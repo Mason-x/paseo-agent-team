@@ -43,9 +43,9 @@
     "@getpaseo/plugin": "0.8.0",
     "@getpaseo/protocol": "0.8.0",
     "@types/node": "^24.5.2",
-    "@vitest/coverage-v8": "^4.1.6",
+    "@vitest/coverage-v8": "^5.0.0",
     "fflate": "^0.8.3",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.6"
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
   }
 }
