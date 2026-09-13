@@ -3260,7 +3260,7 @@ describe("OMP direct provider", () => {
     expect(runtime.starts).toHaveLength(2);
     await second.connection.close();
   });
-  test("blocks list and resume while a new persistent session acquires its native ID", async () => {
+  test("waits to list while a new persistent session acquires its native ID", async () => {
     const runtime = new FakeOmpRuntime();
     runtime.sessionIds.push(NATIVE_SESSION_ID);
     runtime.descriptors.push({ id: NATIVE_SESSION_ID, cwd: "/repo" });
@@ -3296,7 +3296,9 @@ describe("OMP direct provider", () => {
     });
     await started.promise;
 
-    const rejectionStartedAt = performance.now();
+    const listResult = second.events.waitFor(
+      (event) => event.type === "sessions" && event.requestId === "list-during-persistent-open",
+    );
     await second.connection.send({
       type: "sessions",
       requestId: "list-during-persistent-open",
@@ -3317,21 +3319,9 @@ describe("OMP direct provider", () => {
       persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
       history: "replay",
     });
-    const [listFailure, resumeFailure] = await Promise.all([
-      second.events.waitFor(
-        (event) =>
-          event.type === "request.failed" && event.requestId === "list-during-persistent-open",
-      ),
-      second.events.waitFor(
-        (event) =>
-          event.type === "request.failed" && event.requestId === "resume-during-persistent-open",
-      ),
-    ]);
-    expect(performance.now() - rejectionStartedAt).toBeLessThan(1_000);
-    expect(listFailure).toEqual(
-      expect.objectContaining({
-        error: { message: "OMP persistent session registration is in progress" },
-      }),
+    const resumeFailure = await second.events.waitFor(
+      (event) =>
+        event.type === "request.failed" && event.requestId === "resume-during-persistent-open",
     );
     expect(resumeFailure).toEqual(
       expect.objectContaining({
@@ -3343,6 +3333,10 @@ describe("OMP direct provider", () => {
 
     runtime.startGate = null;
     gate.resolve();
+    await listResult;
+    expect(runtime.sessionListRequests).toEqual([
+      { cwd: "/repo", query: undefined, limit: undefined, sessionDir: undefined },
+    ]);
     await first.events.waitFor(
       (event) => event.type === "session.ready" && event.requestId === "new-persistent-open",
     );
@@ -3597,7 +3591,29 @@ describe("OMP direct provider", () => {
     await second.connection.close();
   });
 
-  test("caps provider-global cleanup quarantine growth", () => {
+  test("wakes session discovery when persistent registration is cancelled", async () => {
+    const reservations = new OmpNativeSessionReservations();
+    const owner = Symbol("cancelled-open");
+    reservations.beginPersistentOpen(owner);
+
+    const listing = reservations.waitUntilListable();
+    reservations.cancelPersistentOpen(owner);
+
+    await expect(listing).resolves.toBeUndefined();
+  });
+
+  test("wakes session discovery when persistent registration enters quarantine", async () => {
+    const reservations = new OmpNativeSessionReservations();
+    const owner = Symbol("quarantined-open");
+    reservations.beginPersistentOpen(owner);
+
+    const listing = reservations.waitUntilListable();
+    reservations.quarantine(undefined, owner);
+
+    await expect(listing).rejects.toThrow("OMP native session cleanup quarantine is active");
+  });
+
+  test("caps provider-global cleanup quarantine growth", async () => {
     const reservations = new OmpNativeSessionReservations();
     const entries = Array.from({ length: 256 }, (_, index) => ({
       owner: Symbol(`quarantine-${index}`),
@@ -3612,7 +3628,7 @@ describe("OMP direct provider", () => {
     for (const { nativeSessionId, owner } of entries) {
       reservations.quarantine(nativeSessionId, owner);
     }
-    expect(() => reservations.assertListable()).toThrow(
+    await expect(reservations.waitUntilListable()).rejects.toThrow(
       "OMP native session cleanup quarantine is active",
     );
   });

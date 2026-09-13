@@ -274,6 +274,8 @@ export class OmpNativeSessionReservations {
   private readonly reservations = new Map<string, NativeReservation>();
   private readonly unknownQuarantines = new Set<symbol>();
   private openingOwner: symbol | null = null;
+  private openingSettled: Promise<void> | null = null;
+  private resolveOpening: (() => void) | null = null;
   private overflowQuarantines = 0;
   assertOpenable(): void {
     if (this.hasQuarantine()) {
@@ -281,10 +283,8 @@ export class OmpNativeSessionReservations {
     }
   }
 
-  assertListable(): void {
-    if (this.openingOwner) {
-      throw new OmpPublicError("OMP persistent session registration is in progress");
-    }
+  async waitUntilListable(): Promise<void> {
+    while (this.openingOwner) await this.openingSettled;
     this.assertOpenable();
   }
 
@@ -293,7 +293,12 @@ export class OmpNativeSessionReservations {
       throw new OmpPublicError("OMP persistent session registration is in progress");
     }
     this.assertOpenable();
-    if (!this.openingOwner) this.assertCapacity();
+    if (!this.openingOwner) {
+      this.assertCapacity();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      this.openingSettled = promise;
+      this.resolveOpening = resolve;
+    }
     this.openingOwner = owner;
   }
 
@@ -323,7 +328,7 @@ export class OmpNativeSessionReservations {
       throw new OmpPublicError("OMP native session is already open");
     }
     this.reservations.set(nativeSessionId, { owner, quarantined: false });
-    this.openingOwner = null;
+    this.finishPersistentOpen();
   }
   transition(previousSessionId: string, nextSessionId: string, owner: symbol): void {
     if (this.openingOwner && this.openingOwner !== owner) {
@@ -343,7 +348,14 @@ export class OmpNativeSessionReservations {
   }
 
   cancelPersistentOpen(owner: symbol): void {
-    if (this.openingOwner === owner) this.openingOwner = null;
+    if (this.openingOwner === owner) this.finishPersistentOpen();
+  }
+
+  private finishPersistentOpen(): void {
+    this.openingOwner = null;
+    this.resolveOpening?.();
+    this.resolveOpening = null;
+    this.openingSettled = null;
   }
 
   quarantine(
@@ -352,7 +364,7 @@ export class OmpNativeSessionReservations {
     cleanup?: Promise<void>,
     onReleased?: () => void,
   ): void {
-    if (this.openingOwner === owner) this.openingOwner = null;
+    if (this.openingOwner === owner) this.finishPersistentOpen();
     let release: () => boolean;
     const existing = nativeSessionId ? this.reservations.get(nativeSessionId) : undefined;
     if (nativeSessionId && (!existing || existing.owner === owner)) {
@@ -518,7 +530,7 @@ export function createOmpConnection(
         return;
       case "sessions":
         try {
-          nativeReservations.assertListable();
+          await nativeReservations.waitUntilListable();
           const configuredInput = input as typeof input & ProviderConfigurationCompat;
           const listingConfig = normalizeOmpCatalogOptions(
             {
