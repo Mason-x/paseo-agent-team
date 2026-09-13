@@ -40,18 +40,21 @@ export interface RefreshDependencies {
 }
 
 const execFileAsync = promisify(execFile);
+const GIT_TIMEOUT_MS = 10_000;
+
 
 export async function executeGit(
   cwd: string,
   args: readonly string[],
   signal: AbortSignal,
 ): Promise<string> {
+  const operationSignal = AbortSignal.any([signal, AbortSignal.timeout(GIT_TIMEOUT_MS)]);
   try {
     const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
       encoding: "utf8",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       maxBuffer: 64 * 1024,
-      signal,
+      signal: operationSignal,
     });
     return stdout.trim();
   } catch (error) {
@@ -254,13 +257,22 @@ export async function refreshWorkspaceRequest(
     (remotes.includes("origin") ? "origin" : remotes[0]);
 
   const requestedRemote = remoteForRef(requestedRef, remotes);
-  const refreshResult = await dependencies.refreshRepository(
-    cwd,
-    remote,
-    requestedRemote ? null : (localBranch?.branch ?? null),
-    localBranch?.upstream ?? null,
-    dependencies.signal,
-  );
+  let refreshResult: RepositoryRefreshResult;
+  try {
+    refreshResult = await dependencies.refreshRepository(
+      cwd,
+      remote,
+      requestedRemote ? null : (localBranch?.branch ?? null),
+      localBranch?.upstream ?? null,
+      dependencies.signal,
+    );
+  } catch (error) {
+    if (dependencies.signal.aborted) throw error;
+    dependencies.warn?.(
+      `Skipped refresh because fetching ${remote} failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return request;
+  }
 
   if (refreshResult.kind === "dirty") {
     dependencies.warn?.(

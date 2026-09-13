@@ -53,7 +53,12 @@ export async function inspectWorkspaceFreshness(
     return { kind: "unavailable" };
   }
 
-  await dependencies.refreshRepository(projectRootPath, remote, null, null, dependencies.signal);
+  try {
+    await dependencies.refreshRepository(projectRootPath, remote, null, null, dependencies.signal);
+  } catch (error) {
+    if (dependencies.signal.aborted) throw error;
+    return { kind: "unavailable" };
+  }
   const remoteRef = `${remote}/${mergeRef.slice("refs/heads/".length)}`;
   const behindByText = await optionalGit(
     runGit,

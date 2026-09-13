@@ -157,4 +157,48 @@ describe("worktree refresh", () => {
 
     expect(refreshed).toBe(request);
   });
+
+  test("allows workspace creation when fetching fails", async () => {
+    const { source } = await createStaleRepository();
+    const warnings: string[] = [];
+    const request: WorkspaceCreateRequest = {
+      source: {
+        kind: "worktree",
+        cwd: source,
+        action: "branch-off",
+        branchName: "feature/offline",
+      },
+    };
+
+    const refreshed = await refreshWorkspaceRequest(request, {
+      signal: new AbortController().signal,
+      listProjects: async () => [],
+      refreshRepository: async () => {
+        throw new Error("network unavailable");
+      },
+      warn(message) {
+        warnings.push(message);
+      },
+    });
+
+    expect(refreshed).toBe(request);
+    expect(warnings).toEqual([
+      "Skipped refresh because fetching origin failed: network unavailable",
+    ]);
+  });
+
+  test("reports freshness as unavailable when fetching fails", async () => {
+    const { root, source } = await createStaleRepository();
+    const worktree = join(root, "offline-worktree");
+    git(source, "worktree", "add", "-b", "feature/offline", worktree, "main");
+
+    await expect(
+      inspectWorkspaceFreshness(source, worktree, {
+        signal: new AbortController().signal,
+        refreshRepository: async () => {
+          throw new Error("network unavailable");
+        },
+      }),
+    ).resolves.toEqual({ kind: "unavailable" });
+  });
 });
