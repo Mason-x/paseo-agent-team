@@ -316,6 +316,7 @@ afterEach(async () => {
 const describeOnPosix = process.platform === "win32" ? describe.skip : describe;
 const testOnLinuxOutsideCoverage =
   process.platform === "linux" && process.env.PASEO_OMP_COVERAGE !== "1" ? test : test.skip;
+const testNoCov = process.env.PASEO_OMP_COVERAGE !== "1" ? test : test.skip;
 const RECOVERY_TEST =
   "recovers after subprocess death and lets registry replacement retire active sessions";
 
@@ -867,7 +868,7 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
     }
   });
 
-  test("publishes child and nested child sessions before completing the root", async () => {
+  testNoCov("publishes child and nested child sessions before completing the root", async () => {
     const harness = await createHarness();
     let session: AgentSession | undefined;
     try {
