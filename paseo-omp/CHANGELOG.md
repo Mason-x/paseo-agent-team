@@ -25,6 +25,7 @@
 * Label `xd://` and MCP timeline calls with their registered human-readable title instead of the generic `write` transport or technical route name.
 * Support host-wide session discovery when Paseo opens the unscoped import sheet, preventing its provider failure path from crashing affected 0.8 daemons.
 * Recover degraded or compacted `agent_end` outcomes from complete streamed assistant evidence while continuing to fail closed on partial evidence.
+* Preserve `PLEXUS_API_KEY` when launching OMP so Plexus extension providers can attach their configured bearer header.
 
 ### Security
 

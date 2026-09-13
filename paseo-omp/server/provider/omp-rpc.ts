@@ -1139,6 +1139,7 @@ const INHERITED_PROVIDER_AUTH_ENV: Readonly<Record<string, true>> = {
   OMP_AUTH_BROKER_TOKEN: true,
   OMP_AUTH_BROKER_URL: true,
   OPENAI_API_KEY: true,
+  PLEXUS_API_KEY: true,
   OPENROUTER_API_KEY: true,
   TOGETHER_API_KEY: true,
   XAI_API_KEY: true,

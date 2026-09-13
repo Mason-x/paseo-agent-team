@@ -1889,6 +1889,7 @@ describe("OMP RPC transport", () => {
         HOME: "/home/runner",
         HTTPS_PROXY: proxy,
         OPENAI_API_KEY: "daemon-secret",
+        PLEXUS_API_KEY: "plexus-secret",
         UNRELATED_DAEMON_VALUE: "must-not-pass",
         NODE_OPTIONS: "--require attacker.js",
         RANDOM_TOKEN: "must-not-pass-either",
@@ -1905,11 +1906,19 @@ describe("OMP RPC transport", () => {
       HOME: "/home/runner",
       HTTPS_PROXY: proxy,
       OPENAI_API_KEY: "daemon-secret",
+      PLEXUS_API_KEY: "plexus-secret",
       TEST_ENV: "explicit",
       CUSTOMER_API_KEY: "session-secret",
     });
     expect(request.sensitiveValues).toEqual(
-      expect.arrayContaining(["proxy-user", "proxy-pass", "proxy-token"]),
+      expect.arrayContaining([
+        "proxy-user",
+        "proxy-pass",
+        "proxy-token",
+        "daemon-secret",
+        "plexus-secret",
+        "session-secret",
+      ]),
     );
     expect(request.env.UNRELATED_DAEMON_VALUE).toBeUndefined();
     expect(request.env.NODE_OPTIONS).toBeUndefined();
