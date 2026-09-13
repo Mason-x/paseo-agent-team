@@ -1006,6 +1006,29 @@ async function openSession(
   );
   if (outcome.type === "request.failed") throw new Error(outcome.error.message);
 }
+async function sendPersistentOpen(
+  connection: ProviderConnection,
+  requestId: string,
+  sessionId: string,
+  history: "skip" | "replay" = "skip",
+): Promise<void> {
+  await connection.send({
+    type: "session.open",
+    requestId,
+    sessionId,
+    config: {
+      cwd: "/repo",
+      env: {},
+      mcpServers: {},
+      model: MODEL_PUBLIC_ID,
+      mode: "full",
+      thinkingOption: "medium",
+      settings: {},
+      persist: true,
+    },
+    history,
+  });
+}
 
 async function startPrompt(
   connection: ProviderConnection,
@@ -2766,15 +2789,15 @@ describe("OMP direct provider", () => {
     await second.connection.close();
   });
 
-  test("moves persistent reservation ownership to the branched native session", () => {
+  test("moves persistent reservation ownership to the branched native session", async () => {
     const reservations = new OmpNativeSessionReservations();
     const owner = Symbol("owner");
     const contender = Symbol("contender");
-    reservations.reserve(NATIVE_SESSION_ID, owner);
+    await reservations.reserve(NATIVE_SESSION_ID, owner);
     reservations.transition(NATIVE_SESSION_ID, BRANCHED_NATIVE_SESSION_ID, owner);
 
-    expect(() => reservations.reserve(NATIVE_SESSION_ID, contender)).not.toThrow();
-    expect(() => reservations.reserve(BRANCHED_NATIVE_SESSION_ID, contender)).toThrow(
+    await expect(reservations.reserve(NATIVE_SESSION_ID, contender)).resolves.toBeUndefined();
+    await expect(reservations.reserve(BRANCHED_NATIVE_SESSION_ID, contender)).rejects.toThrow(
       "OMP native session is already open",
     );
   });
@@ -3260,96 +3283,197 @@ describe("OMP direct provider", () => {
     expect(runtime.starts).toHaveLength(2);
     await second.connection.close();
   });
-  test("waits to list while a new persistent session acquires its native ID", async () => {
+  test("serializes concurrent unknown-ID persistent opens in FIFO order", async () => {
     const runtime = new FakeOmpRuntime();
-    runtime.sessionIds.push(NATIVE_SESSION_ID);
-    runtime.descriptors.push({ id: NATIVE_SESSION_ID, cwd: "/repo" });
-    const gate = Promise.withResolvers<void>();
-    const started = Promise.withResolvers<void>();
-    runtime.startGate = gate.promise;
-    runtime.startObserved = started.resolve;
+    const startGate = Promise.withResolvers<void>();
+    const startObserved = Promise.withResolvers<void>();
+    runtime.startGate = startGate.promise;
+    runtime.startObserved = startObserved.resolve;
+    runtime.sessionIds.push("fifo-native-one", "fifo-native-two", "fifo-native-three");
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await sendPersistentOpen(connection, "fifo-open-one", "fifo-session-one");
+    await startObserved.promise;
+    await sendPersistentOpen(connection, "fifo-open-two", "fifo-session-two");
+    await sendPersistentOpen(connection, "fifo-open-three", "fifo-session-three");
+
+    expect(runtime.starts).toHaveLength(1);
+    expect(events.filter((event) => event.type === "request.failed")).toEqual([]);
+
+    runtime.startGate = null;
+    startGate.resolve();
+    for (const requestId of ["fifo-open-one", "fifo-open-two", "fifo-open-three"]) {
+      await events.waitFor(
+        (event) => event.type === "session.ready" && event.requestId === requestId,
+      );
+    }
+    expect(runtime.sessions.map((session) => session.nativeSessionId)).toEqual([
+      "fifo-native-one",
+      "fifo-native-two",
+      "fifo-native-three",
+    ]);
+    await connection.close();
+  });
+
+  test("releases the next persistent waiter after a real open failure", async () => {
+    const runtime = new FakeOmpRuntime();
+    const startGate = Promise.withResolvers<void>();
+    const startObserved = Promise.withResolvers<void>();
+    runtime.startGate = startGate.promise;
+    runtime.startObserved = startObserved.resolve;
+    runtime.nextStartError = new Error("first persistent open failed");
+    runtime.sessionIds.push("failure-native-two");
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await sendPersistentOpen(connection, "failure-open-one", "failure-session-one");
+    await startObserved.promise;
+    await sendPersistentOpen(connection, "failure-open-two", "failure-session-two");
+    expect(runtime.starts).toHaveLength(1);
+    expect(
+      events.some(
+        (event) => event.type === "request.failed" && event.requestId === "failure-open-two",
+      ),
+    ).toBe(false);
+
+    runtime.startGate = null;
+    startGate.resolve();
+    await events.waitFor(
+      (event) => event.type === "request.failed" && event.requestId === "failure-open-one",
+    );
+    await events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "failure-open-two",
+    );
+    expect(runtime.starts).toHaveLength(2);
+    await connection.close();
+  });
+
+  test("removes a queued open when its connection shuts down", async () => {
+    const runtime = new FakeOmpRuntime();
+    const startGate = Promise.withResolvers<void>();
+    const startObserved = Promise.withResolvers<void>();
+    runtime.startGate = startGate.promise;
+    runtime.startObserved = startObserved.resolve;
+    runtime.sessionIds.push("shutdown-native-one", "shutdown-native-two");
     const provider = createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV });
     const connect = async () => {
       const connection = await provider.connect({
         versions: [1],
-        capabilities: ["prompt.message", "session.list", "session.persistence"],
+        capabilities: ["prompt.message", "session.persistence"],
       });
       const events = new EventLog();
       connection.onEvent((event) => events.push(event));
       return { connection, events };
     };
     const first = await connect();
-    const second = await connect();
-    await first.connection.send({
-      type: "session.open",
-      requestId: "new-persistent-open",
-      sessionId: "new-persistent-session",
-      config: {
-        cwd: "/repo",
-        env: {},
-        mcpServers: {},
-        mode: "full",
-        settings: {},
-        persist: true,
-      },
-      history: "skip",
-    });
-    await started.promise;
+    const cancelled = await connect();
+    const successor = await connect();
 
-    const listResult = second.events.waitFor(
-      (event) => event.type === "sessions" && event.requestId === "list-during-persistent-open",
+    await sendPersistentOpen(first.connection, "shutdown-open-one", "shutdown-session-one");
+    await startObserved.promise;
+    await sendPersistentOpen(
+      cancelled.connection,
+      "shutdown-open-cancelled",
+      "shutdown-session-cancelled",
     );
-    await second.connection.send({
-      type: "sessions",
-      requestId: "list-during-persistent-open",
-      cwd: "/repo",
-    });
-    await second.connection.send({
-      type: "session.open",
-      requestId: "resume-during-persistent-open",
-      sessionId: "resume-contender",
-      config: {
-        cwd: "/repo",
-        env: {},
-        mcpServers: {},
-        mode: "full",
-        settings: {},
-        persist: true,
-      },
-      persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
-      history: "replay",
-    });
-    const resumeFailure = await second.events.waitFor(
-      (event) =>
-        event.type === "request.failed" && event.requestId === "resume-during-persistent-open",
+    expect(runtime.starts).toHaveLength(1);
+    await cancelled.connection.close();
+
+    await sendPersistentOpen(
+      successor.connection,
+      "shutdown-open-successor",
+      "shutdown-session-successor",
     );
-    expect(resumeFailure).toEqual(
+    expect(runtime.starts).toHaveLength(1);
+    runtime.startGate = null;
+    startGate.resolve();
+    await first.events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "shutdown-open-one",
+    );
+    await successor.events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "shutdown-open-successor",
+    );
+    expect(runtime.starts).toHaveLength(2);
+    await first.connection.close();
+    await successor.connection.close();
+  });
+
+  test("rejects a duplicate native ID after queued registration completes", async () => {
+    const runtime = new FakeOmpRuntime();
+    const startGate = Promise.withResolvers<void>();
+    const startObserved = Promise.withResolvers<void>();
+    runtime.startGate = startGate.promise;
+    runtime.startObserved = startObserved.resolve;
+    runtime.sessionIds.push("duplicate-native", "duplicate-native");
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await sendPersistentOpen(connection, "duplicate-open-one", "duplicate-session-one");
+    await startObserved.promise;
+    await sendPersistentOpen(connection, "duplicate-open-two", "duplicate-session-two");
+    expect(runtime.starts).toHaveLength(1);
+    runtime.startGate = null;
+    startGate.resolve();
+    await events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "duplicate-open-one",
+    );
+    const rejected = await events.waitFor(
+      (event) => event.type === "request.failed" && event.requestId === "duplicate-open-two",
+    );
+    expect(rejected).toEqual(
+      expect.objectContaining({ error: { message: "OMP native session is already open" } }),
+    );
+    expect(runtime.starts).toHaveLength(2);
+    await connection.close();
+  });
+
+  test("blocks a queued persistent open when cleanup enters quarantine", async () => {
+    const runtime = new FakeOmpRuntime();
+    const startGate = Promise.withResolvers<void>();
+    const startObserved = Promise.withResolvers<void>();
+    const cleanup = Promise.withResolvers<void>();
+    runtime.startGate = startGate.promise;
+    runtime.startObserved = startObserved.resolve;
+    runtime.nextStartError = new OmpCleanupFailure("startup cleanup pending", cleanup.promise);
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await sendPersistentOpen(connection, "quarantine-open-one", "quarantine-session-one");
+    await startObserved.promise;
+    await sendPersistentOpen(connection, "quarantine-open-two", "quarantine-session-two");
+    expect(runtime.starts).toHaveLength(1);
+    expect(
+      events.some(
+        (event) => event.type === "request.failed" && event.requestId === "quarantine-open-two",
+      ),
+    ).toBe(false);
+
+    runtime.startGate = null;
+    startGate.resolve();
+    await events.waitFor(
+      (event) => event.type === "request.failed" && event.requestId === "quarantine-open-one",
+    );
+    const blocked = await events.waitFor(
+      (event) => event.type === "request.failed" && event.requestId === "quarantine-open-two",
+    );
+    expect(blocked).toEqual(
       expect.objectContaining({
-        error: { message: "OMP persistent session registration is in progress" },
+        error: { message: "OMP native session cleanup quarantine is active" },
       }),
     );
     expect(runtime.starts).toHaveLength(1);
-    expect(runtime.sessionListRequests).toEqual([]);
-
-    runtime.startGate = null;
-    gate.resolve();
-    await listResult;
-    expect(runtime.sessionListRequests).toEqual([
-      { cwd: "/repo", query: undefined, limit: undefined, sessionDir: undefined },
-    ]);
-    await first.events.waitFor(
-      (event) => event.type === "session.ready" && event.requestId === "new-persistent-open",
-    );
-    await second.connection.send({
-      type: "sessions",
-      requestId: "list-after-persistent-open",
-      cwd: "/repo",
-    });
-    await second.events.waitFor(
-      (event) => event.type === "sessions" && event.requestId === "list-after-persistent-open",
-    );
-    await first.connection.close();
-    await second.connection.close();
+    cleanup.resolve();
+    await cleanup.promise;
+    await connection.close();
   });
 
   test("keeps the native transcript reserved while its session recovers", async () => {
@@ -3620,9 +3744,9 @@ describe("OMP direct provider", () => {
       nativeSessionId: `quarantined-native-${index}`,
     }));
     for (const { nativeSessionId, owner } of entries) {
-      reservations.reserve(nativeSessionId, owner);
+      await reservations.reserve(nativeSessionId, owner);
     }
-    expect(() => reservations.reserve("quarantine-overflow", Symbol("overflow"))).toThrow(
+    await expect(reservations.reserve("quarantine-overflow", Symbol("overflow"))).rejects.toThrow(
       "OMP persistent session registry limit reached",
     );
     for (const { nativeSessionId, owner } of entries) {
