@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.1...paseo-omp-v0.1.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **paseo-omp:** serialize persistent session registration ([#35](https://github.com/omercnet/paseo-plugins/issues/35)) ([03d38bc](https://github.com/omercnet/paseo-plugins/commit/03d38bc7e4a3d00ec54190e2b234a459bbdc55ae))
+* **paseo-omp:** settle late child dispatches ([#34](https://github.com/omercnet/paseo-plugins/issues/34)) ([0746f11](https://github.com/omercnet/paseo-plugins/commit/0746f11fd94f15028fd624ac7a99ac8ebd88b63d))
+
 ## [0.1.1](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.0...paseo-omp-v0.1.1) (2026-09-13)
 
 
