@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.0...paseo-omp-v0.1.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **paseo-omp:** preserve Plexus plugin credentials ([#27](https://github.com/omercnet/paseo-plugins/issues/27)) ([0674ef1](https://github.com/omercnet/paseo-plugins/commit/0674ef1d3d66efa37ec9d2da9a19dd57472c2cdd))
+* **paseo-omp:** wait for session registration ([#30](https://github.com/omercnet/paseo-plugins/issues/30)) ([82e901e](https://github.com/omercnet/paseo-plugins/commit/82e901e4bb0e66cafeb572c4bd92e0461b57a647))
+
 ## 0.1.0 (2026-09-13)
 
 
