@@ -905,7 +905,7 @@ async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
     environment: TEST_RUNTIME_ENV,
     mcpConnector: async () => ({
       listTools: async () => ({
-        tools: [{ name: "read", inputSchema: { type: "object" } }],
+        tools: [{ name: "read", title: "Repository file lookup", inputSchema: { type: "object" } }],
       }),
       callTool: async () => ({ content: [{ type: "text", text: "bootstrap result" }] }),
       close: async () => {},
@@ -9870,6 +9870,31 @@ describe("OMP direct provider", () => {
       mcpServer.stop(true);
     }
   });
+  test("uses registered labels for direct and routed MCP timeline calls", async () => {
+    const { connection, events, runtime } = await createHostToolHarness();
+    await openHostToolSession(connection, events, "host-tool-labels");
+    const session = sessionAt(runtime);
+    await startPrompt(connection, events, "host-tool-label-turn", "read");
+    for (const [toolCallId, toolName, args] of [
+      ["direct-host-tool", "mcp__repo_read", {}],
+      ["routed-host-tool", "write", { path: "xd://mcp__repo_read", content: "{}" }],
+    ] as const) {
+      session.emit({ type: "tool_execution_start", toolCallId, toolName, args });
+      session.emit({ type: "tool_execution_end", toolCallId, toolName, result: { ok: true } });
+    }
+    const labeledSnapshots = events.flatMap((event) =>
+      event.type === "timeline.item" &&
+      event.item.type === "tool_call" &&
+      event.item.name === "Repository file lookup"
+        ? [event.item]
+        : [],
+    );
+    expect(labeledSnapshots).toHaveLength(4);
+    expect(new Set(labeledSnapshots.map((item) => item.id)).size).toBe(2);
+    expect(labeledSnapshots.filter((item) => item.status === "completed")).toHaveLength(2);
+    await connection.close();
+  });
+
   test("routes one host-tool result while initial host tools bind", async () => {
     const runtime = new FakeOmpRuntime();
     const bindGate = Promise.withResolvers<void>();
@@ -16220,6 +16245,30 @@ describe("OMP direct provider", () => {
         input: { path: "xd://mcp__paseo_list_agents", content: "{}" },
         output: { content: [{ type: "text", text: "agent-1" }] },
       },
+    });
+    session.emit({
+      type: "tool_execution_start",
+      toolCallId: "direct-mcp",
+      toolName: "mcp__paseo_list_providers",
+      args: {},
+    });
+    session.emit({
+      type: "tool_execution_end",
+      toolCallId: "direct-mcp",
+      toolName: "mcp__paseo_list_providers",
+      result: { content: [{ type: "text", text: "provider-1" }] },
+    });
+    const directMcpSnapshots = events.flatMap((event) =>
+      event.type === "timeline.item" &&
+      event.item.type === "tool_call" &&
+      event.item.name === "Paseo list providers"
+        ? [event.item]
+        : [],
+    );
+    expect(directMcpSnapshots).toHaveLength(2);
+    expect(directMcpSnapshots.at(-1)).toMatchObject({
+      name: "Paseo list providers",
+      status: "completed",
     });
     session.emit({
       type: "tool_execution_start",

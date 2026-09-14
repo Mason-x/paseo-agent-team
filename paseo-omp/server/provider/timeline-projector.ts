@@ -465,9 +465,11 @@ export class OmpTimelineProjector {
         }
         if (!previous) this.toolSequence += 1;
         const routedToolName = xdeviceToolName(event.toolName, input);
-        const displayName = routedToolName
-          ? (this.hostToolLabels.get(routedToolName) ?? friendlyXdeviceToolName(routedToolName))
-          : event.toolName;
+        const displayName =
+          this.hostToolLabels.get(routedToolName ?? event.toolName) ??
+          (routedToolName || event.toolName.startsWith("mcp__")
+            ? friendlyXdeviceToolName(routedToolName ?? event.toolName)
+            : event.toolName);
         const snapshot: ToolSnapshot = {
           publicId: previous?.publicId ?? `omp:tool:${this.toolSequence}`,
           nativeName: event.toolName,
