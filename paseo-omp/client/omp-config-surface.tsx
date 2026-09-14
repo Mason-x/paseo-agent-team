@@ -1,8 +1,8 @@
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { listOmpConfig, type OmpConfig } from "../shared/omp-config";
@@ -34,6 +34,20 @@ const PROVIDERS_QUERY_KEY = ["paseo-omp", "provider-snapshot"] as const;
 export interface OmpConfigStyles {
   root: ViewStyle;
   pageTitle: TextStyle;
+  topTabs: ViewStyle;
+  topTab: ViewStyle;
+  topTabActive: ViewStyle;
+  topTabLabel: TextStyle;
+  topTabLabelActive: TextStyle;
+  workspace: ViewStyle;
+  categoryRail: ViewStyle;
+  categoryList: ViewStyle;
+  categoryButton: ViewStyle;
+  categoryButtonActive: ViewStyle;
+  categoryLabel: TextStyle;
+  categoryLabelActive: TextStyle;
+  categoryContent: ViewStyle;
+  search: TextStyle;
   sectionHeader: ViewStyle;
   sectionHeaderRow: ViewStyle;
   sectionTitle: TextStyle;
@@ -62,6 +76,54 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
         color: theme.colors.foreground,
         fontSize: compact ? 22 : 26,
         fontWeight: "700",
+      },
+      topTabs: {
+        flexDirection: "row",
+        alignSelf: "flex-start",
+        gap: 4,
+        padding: 4,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 10,
+        backgroundColor: theme.colors.surface1,
+      },
+      topTab: {
+        paddingHorizontal: compact ? 10 : 14,
+        paddingVertical: 8,
+        borderRadius: 7,
+      },
+      topTabActive: { backgroundColor: theme.colors.accent },
+      topTabLabel: { color: theme.colors.foregroundMuted, fontSize: 13, fontWeight: "600" },
+      topTabLabelActive: { color: theme.colors.accentForeground },
+      workspace: {
+        flexDirection: compact ? "column" : "row",
+        alignItems: "flex-start",
+        gap: compact ? 10 : 18,
+      },
+      categoryRail: {
+        width: compact ? "100%" : 220,
+        gap: 10,
+        padding: 10,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 10,
+        backgroundColor: theme.colors.surface1,
+      },
+      categoryList: { gap: 4 },
+      categoryButton: { paddingHorizontal: 10, paddingVertical: 9, borderRadius: 7 },
+      categoryButtonActive: { backgroundColor: theme.colors.surface2 },
+      categoryLabel: { color: theme.colors.foregroundMuted, fontSize: 13, fontWeight: "500" },
+      categoryLabelActive: { color: theme.colors.foreground, fontWeight: "700" },
+      categoryContent: { flex: 1, minWidth: 0, gap: 10 },
+      search: {
+        color: theme.colors.foreground,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+        backgroundColor: theme.colors.surface0,
+        paddingHorizontal: 10,
+        paddingVertical: 8,
+        fontSize: 13,
       },
       sectionHeader: { gap: 4, marginTop: compact ? 2 : 4 },
       sectionHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10 },
@@ -339,8 +401,10 @@ function OtherSection({ styles, config }: { styles: OmpConfigStyles; config: Omp
 
 function ProviderSetupSection({ styles }: { styles: OmpConfigStyles }) {
   return (
-    <SectionCard styles={styles} title="Provider setup">
-      <Text style={styles.muted}>No plugin-specific settings are required for normal use.</Text>
+    <SectionCard styles={styles} title="OMP Plugin">
+      <Text style={styles.muted}>
+        Launch settings currently come from the active Paseo provider profile.
+      </Text>
       <KeyValueRow
         styles={styles}
         label="Per agent"
@@ -348,7 +412,7 @@ function ProviderSetupSection({ styles }: { styles: OmpConfigStyles }) {
       />
       <KeyValueRow
         styles={styles}
-        label="Advanced profile options"
+        label="Provider profile"
         value="Command, environment, session directory, RPC timeout, role models, and denied tools"
       />
     </SectionCard>
@@ -603,6 +667,84 @@ function ProviderHealthSection({
   );
 }
 
+type SurfaceView = "overview" | "configuration" | "diagnostics";
+type ConfigCategory =
+  | "model-roles"
+  | "enabled-models"
+  | "providers"
+  | "retry"
+  | "memory"
+  | "github"
+  | "appearance"
+  | "other";
+
+const SURFACE_VIEWS: readonly { id: SurfaceView; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "configuration", label: "Configuration" },
+  { id: "diagnostics", label: "Diagnostics" },
+];
+
+const CONFIG_CATEGORIES: readonly { id: ConfigCategory; label: string }[] = [
+  { id: "model-roles", label: "Model roles" },
+  { id: "enabled-models", label: "Enabled models" },
+  { id: "providers", label: "Providers" },
+  { id: "retry", label: "Retry and fallback" },
+  { id: "memory", label: "Memory" },
+  { id: "github", label: "GitHub" },
+  { id: "appearance", label: "Appearance" },
+  { id: "other", label: "Other" },
+];
+
+function ConfigurationCategory({
+  category,
+  styles,
+  config,
+}: {
+  category: ConfigCategory;
+  styles: OmpConfigStyles;
+  config: OmpConfig;
+}) {
+  if (category === "model-roles") return <ModelRolesSection styles={styles} config={config} />;
+  if (category === "enabled-models")
+    return <EnabledModelsSection styles={styles} config={config} />;
+  if (category === "providers") return <ProvidersSection styles={styles} config={config} />;
+  if (category === "retry") return <RetrySection styles={styles} config={config} />;
+  if (category === "memory") return <MemorySection styles={styles} config={config} />;
+  if (category === "github") return <GithubSection styles={styles} config={config} />;
+  if (category === "appearance") return <PreferencesSection styles={styles} config={config} />;
+  return <OtherSection styles={styles} config={config} />;
+}
+
+function SurfaceTabs({
+  styles,
+  selected,
+  onSelect,
+}: {
+  styles: OmpConfigStyles;
+  selected: SurfaceView;
+  onSelect: (view: SurfaceView) => void;
+}) {
+  return (
+    <View accessibilityRole="tablist" style={styles.topTabs}>
+      {SURFACE_VIEWS.map((view) => {
+        const active = selected === view.id;
+        return (
+          <Pressable
+            key={view.id}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            onPress={() => onSelect(view.id)}
+            style={[styles.topTab, active ? styles.topTabActive : null]}
+          >
+            <Text style={[styles.topTabLabel, active ? styles.topTabLabelActive : null]}>
+              {view.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
 export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
   const loadConfig = useRpc(listOmpConfig);
   const result = useQuery({
@@ -610,58 +752,129 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => loadConfig({}),
     refetchInterval: CONFIG_POLL_MS,
   });
+  const [view, setView] = useState<SurfaceView>("overview");
+  const [activeCategory, setActiveCategory] = useState<ConfigCategory>("model-roles");
+  const [search, setSearch] = useState("");
   const styles = useConfigStyles(theme, layout.compact);
   const config = result.data?.config ?? null;
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const visibleCategories = normalizedSearch
+    ? CONFIG_CATEGORIES.filter((category) =>
+        category.label.toLocaleLowerCase().includes(normalizedSearch),
+      )
+    : CONFIG_CATEGORIES;
+  const selectedCategory =
+    visibleCategories.find((category) => category.id === activeCategory) ?? visibleCategories[0];
 
   return (
     <ScrollView contentContainerStyle={styles.root}>
       <Text style={styles.pageTitle}>OMP</Text>
-      <ProviderSetupSection styles={styles} />
-      <ProviderHealthSection theme={theme} styles={styles} />
+      <SurfaceTabs styles={styles} selected={view} onSelect={setView} />
 
-      <View style={styles.sectionHeader}>
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>Configuration</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Refresh OMP configuration"
-            style={styles.refresh}
-            disabled={result.isFetching}
-            onPress={() => void result.refetch()}
-          >
-            <Icon name="RefreshCw" size={14} color={theme.colors.foreground} />
-            <Text style={styles.refreshLabel}>{result.isFetching ? "Refreshing…" : "Refresh"}</Text>
-          </Pressable>
-        </View>
-        {result.data?.path ? (
-          <Text style={styles.source}>{`Source: ${result.data.path}`}</Text>
-        ) : null}
-      </View>
-
-      {result.isLoading ? <Text style={styles.muted}>Loading OMP configuration…</Text> : null}
-      {result.error ? (
-        <Text style={styles.error}>Could not read the OMP configuration. Try refreshing.</Text>
-      ) : null}
-      {!result.isLoading && !result.error && result.data && !result.data.available ? (
-        <Text style={styles.muted}>
-          OMP configuration is unavailable at this path. It may be missing, unreadable, malformed,
-          or the wrong type on disk.
-        </Text>
-      ) : null}
-      {!result.isLoading && !result.error && config && isEmptyConfig(config) ? (
-        <Text style={styles.muted}>The OMP configuration has no recognized settings.</Text>
-      ) : null}
-
-      {config && !isEmptyConfig(config) ? (
+      {view === "overview" ? (
         <>
-          <ModelRolesSection styles={styles} config={config} />
-          <EnabledModelsSection styles={styles} config={config} />
-          <ProvidersSection styles={styles} config={config} />
-          <RetrySection styles={styles} config={config} />
-          <MemorySection styles={styles} config={config} />
-          <GithubSection styles={styles} config={config} />
-          <PreferencesSection styles={styles} config={config} />
-          <OtherSection styles={styles} config={config} />
+          <ProviderSetupSection styles={styles} />
+          <SectionCard styles={styles} title="Native configuration">
+            <KeyValueRow
+              styles={styles}
+              label="Source"
+              value={result.data?.path ?? "Loading configuration path…"}
+            />
+            <KeyValueRow
+              styles={styles}
+              label="Status"
+              value={result.data?.available ? "Available" : "Unavailable"}
+            />
+          </SectionCard>
+        </>
+      ) : null}
+
+      {view === "diagnostics" ? <ProviderHealthSection theme={theme} styles={styles} /> : null}
+
+      {view === "configuration" ? (
+        <>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionTitle}>Configuration</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Refresh OMP configuration"
+                style={styles.refresh}
+                disabled={result.isFetching}
+                onPress={() => void result.refetch()}
+              >
+                <Icon name="RefreshCw" size={14} color={theme.colors.foreground} />
+                <Text style={styles.refreshLabel}>
+                  {result.isFetching ? "Refreshing…" : "Refresh"}
+                </Text>
+              </Pressable>
+            </View>
+            {result.data?.path ? (
+              <Text style={styles.source}>{`Source: ${result.data.path}`}</Text>
+            ) : null}
+          </View>
+
+          {result.isLoading ? <Text style={styles.muted}>Loading OMP configuration…</Text> : null}
+          {result.error ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              Could not read the OMP configuration. Try refreshing.
+            </Text>
+          ) : null}
+          {!result.isLoading && !result.error && result.data && !result.data.available ? (
+            <Text style={styles.muted}>
+              OMP configuration is unavailable at this path. It may be missing, unreadable,
+              malformed, or the wrong type on disk.
+            </Text>
+          ) : null}
+          {!result.isLoading && !result.error && config && isEmptyConfig(config) ? (
+            <Text style={styles.muted}>The OMP configuration has no recognized settings.</Text>
+          ) : null}
+
+          {config && !isEmptyConfig(config) ? (
+            <View style={styles.workspace}>
+              <View style={styles.categoryRail}>
+                <TextInput
+                  accessibilityLabel="Search configuration categories"
+                  placeholder="Search categories"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  value={search}
+                  onChangeText={setSearch}
+                  style={styles.search}
+                />
+                <View style={styles.categoryList}>
+                  {visibleCategories.map((category) => {
+                    const active = selectedCategory?.id === category.id;
+                    return (
+                      <Pressable
+                        key={category.id}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        onPress={() => setActiveCategory(category.id)}
+                        style={[styles.categoryButton, active ? styles.categoryButtonActive : null]}
+                      >
+                        <Text
+                          style={[styles.categoryLabel, active ? styles.categoryLabelActive : null]}
+                        >
+                          {category.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+              <View style={styles.categoryContent}>
+                {selectedCategory ? (
+                  <ConfigurationCategory
+                    category={selectedCategory.id}
+                    styles={styles}
+                    config={config}
+                  />
+                ) : (
+                  <Text style={styles.muted}>No configuration categories match this search.</Text>
+                )}
+              </View>
+            </View>
+          ) : null}
         </>
       ) : null}
     </ScrollView>
