@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.2...paseo-omp-v0.2.0) (2026-09-14)
+
+
+### Features
+
+* **paseo-omp:** add config workspace shell ([#48](https://github.com/omercnet/paseo-plugins/issues/48)) ([1c0126b](https://github.com/omercnet/paseo-plugins/commit/1c0126b51bd3c8ceccacf7758fc14270cd67440e))
+* **paseo-omp:** add opt-in output redaction ([#44](https://github.com/omercnet/paseo-plugins/issues/44)) ([0b0cea1](https://github.com/omercnet/paseo-plugins/commit/0b0cea1501230437fe4d6390b67ca25ee2079c93))
+* **paseo-omp:** browse complete runtime settings catalog ([#49](https://github.com/omercnet/paseo-plugins/issues/49)) ([ef68cd7](https://github.com/omercnet/paseo-plugins/commit/ef68cd754fa3aad4a15bcdc8649f8c7dcdcde79e))
+* **paseo-omp:** edit scalar settings in sidebar ([#50](https://github.com/omercnet/paseo-plugins/issues/50)) ([78da43f](https://github.com/omercnet/paseo-plugins/commit/78da43fd155ed06e29faef507156399b55cf3439))
+* **paseo-omp:** support explicit env passthrough ([#39](https://github.com/omercnet/paseo-plugins/issues/39)) ([e22b3b4](https://github.com/omercnet/paseo-plugins/commit/e22b3b448f218bdecfcb3a168c14fa32051a6392))
+
+
+### Bug Fixes
+
+* **omp:** preserve safe published URLs ([#42](https://github.com/omercnet/paseo-plugins/issues/42)) ([4530430](https://github.com/omercnet/paseo-plugins/commit/4530430a02bee076f8940c376401d3266ce17499))
+* **paseo-omp:** align prompt attachment rendering ([#41](https://github.com/omercnet/paseo-plugins/issues/41)) ([4b708c8](https://github.com/omercnet/paseo-plugins/commit/4b708c897b4af4cd6673e7581f736e95843b545b))
+* **paseo-omp:** expose native Paseo tools ([#52](https://github.com/omercnet/paseo-plugins/issues/52)) ([3b52adf](https://github.com/omercnet/paseo-plugins/commit/3b52adff1de6329fa9f0bc4a1dcea339166e3974))
+* **paseo-omp:** label direct MCP tool calls ([#53](https://github.com/omercnet/paseo-plugins/issues/53)) ([e09b1fd](https://github.com/omercnet/paseo-plugins/commit/e09b1fd2c05cb45422e7d0633e8b638d0841b931))
+* **paseo-omp:** preserve structured tool results ([#46](https://github.com/omercnet/paseo-plugins/issues/46)) ([9e5fe98](https://github.com/omercnet/paseo-plugins/commit/9e5fe989e57e100f67285257cada3242218eee58))
+* **paseo-omp:** render WebP images across clients ([#51](https://github.com/omercnet/paseo-plugins/issues/51)) ([397cb2d](https://github.com/omercnet/paseo-plugins/commit/397cb2d1e660e43e22312ecf9f054d77afcddc6e))
+* **paseo-omp:** stop speculative stream redaction ([#40](https://github.com/omercnet/paseo-plugins/issues/40)) ([539cb61](https://github.com/omercnet/paseo-plugins/commit/539cb61db0b904b8130319c7887852f991c50aba))
+
 ## [0.1.2](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.1...paseo-omp-v0.1.2) (2026-09-13)
 
 
