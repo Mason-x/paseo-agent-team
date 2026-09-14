@@ -616,7 +616,6 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
         }),
       );
       expect(JSON.stringify(events)).not.toContain(SECRET);
-      expect(JSON.stringify(timeline)).toContain("<redacted>");
       expect(events.filter(isTerminal)).toHaveLength(1);
     } finally {
       await session?.close();

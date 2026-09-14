@@ -23,46 +23,6 @@ const BEARER_CREDENTIAL = /\bBearer\s+[A-Za-z0-9._~+/=-]{1,}/giu;
 const CREDENTIAL_ASSIGNMENT =
   /\b(api[ _-]?key|access[ _-]?token|refresh[ _-]?token|authorization|cookie|credential|password|private[ _-]?key|secret|session[ _-]?token)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu;
 const TOKEN_CREDENTIAL = /\b(?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{8,}\b/gu;
-const TOKEN_CREDENTIAL_AT_END =
-  /(?:^|[^A-Za-z0-9_])(?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{8,}$/u;
-const INCOMPLETE_TOKEN_CREDENTIAL =
-  /(?:^|[^A-Za-z0-9_])((?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{0,7})$/u;
-const STREAM_CREDENTIAL_MARKERS = [
-  "api key",
-  "api-key",
-  "api_key",
-  "apikey",
-  "access token",
-  "access-token",
-  "access_token",
-  "accesstoken",
-  "authorization",
-  "bearer ",
-  "cookie",
-  "credential",
-  "password",
-  "private key",
-  "private-key",
-  "private_key",
-  "privatekey",
-  "refresh token",
-  "refresh-token",
-  "refresh_token",
-  "refreshtoken",
-  "secret",
-  "session token",
-  "session-token",
-  "session_token",
-  "sessiontoken",
-  "github_pat",
-  "ghp",
-  "sk",
-  "xoxa",
-  "xoxb",
-  "xoxp",
-  "xoxr",
-  "xoxs",
-] as const;
 const POSIX_ABSOLUTE_PATH = /(^|[^A-Za-z0-9_./\\])(\/(?!\/)[^\s"'`<>\])},;]+)/gu;
 const WINDOWS_ABSOLUTE_PATH = /\b[A-Za-z]:\\[^\s"'`<>\])},;]+/gu;
 
@@ -165,30 +125,6 @@ export function boundedJsonBytes(
   );
 }
 
-function prefixTable(value: string): Uint32Array {
-  const table = new Uint32Array(value.length);
-  let matched = 0;
-  for (let index = 1; index < value.length; index += 1) {
-    while (matched > 0 && value[index] !== value[matched]) matched = table[matched - 1] ?? 0;
-    if (value[index] === value[matched]) matched += 1;
-    table[index] = matched;
-  }
-  return table;
-}
-
-function trailingPrefixLength(input: string, pattern: string, table: Uint32Array): number {
-  if (pattern.length < 2) return 0;
-  const start = Math.max(0, input.length - pattern.length + 1);
-  let matched = 0;
-  for (let index = start; index < input.length; index += 1) {
-    while (matched > 0 && input[index] !== pattern[matched]) matched = table[matched - 1] ?? 0;
-    if (input[index] === pattern[matched]) matched += 1;
-  }
-  if (matched === 0) return 0;
-  const lastComplete = input.lastIndexOf(pattern);
-  return lastComplete >= 0 && input.length - matched < lastComplete + pattern.length ? 0 : matched;
-}
-
 export class BoundedStringSet {
   private readonly values = new Map<string, true>();
 
@@ -249,7 +185,6 @@ export function isOmpCleanupFailure(error: unknown): error is OmpCleanupFailure 
 export class OmpPublicDataFilter {
   private readonly sensitiveValueSet = new Set<string>();
   private readonly sensitiveValues: string[] = [];
-  private readonly sensitivePrefixTables = new Map<string, Uint32Array>();
   private sensitiveValueBytes = 0;
 
   constructor(values: Iterable<string> = []) {
@@ -274,67 +209,11 @@ export class OmpPublicDataFilter {
     additions.sort((left, right) => right.length - left.length);
     for (const value of additions) {
       this.sensitiveValueSet.add(value);
-      this.sensitivePrefixTables.set(value, prefixTable(value));
       this.sensitiveValueBytes += utf8Bytes(value);
       const index = this.sensitiveValues.findIndex((existing) => existing.length < value.length);
       if (index < 0) this.sensitiveValues.push(value);
       else this.sensitiveValues.splice(index, 0, value);
     }
-  }
-  streamText(
-    input: string,
-    final = false,
-    maxBytes = MAX_PUBLIC_STRING_BYTES,
-  ): { text: string; pending: boolean } {
-    if (final) return { text: this.text(input, maxBytes), pending: false };
-    if (TOKEN_CREDENTIAL_AT_END.test(input)) {
-      return { text: this.text(input, maxBytes), pending: false };
-    }
-    let holdback = 0;
-    for (const value of this.sensitiveValues) {
-      const table = this.sensitivePrefixTables.get(value);
-      if (!table) continue;
-      holdback = Math.max(holdback, trailingPrefixLength(input, value, table));
-    }
-    const lowerInput = input.toLowerCase();
-    for (const marker of STREAM_CREDENTIAL_MARKERS) {
-      const maxLength = Math.min(lowerInput.length, marker.length);
-      for (let length = maxLength; length >= 1 && length > holdback; length -= 1) {
-        if (lowerInput.endsWith(marker.slice(0, length))) {
-          holdback = length;
-          break;
-        }
-      }
-    }
-    const token = INCOMPLETE_TOKEN_CREDENTIAL.exec(input)?.[1];
-    if (token) holdback = Math.max(holdback, token.length);
-    const safeInput = holdback === 0 ? input : input.slice(0, -holdback);
-    return { text: this.text(safeInput, maxBytes), pending: holdback > 0 };
-  }
-
-  hasUnsafeStreamSuffix(input: unknown): boolean {
-    const stack: unknown[] = [input];
-    const seen = new WeakSet<object>();
-    let nodes = 0;
-    while (stack.length > 0) {
-      nodes += 1;
-      if (nodes > MAX_PUBLIC_NODES) return true;
-      const value = stack.pop();
-      if (typeof value === "string") {
-        if (this.streamText(value).pending) return true;
-      } else if (Array.isArray(value)) {
-        if (seen.has(value)) continue;
-        seen.add(value);
-        for (const child of value) stack.push(child);
-      } else if (value && typeof value === "object") {
-        if (seen.has(value)) continue;
-        seen.add(value);
-        for (const key in value) {
-          if (Object.hasOwn(value, key)) stack.push((value as Record<string, unknown>)[key]);
-        }
-      }
-    }
-    return false;
   }
 
   text(input: string, maxBytes = MAX_PUBLIC_STRING_BYTES): string {

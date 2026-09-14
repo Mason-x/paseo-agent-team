@@ -11096,8 +11096,12 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("holds credential markers split within their first three characters", () => {
+  test("sanitizes complete snapshots without holding benign suffixes", () => {
     const filter = new OmpPublicDataFilter();
+    for (const value of ["tests", "alpha", "sync", "help", "render"]) {
+      expect(filter.text(value)).toBe(value);
+    }
+
     const cases = [
       ["Authorization: Basic header-secret", "Authorization: <redacted>"],
       ["Bearer bearer-secret", "Bearer <redacted>"],
@@ -11108,14 +11112,120 @@ describe("OMP direct provider", () => {
       ["ghp_abcdefgh", "<redacted>"],
     ] as const;
 
-    for (const [value, expected] of cases) {
-      for (const split of [1, 2, 3]) {
-        expect(filter.streamText(value.slice(0, split))).toEqual({ text: "", pending: true });
-        expect(filter.streamText(value).text).toBe(expected);
-      }
-    }
-    expect(filter.streamText("normal output").text).toBe("normal output");
-    expect(filter.streamText("Aut", true)).toEqual({ text: "Aut", pending: false });
+    for (const [value, expected] of cases) expect(filter.text(value)).toBe(expected);
+  });
+
+  test("publishes partial snapshots immediately and completes tools from final results", () => {
+    const events: ProviderEvent[] = [];
+    const projector = new OmpTimelineProjector(
+      "partial-snapshot-session",
+      (event) => events.push(event),
+      new ManualScheduler(),
+    );
+    const turnId = "partial-snapshot-turn";
+
+    projector.project(
+      {
+        type: "message_start",
+        message: { role: "assistant", content: [], responseId: "partial-response" },
+      },
+      turnId,
+    );
+    projector.project(
+      {
+        type: "message_update",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "tests" },
+            { type: "thinking", thinking: "alpha" },
+          ],
+          responseId: "partial-response",
+        },
+      },
+      turnId,
+    );
+    projector.flush();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({ type: "assistant_message", text: "tests" }),
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({ type: "reasoning", text: "alpha" }),
+      }),
+    );
+
+    projector.project({ type: "command_output", text: "sync" }, turnId);
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({ type: "assistant_message", text: "sync" }),
+      }),
+    );
+
+    projector.project(
+      { type: "tool_execution_start", toolCallId: "suffix-p", toolName: "custom", args: {} },
+      turnId,
+    );
+    projector.project(
+      {
+        type: "tool_execution_update",
+        toolCallId: "suffix-p",
+        toolName: "custom",
+        partialResult: { content: "help" },
+      },
+      turnId,
+    );
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({
+          status: "running",
+          detail: expect.objectContaining({ output: expect.objectContaining({ content: "help" }) }),
+        }),
+      }),
+    );
+
+    projector.project(
+      { type: "tool_execution_start", toolCallId: "suffix-r", toolName: "custom", args: {} },
+      turnId,
+    );
+    projector.project(
+      {
+        type: "tool_execution_update",
+        toolCallId: "suffix-r",
+        toolName: "custom",
+        partialResult: { content: "Au" },
+      },
+      turnId,
+    );
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({
+          status: "running",
+          detail: expect.objectContaining({ output: expect.objectContaining({ content: "Au" }) }),
+        }),
+      }),
+    );
+    projector.project(
+      {
+        type: "tool_execution_end",
+        toolCallId: "suffix-r",
+        toolName: "custom",
+        result: { content: "render" },
+      },
+      turnId,
+    );
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({
+          status: "completed",
+          detail: expect.objectContaining({
+            output: expect.objectContaining({ content: "render" }),
+          }),
+        }),
+      }),
+    );
   });
 
   test("redacts POSIX paths after common delimiters", () => {
@@ -11170,21 +11280,12 @@ describe("OMP direct provider", () => {
       toolName: "auth-write",
       args: { value: "safe" },
     });
-    const splitToolBaseline = events.length;
     session.emit({
       type: "tool_execution_update",
       toolCallId: "split-authorization-tool",
       toolName: "auth-write",
-      partialResult: { content: "Au" },
+      partialResult: { content: "Authorization: Basic tool-secret" },
     });
-    expect(events).toHaveLength(splitToolBaseline);
-    session.emit({
-      type: "tool_execution_update",
-      toolCallId: "split-authorization-tool",
-      toolName: "auth-write",
-      partialResult: { content: "thorization: Basic tool-secret" },
-    });
-    expect(events).toHaveLength(splitToolBaseline);
     session.emit({
       type: "tool_execution_end",
       toolCallId: "split-authorization-tool",
@@ -11195,16 +11296,8 @@ describe("OMP direct provider", () => {
       type: "tool_execution_update",
       toolCallId: "credential-value-1234",
       toolName: "write",
-      partialResult: { content: "credential-value-" },
+      partialResult: { content: "credential-value-1234" },
     });
-    expect(JSON.stringify(events)).not.toContain("credential-value-");
-    session.emit({
-      type: "tool_execution_update",
-      toolCallId: "credential-value-1234",
-      toolName: "write",
-      partialResult: { content: "1234" },
-    });
-    expect(JSON.stringify(events)).not.toContain("credential-value-");
     session.emit({
       type: "tool_execution_end",
       toolCallId: "credential-value-1234",
@@ -11223,45 +11316,24 @@ describe("OMP direct provider", () => {
     });
     session.emit({ type: "notice", level: "warning", message: "license-secret" });
     session.emit({ type: "notice", level: "warning", message: "custom-secret" });
-    session.emit({ type: "command_output", text: "credential-value-" });
-    expect(JSON.stringify(events)).not.toContain("credential-value-");
-    session.emit({ type: "command_output", text: "1234" });
-    session.emit({ type: "command_output", text: " g" });
-    expect(
-      JSON.stringify(events.findLast((event) => event.type === "timeline.item")),
-    ).not.toContain(" g");
-    session.emit({ type: "command_output", text: "hp_abcdefgh" });
-    for (const [type, contentIndex, first, second] of [
-      ["text_delta", 1, "Bearer alpha", "beta"],
-      ["thinking_delta", 2, "Bearer alpha", "beta"],
-      ["text_delta", 3, "credential-value-", "1234"],
-      ["thinking_delta", 4, "credential-value-", "1234"],
-      ["text_delta", 5, "ghp_abc", "defgh"],
-      ["thinking_delta", 6, "Authoriz", "ation: Basic header-secret"],
-      ["text_delta", 7, "A", "uthorization: Basic assistant-one"],
-      ["thinking_delta", 8, "Au", "thorization: Basic reasoning-two"],
-      ["text_delta", 9, "Aut", "horization: Basic assistant-three"],
-      ["thinking_delta", 10, "B", "earer bearer-one"],
-      ["text_delta", 11, "Be", "arer bearer-two"],
-      ["thinking_delta", 12, "Bea", "rer bearer-three"],
-      ["text_delta", 13, "g", "hp_abcdefgh"],
-      ["thinking_delta", 14, "gh", "p_abcdefgh"],
-      ["text_delta", 15, "ghp", "_abcdefgh"],
+    session.emit({ type: "command_output", text: "credential-value-1234" });
+    session.emit({ type: "command_output", text: " ghp_abcdefgh" });
+    for (const [type, contentIndex, value] of [
+      ["text_delta", 1, "Bearer alpha"],
+      ["thinking_delta", 2, "Bearer alpha"],
+      ["text_delta", 3, "credential-value-1234"],
+      ["thinking_delta", 4, "credential-value-1234"],
+      ["text_delta", 5, "ghp_abcdefgh"],
+      ["thinking_delta", 6, "Authorization: Basic header-secret"],
     ] as const) {
       const splitBaseline = events.length;
       session.emit({
         type: "message_update",
-        assistantMessageEvent: { type, contentIndex, delta: first },
+        assistantMessageEvent: { type, contentIndex, delta: value },
         message: { role: "assistant", responseId: "split-stream", content: [] },
       });
       await scheduler.flush();
-      expect(JSON.stringify(events.slice(splitBaseline))).not.toContain(first);
-      session.emit({
-        type: "message_update",
-        assistantMessageEvent: { type, contentIndex, delta: second },
-        message: { role: "assistant", responseId: "split-stream", content: [] },
-      });
-      await scheduler.flush();
+      expect(JSON.stringify(events.slice(splitBaseline))).not.toContain(value);
     }
     const formattedText = "```ts\n\tconst value = 1;\r\n```";
     session.emit({
@@ -11384,7 +11456,7 @@ describe("OMP direct provider", () => {
         ? [event.item.detail.output]
         : [],
     );
-    expect(streamedTool).toEqual([null, "<redacted>"]);
+    expect(streamedTool).toEqual([null, { content: "<redacted>" }, { content: "<redacted>" }]);
     const deferredTool = events.flatMap((event) =>
       event.type === "timeline.item" &&
       event.item.type === "tool_call" &&
@@ -11393,7 +11465,11 @@ describe("OMP direct provider", () => {
         ? [event.item.detail.output]
         : [],
     );
-    expect(deferredTool).toEqual([null, "<redacted>"]);
+    expect(deferredTool).toEqual([
+      null,
+      { content: "Authorization: <redacted>" },
+      { content: "Authorization: <redacted>" },
+    ]);
     const splitToken = events.findLast(
       (event) =>
         event.type === "timeline.item" &&
@@ -11416,29 +11492,6 @@ describe("OMP direct provider", () => {
         ? splitAuthorization.item.text
         : null,
     ).toBe("Authorization: <redacted>");
-    const earlySplitSnapshots = events.flatMap((event) =>
-      event.type === "timeline.item" &&
-      (event.item.type === "assistant_message" || event.item.type === "reasoning")
-        ? [event.item]
-        : [],
-    );
-    for (const [contentIndex, itemType, expected] of [
-      [7, "assistant_message", "Authorization: <redacted>"],
-      [8, "reasoning", "Authorization: <redacted>"],
-      [9, "assistant_message", "Authorization: <redacted>"],
-      [10, "reasoning", "Bearer <redacted>"],
-      [11, "assistant_message", "Bearer <redacted>"],
-      [12, "reasoning", "Bearer <redacted>"],
-      [13, "assistant_message", "<redacted>"],
-      [14, "reasoning", "<redacted>"],
-      [15, "assistant_message", "<redacted>"],
-    ] as const) {
-      const suffix = itemType === "reasoning" ? "reasoning" : "text";
-      const snapshot = earlySplitSnapshots.findLast(
-        (item) => item.type === itemType && item.id.endsWith(`:content:${contentIndex}:${suffix}`),
-      );
-      expect(snapshot?.text).toBe(expected);
-    }
     const toolIds = events.flatMap((event) =>
       event.type === "timeline.item" && event.item.type === "tool_call" ? [event.item.callId] : [],
     );

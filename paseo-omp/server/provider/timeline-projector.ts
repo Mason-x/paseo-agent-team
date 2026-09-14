@@ -74,7 +74,6 @@ type ToolSnapshot = {
   output: JsonValue;
   retainedBytes: number;
   specializedRendered: boolean;
-  unsafePartialOutput: boolean;
   silent: boolean;
 };
 
@@ -475,7 +474,6 @@ export class OmpTimelineProjector {
           retainedBytes,
           turnId,
           generation: this.runtimeGeneration,
-          unsafePartialOutput: previous?.unsafePartialOutput ?? false,
           specializedRendered: previous?.specializedRendered ?? false,
           silent: ["ask_user", "todo"].includes(event.toolName.toLowerCase()),
         };
@@ -488,13 +486,6 @@ export class OmpTimelineProjector {
         const previous = this.tools.get(event.toolCallId);
         if (!previous) return;
         if (previous.turnId !== turnId || previous.generation !== this.runtimeGeneration) return;
-        if (
-          previous.unsafePartialOutput ||
-          this.dataFilter.hasUnsafeStreamSuffix(event.partialResult)
-        ) {
-          this.tools.set(event.toolCallId, { ...previous, unsafePartialOutput: true });
-          return;
-        }
         const output = this.dataFilter.json(
           event.partialResult,
           MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
@@ -538,13 +529,11 @@ export class OmpTimelineProjector {
           this.publishImages(previous.publicId, previous.name, image);
           return;
         }
-        const output = previous.unsafePartialOutput
-          ? "<redacted>"
-          : this.dataFilter.json(
-              event.result,
-              MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
-              MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
-            );
+        const output = this.dataFilter.json(
+          event.result,
+          MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
+          MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
+        );
         const snapshot: ToolSnapshot = { ...previous, output };
         const specializedRendered =
           previous.nativeName.toLowerCase() === "todo" && !event.isError
@@ -569,7 +558,7 @@ export class OmpTimelineProjector {
         const next = `${this.commandText}${event.text}`;
         if (utf8Bytes(next) > MAX_STREAM_TEXT_LENGTH) return;
         this.commandText = next;
-        this.publishCommand(turnId, false);
+        this.publishCommand(turnId);
         return;
       }
     }
@@ -998,13 +987,9 @@ export class OmpTimelineProjector {
     for (const contentIndex of indexes) {
       const block = stream.blocks.get(contentIndex);
       if (!block?.text) continue;
-      const publicText =
-        block.kind === "image"
-          ? { text: block.text, pending: false }
-          : this.dataFilter.streamText(block.text, finalizeFallback);
-      if (publicText.pending) stream.dirtyBlocks.add(contentIndex);
-      if (!publicText.text || block.publishedText === publicText.text) continue;
-      const nextPublishedBytes = utf8Bytes(publicText.text);
+      const publicText = block.kind === "image" ? block.text : this.dataFilter.text(block.text);
+      if (!publicText || block.publishedText === publicText) continue;
+      const nextPublishedBytes = utf8Bytes(publicText);
       if (
         stream.retainedBytes + stream.publishedBytes + nextPublishedBytes >
         MAX_STREAM_TOTAL_BYTES
@@ -1015,7 +1000,7 @@ export class OmpTimelineProjector {
         block.kind === "reasoning" ? "reasoning" : block.kind === "image" ? "image" : "text";
       const id = `${stream.messageId}:content:${contentIndex}:${suffix}`;
       if (block.kind === "reasoning") {
-        this.publish({ type: "reasoning", id, text: publicText.text });
+        this.publish({ type: "reasoning", id, text: publicText });
       } else if (block.kind === "image") {
         if (block.image) this.publishImages(id, "Assistant image", { images: [block.image] });
         else if (block.error) this.publishImageError(id, block.error);
@@ -1024,11 +1009,11 @@ export class OmpTimelineProjector {
           type: "assistant_message",
           id,
           messageId: stream.messageId,
-          text: publicText.text,
+          text: publicText,
         });
       }
       stream.publishedBytes += nextPublishedBytes;
-      block.publishedText = publicText.text;
+      block.publishedText = publicText;
       stream.published = true;
     }
   }
@@ -1044,7 +1029,7 @@ export class OmpTimelineProjector {
     if (this.currentTurnId !== turnId) return;
     this.flush(true);
     this.retireTools("OMP tool ended with the turn");
-    this.publishCommand(turnId, true);
+    this.publishCommand(turnId);
     this.stream = null;
     this.commandText = "";
     this.currentTurnId = null;
@@ -1055,7 +1040,7 @@ export class OmpTimelineProjector {
 
   close(): void {
     this.flush(true);
-    if (this.currentTurnId) this.publishCommand(this.currentTurnId, true);
+    if (this.currentTurnId) this.publishCommand(this.currentTurnId);
     this.retireCompactions("OMP compaction ended when the session closed");
     this.closed = true;
     this.clearFlushTimer();
@@ -1283,9 +1268,9 @@ export class OmpTimelineProjector {
     );
   }
 
-  private publishCommand(turnId: string, final: boolean): void {
+  private publishCommand(turnId: string): void {
     if (!this.commandText) return;
-    const publicText = this.dataFilter.streamText(this.commandText, final).text;
+    const publicText = this.dataFilter.text(this.commandText);
     if (!publicText || publicText === this.commandPublishedText) return;
     this.commandPublishedText = publicText;
     this.publish({
