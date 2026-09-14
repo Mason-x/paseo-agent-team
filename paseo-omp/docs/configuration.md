@@ -54,11 +54,46 @@ Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP'
 
 ## Credentials and environment
 
-Supported provider authentication variables are inherited from the Paseo daemon environment. Put API keys in the daemon's service environment or secret manager, not in `providerOptions.env` or committed configuration.
+The plugin is deny-by-default. It inherits only its fixed built-in allowlist of core provider authentication variables plus exact names that an operator selects with `providerOptions.inheritEnv`; it does not discover or inherit arbitrary credential-shaped names. Prefer OMP's native credential store or auth broker whenever possible.
 
-`providerOptions.env` is only for deliberate non-secret overrides. If configuration contains sensitive values, restrict `<paseo-home>/config.json` to the daemon account (`chmod 600` on POSIX), protect backups, and never attach it to an issue.
+For example:
 
-The plugin validates and bounds native protocol data, but it does not heuristically detect, redact, or rewrite credentials in OMP, model, or tool content. Never put credentials in prompts or tool output. With `outputRedaction: "configured-values"`, exact configured literals are replaced on a best-effort basis; generated secrets and encoded, transformed, or independently streamed fragments are not detected. Centralized Paseo policy is required for redaction guarantees. Unexpected or internal launch failures use fixed fallback messages rather than serializing the launch configuration, while explicit public validation errors may include caller-supplied configuration names or values.
+```json
+{
+  "provider": "omp-plugin",
+  "providerOptions": {
+    "inheritEnv": ["ACME_OMP_API_KEY"],
+    "outputRedaction": "configured-values",
+    "env": {
+      "ACME_OMP_REGION": "us-east-1"
+    }
+  }
+}
+```
+
+`inheritEnv` accepts an array of at most 256 names matching `[A-Za-z_][A-Za-z0-9_]{0,127}`. Selecting a name is an operator trust decision: its daemon-owned value becomes available to the OMP child and anything OMP launches. The plugin resolves selected values from the Paseo daemon environment immediately before each catalog or session launch. Unselected variables remain absent. Explicit `providerOptions.env` and per-session `env` overlays win over inherited values with the same name.
+
+Profiles, persistence, errors, and catalog cache identity contain only the configured `inheritEnv` names, never resolved values or secret-derived hashes. A selected variable that is present and not shadowed by explicit `env` must contain at least 4 UTF-8 bytes. The existing 64 KiB per-value and 1 MiB total environment bounds still apply; shadowed daemon values are neither validated nor counted.
+
+Process-control variables are always rejected case-insensitively, even when explicitly selected. The blocked prefix families are `BUN_INSTALL*`, `DYLD_*`, `GIT_CONFIG*`, `LD_*`, and `NPM_CONFIG_*`. The blocked exact names are:
+
+```text
+BASH_ENV, BUN_OPTIONS, CLASSPATH, CLAUDE_BASH_NO_CI, CLAUDE_BASH_NO_LOGIN,
+CLAUDE_CODE_SHELL_PREFIX, EDITOR, ELECTRON_RUN_AS_NODE, ENV, GEM_HOME, GEM_PATH,
+GIT_SSH_COMMAND, HOME, JAVA_TOOL_OPTIONS, NODE_OPTIONS, NODE_PATH,
+OMP_AUTORESEARCH_DB_DIR, OMP_COMMAND, OMP_GITHUB_CACHE_DB, OMP_PROFILE,
+OMP_WORKTREE_DIR, PATH, PATHEXT, PERL5LIB, PERL5OPT, PI_BASH_NO_CI,
+PI_BASH_NO_LOGIN, PI_CODING_AGENT_DIR, PI_CODING_AGENT_SESSION_DIR,
+PI_CONFIG_DIR, PI_CONFIG_FILES, PI_GIT_COMMON_DIR, PI_PACKAGE_DIR, PI_PROFILE,
+PI_PROJECT_DIR, PI_SESSION_ID, PI_SHELL_PREFIX, PI_SUBPROCESS_CMD,
+PI_WORKTREE_DIR, PWD, PYTHONHOME, PYTHONINSPECT, PYTHONPATH, PYTHONSTARTUP,
+RUBYLIB, RUBYOPT, SHELL, SYSTEMROOT, USERPROFILE, VISUAL, XDG_CACHE_HOME,
+XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_RUNTIME_DIR, XDG_STATE_HOME, _JAVA_OPTIONS
+```
+
+Unlike `inheritEnv`, `providerOptions.env` stores its literal values in the provider profile/configuration. Use it only for deliberate non-secret overrides. If configuration contains sensitive values anyway, restrict `<paseo-home>/config.json` to the daemon account (`chmod 600` on POSIX), protect backups, and never attach it to an issue.
+
+The plugin validates and bounds native protocol data, but it does not heuristically detect, redact, or rewrite credentials in OMP, model, or tool content. Never put credentials in prompts or tool output. With `outputRedaction: "configured-values"`, every non-empty value selected through `inheritEnv` is treated as sensitive regardless of its name, alongside the existing explicitly configured credential values. Exact configured literals are replaced on a best-effort basis; generated secrets and encoded, transformed, or independently streamed fragments are not detected. With the default `none`, inherited values are not rewritten in output. Centralized Paseo policy is required for redaction guarantees. Unexpected or internal launch failures use fixed fallback messages rather than serializing the launch configuration, while explicit public validation errors may include caller-supplied configuration names or values.
 
 ## Modes and permissions
 

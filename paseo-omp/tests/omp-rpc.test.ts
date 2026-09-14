@@ -1885,6 +1885,8 @@ describe("OMP RPC transport", () => {
         HOME: "/home/runner",
         HTTPS_PROXY: proxy,
         OPENAI_API_KEY: "daemon-secret",
+        ANTHROPIC_OAUTH_TOKEN: "anthropic-oauth-secret",
+        CLOUDFLARE_AI_GATEWAY_API_KEY: "cloudflare-secret",
         PLEXUS_API_KEY: "plexus-secret",
         UNRELATED_DAEMON_VALUE: "must-not-pass",
         NODE_OPTIONS: "--require attacker.js",
@@ -1903,9 +1905,12 @@ describe("OMP RPC transport", () => {
       HTTPS_PROXY: proxy,
       OPENAI_API_KEY: "daemon-secret",
       PLEXUS_API_KEY: "plexus-secret",
+      ANTHROPIC_OAUTH_TOKEN: "anthropic-oauth-secret",
+      CLOUDFLARE_AI_GATEWAY_API_KEY: "cloudflare-secret",
       TEST_ENV: "explicit",
       CUSTOMER_API_KEY: "session-secret",
     });
+
     expect(request.env.UNRELATED_DAEMON_VALUE).toBeUndefined();
     expect(request.env.NODE_OPTIONS).toBeUndefined();
     expect(request.env.RANDOM_TOKEN).toBeUndefined();
@@ -2018,6 +2023,54 @@ describe("OMP RPC transport", () => {
     expect(() => buildOmpSpawnRequest({ cwd: "relative", mode: "full" }, TEST_RUNTIME_ENV)).toThrow(
       "absolute",
     );
+  });
+
+  test("inherits only selected daemon values and skips shadowed daemon values", () => {
+    const request = buildOmpSpawnRequest(
+      {
+        cwd: "/repo",
+        mode: "full",
+        inheritEnv: ["CUSTOM_SECRET", "CUSTOM_URL", "OVERRIDDEN"],
+        env: { OVERRIDDEN: "explicit-value" },
+      },
+      {
+        ...TEST_RUNTIME_ENV,
+        CUSTOM_SECRET: "selected-secret",
+        CUSTOM_URL: "https://user:pass@example.test",
+        OVERRIDDEN: "x",
+        UNSELECTED_SECRET: "must-not-pass",
+      },
+    );
+
+    expect(request.env.CUSTOM_SECRET).toBe("selected-secret");
+    expect(request.env.CUSTOM_URL).toBe("https://user:pass@example.test");
+    expect(request.env.OVERRIDDEN).toBe("explicit-value");
+    expect(request.env.UNSELECTED_SECRET).toBeUndefined();
+    expect(request.inheritedRedactionValues).toEqual([
+      "selected-secret",
+      "https://user:pass@example.test",
+    ]);
+
+    expect(() =>
+      buildOmpSpawnRequest(
+        { cwd: "/repo", mode: "full", inheritEnv: ["SHORT_VALUE"] },
+        { ...TEST_RUNTIME_ENV, SHORT_VALUE: "xyz" },
+      ),
+    ).toThrow("too short for safe redaction");
+    expect(() =>
+      buildOmpSpawnRequest(
+        { cwd: "/repo", mode: "full", inheritEnv: ["OVERSIZED_VALUE"] },
+        { ...TEST_RUNTIME_ENV, OVERSIZED_VALUE: "x".repeat(64 * 1024 + 1) },
+      ),
+    ).toThrow("invalid value");
+    for (const name of ["NODE_OPTIONS", "node_options", "PaTh"]) {
+      expect(() =>
+        buildOmpSpawnRequest(
+          { cwd: "/repo", mode: "full", inheritEnv: [name] },
+          { ...TEST_RUNTIME_ENV, [name]: "blocked-value" },
+        ),
+      ).toThrow("forbidden variable");
+    }
   });
 
   test("terminates a surviving POSIX process group after its leader exited", async () => {

@@ -62,12 +62,12 @@ Provider functionality outside the capability flags is tracked separately:
 | Provider SDK surface | Completeness | Implementation |
 | --- | ---: | --- |
 | Registration metadata and sanitized SVG icon | **100%** | Stable `omp-plugin` identity, label, description, and bundled icon. |
-| Strict `providerOptionsSchema` | **100%** | Command, environment, output-redaction mode, session directory, RPC timeout, and role-model options are validated and normalized. |
+| Strict `providerOptionsSchema` | **100%** | Command, literal and names-only inherited environment, output-redaction mode, session directory, RPC timeout, and role-model options are validated and normalized. |
 | Availability diagnostics | **100%** | Bounded checks distinguish missing, unrunnable, incompatible, and available OMP runtimes. |
-| Catalog cache identity | **100%** | Hash includes effective options, settings, scope, cwd, and default command. |
+| Catalog cache identity | **100%** | Hash includes effective options, configured inherited-environment names, settings, scope, cwd, and default command, but never resolves or fingerprints inherited values. |
 | Models, modes, and thinking catalog | **100%** | Native catalog is mapped to opaque public model IDs with committed defaults and permission-gated modes. |
 | Connection `send` / `onEvent` / `close` lifecycle | **100%** | Request correlation, multi-session ownership, process recovery, teardown, and provider reload/removal are covered. |
-| Session launch: cwd, env, system prompt, title, and persistence | **100%** | Complete launch configuration is bounded, validated, forwarded, and re-read on recovery. |
+| Session launch: cwd, env, system prompt, title, and persistence | **100%** | Complete launch configuration is bounded, validated, forwarded, and re-read on recovery; selected daemon environment values are resolved only when catalog and session children spawn. |
 | MCP server forwarding and host tools | **100%** | Configured and caller-scoped Paseo MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Exact `toolPolicy` remains the separate 0% capability above. |
 | Denied native tools | **100%** | `disallowedTools` becomes an explicit OMP allow-list; unknown names fail closed. |
 | Commands and committed session state events | **100%** | Publishes `session.commands`, `session.opened`, `session.config`, `session.ready`, and request completion in protocol order. |
@@ -95,7 +95,7 @@ Install, update, disable, or remove `paseo-omp` independently of the bundled pro
 
 The plugin validates OMP protocol data and bounds public strings and structured values. It does not heuristically redact or rewrite content produced by native OMP, models, or tools. Do not put credentials in prompts or tool output, because that content may be published unchanged after validation and bounding.
 
-`providerOptions.outputRedaction` defaults to `none`, preserving native content subject to those bounds. `configured-values` provides best-effort literal replacement only for explicitly supplied configured credential values. It does not detect generated secrets or encoded, transformed, or independently streamed fragments of configured values. Centralized Paseo policy is required when a deployment needs redaction guarantees.
+`providerOptions.outputRedaction` defaults to `none`, preserving native content subject to those bounds. `configured-values` provides best-effort literal replacement for explicitly supplied credential values and every non-empty daemon value selected through `inheritEnv`, regardless of its name. It does not detect generated secrets or encoded, transformed, or independently streamed fragments of configured values. Centralized Paseo policy is required when a deployment needs redaction guarantees.
 
 Unexpected or internal launch failures use fixed fallback messages rather than serializing the launch configuration. Explicit public validation errors may include caller-supplied configuration names or values. Deployments that require host-wide content redaction should implement it in a dedicated host or plugin layer rather than this protocol adapter.
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const MAX_COMMAND_PARTS = 64;
+const MAX_ENV_ENTRIES = 256;
 const MAX_TEXT_BYTES = 64 * 1024;
 const MAX_MODEL_SELECTOR_BYTES = 513;
 const MAX_PATH_BYTES = 4_096;
@@ -59,6 +60,11 @@ export const OmpProviderOptionsSchema = z
     env: z
       .record(EnvironmentNameSchema, EnvironmentValueSchema)
       .describe("Profile environment applied before session launch environment")
+      .optional(),
+    inheritEnv: z
+      .array(EnvironmentNameSchema)
+      .max(MAX_ENV_ENTRIES)
+      .describe("Daemon environment variable names copied at OMP spawn time")
       .optional(),
     outputRedaction: OmpOutputRedactionSchema.describe(
       "Best-effort exact replacement of explicitly configured credential values in public output",

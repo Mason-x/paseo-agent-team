@@ -842,7 +842,7 @@ export class OmpProviderSession {
       effectiveConfig,
       capabilities.includes("permission"),
     );
-    const outputRedactionValues = configuredOutputRedactionValues(
+    const configuredRedactionValues = configuredOutputRedactionValues(
       normalizedConfig.outputRedaction ?? "none",
       normalizedConfig.env,
       effectiveConfig.mcpServers,
@@ -880,6 +880,10 @@ export class OmpProviderSession {
     let bootstrapConfigRevision = 0;
     try {
       native = await runtime.startSession(startOptions);
+      const outputRedactionValues =
+        normalizedConfig.outputRedaction === "configured-values"
+          ? [...configuredRedactionValues, ...(native.inheritedRedactionValues ?? [])]
+          : configuredRedactionValues;
       unsubscribeBootstrap = native.onEvent((event) => {
         if (event.type === "host_tool_call" || event.type === "host_tool_cancel") {
           hostTools.handle(event);

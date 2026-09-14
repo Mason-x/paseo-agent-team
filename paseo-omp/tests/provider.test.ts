@@ -296,6 +296,7 @@ class ManualScheduler implements OmpTimelineScheduler {
 class FakeOmpSession implements OmpRuntimeSession {
   canReplayHistory = true;
   supportsTypedToolApprovals = true;
+  inheritedRedactionValues: readonly string[] = [];
   readonly listeners = new Set<(event: OmpRpcEvent) => void>();
   readonly prompts: string[] = [];
   readonly promptImages: OmpImage[][] = [];
@@ -713,6 +714,7 @@ class FakeOmpRuntime implements OmpRuntime {
   readonly sessionIds: string[] = [];
   nextModel: OmpModel | null = null;
   nextThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null = null;
+  nextInheritedRedactionValues: readonly string[] = [];
   omitNextThinkingLevel = false;
   nextCloseError: Error | null = null;
   nextStartError: Error | null = null;
@@ -806,6 +808,8 @@ class FakeOmpRuntime implements OmpRuntime {
       throw error;
     }
     const session = new FakeOmpSession();
+    session.inheritedRedactionValues = this.nextInheritedRedactionValues;
+    this.nextInheritedRedactionValues = [];
     session.availableCommandsError = this.commandDiscoveryError;
     session.availableCommands = this.availableCommands.map((command) => ({
       ...command,
@@ -12027,6 +12031,7 @@ describe("OMP direct provider", () => {
 
   test("redacts only configured values across root output surfaces", async () => {
     const runtime = new FakeOmpRuntime();
+    runtime.nextInheritedRedactionValues = ["inherited-setting-value"];
     const { connection, events, scheduler } = await createHostToolHarness(runtime);
     await openSession(
       connection,
@@ -12063,6 +12068,11 @@ describe("OMP direct provider", () => {
       id: "provider-internal-notice-id",
       level: "warning",
       message: "credential-value-1234 at /home/private/config",
+    });
+    session.emit({
+      type: "notice",
+      level: "warning",
+      message: "inherited-setting-value",
     });
     session.emit({
       type: "tool_execution_start",
@@ -12178,6 +12188,7 @@ describe("OMP direct provider", () => {
       "license-secret",
       "custom-secret",
       "mcp-header-secret",
+      "inherited-setting-value",
     ]) {
       expect(visible).not.toContain(configuredValue);
     }
@@ -12204,7 +12215,7 @@ describe("OMP direct provider", () => {
         "xyz",
       ]),
     );
-    expect(notificationMessages.filter((message) => message === "<redacted>")).toHaveLength(3);
+    expect(notificationMessages.filter((message) => message === "<redacted>")).toHaveLength(4);
     expect(
       events.some(
         (event) =>

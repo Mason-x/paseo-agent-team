@@ -135,8 +135,14 @@ export async function discoverOmpCatalog(
       session.getAvailableModels(),
       session.getState(),
     ]);
+    const configuredValues = configuredOutputRedactionValues(
+      options.outputRedaction ?? "none",
+      options.env,
+    );
     const serializer = new OmpPublicDataSerializer(
-      configuredOutputRedactionValues(options.outputRedaction ?? "none", options.env),
+      options.outputRedaction === "configured-values"
+        ? [...configuredValues, ...(session.inheritedRedactionValues ?? [])]
+        : configuredValues,
     );
     const models = mapOmpModels(nativeModels, serializer);
     if (models.length === 0) throw new Error("OMP reported no available models");

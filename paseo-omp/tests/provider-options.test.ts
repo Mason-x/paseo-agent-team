@@ -1,11 +1,13 @@
 import type { ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { describe, expect, test } from "vitest";
 import {
+  normalizeOmpCatalogOptions,
   normalizeOmpSessionConfig,
   withCommittedOmpSelection,
 } from "../server/provider/config-normalization";
 import { buildOmpSpawnRequest } from "../server/provider/omp-rpc";
 import { parseOmpProviderOptions } from "../server/provider/provider-options";
+import { createOmpProvider } from "../server/provider/registration";
 import {
   configuredOutputRedactionValues,
   OmpPublicDataSerializer,
@@ -73,6 +75,66 @@ describe("OMP provider option normalization", () => {
     });
     expect(normalized.readyTimeoutMs).toBe(12_345);
     expect(normalized.requestTimeoutMs).toBe(12_345);
+  });
+
+  test("forwards selected daemon environment names across catalog and session launches", () => {
+    const providerOptions = {
+      inheritEnv: ["CUSTOM_API_KEY", "CUSTOM_SETTING", "OVERRIDE_ME"],
+      env: { OVERRIDE_ME: "profile-value" },
+    };
+    const catalog = normalizeOmpCatalogOptions(
+      { scope: "workspace", cwd: "/repo", providerOptions },
+      "/repo",
+    );
+    const session = normalizeOmpSessionConfig(
+      sessionConfig({
+        providerOptions,
+        env: { OVERRIDE_ME: "session-value" },
+      }),
+    );
+
+    expect(catalog.inheritEnv).toEqual(providerOptions.inheritEnv);
+    expect(session.inheritEnv).toEqual(providerOptions.inheritEnv);
+
+    const daemonEnvironment = {
+      ...TEST_ENV,
+      CUSTOM_API_KEY: "daemon-credential",
+      CUSTOM_SETTING: "daemon-setting",
+      OVERRIDE_ME: "daemon-value",
+      UNSELECTED_VALUE: "must-not-pass",
+    };
+    const catalogRequest = buildOmpSpawnRequest({ ...catalog, environment: daemonEnvironment });
+    const sessionRequest = buildOmpSpawnRequest({ ...session, environment: daemonEnvironment });
+
+    expect(catalogRequest.env.CUSTOM_API_KEY).toBe("daemon-credential");
+    expect(catalogRequest.env.CUSTOM_SETTING).toBe("daemon-setting");
+    expect(catalogRequest.env.OVERRIDE_ME).toBe("profile-value");
+    expect(sessionRequest.env.OVERRIDE_ME).toBe("session-value");
+    expect(catalogRequest.env.UNSELECTED_VALUE).toBeUndefined();
+    expect(sessionRequest.env.UNSELECTED_VALUE).toBeUndefined();
+  });
+
+  test("keys catalog caches by inherited names without resolving daemon values", async () => {
+    const catalogOptions = {
+      scope: "global" as const,
+      providerOptions: { inheritEnv: ["CUSTOM_API_KEY"] },
+    };
+    const firstValueKey = await createOmpProvider({
+      environment: { ...TEST_ENV, CUSTOM_API_KEY: "first-secret" },
+    }).getCatalogCacheKey?.(catalogOptions);
+    const secondValueKey = await createOmpProvider({
+      environment: { ...TEST_ENV, CUSTOM_API_KEY: "second-secret" },
+    }).getCatalogCacheKey?.(catalogOptions);
+    const differentNameKey = await createOmpProvider({
+      environment: { ...TEST_ENV, OTHER_API_KEY: "first-secret" },
+    }).getCatalogCacheKey?.({
+      scope: "global",
+      providerOptions: { inheritEnv: ["OTHER_API_KEY"] },
+    });
+
+    expect(firstValueKey).toBeDefined();
+    expect(firstValueKey).toBe(secondValueKey);
+    expect(firstValueKey).not.toBe(differentNameKey);
   });
 
   test("maps every interactive launch mode after permission bridging", () => {
@@ -211,6 +273,17 @@ describe("OMP provider option normalization", () => {
     expect(() => parseOmpProviderOptions({ params: { rpcTimeoutMs: 0 } })).toThrow(
       "providerOptions.params.rpcTimeoutMs",
     );
+    expect(() => parseOmpProviderOptions({ inheritEnv: "CUSTOM_TOKEN" })).toThrow(
+      "providerOptions.inheritEnv",
+    );
+    expect(() => parseOmpProviderOptions({ inheritEnv: ["9INVALID"] })).toThrow(
+      "providerOptions.inheritEnv.0",
+    );
+    expect(() =>
+      parseOmpProviderOptions({
+        inheritEnv: Array.from({ length: 257 }, (_, index) => `CUSTOM_${index}`),
+      }),
+    ).toThrow("providerOptions.inheritEnv");
     expect(() =>
       normalizeOmpSessionConfig(sessionConfig({ settings: { unsupported: true } })),
     ).toThrow("does not expose live provider settings");

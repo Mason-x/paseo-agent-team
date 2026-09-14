@@ -71,6 +71,7 @@ export function normalizeOmpCatalogOptions(
     noSession: true,
     ...(providerOptions.command ? { command: providerOptions.command } : {}),
     ...(providerOptions.env ? { env: providerOptions.env } : {}),
+    ...(providerOptions.inheritEnv ? { inheritEnv: providerOptions.inheritEnv } : {}),
     outputRedaction: providerOptions.outputRedaction,
     ...(params.sessionDir ? { sessionDir: params.sessionDir } : {}),
     ...(params.rpcTimeoutMs
@@ -125,6 +126,7 @@ export function normalizeOmpSessionConfig(
     cwd: config.cwd,
     ...(options.command ? { command: options.command } : {}),
     ...(Object.keys(env).length > 0 ? { env } : {}),
+    ...(options.inheritEnv ? { inheritEnv: options.inheritEnv } : {}),
     outputRedaction: options.outputRedaction,
     mode: parsedMode.data,
     thinkingOption: config.thinkingOption,
