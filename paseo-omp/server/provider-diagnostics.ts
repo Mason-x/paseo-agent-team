@@ -53,7 +53,7 @@ const PROBE_ENV_ALLOWLIST = [
   "LC_ALL",
 ] as const;
 
-function buildProbeEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function buildProbeEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of PROBE_ENV_ALLOWLIST) {
     const value = sourceEnv[key];
@@ -190,7 +190,7 @@ export async function killWindowsProcessTree(
   return promise;
 }
 
-function defaultSpawn(
+export function defaultSpawn(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,

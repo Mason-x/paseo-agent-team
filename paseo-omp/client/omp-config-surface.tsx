@@ -6,6 +6,14 @@ import { useMemo, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { listOmpConfig, type OmpConfig } from "../shared/omp-config";
+import {
+  categorizeOmpSetting,
+  formatOmpSettingLabel,
+  listOmpSettings,
+  OMP_SETTING_CATEGORIES,
+  type OmpSetting,
+  type OmpSettingCategory,
+} from "../shared/omp-settings";
 import { getOmpProviderHealth, type OmpProviderHealth } from "../shared/provider-diagnostics";
 import {
   type BinaryHealthSummary,
@@ -61,6 +69,19 @@ export interface OmpConfigStyles {
   row: ViewStyle;
   rowLabel: TextStyle;
   rowValue: TextStyle;
+  setting: ViewStyle;
+  settingHeader: ViewStyle;
+  settingPath: TextStyle;
+  settingDescription: TextStyle;
+  settingValue: TextStyle;
+  collectionSummary: TextStyle;
+  chipList: ViewStyle;
+  chip: ViewStyle;
+  chipText: TextStyle;
+  recordList: ViewStyle;
+  recordRow: ViewStyle;
+  recordKey: TextStyle;
+  recordValue: TextStyle;
 }
 
 function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): OmpConfigStyles {
@@ -97,7 +118,7 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
       topTabLabelActive: { color: theme.colors.accentForeground },
       workspace: {
         flexDirection: compact ? "column" : "row",
-        alignItems: "flex-start",
+        alignItems: compact ? "stretch" : "flex-start",
         gap: compact ? 10 : 18,
       },
       categoryRail: {
@@ -114,7 +135,7 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
       categoryButtonActive: { backgroundColor: theme.colors.surface2 },
       categoryLabel: { color: theme.colors.foregroundMuted, fontSize: 13, fontWeight: "500" },
       categoryLabelActive: { color: theme.colors.foreground, fontWeight: "700" },
-      categoryContent: { flex: 1, minWidth: 0, gap: 10 },
+      categoryContent: { flex: compact ? undefined : 1, minWidth: 0, gap: 10 },
       search: {
         color: theme.colors.foreground,
         borderWidth: 1,
@@ -159,13 +180,49 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
       row: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
       rowLabel: { color: theme.colors.foregroundMuted, fontSize: 13 },
       rowValue: { color: theme.colors.foreground, fontSize: 13, flexShrink: 1 },
+      setting: {
+        gap: 5,
+        paddingVertical: 10,
+        borderTopWidth: 1,
+        borderTopColor: theme.colors.border,
+      },
+      settingHeader: {
+        flexDirection: "row",
+        alignItems: "baseline",
+        justifyContent: "space-between",
+        gap: 12,
+      },
+      settingPath: { color: theme.colors.foregroundMuted, fontSize: 11, flexShrink: 1 },
+      settingDescription: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
+      settingValue: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" },
+      collectionSummary: { color: theme.colors.foregroundMuted, fontSize: 12 },
+      chipList: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+      chip: {
+        paddingHorizontal: 8,
+        paddingVertical: 5,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 999,
+        backgroundColor: theme.colors.surface2,
+      },
+      chipText: { color: theme.colors.foreground, fontSize: 12 },
+      recordList: { gap: 6 },
+      recordRow: {
+        flexDirection: compact ? "column" : "row",
+        alignItems: compact ? "flex-start" : "baseline",
+        gap: compact ? 2 : 12,
+        paddingVertical: 5,
+      },
+      recordKey: {
+        width: compact ? undefined : 150,
+        color: theme.colors.foregroundMuted,
+        fontSize: 12,
+        fontWeight: "600",
+      },
+      recordValue: { flex: 1, color: theme.colors.foreground, fontSize: 12 },
     }),
     [compact, theme],
   );
-}
-
-function boolLabel(value: boolean | undefined): string | undefined {
-  return value === undefined ? undefined : value ? "Yes" : "No";
 }
 
 function KeyValueRow({
@@ -204,201 +261,6 @@ function SectionCard({
   );
 }
 
-function ModelRolesSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const roles = Object.entries(config.modelRoles ?? {});
-  if (roles.length === 0) return null;
-  return (
-    <SectionCard styles={styles} title="Model roles">
-      {roles.map(([role, model]) => (
-        <KeyValueRow key={role} styles={styles} label={role} value={model} />
-      ))}
-    </SectionCard>
-  );
-}
-
-function EnabledModelsSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  if (!config.enabledModels || config.enabledModels.length === 0) return null;
-  return (
-    <SectionCard styles={styles} title="Enabled models">
-      {config.enabledModels.map((model) => (
-        <Text key={model} style={styles.rowValue}>
-          {model}
-        </Text>
-      ))}
-    </SectionCard>
-  );
-}
-
-function ProvidersSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const hasOrder = !!config.modelProviderOrder?.length;
-  const hasDisabled = !!config.disabledProviders?.length;
-  if (!hasOrder && !hasDisabled) return null;
-  return (
-    <SectionCard styles={styles} title="Providers">
-      {hasOrder ? (
-        <KeyValueRow
-          styles={styles}
-          label="Order"
-          value={(config.modelProviderOrder ?? []).join(" -> ")}
-        />
-      ) : null}
-      {hasDisabled ? (
-        <KeyValueRow
-          styles={styles}
-          label="Disabled"
-          value={(config.disabledProviders ?? []).join(", ")}
-        />
-      ) : null}
-    </SectionCard>
-  );
-}
-
-function RetrySection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const retry = config.retry;
-  if (!retry) return null;
-  const chains = Object.entries(retry.fallbackChains ?? {});
-  return (
-    <SectionCard styles={styles} title="Retry and fallback">
-      {retry.enabled !== undefined ? (
-        <KeyValueRow styles={styles} label="Enabled" value={boolLabel(retry.enabled) ?? ""} />
-      ) : null}
-      {retry.maxRetries !== undefined ? (
-        <KeyValueRow styles={styles} label="Max retries" value={String(retry.maxRetries)} />
-      ) : null}
-      {retry.modelFallback !== undefined ? (
-        <KeyValueRow
-          styles={styles}
-          label="Model fallback"
-          value={boolLabel(retry.modelFallback) ?? ""}
-        />
-      ) : null}
-      {retry.usageAwareFallback !== undefined ? (
-        <KeyValueRow
-          styles={styles}
-          label="Usage-aware fallback"
-          value={boolLabel(retry.usageAwareFallback) ?? ""}
-        />
-      ) : null}
-      {retry.usageReservePct !== undefined ? (
-        <KeyValueRow styles={styles} label="Usage reserve" value={`${retry.usageReservePct}%`} />
-      ) : null}
-      {retry.usageReservePolicy !== undefined ? (
-        <KeyValueRow
-          styles={styles}
-          label="Usage reserve policy"
-          value={retry.usageReservePolicy}
-        />
-      ) : null}
-      {retry.fallbackRevertPolicy !== undefined ? (
-        <KeyValueRow
-          styles={styles}
-          label="Fallback revert policy"
-          value={retry.fallbackRevertPolicy}
-        />
-      ) : null}
-      {retry.waitForUsageReset !== undefined ? (
-        <KeyValueRow
-          styles={styles}
-          label="Wait for usage reset"
-          value={boolLabel(retry.waitForUsageReset) ?? ""}
-        />
-      ) : null}
-      {retry.baseDelayMs !== undefined ? (
-        <KeyValueRow styles={styles} label="Base delay" value={`${retry.baseDelayMs}ms`} />
-      ) : null}
-      {retry.maxDelayMs !== undefined ? (
-        <KeyValueRow styles={styles} label="Max delay" value={`${retry.maxDelayMs}ms`} />
-      ) : null}
-      {chains.length > 0 ? (
-        <View style={{ gap: 4 }}>
-          <Text style={styles.rowLabel}>Fallback chains</Text>
-          {chains.map(([role, chain]) => (
-            <KeyValueRow key={role} styles={styles} label={role} value={chain.join(" -> ")} />
-          ))}
-        </View>
-      ) : null}
-    </SectionCard>
-  );
-}
-
-function MemorySection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const backend = config.memory?.backend;
-  if (!backend) return null;
-  return (
-    <SectionCard styles={styles} title="Memory">
-      <KeyValueRow styles={styles} label="Backend" value={backend} />
-    </SectionCard>
-  );
-}
-
-function GithubSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const github = config.github;
-  if (!github) return null;
-  const cacheEnabled = github.cache?.enabled;
-  const cacheSoftTtlSec = github.cache?.softTtlSec;
-  const cacheHardTtlSec = github.cache?.hardTtlSec;
-  return (
-    <SectionCard styles={styles} title="GitHub integration">
-      {github.enabled !== undefined ? (
-        <KeyValueRow styles={styles} label="Enabled" value={boolLabel(github.enabled) ?? ""} />
-      ) : null}
-      {cacheEnabled !== undefined ? (
-        <KeyValueRow styles={styles} label="Cache enabled" value={boolLabel(cacheEnabled) ?? ""} />
-      ) : null}
-      {cacheSoftTtlSec !== undefined ? (
-        <KeyValueRow styles={styles} label="Cache soft TTL" value={`${cacheSoftTtlSec}s`} />
-      ) : null}
-      {cacheHardTtlSec !== undefined ? (
-        <KeyValueRow styles={styles} label="Cache hard TTL" value={`${cacheHardTtlSec}s`} />
-      ) : null}
-    </SectionCard>
-  );
-}
-
-function PreferencesSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const themeDark = config.theme?.dark;
-  const themeLight = config.theme?.light;
-  const { symbolPreset, defaultThinkingLevel } = config;
-  const hasAny =
-    themeDark !== undefined ||
-    themeLight !== undefined ||
-    symbolPreset !== undefined ||
-    defaultThinkingLevel !== undefined;
-  if (!hasAny) return null;
-  return (
-    <SectionCard styles={styles} title="Theme and preferences">
-      {themeDark !== undefined ? (
-        <KeyValueRow styles={styles} label="Dark theme" value={themeDark} />
-      ) : null}
-      {themeLight !== undefined ? (
-        <KeyValueRow styles={styles} label="Light theme" value={themeLight} />
-      ) : null}
-      {symbolPreset !== undefined ? (
-        <KeyValueRow styles={styles} label="Symbol preset" value={symbolPreset} />
-      ) : null}
-      {defaultThinkingLevel !== undefined ? (
-        <KeyValueRow styles={styles} label="Default thinking level" value={defaultThinkingLevel} />
-      ) : null}
-    </SectionCard>
-  );
-}
-
-function OtherSection({ styles, config }: { styles: OmpConfigStyles; config: OmpConfig }) {
-  const { setupVersion } = config;
-  const autoqaConsent = config.dev?.autoqaConsent;
-  if (setupVersion === undefined && autoqaConsent === undefined) return null;
-  return (
-    <SectionCard styles={styles} title="Other">
-      {setupVersion !== undefined ? (
-        <KeyValueRow styles={styles} label="Setup version" value={String(setupVersion)} />
-      ) : null}
-      {autoqaConsent !== undefined ? (
-        <KeyValueRow styles={styles} label="Auto-QA consent" value={autoqaConsent} />
-      ) : null}
-    </SectionCard>
-  );
-}
-
 function ProviderSetupSection({ styles }: { styles: OmpConfigStyles }) {
   return (
     <SectionCard styles={styles} title="OMP Plugin">
@@ -417,10 +279,6 @@ function ProviderSetupSection({ styles }: { styles: OmpConfigStyles }) {
       />
     </SectionCard>
   );
-}
-
-function isEmptyConfig(config: OmpConfig): boolean {
-  return Object.keys(config).length === 0;
 }
 
 function toneColor(theme: PluginSurfaceProps["theme"], tone: BinaryHealthSummary["tone"]): string {
@@ -667,52 +525,179 @@ function ProviderHealthSection({
   );
 }
 
-type SurfaceView = "overview" | "configuration" | "diagnostics";
-type ConfigCategory =
-  | "model-roles"
-  | "enabled-models"
-  | "providers"
-  | "retry"
-  | "memory"
-  | "github"
-  | "appearance"
-  | "other";
+const CATEGORY_LABELS: Record<OmpSettingCategory, string> = {
+  appearance: "Appearance",
+  model: "Model",
+  interaction: "Interaction",
+  context: "Context",
+  memory: "Memory",
+  files: "Files",
+  shell: "Shell",
+  tools: "Tools",
+  tasks: "Tasks",
+  providers: "Providers",
+  general: "General",
+};
 
+const CONFIG_CATEGORIES = OMP_SETTING_CATEGORIES.map((id) => ({ id, label: CATEGORY_LABELS[id] }));
+
+function fallbackSettingsFromConfig(config: OmpConfig | null | undefined): OmpSetting[] {
+  if (!config) return [];
+  const settings: OmpSetting[] = [];
+  const visit = (value: unknown, path: string) => {
+    if (Array.isArray(value)) {
+      settings.push({ path, type: "array", value, description: "" });
+      return;
+    }
+    if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      if (entries.length === 0) {
+        settings.push({ path, type: "record", value, description: "" });
+        return;
+      }
+      for (const [key, nested] of entries) visit(nested, path ? `${path}.${key}` : key);
+      return;
+    }
+    if (typeof value === "boolean") {
+      settings.push({ path, type: "boolean", value, description: "" });
+    } else if (typeof value === "number") {
+      settings.push({ path, type: "number", value, description: "" });
+    } else if (typeof value === "string") {
+      settings.push({ path, type: "string", value, description: "" });
+    }
+  };
+  visit(config, "");
+  return settings;
+}
+
+type SurfaceView = "overview" | "configuration" | "diagnostics";
 const SURFACE_VIEWS: readonly { id: SurfaceView; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "configuration", label: "Configuration" },
   { id: "diagnostics", label: "Diagnostics" },
 ];
 
-const CONFIG_CATEGORIES: readonly { id: ConfigCategory; label: string }[] = [
-  { id: "model-roles", label: "Model roles" },
-  { id: "enabled-models", label: "Enabled models" },
-  { id: "providers", label: "Providers" },
-  { id: "retry", label: "Retry and fallback" },
-  { id: "memory", label: "Memory" },
-  { id: "github", label: "GitHub" },
-  { id: "appearance", label: "Appearance" },
-  { id: "other", label: "Other" },
-];
+function formatScalarValue(value: unknown): string {
+  if (value === undefined || value === null) return "Not set";
+  if (typeof value === "boolean") return value ? "Enabled" : "Disabled";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  const serialized = JSON.stringify(value);
+  if (!serialized) return "Not set";
+  return serialized.length > 240 ? `${serialized.slice(0, 237)}…` : serialized;
+}
+
+function StructuredSettingValue({
+  setting,
+  styles,
+}: {
+  setting: OmpSetting;
+  styles: OmpConfigStyles;
+}) {
+  if (setting.redacted) {
+    return (
+      <Text style={styles.settingValue}>
+        {setting.configured === true
+          ? "Configured (hidden)"
+          : setting.configured === false
+            ? "Not set"
+            : "Hidden"}
+      </Text>
+    );
+  }
+  const value = setting.value;
+  if (!Array.isArray(value) && (value === null || typeof value !== "object")) {
+    return <Text style={styles.settingValue}>{formatScalarValue(value)}</Text>;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <Text style={styles.muted}>None</Text>;
+    const allScalar = value.every(
+      (item) => item === null || ["boolean", "number", "string"].includes(typeof item),
+    );
+    const occurrences = new Map<string, number>();
+    const items = value.map((item) => {
+      const text = formatScalarValue(item);
+      const occurrence = (occurrences.get(text) ?? 0) + 1;
+      occurrences.set(text, occurrence);
+      return { item, key: `${text}-${occurrence}`, text };
+    });
+    return (
+      <View style={styles.recordList}>
+        <Text style={styles.collectionSummary}>{value.length} items</Text>
+        {allScalar ? (
+          <View style={styles.chipList}>
+            {items.map(({ key, text }) => (
+              <View key={key} style={styles.chip}>
+                <Text style={styles.chipText}>{text}</Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          items.map(({ item, key }, position) => (
+            <View key={key} style={styles.recordRow}>
+              <Text style={styles.recordKey}>{position + 1}</Text>
+              <Text selectable style={styles.recordValue}>
+                {formatScalarValue(item)}
+              </Text>
+            </View>
+          ))
+        )}
+      </View>
+    );
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return <Text style={styles.muted}>None</Text>;
+  return (
+    <View style={styles.recordList}>
+      <Text style={styles.collectionSummary}>{entries.length} entries</Text>
+      {entries.map(([key, item]) => (
+        <View key={key} style={styles.recordRow}>
+          <Text selectable style={styles.recordKey}>
+            {key}
+          </Text>
+          <Text selectable style={styles.recordValue}>
+            {formatScalarValue(item)}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
 
 function ConfigurationCategory({
   category,
   styles,
-  config,
+  settings,
 }: {
-  category: ConfigCategory;
+  category: { id: OmpSettingCategory; label: string };
   styles: OmpConfigStyles;
-  config: OmpConfig;
+  settings: readonly OmpSetting[];
 }) {
-  if (category === "model-roles") return <ModelRolesSection styles={styles} config={config} />;
-  if (category === "enabled-models")
-    return <EnabledModelsSection styles={styles} config={config} />;
-  if (category === "providers") return <ProvidersSection styles={styles} config={config} />;
-  if (category === "retry") return <RetrySection styles={styles} config={config} />;
-  if (category === "memory") return <MemorySection styles={styles} config={config} />;
-  if (category === "github") return <GithubSection styles={styles} config={config} />;
-  if (category === "appearance") return <PreferencesSection styles={styles} config={config} />;
-  return <OtherSection styles={styles} config={config} />;
+  return (
+    <SectionCard styles={styles} title={`${category.label} · ${settings.length}`}>
+      {settings.map((setting) => {
+        const complex =
+          Array.isArray(setting.value) ||
+          (setting.value !== null && typeof setting.value === "object");
+        return (
+          <View key={setting.path} style={styles.setting}>
+            <View style={styles.settingHeader}>
+              <Text style={styles.cardTitle}>{formatOmpSettingLabel(setting.path)}</Text>
+              {!complex ? <StructuredSettingValue setting={setting} styles={styles} /> : null}
+            </View>
+            <Text selectable style={styles.settingPath}>
+              {setting.path} · {setting.type}
+            </Text>
+            {complex ? <StructuredSettingValue setting={setting} styles={styles} /> : null}
+            {setting.description ? (
+              <Text style={styles.settingDescription}>{setting.description}</Text>
+            ) : null}
+          </View>
+        );
+      })}
+    </SectionCard>
+  );
 }
 
 function SurfaceTabs({
@@ -747,22 +732,44 @@ function SurfaceTabs({
 }
 export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
   const loadConfig = useRpc(listOmpConfig);
-  const result = useQuery({
+  const loadSettings = useRpc(listOmpSettings);
+  const configQuery = useQuery({
     queryKey: ["paseo-omp", "config"],
     queryFn: () => loadConfig({}),
     refetchInterval: CONFIG_POLL_MS,
   });
+  const settingsQuery = useQuery({
+    queryKey: ["paseo-omp", "settings"],
+    queryFn: () => loadSettings({}),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
   const [view, setView] = useState<SurfaceView>("overview");
-  const [activeCategory, setActiveCategory] = useState<ConfigCategory>("model-roles");
+  const [activeCategory, setActiveCategory] = useState<OmpSettingCategory>("appearance");
   const [search, setSearch] = useState("");
   const styles = useConfigStyles(theme, layout.compact);
-  const config = result.data?.config ?? null;
   const normalizedSearch = search.trim().toLocaleLowerCase();
-  const visibleCategories = normalizedSearch
-    ? CONFIG_CATEGORIES.filter((category) =>
-        category.label.toLocaleLowerCase().includes(normalizedSearch),
-      )
-    : CONFIG_CATEGORIES;
+  const catalog = useMemo(() => {
+    const sourceSettings = settingsQuery.data?.available
+      ? settingsQuery.data.settings
+      : fallbackSettingsFromConfig(configQuery.data?.config);
+    const matching = sourceSettings.filter((setting) => {
+      if (!normalizedSearch) return true;
+      return `${setting.path}\n${setting.description}`
+        .toLocaleLowerCase()
+        .includes(normalizedSearch);
+    });
+    const byCategory = new Map<OmpSettingCategory, OmpSetting[]>();
+    for (const setting of matching) {
+      const category = categorizeOmpSetting(setting.path);
+      const group = byCategory.get(category);
+      if (group) group.push(setting);
+      else byCategory.set(category, [setting]);
+    }
+    return { sourceSettings, matching, byCategory };
+  }, [configQuery.data?.config, normalizedSearch, settingsQuery.data]);
+  const visibleCategories = CONFIG_CATEGORIES.filter(
+    (category) => (catalog.byCategory.get(category.id)?.length ?? 0) > 0,
+  );
   const selectedCategory =
     visibleCategories.find((category) => category.id === activeCategory) ?? visibleCategories[0];
 
@@ -774,18 +781,31 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
       {view === "overview" ? (
         <>
           <ProviderSetupSection styles={styles} />
-          <SectionCard styles={styles} title="Native configuration">
-            <KeyValueRow
-              styles={styles}
-              label="Source"
-              value={result.data?.path ?? "Loading configuration path…"}
-            />
-            <KeyValueRow
-              styles={styles}
-              label="Status"
-              value={result.data?.available ? "Available" : "Unavailable"}
-            />
-          </SectionCard>
+          {configQuery.isLoading ? (
+            <Text style={styles.muted}>Loading the native configuration…</Text>
+          ) : configQuery.error ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              Could not read the native OMP configuration.
+            </Text>
+          ) : (
+            <SectionCard styles={styles} title="Native configuration">
+              <KeyValueRow
+                styles={styles}
+                label="Source"
+                value={configQuery.data?.path ?? "Unavailable"}
+              />
+              <KeyValueRow
+                styles={styles}
+                label="Status"
+                value={configQuery.data?.available ? "Available" : "Unavailable"}
+              />
+              <KeyValueRow
+                styles={styles}
+                label="Settings discovered"
+                value={String(catalog.sourceSettings.length)}
+              />
+            </SectionCard>
+          )}
         </>
       ) : null}
 
@@ -800,50 +820,59 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
                 accessibilityRole="button"
                 accessibilityLabel="Refresh OMP configuration"
                 style={styles.refresh}
-                disabled={result.isFetching}
-                onPress={() => void result.refetch()}
+                disabled={configQuery.isFetching || settingsQuery.isFetching}
+                onPress={() => {
+                  void Promise.all([configQuery.refetch(), settingsQuery.refetch()]);
+                }}
               >
                 <Icon name="RefreshCw" size={14} color={theme.colors.foreground} />
                 <Text style={styles.refreshLabel}>
-                  {result.isFetching ? "Refreshing…" : "Refresh"}
+                  {configQuery.isFetching || settingsQuery.isFetching ? "Refreshing…" : "Refresh"}
                 </Text>
               </Pressable>
             </View>
-            {result.data?.path ? (
-              <Text style={styles.source}>{`Source: ${result.data.path}`}</Text>
+            {configQuery.data?.path ? (
+              <Text style={styles.source}>{`Source: ${configQuery.data.path}`}</Text>
             ) : null}
           </View>
 
-          {result.isLoading ? <Text style={styles.muted}>Loading OMP configuration…</Text> : null}
-          {result.error ? (
+          {settingsQuery.isLoading ? (
+            <Text style={styles.muted}>Loading the OMP settings catalog…</Text>
+          ) : null}
+          {settingsQuery.error || settingsQuery.data?.error ? (
             <Text accessibilityRole="alert" style={styles.error}>
-              Could not read the OMP configuration. Try refreshing.
+              OMP settings metadata is unavailable. Showing the safe values read from the config
+              file when available.
             </Text>
           ) : null}
-          {!result.isLoading && !result.error && result.data && !result.data.available ? (
+          {settingsQuery.data?.droppedCount ? (
             <Text style={styles.muted}>
-              OMP configuration is unavailable at this path. It may be missing, unreadable,
-              malformed, or the wrong type on disk.
+              {settingsQuery.data.droppedCount} settings use unsupported metadata types and are not
+              shown.
             </Text>
           ) : null}
-          {!result.isLoading && !result.error && config && isEmptyConfig(config) ? (
-            <Text style={styles.muted}>The OMP configuration has no recognized settings.</Text>
+          {!settingsQuery.isLoading && catalog.sourceSettings.length === 0 ? (
+            <Text style={styles.muted}>OMP reported no readable settings.</Text>
           ) : null}
 
-          {config && !isEmptyConfig(config) ? (
+          {catalog.sourceSettings.length > 0 ? (
             <View style={styles.workspace}>
               <View style={styles.categoryRail}>
                 <TextInput
-                  accessibilityLabel="Search configuration categories"
-                  placeholder="Search categories"
+                  accessibilityLabel="Search OMP settings"
+                  placeholder="Search settings"
                   placeholderTextColor={theme.colors.foregroundMuted}
                   value={search}
                   onChangeText={setSearch}
                   style={styles.search}
                 />
+                <Text style={styles.source}>
+                  {catalog.matching.length} of {catalog.sourceSettings.length} settings
+                </Text>
                 <View style={styles.categoryList}>
                   {visibleCategories.map((category) => {
                     const active = selectedCategory?.id === category.id;
+                    const count = catalog.byCategory.get(category.id)?.length ?? 0;
                     return (
                       <Pressable
                         key={category.id}
@@ -855,7 +884,7 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
                         <Text
                           style={[styles.categoryLabel, active ? styles.categoryLabelActive : null]}
                         >
-                          {category.label}
+                          {category.label} · {count}
                         </Text>
                       </Pressable>
                     );
@@ -865,12 +894,12 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
               <View style={styles.categoryContent}>
                 {selectedCategory ? (
                   <ConfigurationCategory
-                    category={selectedCategory.id}
+                    category={selectedCategory}
                     styles={styles}
-                    config={config}
+                    settings={catalog.byCategory.get(selectedCategory.id) ?? []}
                   />
                 ) : (
-                  <Text style={styles.muted}>No configuration categories match this search.</Text>
+                  <Text style={styles.muted}>No settings match this search.</Text>
                 )}
               </View>
             </View>
