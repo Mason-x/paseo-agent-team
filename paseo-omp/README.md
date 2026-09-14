@@ -68,7 +68,7 @@ Provider functionality outside the capability flags is tracked separately:
 | Models, modes, and thinking catalog | **100%** | Native catalog is mapped to opaque public model IDs with committed defaults and permission-gated modes. |
 | Connection `send` / `onEvent` / `close` lifecycle | **100%** | Request correlation, multi-session ownership, process recovery, teardown, and provider reload/removal are covered. |
 | Session launch: cwd, env, system prompt, title, and persistence | **100%** | Complete launch configuration is bounded, validated, forwarded, and re-read on recovery; selected daemon environment values are resolved only when catalog and session children spawn. |
-| MCP server forwarding and host tools | **100%** | Configured and caller-scoped Paseo MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Exact `toolPolicy` remains the separate 0% capability above. |
+| MCP server forwarding and host tools | **100%** | Configured MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Caller-scoped Paseo orchestration tools retain their native names, such as `create_agent` and `list_profiles`, so OMP skills can invoke them directly. Exact `toolPolicy` remains the separate 0% capability above. |
 | Denied native tools | **100%** | `disallowedTools` becomes an explicit OMP allow-list; unknown names fail closed. |
 | Commands and committed session state events | **100%** | Publishes `session.commands`, `session.opened`, `session.config`, `session.ready`, and request completion in protocol order. |
 | Built-in timeline snapshots | **100%** | Assistant, reasoning, tools, todos, notifications, errors, compaction, images, and friendly MCP labels use stable IDs and complete snapshots. |

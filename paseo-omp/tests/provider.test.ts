@@ -9820,7 +9820,7 @@ describe("OMP direct provider", () => {
       const native = sessionAt(runtime);
       expect(native.hostToolCatalogs[0]).toEqual([
         expect.objectContaining({
-          name: "mcp__paseo_workspace_probe",
+          name: "workspace_probe",
           loadMode: "essential",
         }),
       ]);
@@ -9830,7 +9830,7 @@ describe("OMP direct provider", () => {
         type: "host_tool_call",
         id: "host-call-1",
         toolCallId: "tool-call-1",
-        toolName: "mcp__paseo_workspace_probe",
+        toolName: "workspace_probe",
         arguments: { expectedWorkspaceId: "workspace-1" },
       });
       const execution = await toolExecuted.promise;

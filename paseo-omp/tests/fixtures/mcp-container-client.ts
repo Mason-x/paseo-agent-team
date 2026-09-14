@@ -47,14 +47,14 @@ const bridge = await OmpHostToolsBridge.open({
 });
 try {
   await bridge.bind(runtime as OmpRuntimeSession);
-  if (definitions[0]?.name !== "mcp__paseo_workspace_probe") {
+  if (definitions[0]?.name !== "workspace_probe") {
     throw new Error(`Unexpected Docker host tool catalog: ${JSON.stringify(definitions)}`);
   }
   bridge.handle({
     type: "host_tool_call",
     id: "docker-call",
     toolCallId: "docker-tool-call",
-    toolName: "mcp__paseo_workspace_probe",
+    toolName: "workspace_probe",
     arguments: {},
   });
   const deadline = Date.now() + 5_000;

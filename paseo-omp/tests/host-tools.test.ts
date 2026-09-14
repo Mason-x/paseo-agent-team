@@ -134,10 +134,10 @@ describe("OMP host tool bridge", () => {
     const paseo = new FakeConnection(
       [
         {
-          name: "read",
-          title: "Read workspace file",
-          description: "Read from the caller workspace",
-          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          name: "create_agent",
+          title: "Create agent",
+          description: "Create an agent owned by the caller",
+          inputSchema: { type: "object", properties: { title: { type: "string" } } },
         },
       ],
       {
@@ -185,8 +185,8 @@ describe("OMP host tool bridge", () => {
     expect(observed.every(({ cwd, signal }) => cwd === "/workspace" && !signal.aborted)).toBe(true);
     expect(runtime.catalogs[0]).toEqual([
       expect.objectContaining({
-        name: "mcp__paseo_read",
-        label: "Read workspace file",
+        name: "create_agent",
+        label: "Create agent",
         loadMode: "essential",
       }),
       expect.objectContaining({
@@ -202,7 +202,7 @@ describe("OMP host tool bridge", () => {
     ]);
     expect(bridge.labels).toEqual(
       new Map([
-        ["mcp__paseo_read", "Read workspace file"],
+        ["create_agent", "Create agent"],
         ["mcp__daemon_sibling_status", "Daemon sibling: Status"],
         ["mcp__repo_search", "Repo: Search"],
       ]),
@@ -212,8 +212,8 @@ describe("OMP host tool bridge", () => {
       type: "host_tool_call",
       id: "call-1",
       toolCallId: "tool-call-1",
-      toolName: "mcp__paseo_read",
-      arguments: { path: "README.md" },
+      toolName: "create_agent",
+      arguments: { title: "Review" },
     });
     await flushMicrotasks();
 
@@ -294,12 +294,12 @@ describe("OMP host tool bridge", () => {
     expect(connections).toBe(0);
   });
 
-  test("reserves the canonical Paseo namespace and hashes external collisions", async () => {
+  test("exposes canonical Paseo tools directly and hashes external namespace collisions", async () => {
     const observed: string[] = [];
     const connector: OmpMcpConnector = async (name) => {
       observed.push(name);
       return new FakeConnection(
-        [{ name: "read", description: "Read", inputSchema: { type: "object" } }],
+        [{ name: "create_agent", description: "Create agent", inputSchema: { type: "object" } }],
         { content: [] },
       );
     };
@@ -322,7 +322,7 @@ describe("OMP host tool bridge", () => {
     const names = runtime.catalogs[0]?.map(({ name }) => name) ?? [];
 
     expect(observed[0]).toBe("paseo");
-    expect(names.filter((name) => name.startsWith("mcp__paseo_"))).toEqual(["mcp__paseo_read"]);
+    expect(names.filter((name) => name === "create_agent")).toEqual(["create_agent"]);
     expect(new Set(names).size).toBe(3);
     expect(names.slice(1).every((name) => name.startsWith("mcp__external_paseo_"))).toBe(true);
     await bridge.close();

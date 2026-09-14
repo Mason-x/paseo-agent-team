@@ -206,12 +206,13 @@ function serverNamespaces(servers: readonly ClassifiedServer[]): ReadonlyMap<str
   );
 }
 
-function exposedToolName(namespace: string, serverName: string, toolName: string): string {
+function exposedToolName(server: ClassifiedServer, namespace: string, toolName: string): string {
   const tool = safeName(toolName, "tool");
+  if (server.canonical) return tool;
   const unprefixed = tool.startsWith(`${namespace}_`) ? tool.slice(namespace.length + 1) : tool;
   const base = `mcp__${namespace}_${unprefixed}`;
   if (utf8Bytes(base) <= MAX_HOST_TOOL_NAME_BYTES) return base;
-  const suffix = digest(`${serverName}\0${toolName}`);
+  const suffix = digest(`${server.name}\0${toolName}`);
   return `${base.slice(0, MAX_HOST_TOOL_NAME_BYTES - suffix.length - 1)}_${suffix}`;
 }
 
@@ -422,7 +423,7 @@ export class OmpHostToolsBridge {
           if (definitions.length >= MAX_HOST_TOOLS) {
             throw new Error("MCP servers exposed too many host tools");
           }
-          let name = exposedToolName(namespace, server.name, tool.name);
+          let name = exposedToolName(server, namespace, tool.name);
           if (targets.has(name)) {
             const suffix = digest(`${server.name}\0${tool.name}`);
             name = `${name.slice(0, MAX_HOST_TOOL_NAME_BYTES - suffix.length - 1)}_${suffix}`;

@@ -43,6 +43,7 @@
 * Recover degraded or compacted `agent_end` outcomes from complete streamed assistant evidence while continuing to fail closed on partial evidence.
 * Preserve `PLEXUS_API_KEY` when launching OMP so Plexus extension providers can attach their configured bearer header.
 * Serialize concurrent persistent-session registration so startup restoration waits instead of returning transient provider failures.
+* Expose caller-scoped Paseo orchestration tools under their native names so OMP skills can invoke `list_profiles`, `create_agent`, and related tools without CLI fallback.
 
 ### Security
 
