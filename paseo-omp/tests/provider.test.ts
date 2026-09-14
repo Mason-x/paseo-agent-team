@@ -10971,7 +10971,7 @@ describe("OMP direct provider", () => {
       type: "extension_ui_request",
       id: "oauth-url",
       method: "open_url",
-      url: "https://auth.example.com/callback?token=secret-token&code=secret-code&state=query-state#secret-fragment",
+      url: "https://auth.example.com/callback?next=%2Fdashboard%3Fview%3Dcompact#resume%20here",
       instructions: "Authenticate",
     });
     session.emit({
@@ -11003,7 +11003,8 @@ describe("OMP direct provider", () => {
         type: "notification",
         id: "omp:ui:3",
         level: "info",
-        message: "Authenticate\nhttps://auth.example.com/callback",
+        message:
+          "Authenticate\nhttps://auth.example.com/callback?next=%2Fdashboard%3Fview%3Dcompact#resume%20here",
       },
       {
         type: "notification",
@@ -11012,9 +11013,7 @@ describe("OMP direct provider", () => {
         message: "Documentation\nhttps://docs.example.com/guide",
       },
     ]);
-    expect(JSON.stringify(urlItems)).not.toMatch(
-      /secret-token|secret-code|query-state|secret-fragment|password/u,
-    );
+    expect(JSON.stringify(urlItems)).not.toContain("password");
 
     expect(events).toContainEqual({
       type: "timeline.item",
@@ -15363,17 +15362,17 @@ describe("OMP direct provider", () => {
     });
     session.emit({
       type: "tool_execution_start",
-      toolCallId: "sensitive-fetch",
+      toolCallId: "preserved-fetch",
       toolName: "web_fetch",
-      args: { url: "https://example.com/page?token=model-secret#fragment" },
+      args: { url: "https://example.com/page?next=%2Fdocs%3Ftab%3Dapi#section%202" },
     });
     session.emit({
       type: "tool_execution_end",
-      toolCallId: "sensitive-fetch",
+      toolCallId: "preserved-fetch",
       toolName: "web_fetch",
       result: { content: "page" },
     });
-    const sanitizedFetch = events.findLast(
+    const preservedFetch = events.findLast(
       (event) =>
         event.type === "timeline.item" &&
         event.item.type === "tool_call" &&
@@ -15381,11 +15380,39 @@ describe("OMP direct provider", () => {
         event.item.status === "completed",
     );
     expect(
-      sanitizedFetch?.type === "timeline.item" && sanitizedFetch.item.type === "tool_call"
-        ? sanitizedFetch.item.detail
+      preservedFetch?.type === "timeline.item" && preservedFetch.item.type === "tool_call"
+        ? preservedFetch.item.detail
         : undefined,
-    ).toEqual({ type: "fetch", url: "https://example.com/page", result: "page" });
-    expect(JSON.stringify(sanitizedFetch)).not.toContain("model-secret");
+    ).toEqual({
+      type: "fetch",
+      url: "https://example.com/page?next=%2Fdocs%3Ftab%3Dapi#section%202",
+      result: "page",
+    });
+    const preservedReadUrl = "https://EXAMPLE.com/%7Eguide?next=%2Fdocs%3Ftab%3Dapi#section%202";
+    session.emit({
+      type: "tool_execution_start",
+      toolCallId: "preserved-read-url",
+      toolName: "read",
+      args: { path: preservedReadUrl },
+    });
+    session.emit({
+      type: "tool_execution_end",
+      toolCallId: "preserved-read-url",
+      toolName: "read",
+      result: { content: "read page" },
+    });
+    const preservedRead = events.findLast(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.name === "read" &&
+        event.item.status === "completed",
+    );
+    expect(
+      preservedRead?.type === "timeline.item" && preservedRead.item.type === "tool_call"
+        ? preservedRead.item.detail
+        : undefined,
+    ).toEqual({ type: "fetch", url: preservedReadUrl, result: "read page" });
 
     session.emit({
       type: "tool_execution_start",

@@ -188,7 +188,7 @@ function friendlyXdeviceToolName(name: string): string {
     .trim();
   return words ? `${words[0]?.toUpperCase() ?? ""}${words.slice(1)}` : name;
 }
-function sanitizePublishedUrl(value: string | undefined): string | undefined {
+function publishableHttpUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
     const parsed = new URL(value);
@@ -199,7 +199,7 @@ function sanitizePublishedUrl(value: string | undefined): string | undefined {
     ) {
       return undefined;
     }
-    return `${parsed.origin}${parsed.pathname}`;
+    return value;
   } catch {
     return undefined;
   }
@@ -619,7 +619,7 @@ export class OmpTimelineProjector {
       return;
     }
     if (event.type === "extension_ui_request" && event.method === "open_url") {
-      const url = sanitizePublishedUrl(event.launchUrl ?? event.url);
+      const url = publishableHttpUrl(event.launchUrl ?? event.url);
       if (!url) return;
       this.noticeSequence += 1;
       const message = [event.instructions, url].filter(Boolean).join("\n");
@@ -1493,7 +1493,7 @@ export class OmpTimelineProjector {
       const filePath = firstString(nestedInput, "path", "filePath", "url");
       if (!filePath) return { type: "unknown", input: snapshot.input, output: snapshot.output };
       if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(filePath)) {
-        const url = sanitizePublishedUrl(filePath);
+        const url = publishableHttpUrl(filePath);
         if (!url) {
           return { type: "plain_text", label: snapshot.name, text: resultText };
         }
@@ -1573,7 +1573,7 @@ export class OmpTimelineProjector {
       };
     }
     if (name === "fetch" || name === "web_fetch") {
-      const url = sanitizePublishedUrl(firstString(nestedInput, "url"));
+      const url = publishableHttpUrl(firstString(nestedInput, "url"));
       if (!url) return { type: "plain_text", label: snapshot.name, text: resultText };
       return {
         type: "fetch",
