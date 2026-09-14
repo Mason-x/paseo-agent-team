@@ -9,6 +9,7 @@ import type {
   ProviderToolCallDetail,
   ProviderUsage,
 } from "@getpaseo/plugin/server/provider";
+import { getForgeDefinitionOrNeutral } from "@getpaseo/protocol/forge-manifest";
 import { mapOmpModels, nativeOmpModelId, OMP_MODES, ompModelId, thinkingForModel } from "./catalog";
 import {
   normalizeOmpSessionConfig,
@@ -361,79 +362,163 @@ function isSafeCommandName(name: string): boolean {
 
 type OmpPromptPayload = { text: string; images: OmpImage[]; commandName?: string };
 
-function forgeLabel(forge: string | undefined): string {
-  if (!forge || forge === "github") return "GitHub";
-  if (forge === "gitlab") return "GitLab";
-  if (forge === "bitbucket") return "Bitbucket";
-  if (forge === "azure-devops") return "Azure DevOps";
-  return forge;
+const REVIEW_LINE_MARKERS = { add: "+", remove: "-", context: " " } as const;
+
+function renderPromptAttachmentAsText(part: Exclude<ProviderContent, { type: "image" }>): string {
+  switch (part.type) {
+    case "forge_change_request": {
+      return renderChangeRequestAttachment({
+        forge: part.forge ?? "github",
+        number: part.number,
+        title: part.title,
+        url: part.url,
+        body: part.body,
+        projectPath: part.projectPath,
+        baseRefName: part.baseRefName,
+        headRefName: part.headRefName,
+      });
+    }
+    case "github_pr": {
+      return renderChangeRequestAttachment({
+        forge: "github",
+        number: part.number,
+        title: part.title,
+        url: part.url,
+        body: part.body,
+        baseRefName: part.baseRefName,
+        headRefName: part.headRefName,
+      });
+    }
+    case "forge_issue": {
+      return renderIssueAttachment({
+        forge: part.forge ?? "github",
+        number: part.number,
+        title: part.title,
+        url: part.url,
+        body: part.body,
+        projectPath: part.projectPath,
+      });
+    }
+    case "github_issue": {
+      return renderIssueAttachment({
+        forge: "github",
+        number: part.number,
+        title: part.title,
+        url: part.url,
+        body: part.body,
+      });
+    }
+    case "text": {
+      return part.text;
+    }
+    case "review": {
+      const lines = [`Paseo review attachment (${part.mode})`, `CWD: ${part.cwd}`];
+      if (part.baseRef) {
+        lines.push(`Base: ${part.baseRef}`);
+      }
+      part.comments.forEach((comment, index) => {
+        lines.push(
+          "",
+          `Comment ${index + 1}: ${comment.filePath}:${comment.side}:${comment.lineNumber}`,
+          comment.body,
+          comment.context.hunkHeader,
+        );
+        const target = comment.context.targetLine;
+        for (const line of comment.context.lines) {
+          const isTarget =
+            line.oldLineNumber === target.oldLineNumber &&
+            line.newLineNumber === target.newLineNumber &&
+            line.type === target.type &&
+            line.content === target.content;
+          const prefix = isTarget ? "> " : "  ";
+          const oldLn = padLineNumber(line.oldLineNumber);
+          const newLn = padLineNumber(line.newLineNumber);
+          lines.push(`${prefix}${oldLn} ${newLn} ${REVIEW_LINE_MARKERS[line.type]}${line.content}`);
+        }
+      });
+      return lines.join("\n");
+    }
+    case "uploaded_file": {
+      return [
+        `Uploaded file: ${part.fileName}`,
+        `Path: ${part.path}`,
+        `MIME: ${part.mimeType}`,
+        `Size: ${part.size} bytes`,
+      ].join("\n");
+    }
+    default:
+      throw new Error("unreachable");
+  }
 }
 
-function renderPromptAttachment(part: ProviderContent): string {
-  if (part.type === "text") return part.text;
-  if (part.type === "image") throw new OmpPublicError("Invalid attachment renderer input");
-  if (part.type === "forge_change_request" || part.type === "github_pr") {
-    const forge = part.type === "github_pr" ? "github" : part.forge;
-    const abbreviation = forge === "gitlab" ? "MR" : "PR";
-    const number = forge === "gitlab" ? `!${part.number}` : `#${part.number}`;
-    return [
-      `${forgeLabel(forge)} ${abbreviation} ${number}: ${part.title}`,
-      part.url,
-      "projectPath" in part && part.projectPath ? `Project: ${part.projectPath}` : undefined,
-      part.baseRefName ? `Base: ${part.baseRefName}` : undefined,
-      part.headRefName ? `Head: ${part.headRefName}` : undefined,
-      part.body ? `\n${part.body}` : undefined,
-    ]
-      .filter((value): value is string => value !== undefined)
-      .join("\n");
+function renderChangeRequestAttachment(input: {
+  forge: string;
+  number: number;
+  title: string;
+  url: string;
+  body?: string | null;
+  projectPath?: string;
+  baseRefName?: string | null;
+  headRefName?: string | null;
+}): string {
+  const lines = [
+    `${formatForgeLabel(input.forge)} ${formatChangeRequestAbbrev(input.forge)} ${formatChangeRequestNumber(input.forge, input.number)}: ${input.title}`,
+    input.url,
+  ];
+  if (input.projectPath) {
+    lines.push(`Project: ${input.projectPath}`);
   }
-  if (part.type === "forge_issue" || part.type === "github_issue") {
-    const forge = part.type === "github_issue" ? "github" : part.forge;
-    return [
-      `${forgeLabel(forge)} Issue #${part.number}: ${part.title}`,
-      part.url,
-      "projectPath" in part && part.projectPath ? `Project: ${part.projectPath}` : undefined,
-      part.body ? `\n${part.body}` : undefined,
-    ]
-      .filter((value): value is string => value !== undefined)
-      .join("\n");
+  if (input.baseRefName) {
+    lines.push(`Base: ${input.baseRefName}`);
   }
-  if (part.type === "review") {
-    const lines = [`Paseo review attachment (${part.mode})`, `CWD: ${part.cwd}`];
-    if (part.baseRef) lines.push(`Base: ${part.baseRef}`);
-    for (const [index, comment] of part.comments.entries()) {
-      lines.push(
-        "",
-        `Comment ${index + 1}: ${comment.filePath}:${comment.side}:${comment.lineNumber}`,
-        comment.body,
-        comment.context.hunkHeader,
-      );
-      for (const line of comment.context.lines) {
-        const target = comment.context.targetLine;
-        const selected =
-          line.oldLineNumber === target.oldLineNumber &&
-          line.newLineNumber === target.newLineNumber &&
-          line.type === target.type &&
-          line.content === target.content;
-        const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
-        lines.push(
-          `${selected ? "> " : "  "}${String(line.oldLineNumber ?? "-").padStart(2)} ${String(
-            line.newLineNumber ?? "-",
-          ).padStart(2)} ${marker}${line.content}`,
-        );
-      }
-    }
-    return lines.join("\n");
+  if (input.headRefName) {
+    lines.push(`Head: ${input.headRefName}`);
   }
-  if (part.type === "uploaded_file") {
-    return [
-      `Uploaded file: ${part.fileName}`,
-      `Path: ${part.path}`,
-      `MIME: ${part.mimeType}`,
-      `Size: ${part.size} bytes`,
-    ].join("\n");
+  if (input.body) {
+    lines.push("", input.body);
   }
-  throw new OmpPublicError("Unsupported OMP prompt attachment");
+  return lines.join("\n");
+}
+
+function renderIssueAttachment(input: {
+  forge: string;
+  number: number;
+  title: string;
+  url: string;
+  body?: string | null;
+  projectPath?: string;
+}): string {
+  const lines = [
+    `${formatForgeLabel(input.forge)} Issue ${formatIssueNumber(input.forge, input.number)}: ${input.title}`,
+    input.url,
+  ];
+  if (input.projectPath) {
+    lines.push(`Project: ${input.projectPath}`);
+  }
+  if (input.body) {
+    lines.push("", input.body);
+  }
+  return lines.join("\n");
+}
+
+function formatForgeLabel(forge: string): string {
+  return getForgeDefinitionOrNeutral(forge).displayName;
+}
+
+function formatChangeRequestAbbrev(forge: string): string {
+  return getForgeDefinitionOrNeutral(forge).changeRequestAbbrev;
+}
+
+function formatChangeRequestNumber(forge: string, number: number): string {
+  return `${getForgeDefinitionOrNeutral(forge).changeRequestNumberPrefix}${number}`;
+}
+
+function formatIssueNumber(forge: string, number: number): string {
+  return `${getForgeDefinitionOrNeutral(forge).issueNumberPrefix}${number}`;
+}
+
+function padLineNumber(lineNumber: number | null): string {
+  return (lineNumber?.toString() ?? "-").padStart(2);
 }
 
 function promptPayload(input: SessionPromptInput): OmpPromptPayload {
@@ -472,7 +557,7 @@ function promptPayload(input: SessionPromptInput): OmpPromptPayload {
       images.push({ type: "image", data: part.data, mimeType: part.mimeType });
       continue;
     }
-    appendText(renderPromptAttachment(part));
+    appendText(renderPromptAttachmentAsText(part));
   }
   const text = parts.join("\n\n").trim();
   if (!text && images.length === 0) throw new OmpPublicError("OMP prompt cannot be empty");

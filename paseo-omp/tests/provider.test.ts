@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { PassThrough } from "node:stream";
 import type {
   ProviderConnection,
+  ProviderContent,
   ProviderEvent,
   ProviderInput,
   ProviderRegistration,
@@ -4736,10 +4737,12 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("renders structured prompt attachments before invoking OMP", async () => {
+  test("renders prompt attachments exactly and keeps images as ordered image blocks", async () => {
     const { connection, events, runtime } = await createHarness();
     await openSession(connection, events);
     const session = sessionAt(runtime);
+    const png = "iVBORw0KGgo=";
+    const jpeg = "/9j/";
     await connection.send({
       type: "session.prompt",
       sessionId: "session-1",
@@ -4753,37 +4756,35 @@ describe("OMP direct provider", () => {
             {
               type: "forge_change_request",
               mimeType: "application/paseo-forge-change-request",
-              forge: "gitlab",
+              forge: "gitea",
               number: 42,
               title: "Fix auth",
-              url: "https://gitlab.example/p/merge_requests/42",
+              url: "https://gitea.example/p/pulls/42",
               projectPath: "team/project",
               baseRefName: "main",
               headRefName: "fix/auth",
               body: "Closes the gap.",
             },
+            { type: "image", data: png, mimeType: "image/png" },
             {
               type: "github_pr",
               mimeType: "application/github-pr",
               number: 7,
               title: "Legacy pull request",
               url: "https://github.example/p/pull/7",
+              baseRefName: "main",
+              headRefName: "legacy-fix",
+              body: "Legacy change body.",
             },
             {
               type: "forge_issue",
               mimeType: "application/paseo-forge-issue",
-              forge: "bitbucket",
+              forge: "codeberg",
               number: 9,
               title: "Current issue",
-              url: "https://bitbucket.example/p/issues/9",
+              url: "https://codeberg.example/p/issues/9",
               projectPath: "team/project",
-            },
-            {
-              type: "github_issue",
-              mimeType: "application/github-issue",
-              number: 11,
-              title: "Legacy issue",
-              url: "https://github.example/p/issues/11",
+              body: "Current issue body.",
             },
             {
               type: "text",
@@ -4791,6 +4792,15 @@ describe("OMP direct provider", () => {
               title: "Context",
               text: "Attached text context",
             },
+            {
+              type: "github_issue",
+              mimeType: "application/github-issue",
+              number: 11,
+              title: "Legacy issue",
+              url: "https://github.example/p/issues/11",
+              body: "Legacy issue body.",
+            },
+            { type: "image", data: jpeg, mimeType: "image/jpeg" },
             {
               type: "review",
               mimeType: "application/paseo-review",
@@ -4806,14 +4816,26 @@ describe("OMP direct provider", () => {
                   context: {
                     hunkHeader: "@@ -1,2 +1,2 @@",
                     targetLine: {
-                      oldLineNumber: 2,
+                      oldLineNumber: null,
                       newLineNumber: 2,
                       type: "add",
                       content: "secure();",
                     },
                     lines: [
                       {
+                        oldLineNumber: 1,
+                        newLineNumber: 1,
+                        type: "context",
+                        content: "const secure = false;",
+                      },
+                      {
                         oldLineNumber: 2,
+                        newLineNumber: null,
+                        type: "remove",
+                        content: "insecure();",
+                      },
+                      {
+                        oldLineNumber: null,
                         newLineNumber: 2,
                         type: "add",
                         content: "secure();",
@@ -4835,58 +4857,93 @@ describe("OMP direct provider", () => {
         },
       },
     });
-    await events.waitFor(
+    const attachmentResult = await events.waitFor(
       (event) => event.type === "session.prompt_result" && event.clientMessageId === "attachments",
     );
-    const renderedPrompt = session.prompts.at(-1);
-    expect(renderedPrompt).toContain("Review these");
-    expect(renderedPrompt).toContain(
-      "GitLab MR !42: Fix auth\nhttps://gitlab.example/p/merge_requests/42\nProject: team/project\nBase: main\nHead: fix/auth\n\nCloses the gap.",
-    );
-    expect(renderedPrompt).toContain(
-      "GitHub PR #7: Legacy pull request\nhttps://github.example/p/pull/7",
-    );
-    expect(renderedPrompt).toContain(
-      "Bitbucket Issue #9: Current issue\nhttps://bitbucket.example/p/issues/9\nProject: team/project",
-    );
-    expect(renderedPrompt).toContain(
-      "GitHub Issue #11: Legacy issue\nhttps://github.example/p/issues/11",
-    );
-    expect(renderedPrompt).toContain("Attached text context");
-    expect(renderedPrompt).toContain(
-      "Paseo review attachment (base)\nCWD: /repo\nBase: main\n\nComment 1: src/auth.ts:new:2\nCheck this branch.\n@@ -1,2 +1,2 @@\n>  2  2 +secure();",
-    );
-    expect(renderedPrompt).toContain(
-      "Uploaded file: spec.txt\nPath: /repo/spec.txt\nMIME: text/plain\nSize: 12 bytes",
-    );
-    const attachmentResult = events.findLast(
-      (event) => event.type === "session.prompt_result" && event.clientMessageId === "attachments",
-    );
-    if (!attachmentResult) throw new Error("Expected attachment prompt result");
-    const turnId = turnIdFrom(attachmentResult);
-    await finishTurn(events, session, turnId);
+    expect(session.prompts).toEqual([
+      [
+        "Review these",
+        "Gitea PR #42: Fix auth\nhttps://gitea.example/p/pulls/42\nProject: team/project\nBase: main\nHead: fix/auth\n\nCloses the gap.",
+        "GitHub PR #7: Legacy pull request\nhttps://github.example/p/pull/7\nBase: main\nHead: legacy-fix\n\nLegacy change body.",
+        "Codeberg Issue #9: Current issue\nhttps://codeberg.example/p/issues/9\nProject: team/project\n\nCurrent issue body.",
+        "Attached text context",
+        "GitHub Issue #11: Legacy issue\nhttps://github.example/p/issues/11\n\nLegacy issue body.",
+        [
+          "Paseo review attachment (base)",
+          "CWD: /repo",
+          "Base: main",
+          "",
+          "Comment 1: src/auth.ts:new:2",
+          "Check this branch.",
+          "@@ -1,2 +1,2 @@",
+          "   1  1  const secure = false;",
+          "   2  - -insecure();",
+          ">  -  2 +secure();",
+        ].join("\n"),
+        "Uploaded file: spec.txt\nPath: /repo/spec.txt\nMIME: text/plain\nSize: 12 bytes",
+      ].join("\n\n"),
+    ]);
+    expect(session.promptImages).toEqual([
+      [
+        { type: "image", data: png, mimeType: "image/png" },
+        { type: "image", data: jpeg, mimeType: "image/jpeg" },
+      ],
+    ]);
+    await finishTurn(events, session, turnIdFrom(attachmentResult));
+    await connection.close();
+  });
 
-    await connection.send({
-      type: "session.prompt",
-      sessionId: "session-1",
-      prompt: {
-        clientMessageId: "too-many-parts",
-        delivery: "auto",
-        input: {
-          type: "message",
-          content: Array.from({ length: 65 }, () => ({ type: "text" as const, text: "x" })),
+  test("preserves prompt part and byte bounds plus image and empty validation", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const expectPromptFailure = async (
+      clientMessageId: string,
+      content: ProviderContent[],
+      message: string,
+    ) => {
+      await connection.send({
+        type: "session.prompt",
+        sessionId: "session-1",
+        prompt: {
+          clientMessageId,
+          delivery: "auto",
+          input: { type: "message", content },
         },
-      },
-    });
-    const oversized = await events.waitFor(
-      (event) =>
-        event.type === "session.prompt_result" && event.clientMessageId === "too-many-parts",
+      });
+      await expect(
+        events.waitFor(
+          (event) =>
+            event.type === "session.prompt_result" && event.clientMessageId === clientMessageId,
+        ),
+      ).resolves.toEqual(
+        expect.objectContaining({ result: { type: "failed", error: { message } } }),
+      );
+    };
+
+    await expectPromptFailure(
+      "empty-prompt",
+      [{ type: "text", text: " \n " }],
+      "OMP prompt cannot be empty",
     );
-    expect(oversized).toEqual(
-      expect.objectContaining({
-        result: { type: "failed", error: { message: "OMP prompt has too many content parts" } },
-      }),
+    await expectPromptFailure(
+      "too-many-parts",
+      Array.from({ length: 65 }, () => ({ type: "text" as const, text: "x" })),
+      "OMP prompt has too many content parts",
     );
+    await expectPromptFailure(
+      "too-many-bytes",
+      [{ type: "text", text: "é".repeat(512 * 1024 + 1) }],
+      "OMP prompt is too large",
+    );
+    await expectPromptFailure(
+      "invalid-image",
+      [{ type: "image", mimeType: "image/png", data: "not-base64" }],
+      "OMP prompt image is invalid",
+    );
+
+    expect(session.prompts).toEqual([]);
+    expect(session.promptImages).toEqual([]);
     await connection.close();
   });
 
