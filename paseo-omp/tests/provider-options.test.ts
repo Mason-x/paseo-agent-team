@@ -6,6 +6,10 @@ import {
 } from "../server/provider/config-normalization";
 import { buildOmpSpawnRequest } from "../server/provider/omp-rpc";
 import { parseOmpProviderOptions } from "../server/provider/provider-options";
+import {
+  configuredOutputRedactionValues,
+  OmpPublicDataSerializer,
+} from "../server/provider/security";
 
 const TEST_ENV: NodeJS.ProcessEnv = {
   HOME: "/home/tester",
@@ -107,6 +111,72 @@ describe("OMP provider option normalization", () => {
     }
   });
 
+  test("defaults output redaction to none and accepts only configured-values", () => {
+    expect(parseOmpProviderOptions({}).outputRedaction).toBe("none");
+    expect(
+      normalizeOmpSessionConfig(
+        sessionConfig({ providerOptions: { outputRedaction: "configured-values" } }),
+      ).outputRedaction,
+    ).toBe("configured-values");
+    for (const outputRedaction of ["configured", "all", true, null]) {
+      expect(() => parseOmpProviderOptions({ outputRedaction })).toThrow(
+        "providerOptions.outputRedaction",
+      );
+    }
+  });
+  test("collects only explicit credential values and excludes short values", () => {
+    const config = sessionConfig({
+      env: {
+        SESSION_SECRET: "session-secret",
+        SHARED_TOKEN: "session-override",
+        SHORT_TOKEN: "xyz",
+      },
+      mcpServers: {
+        local: {
+          type: "stdio",
+          command: "server-secret-is-not-collected",
+          args: ["argument-secret-is-not-collected"],
+          env: { MCP_VALUE: "mcp-env-secret", SHORT: "abc" },
+        },
+        remote: {
+          type: "http",
+          url: "https://url-secret-is-not-collected.example.test",
+          headers: { Authorization: "mcp-header-secret", "X-Short": "xyz" },
+        },
+      },
+      providerOptions: {
+        outputRedaction: "configured-values",
+        env: {
+          PROFILE_API_KEY: "profile-secret",
+          PROFILE_LABEL: "profile-visible",
+          SHARED_TOKEN: "profile-loses",
+        },
+      },
+    });
+    const normalized = normalizeOmpSessionConfig(config);
+
+    expect(
+      configuredOutputRedactionValues(
+        normalized.outputRedaction ?? "none",
+        normalized.env,
+        config.mcpServers,
+      ),
+    ).toEqual([
+      "profile-secret",
+      "session-override",
+      "session-secret",
+      "mcp-env-secret",
+      "mcp-header-secret",
+    ]);
+    expect(configuredOutputRedactionValues("none", normalized.env, config.mcpServers)).toEqual([]);
+  });
+
+  test("does not hold fragmented output for cross-frame redaction", () => {
+    const serializer = new OmpPublicDataSerializer(["configured-secret"]);
+    expect(serializer.text("configured-")).toBe("configured-");
+    expect(serializer.text("secret")).toBe("secret");
+    expect(serializer.text("configured-secret")).toBe("<redacted>");
+  });
   test("enforces the generic denied tool list in OMP launch arguments", () => {
     const normalized = normalizeOmpSessionConfig({
       ...sessionConfig({ mode: "full" }),

@@ -1,15 +1,11 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { constants, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, expect, test } from "vitest";
 import {
   buildOmpSpawnRequest,
-  collectAmbientMcpSecrets,
-  type OmpMcpFileOps,
   type OmpRpcEvent,
   OmpRpcRuntime,
   type OmpSpawnRequest,
@@ -1874,7 +1870,7 @@ describe("OMP RPC transport", () => {
     await session.close();
   });
 
-  test("builds argv-only launches with a minimal authenticated environment", () => {
+  test("builds argv-only launches with a minimal allowlisted environment", () => {
     const proxy = "https://proxy-user:proxy-pass@example.test?token=proxy-token";
     const request = buildOmpSpawnRequest(
       {
@@ -1910,16 +1906,6 @@ describe("OMP RPC transport", () => {
       TEST_ENV: "explicit",
       CUSTOMER_API_KEY: "session-secret",
     });
-    expect(request.sensitiveValues).toEqual(
-      expect.arrayContaining([
-        "proxy-user",
-        "proxy-pass",
-        "proxy-token",
-        "daemon-secret",
-        "plexus-secret",
-        "session-secret",
-      ]),
-    );
     expect(request.env.UNRELATED_DAEMON_VALUE).toBeUndefined();
     expect(request.env.NODE_OPTIONS).toBeUndefined();
     expect(request.env.RANDOM_TOKEN).toBeUndefined();
@@ -1933,23 +1919,22 @@ describe("OMP RPC transport", () => {
       DEBUG: "1",
       NODE_ENV: "dev",
     });
-    expect(benignShortValues.sensitiveValues).toEqual([]);
-    expect(() =>
+    expect(
       buildOmpSpawnRequest(
         { cwd: "/repo", mode: "full", env: { API_TOKEN: "x" } },
         TEST_RUNTIME_ENV,
-      ),
-    ).toThrow("credential is too short");
+      ).env.API_TOKEN,
+    ).toBe("x");
     for (const proxy of [
       "https://abc:long-password@example.test",
       "https://example.test?token=xyz",
     ]) {
-      expect(() =>
+      expect(
         buildOmpSpawnRequest(
           { cwd: "/repo", mode: "full", env: { HTTPS_PROXY: proxy } },
           TEST_RUNTIME_ENV,
-        ),
-      ).toThrow("proxy credential is too short");
+        ).env.HTTPS_PROXY,
+      ).toBe(proxy);
     }
     const benignShortProxy = "https://example.test/abc?arbitrary=xyz#abc";
     const benignProxyRequest = buildOmpSpawnRequest(
@@ -1957,7 +1942,6 @@ describe("OMP RPC transport", () => {
       TEST_RUNTIME_ENV,
     );
     expect(benignProxyRequest.env.HTTPS_PROXY).toBe(benignShortProxy);
-    expect(benignProxyRequest.sensitiveValues).toContain(benignShortProxy);
     expect(() =>
       buildOmpSpawnRequest(
         { cwd: "/repo", mode: "full", env: { LD_PRELOAD: "/tmp/evil.so" } },
@@ -2013,12 +1997,12 @@ describe("OMP RPC transport", () => {
         ),
       ).toThrow("forbidden variable");
     }
-    expect(() =>
+    expect(
       buildOmpSpawnRequest(
         { cwd: "/repo", mode: "full" },
         { ...TEST_RUNTIME_ENV, OPENAI_API_KEY: "x" },
-      ),
-    ).toThrow("too short");
+      ).env.OPENAI_API_KEY,
+    ).toBe("x");
     expect(() =>
       buildOmpSpawnRequest(
         { cwd: "/repo", mode: "full", systemPrompt: "x".repeat(64 * 1024 + 1) },
@@ -2034,169 +2018,6 @@ describe("OMP RPC transport", () => {
     expect(() => buildOmpSpawnRequest({ cwd: "relative", mode: "full" }, TEST_RUNTIME_ENV)).toThrow(
       "absolute",
     );
-  });
-
-  test("collects ambient MCP URL, header, and environment secrets for redaction", () => {
-    const root = mkdtempSync(join(tmpdir(), "paseo-omp-mcp-"));
-    const agentDir = join(root, "agent");
-    mkdirSync(agentDir);
-    mkdirSync(join(root, ".omp"));
-    writeFileSync(join(root, ".omp", "mcp.json"), "{not-json");
-    writeFileSync(
-      join(agentDir, "mcp.json"),
-      JSON.stringify({
-        servers: {
-          remote: {
-            url: "https://user%40name:p%40ss@example.test/long%2Dsecret%2Dpath?token=token%2Dvalue&code=long%2Dprivate%2Dvalue#secret%2Dfragment",
-            headers: {
-              Authorization: "Bearer header-secret",
-              "X-License": "license-secret",
-              "User-Agent": "agent-secret",
-            },
-          },
-          local: {
-            type: "stdio",
-            command: "server",
-            env: {
-              API_KEY: "env-secret",
-              CUSTOM_VALUE: "custom-secret",
-              DEBUG: "1",
-              NODE_ENV: "dev",
-            },
-          },
-          debugSecret: {
-            type: "stdio",
-            command: "server",
-            env: { DEBUG: "debug-secret" },
-          },
-        },
-      }),
-    );
-    try {
-      const request = buildOmpSpawnRequest(
-        { cwd: root, mode: "full" },
-        { PATH: "/usr/bin", HOME: root, PI_CODING_AGENT_DIR: agentDir },
-      );
-      expect(request.sensitiveValues).toEqual(
-        expect.arrayContaining([
-          "https://user%40name:p%40ss@example.test/long%2Dsecret%2Dpath?token=token%2Dvalue&code=long%2Dprivate%2Dvalue#secret%2Dfragment",
-          "user%40name",
-          "user@name",
-          "p%40ss",
-          "p@ss",
-          "long%2Dsecret%2Dpath",
-          "long-secret-path",
-          "token%2Dvalue",
-          "token-value",
-          "long%2Dprivate%2Dvalue",
-          "long-private-value",
-          "secret%2Dfragment",
-          "secret-fragment",
-          "Bearer header-secret",
-          "env-secret",
-          "license-secret",
-          "custom-secret",
-          "agent-secret",
-          "debug-secret",
-        ]),
-      );
-      expect(request.sensitiveValues).not.toContain("1");
-      writeFileSync(
-        join(agentDir, "mcp.json"),
-        JSON.stringify({
-          servers: {
-            remote: { type: "http", url: "x:", headers: { "X-License": "éx", Author: "abc" } },
-            local: { type: "stdio", command: "server", env: { PIN: "123", AUTHOR: "abc" } },
-          },
-        }),
-      );
-      const benignShortConfig = buildOmpSpawnRequest(
-        { cwd: root, mode: "full" },
-        { PATH: "/usr/bin", HOME: root, PI_CODING_AGENT_DIR: agentDir },
-      );
-      expect(benignShortConfig.sensitiveValues).not.toEqual(
-        expect.arrayContaining(["éx", "123", "abc"]),
-      );
-      for (const config of [
-        {
-          servers: {
-            unsafe: { type: "http", headers: { Authorization: "abc" } },
-          },
-        },
-        { servers: { unsafe: { type: "stdio", command: "server", env: { API_TOKEN: "xyz" } } } },
-        { servers: { unsafe: { type: "stdio", command: "server", env: { AUTH: "abc" } } } },
-        { servers: { unsafe: { type: "stdio", command: "server", env: { clientSecret: "abc" } } } },
-        { servers: { unsafe: { type: "http", auth: "abc" } } },
-        { servers: { unsafe: { type: "http", auth: { custom: "abc" } } } },
-        { servers: { unsafe: { type: "http", oauth: { nested: { custom: "abc" } } } } },
-        { servers: { unsafe: { type: "http", url: "https://user:abc@example.test/mcp" } } },
-        { servers: { unsafe: { type: "http", url: "https://example.test/mcp?token=xyz" } } },
-      ]) {
-        writeFileSync(join(agentDir, "mcp.json"), JSON.stringify(config));
-        expect(() =>
-          buildOmpSpawnRequest(
-            { cwd: root, mode: "full" },
-            { PATH: "/usr/bin", HOME: root, PI_CODING_AGENT_DIR: agentDir },
-          ),
-        ).toThrow("credential is too short");
-      }
-      writeFileSync(
-        join(agentDir, "mcp.json"),
-        JSON.stringify({
-          servers: { unsafe: { type: "stdio", command: "server", env: { token: "x" } } },
-        }),
-      );
-      const isolated = buildOmpSpawnRequest(
-        { cwd: "/repo", mode: "full", environment: TEST_RUNTIME_ENV },
-        { PATH: "/usr/bin", HOME: root, PI_CODING_AGENT_DIR: agentDir },
-      );
-      expect(isolated.sensitiveValues).toEqual([]);
-      expect(() =>
-        buildOmpSpawnRequest(
-          { cwd: root, mode: "full" },
-          { PATH: "/usr/bin", HOME: root, PI_CODING_AGENT_DIR: agentDir },
-        ),
-      ).toThrow("credential is too short");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("opens MCP candidates nonblocking and never reads non-regular descriptors", () => {
-    const opens: Array<{ path: string; flags: number }> = [];
-    const closed: number[] = [];
-    let reads = 0;
-    const fileOps: OmpMcpFileOps = {
-      open(path, flags) {
-        opens.push({ path, flags });
-        return opens.length;
-      },
-      stat() {
-        return { size: 0, isFile: () => false };
-      },
-      read() {
-        reads += 1;
-        return 0;
-      },
-      close(descriptor) {
-        closed.push(descriptor);
-      },
-    };
-
-    expect(collectAmbientMcpSecrets("/repo", { HOME: "/home/runner" }, fileOps)).toEqual([]);
-    expect(opens.map(({ path }) => path)).toEqual([
-      join("/home/runner", ".omp", "agent", "mcp.json"),
-      join("/repo", ".omp", "mcp.json"),
-    ]);
-    if (process.platform !== "win32" && constants.O_NONBLOCK !== 0) {
-      expect(opens.every(({ flags }) => (flags & constants.O_NONBLOCK) !== 0)).toBe(true);
-    }
-    const noFollow = constants.O_NOFOLLOW;
-    if (typeof noFollow === "number" && noFollow !== 0) {
-      expect(opens.every(({ flags }) => (flags & noFollow) !== 0)).toBe(true);
-    }
-    expect(reads).toBe(0);
-    expect(closed).toEqual([1, 2]);
   });
 
   test("terminates a surviving POSIX process group after its leader exited", async () => {

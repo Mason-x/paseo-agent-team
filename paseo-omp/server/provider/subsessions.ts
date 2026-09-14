@@ -14,7 +14,7 @@ import {
   BoundedStringSet,
   boundedJsonBytes,
   boundedJsonMetrics,
-  OmpPublicDataFilter,
+  OmpPublicDataSerializer,
   OmpPublicError,
 } from "./security";
 import { OmpTimelineProjector, type OmpTimelineScheduler } from "./timeline-projector";
@@ -289,10 +289,11 @@ export class OmpSubsessionProjector {
   private readonly toolOwners = new Map<string, string>();
   private readonly dispatches = new Map<string, TaskDispatch>();
   private readonly bufferedEvents: OmpSubagentEvent[] = [];
-  private readonly sensitiveValues = new Set<string>();
   private bufferedBytes = 0;
   private replaying = false;
   private closed = false;
+
+  private readonly dataFilter: OmpPublicDataSerializer;
 
   constructor(
     private readonly rootSessionId: string,
@@ -301,24 +302,10 @@ export class OmpSubsessionProjector {
     private readonly cwd: string,
     private readonly emit: Emit,
     private readonly scheduler: OmpTimelineScheduler,
-    sensitiveValues: Iterable<string>,
     private readonly onActivityChange: () => void,
+    private readonly outputRedactionValues: readonly string[],
   ) {
-    for (const value of sensitiveValues) this.sensitiveValues.add(value);
-    this.dataFilter = new OmpPublicDataFilter(this.sensitiveValues);
-  }
-
-  private readonly dataFilter: OmpPublicDataFilter;
-
-  addSensitiveValues(values: Iterable<string>): void {
-    const additions: string[] = [];
-    for (const value of values) {
-      if (this.sensitiveValues.has(value)) continue;
-      this.sensitiveValues.add(value);
-      additions.push(value);
-    }
-    this.dataFilter.addSensitiveValues(additions);
-    for (const child of this.children.values()) child.projector.addSensitiveValues(additions);
+    this.dataFilter = new OmpPublicDataSerializer(outputRedactionValues);
   }
 
   observeSessionEvent(ownerSessionId: string, event: OmpAgentSessionEvent): void {
@@ -552,7 +539,7 @@ export class OmpSubsessionProjector {
         sessionId,
         this.emit,
         this.scheduler,
-        this.sensitiveValues,
+        this.outputRedactionValues,
       ),
     };
     this.children.set(sessionId, child);

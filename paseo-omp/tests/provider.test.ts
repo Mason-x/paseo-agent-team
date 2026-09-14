@@ -1,18 +1,22 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type {
   ProviderConnection,
   ProviderContent,
   ProviderEvent,
   ProviderInput,
+  ProviderMcpServerConfig,
   ProviderRegistration,
+  ProviderSessionConfig,
   ProviderTimelineItem,
 } from "@getpaseo/plugin/server/provider";
 import { AgentPermissionRequestPayloadSchema } from "@getpaseo/protocol/messages";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 import { mapOmpModels, ompModelId } from "../server/provider/catalog";
 import { OmpNativeSessionReservations } from "../server/provider/connection";
 import { withOmpWorkspaceIdentity } from "../server/provider/host-tools";
@@ -36,7 +40,7 @@ import {
   type OmpToolApprovalResponse,
 } from "../server/provider/omp-rpc";
 import { createOmpProvider } from "../server/provider/registration";
-import { OmpCleanupFailure, OmpPublicDataFilter } from "../server/provider/security";
+import { OmpCleanupFailure, OmpPublicDataSerializer } from "../server/provider/security";
 import {
   OmpTimelineProjector,
   type OmpTimelineScheduler,
@@ -293,7 +297,6 @@ class FakeOmpSession implements OmpRuntimeSession {
   canReplayHistory = true;
   supportsTypedToolApprovals = true;
   readonly listeners = new Set<(event: OmpRpcEvent) => void>();
-  redactionValues: readonly string[] = [];
   readonly prompts: string[] = [];
   readonly promptImages: OmpImage[][] = [];
   readonly steers: string[] = [];
@@ -721,7 +724,6 @@ class FakeOmpRuntime implements OmpRuntime {
   ];
   availableModels: OmpModel[] = [MODEL, ALTERNATE_MODEL];
   nextAvailableModels: OmpModel[] | null = null;
-  redactionValues: readonly string[] = [];
   readonly descriptors: Array<{
     id: string;
     cwd: string;
@@ -809,7 +811,6 @@ class FakeOmpRuntime implements OmpRuntime {
       ...command,
       ...(command.aliases ? { aliases: [...command.aliases] } : {}),
     }));
-    session.redactionValues = this.redactionValues;
     session.nativeSessionId =
       this.sessionIds.shift() ?? options.resumeSessionId ?? session.nativeSessionId;
     session.canReplayHistory = this.nextCanReplayHistory;
@@ -893,9 +894,10 @@ async function createHarness(
 }
 
 async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
+  const scheduler = new ManualScheduler();
   const connection = await createOmpProvider({
     runtime,
-    timelineScheduler: new ManualScheduler(),
+    timelineScheduler: scheduler,
     environment: TEST_RUNTIME_ENV,
     mcpConnector: async () => ({
       listTools: async () => ({
@@ -918,7 +920,7 @@ async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
   });
   const events = new EventLog();
   connection.onEvent((event) => events.push(event));
-  return { connection, events, runtime };
+  return { connection, events, runtime, scheduler };
 }
 
 async function openHostToolSession(
@@ -982,6 +984,10 @@ async function openSession(
   model = MODEL_PUBLIC_ID,
   thinkingOption: string | null = "medium",
   persist = true,
+  extra: {
+    providerOptions?: ProviderSessionConfig["providerOptions"];
+    mcpServers?: Readonly<Record<string, ProviderMcpServerConfig>>;
+  } = {},
 ) {
   await connection.send({
     type: "session.open",
@@ -991,12 +997,13 @@ async function openSession(
       cwd: "/repo",
       env,
       systemPrompt: "Be precise",
-      mcpServers: {},
+      mcpServers: extra.mcpServers ?? {},
       model,
       persist,
       mode: "full",
       ...(thinkingOption ? { thinkingOption } : {}),
       settings: {},
+      ...(extra.providerOptions ? { providerOptions: extra.providerOptions } : {}),
     },
     history: "skip",
   });
@@ -1179,7 +1186,8 @@ describe("OMP direct provider", () => {
         settings: {},
         providerOptions: {
           command: ["/opt/omp-wrapper", "omp"],
-          env: { PROFILE_VALUE: "profile" },
+          env: { PROFILE_VALUE: "profile", PROFILE_API_KEY: "profile-secret" },
+          outputRedaction: "configured-values",
           params: {
             sessionDir: "/sessions/custom",
             rpcTimeoutMs: 8_000,
@@ -1196,7 +1204,11 @@ describe("OMP direct provider", () => {
     );
     const expectedTemplate = {
       command: ["/opt/omp-wrapper", "omp"],
-      env: { PROFILE_VALUE: "profile", SESSION_VALUE: "session" },
+      env: {
+        PROFILE_VALUE: "profile",
+        PROFILE_API_KEY: "profile-secret",
+        SESSION_VALUE: "session",
+      },
       mode: "full",
       noSession: false,
       readyTimeoutMs: 8_000,
@@ -1204,6 +1216,7 @@ describe("OMP direct provider", () => {
       roleModels: { smol: "openai/gpt-5-mini" },
       sessionDir: "/sessions/custom",
       systemPrompt: "profile system prompt",
+      outputRedaction: "configured-values",
     } as const;
     expect(runtime.starts[0]).toEqual(expect.objectContaining(expectedTemplate));
 
@@ -1240,6 +1253,17 @@ describe("OMP direct provider", () => {
           model: "openai/gpt-5.4",
           thinkingOption: "high",
           resumeSessionId: NATIVE_SESSION_ID,
+        }),
+      );
+      sessionAt(runtime, recovery).emit({
+        type: "notice",
+        level: "info",
+        message: "profile-secret",
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          sessionId: "profile-session",
+          item: expect.objectContaining({ type: "notification", message: "<redacted>" }),
         }),
       );
       await finishTurn(events, sessionAt(runtime, recovery), turnId);
@@ -1486,7 +1510,7 @@ describe("OMP direct provider", () => {
     expect(runtime.starts).toHaveLength(1);
     await connection.close();
   });
-  test("keeps text-shaped tool approvals generic and filters their public input", async () => {
+  test("keeps text-shaped tool approvals generic and bounds their public input", async () => {
     const { connection, events, runtime } = await createHarness();
     await openSession(connection, events, "spoofed-approval-open", "session-1", {
       API_TOKEN: "credential-secret",
@@ -1508,7 +1532,7 @@ describe("OMP direct provider", () => {
     expect(permission.request.kind).toBe("question");
     expect(permission.request.detail).toBeUndefined();
     const visible = JSON.stringify(permission.request);
-    expect(visible).not.toContain("credential-secret");
+    expect(visible).toContain("credential-secret");
     expect(visible).toContain("/home/private/file");
     expect(visible).toContain("\\u0007");
     expect(Buffer.byteLength(visible, "utf8")).toBeLessThan(128 * 1024);
@@ -1517,9 +1541,17 @@ describe("OMP direct provider", () => {
 
   test("publishes trusted typed tool permissions and correlates each response once", async () => {
     const { connection, events, runtime } = await createHarness();
-    await openSession(connection, events, "typed-approval-open", "session-1", {
-      API_TOKEN: "credential-secret",
-    });
+    await openSession(
+      connection,
+      events,
+      "typed-approval-open",
+      "session-1",
+      { API_TOKEN: "credential-secret" },
+      MODEL_PUBLIC_ID,
+      "medium",
+      true,
+      { providerOptions: { outputRedaction: "configured-values" } },
+    );
     const session = sessionAt(runtime);
     session.emit({
       type: "tool_approval_request",
@@ -1576,6 +1608,12 @@ describe("OMP direct provider", () => {
     if (permission?.type !== "session.permission") throw new Error("Expected tool permission");
     expect(permission.request).toMatchObject({
       kind: "tool",
+      description: "Review <redacted>",
+      input: {
+        token: "<redacted>",
+        command: "echo <redacted>",
+        identity: { kind: "shell", command: "echo <redacted>" },
+      },
       detail: { type: "shell", command: "echo <redacted>" },
       actions: [
         expect.objectContaining({ id: "allow", behavior: "allow" }),
@@ -1852,6 +1890,42 @@ describe("OMP direct provider", () => {
       provider: maliciousModel.provider,
       modelId: maliciousModel.id,
     });
+    await connection.close();
+  });
+
+  test("applies configured exact replacement to catalog text", async () => {
+    const model: OmpModel = {
+      provider: "provider",
+      id: "model",
+      name: "catalog-secret",
+      reasoning: false,
+    };
+    const runtime = new FakeOmpRuntime();
+    runtime.availableModels = [model];
+    runtime.nextModel = model;
+    const { connection, events } = await createHarness(runtime);
+
+    await connection.send({
+      type: "catalog",
+      requestId: "configured-redaction-catalog",
+      cwd: "/repo",
+      providerOptions: {
+        outputRedaction: "configured-values",
+        env: { MODEL_API_KEY: "catalog-secret" },
+      },
+    } as never);
+    const catalog = await events.waitFor(
+      (event) => event.type === "catalog" && event.requestId === "configured-redaction-catalog",
+    );
+
+    expect(catalog).toEqual(
+      expect.objectContaining({
+        catalog: expect.objectContaining({
+          models: [expect.objectContaining({ label: "provider/<redacted>" })],
+        }),
+      }),
+    );
+    expect(runtime.starts[0]?.outputRedaction).toBe("configured-values");
     await connection.close();
   });
   test("rejects slash-containing native model providers", async () => {
@@ -4687,7 +4761,7 @@ describe("OMP direct provider", () => {
     expect(runtime.starts).toHaveLength(0);
   });
 
-  test("rejects every exact MCP policy and dangerous environment before spawn", async () => {
+  test("rejects unsupported MCP policy and dangerous environment without serializing config", async () => {
     const runtime = new FakeOmpRuntime();
     const connection = await createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV }).connect({
       versions: [1],
@@ -6561,7 +6635,6 @@ describe("OMP direct provider", () => {
 
   test("accepts image blocks and projects later indexed text", async () => {
     const runtime = new FakeOmpRuntime();
-    runtime.redactionValues = ["iVBORw0KGgo="];
     const { connection, events, scheduler } = await createHarness(runtime);
     await openSession(connection, events);
     const turnId = turnIdFrom(await startPrompt(connection, events));
@@ -8557,13 +8630,12 @@ describe("OMP direct provider", () => {
     expect(
       items.filter((item) => item.type === "compaction" && item.status === "completed"),
     ).toHaveLength(1);
-    expect(JSON.stringify(items)).not.toContain("credential-secret");
     expect(
       items.some(
         (item) =>
           item.type === "notification" &&
           item.level === "error" &&
-          item.message === "<redacted> failed",
+          item.message === "credential-secret failed",
       ),
     ).toBe(true);
 
@@ -11144,24 +11216,32 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("preserves normal output with benign short environment values", async () => {
+  test("preserves configured credential values by default", async () => {
     const { connection, events, runtime } = await createHarness();
-    await openSession(connection, events, "short-env-open", "session-1", {
+    await openSession(connection, events, "default-output-open", "session-1", {
+      API_TOKEN: "credential-secret",
       DEBUG: "1",
       NODE_ENV: "dev",
     });
-    sessionAt(runtime).emit({ type: "notice", level: "info", message: "value 1 in dev" });
+    sessionAt(runtime).emit({
+      type: "notice",
+      level: "info",
+      message: "credential-secret value 1 in dev",
+    });
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "timeline.item",
-        item: expect.objectContaining({ type: "notification", message: "value 1 in dev" }),
+        item: expect.objectContaining({
+          type: "notification",
+          message: "credential-secret value 1 in dev",
+        }),
       }),
     );
     await connection.close();
   });
 
-  test("bounds text while preserving content except exact sensitive values", () => {
-    const filter = new OmpPublicDataFilter(["known-sensitive-value"]);
+  test("bounds text without changing content", () => {
+    const serializer = new OmpPublicDataSerializer();
     for (const value of [
       "Authorization: Basic header-secret",
       "Bearer bearer-secret",
@@ -11174,13 +11254,10 @@ describe("OMP direct provider", () => {
       String.raw`C:\Users\private\file.txt`,
       "\u0000\u0007\t\n\r",
     ]) {
-      expect(filter.text(value)).toBe(value);
+      expect(serializer.text(value)).toBe(value);
     }
 
-    expect(filter.text("known-sensitive-value twice known-sensitive-value")).toBe(
-      "<redacted> twice <redacted>",
-    );
-    expect(filter.text("🙂🙂🙂🙂", 15)).toBe("🙂<truncated>");
+    expect(serializer.text("🙂🙂🙂🙂", 15)).toBe("🙂<truncated>");
   });
 
   test("bounds JSON-encoded control-heavy tool output", () => {
@@ -11225,19 +11302,19 @@ describe("OMP direct provider", () => {
     ).toMatch(/^\0+<truncated>$/u);
   });
 
-  test("preserves structured values unless their exact value is sensitive", () => {
-    const filter = new OmpPublicDataFilter(["known-sensitive-value"]);
-    expect(
-      filter.json({
-        apiKey: "another-secret",
-        password: "known-sensitive-value",
-        secret: { type: "string" },
-      }),
-    ).toEqual({
+  test("preserves structured values with sensitive-shaped keys", () => {
+    const serializer = new OmpPublicDataSerializer();
+    const output = serializer.json({
       apiKey: "another-secret",
-      password: "<redacted>",
+      password: "known-sensitive-value",
       secret: { type: "string" },
     });
+    expect(output).toEqual({
+      apiKey: "another-secret",
+      password: "known-sensitive-value",
+      secret: { type: "string" },
+    });
+    expect(Object.getPrototypeOf(output)).toBeNull();
   });
 
   test("projects Windows drive paths as read details", () => {
@@ -11393,14 +11470,38 @@ describe("OMP direct provider", () => {
     );
   });
 
-  test("redacts provider-owned timeline payloads and native identifiers", async () => {
+  test("redacts only configured values across root output surfaces", async () => {
     const runtime = new FakeOmpRuntime();
-    runtime.redactionValues = ["license-secret", "custom-secret"];
-    const { connection, events, scheduler } = await createHarness(runtime);
-    await openSession(connection, events, "redacted-open", "session-1", {
-      MY_RUNTIME_SECRET: "credential-value-1234",
-    });
-    const turnId = turnIdFrom(await startPrompt(connection, events, "redacted-prompt", "work"));
+    const { connection, events, scheduler } = await createHostToolHarness(runtime);
+    await openSession(
+      connection,
+      events,
+      "configured-redaction-open",
+      "session-1",
+      { MY_RUNTIME_SECRET: "credential-value-1234", SHORT_TOKEN: "xyz" },
+      MODEL_PUBLIC_ID,
+      "medium",
+      true,
+      {
+        providerOptions: {
+          outputRedaction: "configured-values",
+          env: { LICENSE_SECRET: "license-secret" },
+        },
+        mcpServers: {
+          local: {
+            type: "stdio",
+            command: "server",
+            env: { MCP_SECRET: "custom-secret", SHORT: "abc" },
+          },
+          remote: {
+            type: "http",
+            url: "https://example.test/mcp",
+            headers: { Authorization: "mcp-header-secret", "X-Short": "xyz" },
+          },
+        },
+      },
+    );
+    const turnId = turnIdFrom(await startPrompt(connection, events, "preserved-prompt", "work"));
     const session = sessionAt(runtime);
     session.emit({
       type: "notice",
@@ -11472,6 +11573,8 @@ describe("OMP direct provider", () => {
     });
     session.emit({ type: "notice", level: "warning", message: "license-secret" });
     session.emit({ type: "notice", level: "warning", message: "custom-secret" });
+    session.emit({ type: "notice", level: "warning", message: "mcp-header-secret" });
+    session.emit({ type: "notice", level: "warning", message: "xyz" });
     session.emit({ type: "command_output", text: "credential-value-1234" });
     session.emit({ type: "command_output", text: " ghp_abcdefgh" });
     for (const [type, contentIndex, value] of [
@@ -11515,15 +11618,20 @@ describe("OMP direct provider", () => {
     await scheduler.flush();
 
     const visible = JSON.stringify(events);
-    expect(visible).not.toContain("credential-value-1234");
+    for (const configuredValue of [
+      "credential-value-1234",
+      "license-secret",
+      "custom-secret",
+      "mcp-header-secret",
+    ]) {
+      expect(visible).not.toContain(configuredValue);
+    }
     expect(visible).toContain("another-secret");
     expect(visible).not.toContain("provider-internal-notice-id");
-    expect(visible).not.toContain("credential-value-");
     expect(visible).not.toContain("provider-internal-tool-id");
     expect(visible).not.toContain("provider-internal-response-id");
-    expect(visible).not.toContain("license-secret");
-    expect(visible).not.toContain("custom-secret");
     expect(visible).toContain("/home/private");
+    expect(visible).toContain("xyz");
     const notificationMessages = events.flatMap((event) =>
       event.type === "timeline.item" && event.item.type === "notification"
         ? [event.item.message]
@@ -11538,8 +11646,10 @@ describe("OMP direct provider", () => {
         "Authorization=AWS4-HMAC-SHA256 Credential=aws-credential, SignedHeaders=host, Signature=aws-signature\nNext line",
         "Authorization: Bearer token-not-from-env",
         "Authorization: Basic basic-token-not-from-env",
+        "xyz",
       ]),
     );
+    expect(notificationMessages.filter((message) => message === "<redacted>")).toHaveLength(3);
     expect(
       events.some(
         (event) =>
@@ -11653,6 +11763,7 @@ describe("OMP direct provider", () => {
       event.type === "timeline.item" && event.item.type === "tool_call" ? [event.item.callId] : [],
     );
     expect(new Set(toolIds).size).toBe(3);
+    expect(JSON.stringify(toolIds)).not.toContain("credential-value-1234");
     const firstTool = events.find(
       (event) => event.type === "timeline.item" && event.item.type === "tool_call",
     );
@@ -11661,18 +11772,19 @@ describe("OMP direct provider", () => {
       firstTool.item.type !== "tool_call" ||
       firstTool.item.detail.type !== "unknown"
     ) {
-      throw new Error("Expected sanitized tool item");
+      throw new Error("Expected bounded tool item");
     }
     const detailInput = firstTool.item.detail.input;
     if (!detailInput || typeof detailInput !== "object" || Array.isArray(detailInput)) {
-      throw new Error("Expected sanitized tool input object");
+      throw new Error("Expected bounded tool input object");
     }
     expect(Object.getPrototypeOf(detailInput)).toBeNull();
     expect(Object.hasOwn({}, "polluted")).toBe(false);
     expect(Object.keys(detailInput)).toEqual(["apiKey", "/home/private", "literal"]);
     expect(detailInput.apiKey).toBe("another-secret");
-    expect(visible).toContain("<redacted>");
-    await finishTurn(events, session, turnId);
+
+    const terminal = await finishTurn(events, session, turnId);
+    expect(terminal).toEqual(expect.objectContaining({ state: "completed" }));
     await connection.close();
   });
   test("bounds aggregate retained bytes across many active tools", async () => {
@@ -12559,11 +12671,20 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("preserves structural protocol data through OmpRpcRuntime", async () => {
+  test("preserves configured environment and MCP values in native output", async () => {
     const nativeSessionId = "native-session-secret";
     const proxyUrl = "https://proxy%2Duser:proxy%2Dpass@example.test?access_token=proxy%2Dtoken";
     const sessionProxyUrl =
       "https://session%2Duser:p%40ss@example.test/session%2Dpath?code=token%2Dvalue#secret%2Dfragment";
+    const root = mkdtempSync(join(tmpdir(), "paseo-omp-content-neutral-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+    const agentDir = join(root, "agent");
+    const mcpValue = "configured-mcp-value";
+    mkdirSync(agentDir);
+    writeFileSync(
+      join(agentDir, "mcp.json"),
+      JSON.stringify({ servers: { local: { env: { MCP_SECRET: mcpValue } } } }),
+    );
     const children: ProviderRpcChild[] = [];
     const launchArgs: string[][] = [];
     const promptRequestIds: string[] = [];
@@ -12668,11 +12789,16 @@ describe("OMP direct provider", () => {
         return child.asChildProcess();
       },
       terminateProcessTree: () => Promise.resolve(true),
-      environment: TEST_RUNTIME_ENV,
+      environment: { ...TEST_RUNTIME_ENV, HOME: root, PI_CODING_AGENT_DIR: agentDir },
     });
     const connection = await createOmpProvider({
       runtime,
-      environment: { ...TEST_RUNTIME_ENV, HTTPS_PROXY: proxyUrl },
+      environment: {
+        ...TEST_RUNTIME_ENV,
+        HOME: root,
+        PI_CODING_AGENT_DIR: agentDir,
+        HTTPS_PROXY: proxyUrl,
+      },
     }).connect({
       versions: [1],
       capabilities: ["prompt.message", "prompt.steer", "session.configure"],
@@ -12686,33 +12812,18 @@ describe("OMP direct provider", () => {
     children[0]?.write({
       type: "notice",
       level: "warning",
-      message: `${proxyUrl} proxy-user proxy-pass proxy-token session%2Duser session-user p%40ss p@ss session%2Dpath session-path token%2Dvalue token-value secret%2Dfragment secret-fragment`,
+      message: `${mcpValue} ${proxyUrl} proxy-user proxy-pass proxy-token session%2Duser session-user p%40ss p@ss session%2Dpath session-path token%2Dvalue token-value secret%2Dfragment secret-fragment`,
     });
     const proxyNotice = events.findLast(
       (event) => event.type === "timeline.item" && event.item.type === "notification",
     );
     expect(proxyNotice).toEqual(
       expect.objectContaining({
-        item: expect.objectContaining({ message: expect.stringContaining("<redacted>") }),
+        item: expect.objectContaining({
+          message: `${mcpValue} ${proxyUrl} proxy-user proxy-pass proxy-token session%2Duser session-user p%40ss p@ss session%2Dpath session-path token%2Dvalue token-value secret%2Dfragment secret-fragment`,
+        }),
       }),
     );
-    for (const secret of [
-      "proxy-user",
-      "proxy-pass",
-      "proxy-token",
-      "session%2Duser",
-      "session-user",
-      "p%40ss",
-      "p@ss",
-      "session%2Dpath",
-      "session-path",
-      "token%2Dvalue",
-      "token-value",
-      "secret%2Dfragment",
-      "secret-fragment",
-    ]) {
-      expect(JSON.stringify(proxyNotice)).not.toContain(secret);
-    }
     const turnId = turnIdFrom(await startPrompt(connection, events, "transport-prompt", "work"));
     const bufferedLargeTool = await events.waitFor(
       (event) =>
@@ -13074,7 +13185,17 @@ describe("OMP direct provider", () => {
       new ManualScheduler(),
       ["prompt.message", "session.subsession"],
     );
-    await openSession(connection, events);
+    await openSession(
+      connection,
+      events,
+      "child-redaction-open",
+      "session-1",
+      { CHILD_SECRET: "child-secret" },
+      MODEL_PUBLIC_ID,
+      "medium",
+      true,
+      { providerOptions: { outputRedaction: "configured-values" } },
+    );
     const session = sessionAt(runtime);
     const turnId = turnIdFrom(await startPrompt(connection, events));
     session.emit({
@@ -13093,8 +13214,8 @@ describe("OMP direct provider", () => {
       type: "subagent_lifecycle",
       payload: {
         id: "native-child-single",
-        agent: "Bearer scout",
-        description: "Inspect /home/private/API_KEY=visible\u0007",
+        agent: "child-secret scout",
+        description: "Inspect child-secret",
         status: "started",
         sessionFile: "/sessions/root/native-child-single.jsonl",
         parentToolCallId: "task-single",
@@ -13109,8 +13230,8 @@ describe("OMP direct provider", () => {
       expect.objectContaining({
         capabilities: [],
         restoration: "parent",
-        title: "Bearer scout",
-        description: "Inspect /home/private/API_KEY=visible\u0007",
+        title: "<redacted> scout",
+        description: "Inspect <redacted>",
       }),
     );
     session.emit({
@@ -13119,7 +13240,11 @@ describe("OMP direct provider", () => {
         id: "native-child-single",
         event: {
           type: "message_end",
-          message: { role: "assistant", responseId: "child-answer", content: "child output" },
+          message: {
+            role: "assistant",
+            responseId: "child-answer",
+            content: "child-secret output",
+          },
         },
       },
     });
@@ -13129,7 +13254,11 @@ describe("OMP direct provider", () => {
         id: "native-child-single",
         event: {
           type: "message_end",
-          message: { role: "assistant", responseId: "child-answer", content: "child output" },
+          message: {
+            role: "assistant",
+            responseId: "child-answer",
+            content: "child-secret output",
+          },
         },
       },
     });
@@ -13139,7 +13268,7 @@ describe("OMP direct provider", () => {
           event.type === "timeline.item" &&
           event.sessionId === opened.sessionId &&
           event.item.type === "assistant_message" &&
-          event.item.text === "child output",
+          event.item.text === "<redacted> output",
       ),
     ).toHaveLength(1);
     session.emit({ type: "agent_end", messages: [], isTerminal: true });
@@ -14663,7 +14792,6 @@ describe("OMP direct provider", () => {
 
   test("continues extension questions through native permissions", async () => {
     const runtime = new FakeOmpRuntime();
-    runtime.redactionValues = ["Preview", "Production"];
     const { connection, events } = await createHarness(runtime);
     await openSession(connection, events);
     const session = sessionAt(runtime);
@@ -14691,12 +14819,12 @@ describe("OMP direct provider", () => {
         question: "Deployment",
         options: [
           {
-            label: "<redacted>",
+            label: "Preview",
             value: expect.stringMatching(/:option:0$/u),
             description: "Safe sandbox",
           },
           {
-            label: "<redacted> (2)",
+            label: "Production",
             value: expect.stringMatching(/:option:1$/u),
             description: "Live traffic",
           },
@@ -14747,7 +14875,7 @@ describe("OMP direct provider", () => {
       permissionId: permission.request.id,
       response: {
         behavior: "allow",
-        updatedInput: { answers: { Deployment: "<redacted> (2)" } },
+        updatedInput: { answers: { Deployment: "Production" } },
       },
     });
     await events.waitFor(
@@ -15388,28 +15516,34 @@ describe("OMP direct provider", () => {
     );
     await connection.close();
   });
-  test("accepts null command input and redacts published command and custom names", async () => {
+  test("accepts null command input and preserves command and custom names", async () => {
     const runtime = new FakeOmpRuntime();
-    runtime.redactionValues = ["secret-command"];
     runtime.availableCommands = [
       { name: "help", description: "Help", input: null, source: "builtin" },
       { name: "secret-command", description: "Private", input: null, source: "extension" },
     ];
     const { connection, events } = await createHarness(runtime);
-    await openSession(connection, events, "redacted-open", "session-1", {
-      SECRET_NAME: "secret-command",
-    });
+    await openSession(
+      connection,
+      events,
+      "configured-output-open",
+      "session-1",
+      { SECRET_NAME: "secret-command" },
+      MODEL_PUBLIC_ID,
+      "medium",
+      true,
+      { providerOptions: { outputRedaction: "configured-values" } },
+    );
     const commandEvent = events.find((event) => event.type === "session.commands");
-    expect(JSON.stringify(commandEvent)).not.toContain("secret-command");
     expect(commandEvent).toEqual(
       expect.objectContaining({
         commands: expect.arrayContaining([
           { name: "help", description: "Help" },
-          expect.objectContaining({ name: "<redacted>" }),
+          { name: "<redacted>", description: "Private" },
         ]),
       }),
     );
-    const turnId = turnIdFrom(await startPrompt(connection, events, "custom-redaction", "work"));
+    const turnId = turnIdFrom(await startPrompt(connection, events, "custom-output", "work"));
     sessionAt(runtime).emit({
       type: "message_end",
       message: {
@@ -15423,7 +15557,9 @@ describe("OMP direct provider", () => {
     const custom = events.findLast(
       (event) => event.type === "timeline.item" && event.item.type === "tool_call",
     );
-    expect(JSON.stringify(custom)).not.toContain("secret-command");
+    expect(custom).toEqual(
+      expect.objectContaining({ item: expect.objectContaining({ name: "<redacted>" }) }),
+    );
     await finishTurn(events, sessionAt(runtime), turnId);
     await connection.close();
   });
@@ -15701,8 +15837,8 @@ describe("OMP direct provider", () => {
             mimeType: "image/png",
           },
         ],
-        text: "token <redacted>",
-        details: { width: 1280, height: 720, authorization: "<redacted>" },
+        text: "token test-value",
+        details: { width: 1280, height: 720, authorization: "test-value" },
       },
     });
     const screenshotLifecycle = events.flatMap((event) =>
@@ -15810,8 +15946,8 @@ describe("OMP direct provider", () => {
             mimeType: "image/png",
           },
         ],
-        text: "caption <redacted>",
-        details: { token: "<redacted>" },
+        text: "caption test-value",
+        details: { token: "test-value" },
       },
     });
     const completedMappedTools = events.flatMap((event) =>

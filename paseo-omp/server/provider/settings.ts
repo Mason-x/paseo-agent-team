@@ -27,6 +27,7 @@ const ModelSelectorSchema = boundedString(MAX_MODEL_SELECTOR_BYTES).refine(
 
 /** Native approval modes are available because provider permissions are bridged to Paseo. */
 export const OmpModeSchema = z.enum(["full", "write", "ask"]);
+export const OmpOutputRedactionSchema = z.enum(["none", "configured-values"]).default("none");
 
 export const OmpProviderParamsSchema = z
   .object({
@@ -59,9 +60,13 @@ export const OmpProviderOptionsSchema = z
       .record(EnvironmentNameSchema, EnvironmentValueSchema)
       .describe("Profile environment applied before session launch environment")
       .optional(),
+    outputRedaction: OmpOutputRedactionSchema.describe(
+      "Best-effort exact replacement of explicitly configured credential values in public output",
+    ),
     params: OmpProviderParamsSchema.optional(),
   })
   .strict();
 
 export type OmpMode = z.infer<typeof OmpModeSchema>;
+export type OmpOutputRedaction = z.infer<typeof OmpOutputRedactionSchema>;
 export type OmpProviderOptions = z.infer<typeof OmpProviderOptionsSchema>;

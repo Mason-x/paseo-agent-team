@@ -28,6 +28,7 @@ Advanced launch overrides belong in an `omp-plugin` provider profile. The provid
 | --- | --- |
 | `command` | Complete OMP executable and argument prefix. |
 | `env` | Non-secret process overrides applied below the session launch environment. |
+| `outputRedaction` | `none` (default) preserves native output. `configured-values` replaces exact credential values explicitly supplied through profile/session credential environment fields and configured MCP headers/environment. Best-effort only: independently streamed fragments are not reconstructed or held back for DLP. |
 | `params.sessionDir` | Native OMP session directory supplied through `--session-dir`. Used consistently by discovery, import, resume, and launch. |
 | `params.rpcTimeoutMs` | Startup, request, catalog, and availability timeout, from 1 ms through 10 minutes. |
 | `params.smolModel` | Native selector supplied through `--smol`. |

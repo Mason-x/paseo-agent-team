@@ -38,10 +38,11 @@ import { buildOmpSpawnRequest } from "./omp-rpc";
 import {
   BoundedStringSet,
   boundedJsonBytes,
+  configuredOutputRedactionValues,
   isOmpCleanupFailure,
   isOmpPublicError,
   OmpCleanupFailure,
-  OmpPublicDataFilter,
+  OmpPublicDataSerializer,
   OmpPublicError,
   utf8Bytes,
 } from "./security";
@@ -710,7 +711,7 @@ export class OmpProviderSession {
   private branchWatermarkValid = true;
   private readonly unclaimedBranchEntries: Array<{ entryId: string; text: string }> = [];
   private readonly scheduler: OmpTimelineScheduler;
-  private readonly dataFilter: OmpPublicDataFilter;
+  private readonly dataFilter: OmpPublicDataSerializer;
   private readonly nativeModelsByPublicId: ReadonlyMap<string, OmpModel>;
   private readonly lifetime = new AbortController();
   private generation = 0;
@@ -762,6 +763,7 @@ export class OmpProviderSession {
     nativeSessionFile: string | undefined,
     private readonly config: ProviderSessionConfig,
     private configState: ProviderConfigState,
+    outputRedactionValues: readonly string[],
     nativeModelsByPublicId: ReadonlyMap<string, OmpModel>,
     private readonly capabilities: readonly string[],
     private readonly slashCommands: Set<string>,
@@ -779,11 +781,7 @@ export class OmpProviderSession {
     this.id = id;
     this.cwd = config.cwd;
     this.scheduler = scheduler;
-    const sensitiveValues = [
-      ...Object.values(config.env ?? {}),
-      ...(runtime.redactionValues ?? []),
-    ];
-    this.dataFilter = new OmpPublicDataFilter(sensitiveValues);
+    this.dataFilter = new OmpPublicDataSerializer(outputRedactionValues);
     this.nativeModelsByPublicId = nativeModelsByPublicId;
     this.commandCatalog = commandCatalog;
     this.hostTools.onFatal(() => this.handleRuntimeFailure());
@@ -791,7 +789,7 @@ export class OmpProviderSession {
       id,
       emit,
       scheduler,
-      sensitiveValues,
+      outputRedactionValues,
       capabilities.includes("session.revert.conversation"),
       hostTools.labels,
     );
@@ -803,8 +801,8 @@ export class OmpProviderSession {
           config.cwd,
           emit,
           scheduler,
-          sensitiveValues,
           () => this.resumeDeferredAgentEnd(),
+          outputRedactionValues,
         )
       : null;
     this.bindRuntime(runtime);
@@ -843,6 +841,11 @@ export class OmpProviderSession {
     const normalizedConfig = normalizeOmpSessionConfig(
       effectiveConfig,
       capabilities.includes("permission"),
+    );
+    const outputRedactionValues = configuredOutputRedactionValues(
+      normalizedConfig.outputRedaction ?? "none",
+      normalizedConfig.env,
+      effectiveConfig.mcpServers,
     );
     const persistedDescriptor = resumeSessionId
       ? await authorizeNativeSession(
@@ -906,11 +909,7 @@ export class OmpProviderSession {
       if (resumeSessionId && initialState.sessionId !== resumeSessionId) {
         throw new OmpPublicError("OMP resumed a different native session");
       }
-      const filter = new OmpPublicDataFilter([
-        ...Object.values(startOptions.env ?? {}),
-        ...(native.redactionValues ?? []),
-      ]);
-      const models = mapOmpModels(nativeModels, filter);
+      const models = mapOmpModels(nativeModels, new OmpPublicDataSerializer(outputRedactionValues));
       const nativeModelsByPublicId = new Map(
         nativeModels.map((model) => [ompModelId(model), model] as const),
       );
@@ -988,6 +987,7 @@ export class OmpProviderSession {
         persistedDescriptor?.transcriptFile ?? state.sessionFile,
         effectiveConfig,
         configState,
+        outputRedactionValues,
         nativeModelsByPublicId,
         sessionCapabilities,
         new Set([
@@ -2632,9 +2632,6 @@ export class OmpProviderSession {
         throw new Error("OMP host tool bridge detached during recovery");
       }
       if (this.subsessions) await recovered.setSubagentSubscription("events");
-      this.dataFilter.addSensitiveValues(recovered.redactionValues ?? []);
-      this.projector.addSensitiveValues(recovered.redactionValues ?? []);
-      this.subsessions?.addSensitiveValues(recovered.redactionValues ?? []);
       this.generation += 1;
       this.lastUsage = null;
       this.runtimeDead = null;

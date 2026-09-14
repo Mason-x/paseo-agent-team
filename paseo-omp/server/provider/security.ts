@@ -1,3 +1,6 @@
+import type { ProviderMcpServerConfig } from "@getpaseo/plugin/server/provider";
+import type { OmpOutputRedaction } from "./settings";
+
 export type JsonValue =
   | null
   | boolean
@@ -10,14 +13,34 @@ const MAX_PUBLIC_STRING_BYTES = 1024 * 1024;
 const MAX_PUBLIC_COLLECTION_ITEMS = 128;
 const MAX_PUBLIC_DEPTH = 16;
 const MAX_PUBLIC_NODES = 2_048;
-const MAX_SENSITIVE_VALUES = 256;
-const MAX_SENSITIVE_VALUE_BYTES = 256 * 1024;
+const MAX_EXACT_REDACTION_VALUES = 256;
+const MAX_EXACT_REDACTION_VALUE_BYTES = 256 * 1024;
 const MAX_PUBLIC_JSON_BYTES = 256 * 1024;
-const REDACTED = "<redacted>";
 const OMITTED = "<omitted>";
+const REDACTED = "<redacted>";
+const CREDENTIAL_ENV_NAME =
+  /(?:^|_)(?:API_KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH|AUTHORIZATION|COOKIE|CREDENTIAL|CREDENTIALS|OAUTH|PASSWORD|PRIVATE_KEY|REFRESH_TOKEN|SECRET|SESSION_TOKEN|TOKEN)(?:$|_)/iu;
 
 export function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+export function configuredOutputRedactionValues(
+  mode: OmpOutputRedaction,
+  env: Readonly<Record<string, string>> | undefined,
+  mcpServers: Readonly<Record<string, ProviderMcpServerConfig>> = {},
+): readonly string[] {
+  if (mode === "none") return [];
+  const values: string[] = [];
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (CREDENTIAL_ENV_NAME.test(name) && utf8Bytes(value) >= 4) values.push(value);
+  }
+  for (const server of Object.values(mcpServers)) {
+    const configuredValues = server.type === "stdio" ? server.env : server.headers;
+    for (const value of Object.values(configuredValues ?? {})) {
+      if (utf8Bytes(value) >= 4) values.push(value);
+    }
+  }
+  return values;
 }
 
 function jsonStringBytes(value: string): number {
@@ -196,43 +219,26 @@ export function isOmpCleanupFailure(error: unknown): error is OmpCleanupFailure 
   );
 }
 
-export class OmpPublicDataFilter {
-  private readonly sensitiveValueSet = new Set<string>();
-  private readonly sensitiveValues: string[] = [];
-  private sensitiveValueBytes = 0;
+export class OmpPublicDataSerializer {
+  private readonly exactValues: readonly string[];
 
   constructor(values: Iterable<string> = []) {
-    this.addSensitiveValues(values);
-  }
-
-  addSensitiveValues(values: Iterable<string>): void {
-    const additions: string[] = [];
-    let addedBytes = 0;
+    const unique = new Set<string>();
+    let bytes = 0;
     for (const value of values) {
-      if (utf8Bytes(value) < 4) continue;
-      if (this.sensitiveValueSet.has(value) || additions.includes(value)) continue;
-      additions.push(value);
-      addedBytes += utf8Bytes(value);
+      if (utf8Bytes(value) < 4 || unique.has(value)) continue;
+      unique.add(value);
+      bytes += utf8Bytes(value);
+      if (unique.size > MAX_EXACT_REDACTION_VALUES || bytes > MAX_EXACT_REDACTION_VALUE_BYTES) {
+        throw new Error("OMP configured output-redaction budget exceeded");
+      }
     }
-    if (
-      this.sensitiveValueSet.size + additions.length > MAX_SENSITIVE_VALUES ||
-      this.sensitiveValueBytes + addedBytes > MAX_SENSITIVE_VALUE_BYTES
-    ) {
-      throw new Error("OMP sensitive-value redaction budget exceeded");
-    }
-    additions.sort((left, right) => right.length - left.length);
-    for (const value of additions) {
-      this.sensitiveValueSet.add(value);
-      this.sensitiveValueBytes += utf8Bytes(value);
-      const index = this.sensitiveValues.findIndex((existing) => existing.length < value.length);
-      if (index < 0) this.sensitiveValues.push(value);
-      else this.sensitiveValues.splice(index, 0, value);
-    }
+    this.exactValues = Object.freeze([...unique].sort((left, right) => right.length - left.length));
   }
 
   text(input: string, maxBytes = MAX_PUBLIC_STRING_BYTES): string {
     let output = input;
-    for (const value of this.sensitiveValues) output = output.split(value).join(REDACTED);
+    for (const value of this.exactValues) output = output.split(value).join(REDACTED);
     return truncateUtf8(output, maxBytes);
   }
 

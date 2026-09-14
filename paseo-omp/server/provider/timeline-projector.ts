@@ -9,7 +9,7 @@ import type { OmpMessage, OmpRpcEvent } from "./omp-rpc";
 import {
   boundedJsonBytes,
   type JsonValue,
-  OmpPublicDataFilter,
+  OmpPublicDataSerializer,
   OmpPublicError,
   utf8Bytes,
 } from "./security";
@@ -245,7 +245,7 @@ type NativeImageResult = { image: NativeImageEnvelope } | { error: string };
 
 function nativeImageResult(
   value: unknown,
-  filter: OmpPublicDataFilter,
+  filter: OmpPublicDataSerializer,
 ): NativeImageResult | undefined {
   if (
     boundedJsonBytes(
@@ -368,20 +368,18 @@ export class OmpTimelineProjector {
   private commandText = "";
   private commandPublishedText = "";
   private closed = false;
+
+  private readonly dataFilter: OmpPublicDataSerializer;
+
   constructor(
     private readonly sessionId: string,
     private readonly emit: Emit,
     private readonly scheduler: OmpTimelineScheduler = defaultOmpTimelineScheduler,
-    sensitiveValues: Iterable<string> = [],
+    outputRedactionValues: readonly string[] = [],
     private readonly conversationRevertEnabled = false,
     private readonly hostToolLabels: ReadonlyMap<string, string> = new Map(),
   ) {
-    this.dataFilter = new OmpPublicDataFilter(sensitiveValues);
-  }
-
-  private readonly dataFilter: OmpPublicDataFilter;
-  addSensitiveValues(values: Iterable<string>): void {
-    this.dataFilter.addSensitiveValues(values);
+    this.dataFilter = new OmpPublicDataSerializer(outputRedactionValues);
   }
 
   project(event: OmpRpcEvent, turnId: string, bypassReplayFilter = false): void {
