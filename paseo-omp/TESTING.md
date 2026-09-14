@@ -42,7 +42,7 @@ Classifications:
 | Advisor messages | **Equivalent** | Advisor notes preserve severity/attribution in stable tool-call blocks; `advisor_yielded` emits completion notice. |
 | System notices | **Equivalent** | Native notices and safe passive UI notifications map to bounded notification items; hidden custom notices remain hidden. |
 | Ask interactions | **Equivalent** | Select/confirm/input/editor questions, option descriptions, fixed-only rejection, bounded freeform input, native sentinel/follow-up submission, cancellation, timeout, and turn ownership are covered by permission regressions. |
-| Typed tool permission presentation | **Equivalent** | OMP `typedToolApprovals: 1` is negotiated reciprocally; strict native request/cancel/response frames are correlated exactly once and mapped from trusted shell/edit/write identity to bounded, redacted `kind: "tool"` permissions. Older OMP builds retain generic extension questions. |
+| Typed tool permission presentation | **Equivalent** | OMP `typedToolApprovals: 1` is negotiated reciprocally; strict native request/cancel/response frames are correlated exactly once and mapped from trusted shell/edit/write identity to bounded, content-preserving `kind: "tool"` permissions. Older OMP builds retain generic extension questions. |
 | Slash command catalog | **Equivalent** | Native commands and aliases refresh authoritatively; the bundled `compact`, `autocompact`, `handoff`, `steer`, and `follow-up` commands are always published. |
 | Manual `/compact` | **Equivalent** | Uses native `compact`, exposes one loading/completed operation, keeps long requests alive, refreshes usage, and supports interruption. |
 | `/autocompact` | **Equivalent** | `on`, `off`, and state-backed `toggle` use native `set_auto_compaction`; invalid or unavailable state fails visibly. |
@@ -62,7 +62,8 @@ Classifications:
 | Conversation rewind | **Equivalent** | Only conversation scope is advertised; active-turn/stale-token rejection and branch replay are tested. |
 | Native branch transition | **Equivalent** | New native IDs atomically replace persistence/reservation ownership; indeterminate post-branch failures close and quarantine the session. |
 | Custom executable command | **Equivalent** | Strict `providerOptions.command` replaces the executable prefix and survives recovery. |
-| Custom environment | **Equivalent** | Strict `providerOptions.env` is merged below launch env, survives recovery, and is filtered from public output. |
+| Custom environment | **Equivalent** | Strict `providerOptions.env` is merged below launch env and survives recovery. Unexpected or internal launch failures use fixed fallbacks rather than serializing launch configuration, while explicit public validation errors may include caller-supplied configuration names or values. |
+| Configured output redaction | **Equivalent** | `providerOptions.outputRedaction` defaults to `none`. `configured-values` performs bounded best-effort literal replacement only for explicitly supplied configured credential values across root and nested timelines; generated, encoded, transformed, and independently streamed fragments remain outside its scope. |
 | Provider parameters | **Equivalent** | `sessionDir`, `rpcTimeoutMs`, and `smol`/`slow`/`plan` model roles map to native arguments and survive recovery; cold resume authorization scans the normalized configured `sessionDir`. |
 | Configured model replacement/additions | **Protocol** and **Equivalent** | Paseo applies profile `models` replacement and `additionalModels` overlays to the profile-specific plugin catalog. |
 | Generic denied tools | **Equivalent** | Core forwards a bounded, deduplicated `deniedTools` list; the plugin turns recognized OMP built-ins into an explicit launch allow-list before the process starts and rejects unknown names rather than silently under-enforcing. |
@@ -70,6 +71,8 @@ Classifications:
 | Profile settings in provider discovery | **Equivalent** | Core forwards profile settings to catalog, cache-key, and session-list operations; the provider includes them in cache identity without claiming unsupported live OMP settings. |
 | Terminal-started OMP session hooks | **Unsupported** | The bundled terminal hook registry contains Claude, Codex, and OpenCode only; OMP exposes no registered terminal activity hook to preserve. |
 | Metadata-generation flows | **Protocol** and **Equivalent** | Generic structured generation selects plugin models from catalog metadata and creates non-persisted sessions; provider responses use the existing parse/validation retry loop. |
+
+The output boundary validates protocol shapes and bounds strings, structured values, depth, item counts, nodes, cumulative serialized bytes, and cycles. With the default `outputRedaction: "none"`, it does not heuristically redact or rewrite native OMP, model, tool, or permission content. The optional `configured-values` mode replaces exact configured credential literals on a best-effort basis, but it cannot detect generated secrets or encoded, transformed, or independently streamed fragments. Credentials therefore must not appear in prompts or tool output, and centralized Paseo policy is required for redaction guarantees. Unexpected or internal launch failures use fixed public fallbacks rather than serializing launch configuration, while explicit public validation errors may include caller-supplied configuration names or values.
 
 ## Integration boundary tests
 

@@ -28,7 +28,7 @@ Advanced launch overrides belong in an `omp-plugin` provider profile. The provid
 | --- | --- |
 | `command` | Complete OMP executable and argument prefix. |
 | `env` | Non-secret process overrides applied below the session launch environment. |
-| `outputRedaction` | `none` (default) preserves native output. `configured-values` replaces exact credential values explicitly supplied through profile/session credential environment fields and configured MCP headers/environment. Best-effort only: independently streamed fragments are not reconstructed or held back for DLP. |
+| `outputRedaction` | `none` (default) preserves native output. `configured-values` performs best-effort literal replacement only for explicitly supplied configured credential values from profile/session credential environment fields and configured MCP headers or environment. |
 | `params.sessionDir` | Native OMP session directory supplied through `--session-dir`. Used consistently by discovery, import, resume, and launch. |
 | `params.rpcTimeoutMs` | Startup, request, catalog, and availability timeout, from 1 ms through 10 minutes. |
 | `params.smolModel` | Native selector supplied through `--smol`. |
@@ -57,6 +57,8 @@ Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP'
 Supported provider authentication variables are inherited from the Paseo daemon environment. Put API keys in the daemon's service environment or secret manager, not in `providerOptions.env` or committed configuration.
 
 `providerOptions.env` is only for deliberate non-secret overrides. If configuration contains sensitive values, restrict `<paseo-home>/config.json` to the daemon account (`chmod 600` on POSIX), protect backups, and never attach it to an issue.
+
+The plugin validates and bounds native protocol data, but it does not heuristically detect, redact, or rewrite credentials in OMP, model, or tool content. Never put credentials in prompts or tool output. With `outputRedaction: "configured-values"`, exact configured literals are replaced on a best-effort basis; generated secrets and encoded, transformed, or independently streamed fragments are not detected. Centralized Paseo policy is required for redaction guarantees. Unexpected or internal launch failures use fixed fallback messages rather than serializing the launch configuration, while explicit public validation errors may include caller-supplied configuration names or values.
 
 ## Modes and permissions
 

@@ -62,7 +62,7 @@ Provider functionality outside the capability flags is tracked separately:
 | Provider SDK surface | Completeness | Implementation |
 | --- | ---: | --- |
 | Registration metadata and sanitized SVG icon | **100%** | Stable `omp-plugin` identity, label, description, and bundled icon. |
-| Strict `providerOptionsSchema` | **100%** | Command, environment, session directory, RPC timeout, and role-model options are validated and normalized. |
+| Strict `providerOptionsSchema` | **100%** | Command, environment, output-redaction mode, session directory, RPC timeout, and role-model options are validated and normalized. |
 | Availability diagnostics | **100%** | Bounded checks distinguish missing, unrunnable, incompatible, and available OMP runtimes. |
 | Catalog cache identity | **100%** | Hash includes effective options, settings, scope, cwd, and default command. |
 | Models, modes, and thinking catalog | **100%** | Native catalog is mapped to opaque public model IDs with committed defaults and permission-gated modes. |
@@ -90,6 +90,14 @@ Existing agents whose provider is `omp` remain owned by the bundled provider. Ne
 OMP `18.1.15` is the oldest version tested end to end. The direct provider's hard compatibility gate is `rpc-ui` protocol v2: metadata-free legacy ready frames and v1-only runtimes are rejected before a provider session opens because they cannot support the advertised persistence and conversation-rewind capabilities. Typed tool approvals remain capability-gated and fall back as described above.
 
 Install, update, disable, or remove `paseo-omp` independently of the bundled provider. Verify the provider snapshot contains `omp-plugin` after installation; a bundled `omp` entry may remain present and is not modified by this plugin.
+
+## Output and credential boundary
+
+The plugin validates OMP protocol data and bounds public strings and structured values. It does not heuristically redact or rewrite content produced by native OMP, models, or tools. Do not put credentials in prompts or tool output, because that content may be published unchanged after validation and bounding.
+
+`providerOptions.outputRedaction` defaults to `none`, preserving native content subject to those bounds. `configured-values` provides best-effort literal replacement only for explicitly supplied configured credential values. It does not detect generated secrets or encoded, transformed, or independently streamed fragments of configured values. Centralized Paseo policy is required when a deployment needs redaction guarantees.
+
+Unexpected or internal launch failures use fixed fallback messages rather than serializing the launch configuration. Explicit public validation errors may include caller-supplied configuration names or values. Deployments that require host-wide content redaction should implement it in a dedicated host or plugin layer rather than this protocol adapter.
 
 ## Testing and development
 
