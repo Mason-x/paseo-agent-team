@@ -2,19 +2,29 @@ import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/clie
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Linking, Pressable, ScrollView, Switch, Text, View } from "react-native";
 import { listOmpConfig, type OmpConfig } from "../shared/omp-config";
 import {
   categorizeOmpSetting,
   formatOmpSettingLabel,
   listOmpSettings,
   OMP_SETTING_CATEGORIES,
+  type OmpScalarValue,
   type OmpSetting,
   type OmpSettingCategory,
+  updateOmpSettings,
 } from "../shared/omp-settings";
 import { getOmpProviderHealth, type OmpProviderHealth } from "../shared/provider-diagnostics";
+import {
+  documentationForSettingCategory,
+  documentationForSettingPath,
+  OMP_SETTINGS_GUIDES,
+  OMP_SETTINGS_REFERENCE,
+  type OmpDocumentationLink,
+} from "./omp-doc-links";
+import { OmpPluginManagerSection } from "./omp-plugin-manager";
 import {
   type BinaryHealthSummary,
   loadReadyProviderSnapshot,
@@ -35,6 +45,7 @@ import {
   summarizeRpcUiSupport,
 } from "./provider-diagnostics-state";
 
+const SETTINGS_QUERY_KEY = ["paseo-omp", "settings"] as const;
 const CONFIG_POLL_MS = 30_000;
 const HEALTH_QUERY_KEY = ["paseo-omp", "provider-health"] as const;
 const PROVIDERS_QUERY_KEY = ["paseo-omp", "provider-snapshot"] as const;
@@ -63,8 +74,13 @@ export interface OmpConfigStyles {
   muted: TextStyle;
   error: TextStyle;
   refresh: ViewStyle;
+  docsActions: ViewStyle;
+  docLink: ViewStyle;
+  docLinkPressed: ViewStyle;
+  docLinkText: TextStyle;
   refreshLabel: TextStyle;
   card: ViewStyle;
+  cardHeader: ViewStyle;
   cardTitle: TextStyle;
   row: ViewStyle;
   rowLabel: TextStyle;
@@ -82,6 +98,13 @@ export interface OmpConfigStyles {
   recordRow: ViewStyle;
   recordKey: TextStyle;
   recordValue: TextStyle;
+  editorActions: ViewStyle;
+  editorAction: ViewStyle;
+  editorActionPrimary: ViewStyle;
+  editorActionText: TextStyle;
+  editorActionTextPrimary: TextStyle;
+  scalarInput: TextStyle;
+  resetAction: TextStyle;
 }
 
 function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): OmpConfigStyles {
@@ -99,6 +122,7 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
         fontWeight: "700",
       },
       topTabs: {
+        flexWrap: "wrap",
         flexDirection: "row",
         alignSelf: "flex-start",
         gap: 4,
@@ -147,7 +171,7 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
         fontSize: 13,
       },
       sectionHeader: { gap: 4, marginTop: compact ? 2 : 4 },
-      sectionHeaderRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+      sectionHeaderRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 },
       sectionTitle: {
         color: theme.colors.foreground,
         fontSize: compact ? 16 : 18,
@@ -156,6 +180,17 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
       source: { color: theme.colors.foregroundMuted, fontSize: 12 },
       muted: { color: theme.colors.foregroundMuted, fontSize: 13 },
       error: { color: theme.colors.statusDanger, fontSize: 13 },
+      docsActions: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
+      docLink: {
+        paddingHorizontal: 8,
+        paddingVertical: 5,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 7,
+        backgroundColor: theme.colors.surface1,
+      },
+      docLinkPressed: { opacity: 0.72 },
+      docLinkText: { color: theme.colors.accent, fontSize: 12, fontWeight: "600" },
       refresh: {
         flexDirection: "row",
         alignItems: "center",
@@ -168,6 +203,13 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
         backgroundColor: theme.colors.surface1,
       },
       refreshLabel: { color: theme.colors.foreground, fontSize: 13 },
+      cardHeader: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        flexWrap: "wrap",
+        gap: 8,
+      },
       card: {
         gap: 8,
         padding: compact ? 10 : 12,
@@ -220,6 +262,43 @@ function useConfigStyles(theme: PluginSurfaceProps["theme"], compact: boolean): 
         fontWeight: "600",
       },
       recordValue: { flex: 1, color: theme.colors.foreground, fontSize: 12 },
+      editorActions: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        gap: 8,
+        padding: 10,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 10,
+        backgroundColor: theme.colors.surface1,
+      },
+      editorAction: {
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+      },
+      editorActionPrimary: {
+        backgroundColor: theme.colors.accent,
+        borderColor: theme.colors.accent,
+      },
+      editorActionText: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" },
+      editorActionTextPrimary: { color: theme.colors.accentForeground },
+      scalarInput: {
+        minWidth: 180,
+        maxWidth: 420,
+        color: theme.colors.foreground,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        borderRadius: 7,
+        backgroundColor: theme.colors.surface0,
+        paddingHorizontal: 9,
+        paddingVertical: 6,
+        fontSize: 13,
+      },
+      resetAction: { color: theme.colors.accent, fontSize: 12, fontWeight: "600" },
     }),
     [compact, theme],
   );
@@ -247,17 +326,44 @@ function KeyValueRow({
 function SectionCard({
   styles,
   title,
+  action,
   children,
 }: {
   styles: OmpConfigStyles;
   title: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>{title}</Text>
+      <View style={styles.cardHeader}>
+        <Text style={styles.cardTitle}>{title}</Text>
+        {action}
+      </View>
       {children}
     </View>
+  );
+}
+
+function DocumentationLink({
+  link,
+  styles,
+  onOpen,
+}: {
+  link: OmpDocumentationLink;
+  styles: OmpConfigStyles;
+  onOpen(link: OmpDocumentationLink): void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="link"
+      accessibilityLabel={link.accessibilityLabel}
+      accessibilityHint="Opens in your browser"
+      onPress={() => onOpen(link)}
+      style={({ pressed }) => [styles.docLink, pressed ? styles.docLinkPressed : null]}
+    >
+      <Text style={styles.docLinkText}>{link.label}</Text>
+    </Pressable>
   );
 }
 
@@ -281,6 +387,41 @@ function ProviderSetupSection({ styles }: { styles: OmpConfigStyles }) {
   );
 }
 
+function PluginConfigurationSection({ styles }: { styles: OmpConfigStyles }) {
+  return (
+    <>
+      <SectionCard styles={styles} title="OMP Plugin launch options">
+        <Text style={styles.muted}>
+          Paseo does not expose the effective providerOptions for active launches through the plugin
+          API. Configure these values in the provider profile; this tab documents the supported
+          contract without claiming defaults are active.
+        </Text>
+        <KeyValueRow styles={styles} label="Command" value="Executable and argument prefix" />
+        <KeyValueRow
+          styles={styles}
+          label="Inherited environment"
+          value="Daemon variable names copied at OMP spawn time"
+        />
+        <KeyValueRow
+          styles={styles}
+          label="Explicit environment"
+          value="Stored non-secret overrides"
+        />
+        <KeyValueRow styles={styles} label="Output redaction" value="None or configured values" />
+        <KeyValueRow
+          styles={styles}
+          label="Runtime parameters"
+          value="Session directory, RPC timeout, small, slow, and plan models"
+        />
+        <KeyValueRow styles={styles} label="Denied tools" value="Native OMP tool restrictions" />
+      </SectionCard>
+      <Text style={styles.muted}>
+        Inherited environment configuration stores names only. Values stay in the daemon environment
+        and are resolved only when OMP starts.
+      </Text>
+    </>
+  );
+}
 function toneColor(theme: PluginSurfaceProps["theme"], tone: BinaryHealthSummary["tone"]): string {
   if (tone === "ok") return theme.colors.statusSuccess;
   if (tone === "warning") return theme.colors.statusWarning;
@@ -570,9 +711,11 @@ function fallbackSettingsFromConfig(config: OmpConfig | null | undefined): OmpSe
   return settings;
 }
 
-type SurfaceView = "overview" | "configuration" | "diagnostics";
+type SurfaceView = "overview" | "plugin" | "plugins" | "configuration" | "diagnostics";
 const SURFACE_VIEWS: readonly { id: SurfaceView; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "plugin", label: "Plugin" },
+  { id: "plugins", label: "OMP plugins" },
   { id: "configuration", label: "Configuration" },
   { id: "diagnostics", label: "Diagnostics" },
 ];
@@ -665,31 +808,123 @@ function StructuredSettingValue({
   );
 }
 
+type SettingDraft = { operation: "set"; value: string | boolean } | { operation: "reset" };
+
+function EditableScalarValue({
+  setting,
+  draft,
+  disabled,
+  styles,
+  onSet,
+  onReset,
+}: {
+  setting: OmpSetting;
+  draft: SettingDraft | undefined;
+  disabled: boolean;
+  styles: OmpConfigStyles;
+  onSet(value: string | boolean): void;
+  onReset(): void;
+}) {
+  const value = draft?.operation === "set" ? draft.value : setting.value;
+  return (
+    <View style={styles.recordList}>
+      {draft?.operation === "reset" ? (
+        <Text style={styles.muted}>Will reset to the OMP default</Text>
+      ) : setting.type === "boolean" ? (
+        <Switch
+          accessibilityLabel={`Toggle ${formatOmpSettingLabel(setting.path)}`}
+          disabled={disabled}
+          value={value === true}
+          onValueChange={onSet}
+        />
+      ) : (
+        <TextInput
+          accessibilityLabel={`Edit ${formatOmpSettingLabel(setting.path)}`}
+          editable={!disabled}
+          keyboardType={setting.type === "number" ? "numeric" : "default"}
+          value={value === undefined ? "" : String(value)}
+          onChangeText={onSet}
+          style={styles.scalarInput}
+        />
+      )}
+      <Pressable accessibilityRole="button" disabled={disabled} onPress={onReset}>
+        <Text style={styles.resetAction}>Reset to default</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 function ConfigurationCategory({
   category,
   styles,
   settings,
+  drafts,
+  disabled,
+  onDraft,
+  onOpenDocumentation,
 }: {
   category: { id: OmpSettingCategory; label: string };
   styles: OmpConfigStyles;
   settings: readonly OmpSetting[];
+  drafts: Readonly<Record<string, SettingDraft>>;
+  disabled: boolean;
+  onDraft(path: string, draft: SettingDraft): void;
+  onOpenDocumentation(link: OmpDocumentationLink): void;
 }) {
+  const categoryDocumentation = documentationForSettingCategory(category.id);
   return (
-    <SectionCard styles={styles} title={`${category.label} · ${settings.length}`}>
+    <SectionCard
+      styles={styles}
+      title={`${category.label} · ${settings.length}`}
+      action={
+        categoryDocumentation ? (
+          <DocumentationLink
+            link={categoryDocumentation}
+            styles={styles}
+            onOpen={onOpenDocumentation}
+          />
+        ) : undefined
+      }
+    >
       {settings.map((setting) => {
         const complex =
           Array.isArray(setting.value) ||
           (setting.value !== null && typeof setting.value === "object");
+        const editable =
+          !setting.redacted && ["boolean", "number", "string", "enum"].includes(setting.type);
+        const settingDocumentation = documentationForSettingPath(setting.path);
         return (
           <View key={setting.path} style={styles.setting}>
             <View style={styles.settingHeader}>
               <Text style={styles.cardTitle}>{formatOmpSettingLabel(setting.path)}</Text>
-              {!complex ? <StructuredSettingValue setting={setting} styles={styles} /> : null}
+              {!complex && !editable ? (
+                <StructuredSettingValue setting={setting} styles={styles} />
+              ) : null}
             </View>
             <Text selectable style={styles.settingPath}>
               {setting.path} · {setting.type}
             </Text>
-            {complex ? <StructuredSettingValue setting={setting} styles={styles} /> : null}
+            {settingDocumentation ? (
+              <View style={styles.docsActions}>
+                <DocumentationLink
+                  link={settingDocumentation}
+                  styles={styles}
+                  onOpen={onOpenDocumentation}
+                />
+              </View>
+            ) : null}
+            {editable ? (
+              <EditableScalarValue
+                setting={setting}
+                draft={drafts[setting.path]}
+                disabled={disabled}
+                styles={styles}
+                onSet={(value) => onDraft(setting.path, { operation: "set", value })}
+                onReset={() => onDraft(setting.path, { operation: "reset" })}
+              />
+            ) : complex ? (
+              <StructuredSettingValue setting={setting} styles={styles} />
+            ) : null}
             {setting.description ? (
               <Text style={styles.settingDescription}>{setting.description}</Text>
             ) : null}
@@ -733,19 +968,23 @@ function SurfaceTabs({
 export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
   const loadConfig = useRpc(listOmpConfig);
   const loadSettings = useRpc(listOmpSettings);
+  const updateSettings = useRpc(updateOmpSettings);
+  const queryClient = useQueryClient();
   const configQuery = useQuery({
     queryKey: ["paseo-omp", "config"],
     queryFn: () => loadConfig({}),
     refetchInterval: CONFIG_POLL_MS,
   });
   const settingsQuery = useQuery({
-    queryKey: ["paseo-omp", "settings"],
+    queryKey: SETTINGS_QUERY_KEY,
     queryFn: () => loadSettings({}),
     staleTime: Number.POSITIVE_INFINITY,
   });
   const [view, setView] = useState<SurfaceView>("overview");
   const [activeCategory, setActiveCategory] = useState<OmpSettingCategory>("appearance");
   const [search, setSearch] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, SettingDraft>>({});
+  const [documentationError, setDocumentationError] = useState<string | null>(null);
   const styles = useConfigStyles(theme, layout.compact);
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const catalog = useMemo(() => {
@@ -772,6 +1011,57 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
   );
   const selectedCategory =
     visibleCategories.find((category) => category.id === activeCategory) ?? visibleCategories[0];
+  const openDocumentation = useCallback(async (link: OmpDocumentationLink) => {
+    setDocumentationError(null);
+    try {
+      await Linking.openURL(link.url);
+    } catch {
+      setDocumentationError(`Could not open ${link.label.toLocaleLowerCase()}.`);
+    }
+  }, []);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const revision = settingsQuery.data?.revision;
+      if (!revision) throw new Error("OMP settings cannot be edited without a current revision.");
+      const byPath = new Map(catalog.sourceSettings.map((setting) => [setting.path, setting]));
+      const changes = Object.entries(drafts).map(([path, draft]) => {
+        if (draft.operation === "reset") return { operation: "reset" as const, path };
+        const setting = byPath.get(path);
+        if (!setting) throw new Error(`Setting ${path} is no longer available.`);
+        let value: OmpScalarValue = draft.value;
+        if (setting.type === "number") {
+          const raw = String(draft.value).trim();
+          if (!raw) throw new Error(`${path} requires a number.`);
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) throw new Error(`${path} requires a finite number.`);
+          value = parsed;
+        }
+        return { operation: "set" as const, path, value };
+      });
+      return updateSettings({ revision, changes });
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData(SETTINGS_QUERY_KEY, result.catalog);
+      if (
+        !result.conflict &&
+        !result.failed &&
+        result.appliedPaths.length === Object.keys(drafts).length
+      ) {
+        setDrafts({});
+      } else if (result.appliedPaths.length > 0) {
+        setDrafts((current) => {
+          const next = { ...current };
+          for (const path of result.appliedPaths) delete next[path];
+          return next;
+        });
+      }
+    },
+  });
+  const draftCount = Object.keys(drafts).length;
+  const displayedConfigPath = settingsQuery.data?.available
+    ? settingsQuery.data.path
+    : configQuery.data?.path;
 
   return (
     <ScrollView contentContainerStyle={styles.root}>
@@ -792,7 +1082,7 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
               <KeyValueRow
                 styles={styles}
                 label="Source"
-                value={configQuery.data?.path ?? "Unavailable"}
+                value={displayedConfigPath ?? "Source unavailable"}
               />
               <KeyValueRow
                 styles={styles}
@@ -807,6 +1097,12 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
             </SectionCard>
           )}
         </>
+      ) : null}
+
+      {view === "plugin" ? <PluginConfigurationSection styles={styles} /> : null}
+
+      {view === "plugins" ? (
+        <OmpPluginManagerSection theme={theme} compact={layout.compact} />
       ) : null}
 
       {view === "diagnostics" ? <ProviderHealthSection theme={theme} styles={styles} /> : null}
@@ -831,10 +1127,71 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
                 </Text>
               </Pressable>
             </View>
-            {configQuery.data?.path ? (
-              <Text style={styles.source}>{`Source: ${configQuery.data.path}`}</Text>
-            ) : null}
+            <View style={styles.docsActions}>
+              <DocumentationLink
+                link={OMP_SETTINGS_REFERENCE}
+                styles={styles}
+                onOpen={openDocumentation}
+              />
+              {OMP_SETTINGS_GUIDES.map((link) => (
+                <DocumentationLink
+                  key={link.url}
+                  link={link}
+                  styles={styles}
+                  onOpen={openDocumentation}
+                />
+              ))}
+            </View>
+            {displayedConfigPath ? (
+              <Text style={styles.source}>{`Source: ${displayedConfigPath}`}</Text>
+            ) : (
+              <Text style={styles.source}>Source unavailable</Text>
+            )}
           </View>
+          {documentationError ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {documentationError}
+            </Text>
+          ) : null}
+
+          {draftCount > 0 ? (
+            <View style={styles.editorActions}>
+              <Text style={styles.muted}>{draftCount} unsaved changes</Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={save.isPending}
+                onPress={() => setDrafts({})}
+                style={styles.editorAction}
+              >
+                <Text style={styles.editorActionText}>Discard</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={save.isPending}
+                onPress={() => save.mutate()}
+                style={[styles.editorAction, styles.editorActionPrimary]}
+              >
+                <Text style={[styles.editorActionText, styles.editorActionTextPrimary]}>
+                  {save.isPending ? "Applying…" : "Apply changes"}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+          {save.error ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {save.error instanceof Error ? save.error.message : "Could not apply OMP settings."}
+            </Text>
+          ) : null}
+          {save.data?.conflict ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              OMP configuration changed outside Paseo. Review the refreshed values and apply again.
+            </Text>
+          ) : null}
+          {save.data?.failed ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {save.data.failed.path}: {save.data.failed.message}
+            </Text>
+          ) : null}
 
           {settingsQuery.isLoading ? (
             <Text style={styles.muted}>Loading the OMP settings catalog…</Text>
@@ -897,6 +1254,12 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
                     category={selectedCategory}
                     styles={styles}
                     settings={catalog.byCategory.get(selectedCategory.id) ?? []}
+                    drafts={drafts}
+                    disabled={!settingsQuery.data?.revision || save.isPending}
+                    onDraft={(path, draft) =>
+                      setDrafts((current) => ({ ...current, [path]: draft }))
+                    }
+                    onOpenDocumentation={openDocumentation}
                   />
                 ) : (
                   <Text style={styles.muted}>No settings match this search.</Text>

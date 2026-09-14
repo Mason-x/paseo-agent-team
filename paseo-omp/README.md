@@ -13,7 +13,7 @@ paseo plugin add omercnet/paseo-plugins:paseo-omp --ref paseo-omp-v<version>
 paseo plugin ls paseo-omp
 ```
 
-Open the **OMP** sidebar to verify the binary, RPC compatibility, storage, process health, registered providers, and effective native configuration. Then create an agent and select **OMP Plugin**. Normal use requires no plugin-specific settings.
+Open the **OMP** sidebar to review the provider-profile contract, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and inspect storage and process diagnostics. Then create an agent and select **OMP Plugin**. Normal use requires no plugin-specific settings.
 
 - [Install, update, rollback, and local development](docs/installation.md)
 - [Configuration and every provider option](docs/configuration.md)

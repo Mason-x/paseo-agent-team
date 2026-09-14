@@ -62,6 +62,27 @@ export function buildProbeEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+const STATEFUL_CONFIG_ENV = [
+  "OMP_PROFILE",
+  "PI_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "PI_CONFIG_DIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME",
+] as const;
+
+export function buildStatefulCommandEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = buildProbeEnv(sourceEnv);
+  for (const key of STATEFUL_CONFIG_ENV) {
+    const value = sourceEnv[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 /** The minimal child-process shape a probe needs: readable stdio, exit reporting, and cleanup. */
 export interface ProbeReadable {
   on(event: "data", listener: (chunk: Buffer) => void): void;

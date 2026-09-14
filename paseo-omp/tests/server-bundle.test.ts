@@ -99,7 +99,7 @@ describe("plugin server bundle", () => {
         handle: (...args: unknown[]) => handlers.push(args),
         registerProvider: (provider: ProviderRegistration) => providers.push(provider),
       });
-      expect(handlers).toHaveLength(8);
+      expect(handlers).toHaveLength(13);
       expect(beforeHooks).toHaveLength(1);
       const [hookName, hook] = beforeHooks[0] as [
         string,

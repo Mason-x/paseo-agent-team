@@ -1,8 +1,8 @@
 # Configuration
 
-Normal use requires no plugin-specific configuration. Open the **OMP** sidebar in Paseo to inspect the binary, RPC compatibility, storage paths, process health, registered providers, and the safe non-secret subset of the active native OMP configuration.
+Open the **OMP** sidebar to browse the complete installed OMP settings catalog. Boolean, number, string, and enum settings support revision-checked Apply, Discard, and Reset actions; arrays, records, and credentials remain read-only. Configuration writes use OMP's native `config set` and `config reset` commands rather than rewriting YAML.
 
-Choose **OMP Plugin** when creating an agent. Model, mode, thinking level, system prompt, persistence, MCP servers, workspace, and agent environment use Paseo's standard provider controls.
+The **Plugin** tab documents the supported `omp-plugin` launch options, including names-only inherited environment configuration. Paseo's public plugin API does not expose the effective provider options for active launches, so the tab does not claim profile values are active. Choose **OMP Plugin** when creating an agent. Model, mode, thinking level, system prompt, persistence, MCP servers, workspace, and agent environment use Paseo's standard provider controls.
 
 ## Optional provider profile overrides
 
@@ -28,6 +28,7 @@ Advanced launch overrides belong in an `omp-plugin` provider profile. The provid
 | --- | --- |
 | `command` | Complete OMP executable and argument prefix. |
 | `env` | Non-secret process overrides applied below the session launch environment. |
+| `inheritEnv` | Daemon environment variable names copied only when OMP starts. Values are never stored in the profile or displayed in the sidebar. |
 | `outputRedaction` | `none` (default) preserves native output. `configured-values` performs best-effort literal replacement only for explicitly supplied configured credential values from profile/session credential environment fields and configured MCP headers or environment. |
 | `params.sessionDir` | Native OMP session directory supplied through `--session-dir`. Used consistently by discovery, import, resume, and launch. |
 | `params.rpcTimeoutMs` | Startup, request, catalog, and availability timeout, from 1 ms through 10 minutes. |
@@ -45,6 +46,15 @@ Paseo's generic provider profile fields remain available:
 | `paseoTools` | Enables or restricts which caller-scoped Paseo orchestration tools the daemon includes before they reach OMP as MCP host tools. |
 
 These options cover every plugin-specific launch value. Values that belong to an individual agent, including model, mode, thinking level, title, system prompt, MCP servers, persistence, and cwd, remain standard Paseo session fields rather than duplicate plugin options.
+
+## OMP-native plugins
+
+Open **OMP → OMP plugins** to inspect plugins installed through OMP. The manager uses OMP's documented singular `omp plugin` CLI and supports user-scoped install, enable, disable, upgrade, and uninstall operations. Every state-changing action requires an explicit confirmation; already-running OMP sessions are unchanged.
+
+Project-scoped installations remain visible but read-only because their lifecycle commands must run from that project's working directory. Plugin configuration exposes schema metadata without returning current or default values. Non-secret scalar plugin settings can be set or deleted through write-only controls. Secret settings are presence-only and delete-only because OMP's CLI would otherwise expose a new secret through process arguments.
+
+The Configuration view links to the official OMP settings reference, value parsing and precedence guides, relevant category sections, and a small curated set of setting-specific anchors.
+
 
 ## MCP tools and policy boundary
 

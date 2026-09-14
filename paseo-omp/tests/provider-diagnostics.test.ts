@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  buildStatefulCommandEnv,
   computeOmpProviderHealth,
   computeProcessDiagnostics,
   killWindowsProcessTree,
@@ -19,6 +20,26 @@ import {
 import { OmpProviderHealthSchema } from "../shared/provider-diagnostics";
 
 const testOnPosix = process.platform === "win32" ? test.skip : test;
+
+test("stateful OMP commands preserve config selectors without provider credentials", () => {
+  const env = buildStatefulCommandEnv({
+    PATH: "/bin",
+    HOME: "/home/test",
+    OMP_PROFILE: "work",
+    PI_CODING_AGENT_DIR: "/tmp/agent",
+    XDG_CONFIG_HOME: "/tmp/config",
+    OPENAI_API_KEY: "must-not-pass",
+  });
+
+  expect(env).toMatchObject({
+    PATH: "/bin",
+    HOME: "/home/test",
+    OMP_PROFILE: "work",
+    PI_CODING_AGENT_DIR: "/tmp/agent",
+    XDG_CONFIG_HOME: "/tmp/config",
+  });
+  expect(env.OPENAI_API_KEY).toBeUndefined();
+});
 
 const temporaryDirectories: string[] = [];
 const HOME_DIR = await realpath(tmpdir());

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { parseOmpSettingsList } from "../server/omp-settings";
+import {
+  listOmpSettingsWithDependencies,
+  type OmpSettingsDependencies,
+  parseOmpSettingsList,
+  updateOmpSettingsWithDependencies,
+} from "../server/omp-settings";
 import { categorizeOmpSetting, formatOmpSettingLabel } from "../shared/omp-settings";
 
 describe("OMP settings inventory", () => {
@@ -68,5 +73,111 @@ describe("OMP settings inventory", () => {
     expect(formatOmpSettingLabel("providers.streamIdleTimeoutSeconds")).toBe(
       "Stream Idle Timeout Seconds",
     );
+  });
+});
+
+describe("OMP scalar settings updates", () => {
+  function harness() {
+    const values: Record<string, { value: unknown; type: string; description: string }> = {
+      "retry.enabled": { value: true, type: "boolean", description: "" },
+      temperature: { value: 0.5, type: "number", description: "" },
+      personality: { value: "default", type: "enum", description: "" },
+    };
+    const commands: string[][] = [];
+    const dependencies: OmpSettingsDependencies = {
+      async resolveExecutable() {
+        return "/fake/omp";
+      },
+      async runConfig(_executable, args) {
+        commands.push([...args]);
+        const serializedValue = args.at(-1);
+        if (args[0] === "set" && args[1] === "temperature" && serializedValue === "99") {
+          return {
+            outcome: "exited",
+            stdout: "",
+            truncated: false,
+            exitCode: 1,
+            signal: null,
+            spawnErrorCode: null,
+            cleanupFailed: false,
+          };
+        }
+        if (args[0] === "set" && args[1] && serializedValue !== undefined) {
+          const setting = values[args[1]];
+          if (setting) {
+            setting.value =
+              setting.type === "boolean"
+                ? serializedValue === "true"
+                : setting.type === "number"
+                  ? Number(serializedValue)
+                  : serializedValue;
+          }
+        }
+        if (args[0] === "reset" && args[1] === "retry.enabled") values[args[1]].value = false;
+        return {
+          outcome: "exited",
+          stdout: args[0] === "list" ? JSON.stringify(values) : "",
+          truncated: false,
+          exitCode: 0,
+          signal: null,
+          spawnErrorCode: null,
+          cleanupFailed: false,
+        };
+      },
+    };
+    return { commands, dependencies };
+  }
+  test("applies validated scalar sets and resets against one revision", async () => {
+    const { commands, dependencies } = harness();
+    const listed = await listOmpSettingsWithDependencies({}, dependencies);
+    const result = await updateOmpSettingsWithDependencies(
+      {
+        revision: listed.revision ?? "",
+        changes: [
+          { operation: "set", path: "personality", value: "concise" },
+          { operation: "reset", path: "retry.enabled" },
+        ],
+      },
+      dependencies,
+    );
+
+    expect(result.conflict).toBe(false);
+    expect(result.appliedPaths).toEqual(["personality", "retry.enabled"]);
+    expect(commands).toContainEqual(["set", "personality", "--json", "--", "concise"]);
+    expect(commands).toContainEqual(["reset", "retry.enabled"]);
+  });
+
+  test("rejects stale revisions before running mutations", async () => {
+    const { commands, dependencies } = harness();
+    const result = await updateOmpSettingsWithDependencies(
+      { revision: "stale", changes: [{ operation: "set", path: "personality", value: "x" }] },
+      dependencies,
+    );
+
+    expect(result.conflict).toBe(true);
+    expect(commands.filter(([operation]) => operation !== "list" && operation !== "path")).toEqual(
+      [],
+    );
+  });
+
+  test("reports the first failed change after preserving applied paths", async () => {
+    const { dependencies } = harness();
+    const listed = await listOmpSettingsWithDependencies({}, dependencies);
+    const result = await updateOmpSettingsWithDependencies(
+      {
+        revision: listed.revision ?? "",
+        changes: [
+          { operation: "set", path: "personality", value: "concise" },
+          { operation: "set", path: "temperature", value: 99 },
+        ],
+      },
+      dependencies,
+    );
+
+    expect(result.appliedPaths).toEqual(["personality"]);
+    expect(result.failed).toEqual({
+      path: "temperature",
+      message: "OMP rejected this setting change.",
+    });
   });
 });

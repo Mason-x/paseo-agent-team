@@ -12,6 +12,8 @@ export const OmpSettingTypeSchema = z.enum([
   "record",
 ]);
 export type OmpSettingType = z.infer<typeof OmpSettingTypeSchema>;
+export const OmpScalarValueSchema = z.union([z.boolean(), z.number(), z.string()]);
+export type OmpScalarValue = z.infer<typeof OmpScalarValueSchema>;
 
 export const OmpSettingSchema = z
   .object({
@@ -168,9 +170,38 @@ export const listOmpSettings = defineRpc({
   input: z.object({}),
   output: z.object({
     catalogVersion: z.literal(OMP_SETTINGS_CATALOG_VERSION),
+    revision: z.string().optional(),
+    path: z.string().optional(),
     available: z.boolean(),
     droppedCount: z.number().int().nonnegative(),
     settings: z.array(OmpSettingSchema),
     error: z.string().optional(),
+  }),
+});
+
+const OmpSettingChangeSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("set"), path: z.string().min(1), value: OmpScalarValueSchema }),
+  z.object({ operation: z.literal("reset"), path: z.string().min(1) }),
+]);
+
+export const updateOmpSettings = defineRpc({
+  name: "paseo-omp.update-settings",
+  input: z.object({
+    revision: z.string(),
+    changes: z.array(OmpSettingChangeSchema).min(1).max(100),
+  }),
+  output: z.object({
+    conflict: z.boolean(),
+    appliedPaths: z.array(z.string()),
+    failed: z.object({ path: z.string(), message: z.string() }).optional(),
+    catalog: z.object({
+      catalogVersion: z.literal(OMP_SETTINGS_CATALOG_VERSION),
+      available: z.boolean(),
+      revision: z.string().optional(),
+      path: z.string().optional(),
+      droppedCount: z.number().int().nonnegative(),
+      settings: z.array(OmpSettingSchema),
+      error: z.string().optional(),
+    }),
   }),
 });
