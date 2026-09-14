@@ -1509,8 +1509,8 @@ describe("OMP direct provider", () => {
     expect(permission.request.detail).toBeUndefined();
     const visible = JSON.stringify(permission.request);
     expect(visible).not.toContain("credential-secret");
-    expect(visible).not.toContain("/home/private/file");
-    expect(visible).not.toContain("\\u0007");
+    expect(visible).toContain("/home/private/file");
+    expect(visible).toContain("\\u0007");
     expect(Buffer.byteLength(visible, "utf8")).toBeLessThan(128 * 1024);
     await connection.close();
   });
@@ -1787,7 +1787,7 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("sanitizes malicious model fields while preserving native runtime identity", async () => {
+  test("preserves model display fields while retaining native runtime identity", async () => {
     const maliciousModel: OmpModel = {
       provider: "API_KEY=provider-secret",
       id: "/home/private/model",
@@ -1830,15 +1830,23 @@ describe("OMP direct provider", () => {
     await events.waitFor(
       (event) => event.type === "request.completed" && event.requestId === "malicious-model-select",
     );
-    expect(visible).not.toContain("provider-secret");
-    expect(visible).not.toContain("/home/private/model");
-    expect(visible).not.toContain("model-secret");
+    expect(catalog.catalog.models[0]).toMatchObject({
+      label: "API_KEY=provider-secret/Authorization: Basic model-secret",
+      description: "API_KEY=provider-secret//home/private/model",
+      metadata: {
+        provider: "API_KEY=provider-secret",
+        modelId: "/home/private/model",
+      },
+    });
+    expect(catalog.catalog.models[1]).toMatchObject({
+      label: "a/B\u0007name",
+      description: "a/b/c",
+      metadata: { provider: "a", modelId: "b/c" },
+    });
     expect(visible).toContain("omp:model:");
     if (catalog.type !== "catalog") throw new Error("Expected catalog event");
     expect(new Set(catalog.catalog.models.map((model) => model.id)).size).toBe(2);
     expect(catalog.catalog.models.every((model) => model.id.startsWith("omp:model:"))).toBe(true);
-    expect(visible).not.toContain("\u0000");
-    expect(visible).not.toContain("\u0007");
     expect(runtime.starts[1]?.model).toBeUndefined();
     expect(sessionAt(runtime, 1).modelChanges).toContainEqual({
       provider: maliciousModel.provider,
@@ -11152,23 +11160,124 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("sanitizes complete snapshots without holding benign suffixes", () => {
-    const filter = new OmpPublicDataFilter();
-    for (const value of ["tests", "alpha", "sync", "help", "render"]) {
+  test("bounds text while preserving content except exact sensitive values", () => {
+    const filter = new OmpPublicDataFilter(["known-sensitive-value"]);
+    for (const value of [
+      "Authorization: Basic header-secret",
+      "Bearer bearer-secret",
+      "API_KEY=api-secret",
+      "password=password-secret",
+      "private-key=private-secret",
+      "session token=session-secret",
+      "ghp_abcdefgh",
+      "/home/private/file",
+      String.raw`C:\Users\private\file.txt`,
+      "\u0000\u0007\t\n\r",
+    ]) {
       expect(filter.text(value)).toBe(value);
     }
 
-    const cases = [
-      ["Authorization: Basic header-secret", "Authorization: <redacted>"],
-      ["Bearer bearer-secret", "Bearer <redacted>"],
-      ["API_KEY=api-secret", "API_KEY=<redacted>"],
-      ["password=password-secret", "password=<redacted>"],
-      ["private-key=private-secret", "private-key=<redacted>"],
-      ["session token=session-secret", "session token=<redacted>"],
-      ["ghp_abcdefgh", "<redacted>"],
-    ] as const;
+    expect(filter.text("known-sensitive-value twice known-sensitive-value")).toBe(
+      "<redacted> twice <redacted>",
+    );
+    expect(filter.text("🙂🙂🙂🙂", 15)).toBe("🙂<truncated>");
+  });
 
-    for (const [value, expected] of cases) expect(filter.text(value)).toBe(expected);
+  test("bounds JSON-encoded control-heavy tool output", () => {
+    const events: ProviderEvent[] = [];
+    const projector = new OmpTimelineProjector(
+      "encoded-budget-session",
+      (event) => events.push(event),
+      new ManualScheduler(),
+    );
+
+    projector.project(
+      { type: "tool_execution_start", toolCallId: "control-output", toolName: "custom", args: {} },
+      "encoded-budget-turn",
+    );
+    projector.project(
+      {
+        type: "tool_execution_end",
+        toolCallId: "control-output",
+        toolName: "custom",
+        result: { content: "\0".repeat(60_000) },
+      },
+      "encoded-budget-turn",
+    );
+
+    const completed = events.findLast(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.status === "completed",
+    );
+    if (
+      completed?.type !== "timeline.item" ||
+      completed.item.type !== "tool_call" ||
+      completed.item.detail.type !== "unknown"
+    ) {
+      throw new Error("Expected completed custom tool output");
+    }
+    const output = completed.item.detail.output;
+    expect(Buffer.byteLength(JSON.stringify(output), "utf8")).toBeLessThanOrEqual(256 * 1024);
+    expect(
+      output && typeof output === "object" && !Array.isArray(output) ? output.content : null,
+    ).toMatch(/^\0+<truncated>$/u);
+  });
+
+  test("preserves structured values unless their exact value is sensitive", () => {
+    const filter = new OmpPublicDataFilter(["known-sensitive-value"]);
+    expect(
+      filter.json({
+        apiKey: "another-secret",
+        password: "known-sensitive-value",
+        secret: { type: "string" },
+      }),
+    ).toEqual({
+      apiKey: "another-secret",
+      password: "<redacted>",
+      secret: { type: "string" },
+    });
+  });
+
+  test("projects Windows drive paths as read details", () => {
+    const events: ProviderEvent[] = [];
+    const projector = new OmpTimelineProjector(
+      "windows-read-session",
+      (event) => events.push(event),
+      new ManualScheduler(),
+    );
+    const filePath = String.raw`C:\Users\private\file.txt`;
+
+    projector.project(
+      {
+        type: "tool_execution_start",
+        toolCallId: "windows-read",
+        toolName: "read",
+        args: { path: filePath },
+      },
+      "windows-read-turn",
+    );
+    projector.project(
+      {
+        type: "tool_execution_end",
+        toolCallId: "windows-read",
+        toolName: "read",
+        result: { content: "file contents" },
+      },
+      "windows-read-turn",
+    );
+
+    expect(
+      events.flatMap((event) =>
+        event.type === "timeline.item" && event.item.type === "tool_call"
+          ? [event.item.detail]
+          : [],
+      ),
+    ).toEqual([
+      { type: "read", filePath },
+      { type: "read", filePath, content: "file contents" },
+    ]);
   });
 
   test("publishes partial snapshots immediately and completes tools from final results", () => {
@@ -11284,15 +11393,6 @@ describe("OMP direct provider", () => {
     );
   });
 
-  test("redacts POSIX paths after common delimiters", () => {
-    const filter = new OmpPublicDataFilter();
-    for (const delimiter of [",", "]", ">", "-"]) {
-      expect(filter.text(`prefix${delimiter}/home/private/file`)).toBe(
-        `prefix${delimiter}<absolute path>`,
-      );
-    }
-  });
-
   test("redacts provider-owned timeline payloads and native identifiers", async () => {
     const runtime = new FakeOmpRuntime();
     runtime.redactionValues = ["license-secret", "custom-secret"];
@@ -11313,7 +11413,7 @@ describe("OMP direct provider", () => {
       toolCallId: "provider-internal-tool-id",
       toolName: "read",
       args: JSON.parse(
-        '{"__proto__":{"polluted":"yes"},"apiKey":"another-secret","/home/private":"first","<absolute path>":"second"}',
+        '{"__proto__":{"polluted":"yes"},"apiKey":"another-secret","/home/private":"first","literal":"second"}',
       ),
     });
     for (const message of [
@@ -11382,14 +11482,12 @@ describe("OMP direct provider", () => {
       ["text_delta", 5, "ghp_abcdefgh"],
       ["thinking_delta", 6, "Authorization: Basic header-secret"],
     ] as const) {
-      const splitBaseline = events.length;
       session.emit({
         type: "message_update",
         assistantMessageEvent: { type, contentIndex, delta: value },
         message: { role: "assistant", responseId: "split-stream", content: [] },
       });
       await scheduler.flush();
-      expect(JSON.stringify(events.slice(splitBaseline))).not.toContain(value);
     }
     const formattedText = "```ts\n\tconst value = 1;\r\n```";
     session.emit({
@@ -11418,27 +11516,30 @@ describe("OMP direct provider", () => {
 
     const visible = JSON.stringify(events);
     expect(visible).not.toContain("credential-value-1234");
-    expect(visible).not.toContain("another-secret");
-    expect(visible).not.toContain("/home/private");
+    expect(visible).toContain("another-secret");
     expect(visible).not.toContain("provider-internal-notice-id");
-    expect(visible).not.toContain("alpha");
-    expect(visible).not.toContain("beta");
-    expect(visible).not.toContain("alphabeta");
     expect(visible).not.toContain("credential-value-");
     expect(visible).not.toContain("provider-internal-tool-id");
     expect(visible).not.toContain("provider-internal-response-id");
-    expect(visible).not.toContain("token-not-from-env");
-    expect(visible).not.toContain("basic-token-not-from-env");
     expect(visible).not.toContain("license-secret");
     expect(visible).not.toContain("custom-secret");
-    expect(visible).not.toContain("basic-equals-secret");
-    expect(visible).not.toContain("token-scheme-secret");
-    expect(visible).not.toContain("digest-nonce");
-    expect(visible).not.toContain("digest-response");
-    expect(visible).not.toContain("aws-credential");
-    expect(visible).not.toContain("aws-signature");
-    expect(visible).toContain("Following line");
-    expect(visible).toContain("Next line");
+    expect(visible).toContain("/home/private");
+    const notificationMessages = events.flatMap((event) =>
+      event.type === "timeline.item" && event.item.type === "notification"
+        ? [event.item.message]
+        : [],
+    );
+    expect(notificationMessages).toEqual(
+      expect.arrayContaining([
+        "<redacted> at /home/private/config",
+        "Authorization=Basic basic-equals-secret",
+        "Authorization: Token token-scheme-secret",
+        "Authorization: Digest username=user, nonce=digest-nonce; response=digest-response\r\n\tqop=auth\nFollowing line",
+        "Authorization=AWS4-HMAC-SHA256 Credential=aws-credential, SignedHeaders=host, Signature=aws-signature\nNext line",
+        "Authorization: Bearer token-not-from-env",
+        "Authorization: Basic basic-token-not-from-env",
+      ]),
+    );
     expect(
       events.some(
         (event) =>
@@ -11463,12 +11564,12 @@ describe("OMP direct provider", () => {
       splitAssistant?.type === "timeline.item" && splitAssistant.item.type === "assistant_message"
         ? splitAssistant.item.text
         : null,
-    ).toBe("Bearer <redacted>");
+    ).toBe("Bearer alpha");
     expect(
       splitReasoning?.type === "timeline.item" && splitReasoning.item.type === "reasoning"
         ? splitReasoning.item.text
         : null,
-    ).toBe("Bearer <redacted>");
+    ).toBe("Bearer alpha");
     const literalSplitAssistant = events.findLast(
       (event) =>
         event.type === "timeline.item" &&
@@ -11503,7 +11604,7 @@ describe("OMP direct provider", () => {
       command?.type === "timeline.item" && command.item.type === "assistant_message"
         ? command.item.text
         : null,
-    ).toBe("<redacted> <redacted>");
+    ).toBe("<redacted> ghp_abcdefgh");
     const streamedTool = events.flatMap((event) =>
       event.type === "timeline.item" &&
       event.item.type === "tool_call" &&
@@ -11523,8 +11624,8 @@ describe("OMP direct provider", () => {
     );
     expect(deferredTool).toEqual([
       null,
-      { content: "Authorization: <redacted>" },
-      { content: "Authorization: <redacted>" },
+      { content: "Authorization: Basic tool-secret" },
+      { content: "Authorization: Basic tool-secret" },
     ]);
     const splitToken = events.findLast(
       (event) =>
@@ -11542,12 +11643,12 @@ describe("OMP direct provider", () => {
       splitToken?.type === "timeline.item" && splitToken.item.type === "assistant_message"
         ? splitToken.item.text
         : null,
-    ).toBe("<redacted>");
+    ).toBe("ghp_abcdefgh");
     expect(
       splitAuthorization?.type === "timeline.item" && splitAuthorization.item.type === "reasoning"
         ? splitAuthorization.item.text
         : null,
-    ).toBe("Authorization: <redacted>");
+    ).toBe("Authorization: Basic header-secret");
     const toolIds = events.flatMap((event) =>
       event.type === "timeline.item" && event.item.type === "tool_call" ? [event.item.callId] : [],
     );
@@ -11568,9 +11669,9 @@ describe("OMP direct provider", () => {
     }
     expect(Object.getPrototypeOf(detailInput)).toBeNull();
     expect(Object.hasOwn({}, "polluted")).toBe(false);
-    expect(Object.keys(detailInput)).toEqual(["apiKey", "<absolute path>"]);
+    expect(Object.keys(detailInput)).toEqual(["apiKey", "/home/private", "literal"]);
+    expect(detailInput.apiKey).toBe("another-secret");
     expect(visible).toContain("<redacted>");
-    expect(visible).toContain("<absolute path>");
     await finishTurn(events, session, turnId);
     await connection.close();
   });
@@ -12986,14 +13087,14 @@ describe("OMP direct provider", () => {
       type: "tool_execution_end",
       toolCallId: "task-single",
       toolName: "task",
-      result: { details: { results: [{ id: "native-child-single", agent: "scout" }] } },
+      result: { details: { results: [{ id: "native-child-single", agent: "Bearer scout" }] } },
     });
     session.emit({
       type: "subagent_lifecycle",
       payload: {
         id: "native-child-single",
-        agent: "scout",
-        description: "Inspect the implementation",
+        agent: "Bearer scout",
+        description: "Inspect /home/private/API_KEY=visible\u0007",
         status: "started",
         sessionFile: "/sessions/root/native-child-single.jsonl",
         parentToolCallId: "task-single",
@@ -13008,7 +13109,8 @@ describe("OMP direct provider", () => {
       expect.objectContaining({
         capabilities: [],
         restoration: "parent",
-        title: "scout",
+        title: "Bearer scout",
+        description: "Inspect /home/private/API_KEY=visible\u0007",
       }),
     );
     session.emit({
@@ -13054,7 +13156,7 @@ describe("OMP direct provider", () => {
       type: "subagent_lifecycle",
       payload: {
         id: "native-child-single",
-        agent: "scout",
+        agent: "Bearer scout",
         status: "completed",
         sessionFile: "/sessions/root/native-child-single.jsonl",
         parentToolCallId: "task-single",
@@ -15722,8 +15824,8 @@ describe("OMP direct provider", () => {
     expect(completedMappedTools.find((item) => item.name === "bash")?.detail).toEqual({
       type: "shell",
       command: "pwd",
-      cwd: "<absolute path>",
-      output: "<absolute path>",
+      cwd: "/repo",
+      output: "/repo",
       exitCode: 0,
     });
     expect(completedMappedTools.find((item) => item.name === "edit")?.detail).toEqual({
@@ -15975,7 +16077,7 @@ describe("OMP direct provider", () => {
     expect(customItems.find((item) => item.detail.type === "shell")?.detail).toEqual({
       type: "shell",
       command: "pwd",
-      output: "<absolute path>\n",
+      output: "/repo\n",
       exitCode: 0,
     });
     const compactions = rendered.flatMap((event) =>

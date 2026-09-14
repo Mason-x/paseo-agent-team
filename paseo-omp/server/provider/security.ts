@@ -16,18 +16,45 @@ const MAX_PUBLIC_JSON_BYTES = 256 * 1024;
 const REDACTED = "<redacted>";
 const OMITTED = "<omitted>";
 
-const SENSITIVE_KEY =
-  /(?:^|_)(?:api_?key|access_?token|refresh_?token|auth|authorization|cookie|credential|password|private_?key|secret|session_?token)(?:$|_)/iu;
-const AUTHORIZATION_CREDENTIAL = /\bAuthorization\s*[:=]\s*[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*/giu;
-const BEARER_CREDENTIAL = /\bBearer\s+[A-Za-z0-9._~+/=-]{1,}/giu;
-const CREDENTIAL_ASSIGNMENT =
-  /\b(api[ _-]?key|access[ _-]?token|refresh[ _-]?token|authorization|cookie|credential|password|private[ _-]?key|secret|session[ _-]?token)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu;
-const TOKEN_CREDENTIAL = /\b(?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{8,}\b/gu;
-const POSIX_ABSOLUTE_PATH = /(^|[^A-Za-z0-9_./\\])(\/(?!\/)[^\s"'`<>\])},;]+)/gu;
-const WINDOWS_ABSOLUTE_PATH = /\b[A-Za-z]:\\[^\s"'`<>\])},;]+/gu;
-
 export function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+function jsonStringBytes(value: string): number {
+  return utf8Bytes(JSON.stringify(value));
+}
+
+function jsonStringCharacterBytes(character: string): number {
+  const codeUnit = character.charCodeAt(0);
+  if (codeUnit === 0x22 || codeUnit === 0x5c) return 2;
+  if (codeUnit <= 0x1f) {
+    return codeUnit === 0x08 ||
+      codeUnit === 0x09 ||
+      codeUnit === 0x0a ||
+      codeUnit === 0x0c ||
+      codeUnit === 0x0d
+      ? 2
+      : 6;
+  }
+  if (character.length === 1 && codeUnit >= 0xd800 && codeUnit <= 0xdfff) return 6;
+  return utf8Bytes(character);
+}
+
+function truncateJsonString(value: string, maxBytes: number): string {
+  if (jsonStringBytes(value) <= maxBytes) return value;
+  const suffix = "<truncated>";
+  const suffixBytes = jsonStringBytes(suffix);
+  if (suffixBytes > maxBytes) return "";
+  const budget = maxBytes - suffixBytes;
+  let output = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = jsonStringCharacterBytes(character);
+    if (bytes + characterBytes > budget) break;
+    output += character;
+    bytes += characterBytes;
+  }
+  return `${output}${suffix}`;
 }
 
 export function truncateUtf8(value: string, maxBytes: number): string {
@@ -43,19 +70,6 @@ export function truncateUtf8(value: string, maxBytes: number): string {
     bytes += characterBytes;
   }
   return `${output}${suffix}`;
-}
-
-function replaceControlCharacters(value: string): string {
-  let output = "";
-  let segmentStart = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f))
-      continue;
-    output += `${value.slice(segmentStart, index)}<control>`;
-    segmentStart = index + 1;
-  }
-  return segmentStart === 0 ? value : output + value.slice(segmentStart);
 }
 
 export interface BoundedJsonMetrics {
@@ -217,18 +231,8 @@ export class OmpPublicDataFilter {
   }
 
   text(input: string, maxBytes = MAX_PUBLIC_STRING_BYTES): string {
-    let output = input.replace(AUTHORIZATION_CREDENTIAL, `Authorization: ${REDACTED}`);
-    output = output.replace(BEARER_CREDENTIAL, `Bearer ${REDACTED}`);
+    let output = input;
     for (const value of this.sensitiveValues) output = output.split(value).join(REDACTED);
-    output = replaceControlCharacters(
-      output
-        .replace(CREDENTIAL_ASSIGNMENT, (_match, name: string, separator: string) => {
-          return `${name}${separator}${REDACTED}`;
-        })
-        .replace(TOKEN_CREDENTIAL, REDACTED),
-    )
-      .replace(POSIX_ABSOLUTE_PATH, (_match, prefix: string) => `${prefix}<absolute path>`)
-      .replace(WINDOWS_ABSOLUTE_PATH, "<absolute path>");
     return truncateUtf8(output, maxBytes);
   }
 
@@ -247,19 +251,13 @@ export class OmpPublicDataFilter {
     };
     const boundedString = (value: string): string => {
       const sanitized = this.text(value, Math.min(maxStringBytes, remaining));
-      const encodedBytes = utf8Bytes(JSON.stringify(sanitized));
-      if (consume(encodedBytes)) return sanitized;
-      const fallback = this.text(sanitized, Math.max(0, Math.floor((remaining - 2) / 2)));
-      consume(utf8Bytes(JSON.stringify(fallback)));
-      return fallback;
+      const output = truncateJsonString(sanitized, remaining);
+      consume(jsonStringBytes(output));
+      return output;
     };
-    const visit = (value: unknown, key: string | undefined, depth: number): JsonValue => {
+    const visit = (value: unknown, depth: number): JsonValue => {
       nodes += 1;
       if (nodes > MAX_PUBLIC_NODES || depth > MAX_PUBLIC_DEPTH || remaining < 16) return OMITTED;
-      if (key && SENSITIVE_KEY.test(key)) {
-        consume(utf8Bytes(JSON.stringify(REDACTED)));
-        return REDACTED;
-      }
       if (value === null) {
         consume(4);
         return null;
@@ -282,7 +280,7 @@ export class OmpPublicDataFilter {
         const length = Math.min(value.length, MAX_PUBLIC_COLLECTION_ITEMS);
         for (let index = 0; index < length && remaining >= 16; index += 1) {
           if (index > 0) consume(1);
-          output.push(visit(value[index], undefined, depth + 1));
+          output.push(visit(value[index], depth + 1));
         }
         return output;
       }
@@ -304,10 +302,10 @@ export class OmpPublicDataFilter {
         }
         const keyBytes = utf8Bytes(JSON.stringify(safeKey)) + 1 + (itemCount > 1 ? 1 : 0);
         if (!consume(keyBytes)) break;
-        output[safeKey] = visit((value as Record<string, unknown>)[childKey], childKey, depth + 1);
+        output[safeKey] = visit((value as Record<string, unknown>)[childKey], depth + 1);
       }
       return output;
     };
-    return visit(input, undefined, 0);
+    return visit(input, 0);
   }
 }

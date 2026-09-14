@@ -1492,7 +1492,7 @@ export class OmpTimelineProjector {
     if (name === "read") {
       const filePath = firstString(nestedInput, "path", "filePath", "url");
       if (!filePath) return { type: "unknown", input: snapshot.input, output: snapshot.output };
-      if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(filePath)) {
+      if (!/^[A-Za-z]:[\\/]/u.test(filePath) && /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(filePath)) {
         const url = publishableHttpUrl(filePath);
         if (!url) {
           return { type: "plain_text", label: snapshot.name, text: resultText };
