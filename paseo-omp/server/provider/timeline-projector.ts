@@ -31,16 +31,12 @@ const MAX_NATIVE_IMAGE_RESULT_BYTES = 12 * 1024 * 1024;
 const MAX_RETIRED_TOOL_IDS = 1_024;
 
 type Emit = (event: ProviderEvent) => void;
-type NativeImageMimeType = Exclude<OmpImageMimeType, "image/webp">;
 
 type NativeImage = {
   id: string;
   data: string;
-  mimeType: NativeImageMimeType;
+  mimeType: OmpImageMimeType;
 };
-
-const UNSUPPORTED_WEBP_MESSAGE =
-  "OMP image uses WebP, which is not supported on every Paseo client";
 
 type StreamBlockKind = "assistant_message" | "reasoning" | "image";
 
@@ -51,7 +47,6 @@ type StreamBlockSnapshot = {
   text: string;
   publishedText?: string;
   image?: NativeImage;
-  error?: string;
 };
 
 type StreamSnapshot = {
@@ -118,9 +113,6 @@ function assistantContentFingerprint(message: OmpAssistantMessage): string {
 function imageBlock(data: string, mimeType: string): StreamBlockSnapshot | undefined {
   if (!isValidImagePayload(data, mimeType, MAX_IMAGE_ENCODED_LENGTH)) return undefined;
   if (!isOmpImageMimeType(mimeType)) return undefined;
-  if (mimeType === "image/webp") {
-    return { kind: "image", text: mimeType, error: UNSUPPORTED_WEBP_MESSAGE };
-  }
   return {
     kind: "image",
     text: `${mimeType}\n${data}`,
@@ -238,7 +230,7 @@ type NativeImageEnvelope = {
   details?: JsonValue;
 };
 
-type NativeImageResult = { image: NativeImageEnvelope; output: JsonValue } | { error: string };
+type NativeImageResult = { image: NativeImageEnvelope; output: JsonValue };
 
 function nativeImageResult(
   value: unknown,
@@ -281,7 +273,6 @@ function nativeImageResult(
       ) {
         return undefined;
       }
-      if (part.mimeType === "image/webp") return { error: UNSUPPORTED_WEBP_MESSAGE };
       images.push({
         id: createHash("sha256")
           .update(part.mimeType)
@@ -515,16 +506,6 @@ export class OmpTimelineProjector {
         this.tools.delete(event.toolCallId);
         this.activeToolBytes -= previous.retainedBytes;
         if (preservedImage && !event.isError) {
-          if ("error" in preservedImage) {
-            const output = this.dataFilter.json(
-              event.result,
-              MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
-              MAX_PUBLIC_TOOL_PAYLOAD_BYTES,
-            );
-            this.publishTool({ ...previous, output }, "completed");
-            this.publishImageError(`${previous.publicId}:images`, preservedImage.error);
-            return;
-          }
           const { image, output } = preservedImage;
           this.publishTool({ ...previous, output }, "completed");
           this.publishImages(previous.publicId, previous.name, image);
@@ -1007,7 +988,6 @@ export class OmpTimelineProjector {
         this.publish({ type: "reasoning", id, text: publicText });
       } else if (block.kind === "image") {
         if (block.image) this.publishImages(id, "Assistant image", { images: [block.image] });
-        else if (block.error) this.publishImageError(id, block.error);
       } else {
         this.publish({
           type: "assistant_message",
@@ -1370,15 +1350,11 @@ export class OmpTimelineProjector {
         status: message.cancelled ? "canceled" : "completed",
         error: null,
       });
-      if (imageResult) {
-        if ("error" in imageResult) this.publishImageError(`${id}:images`, imageResult.error);
-        else this.publishImages(id, publicType, imageResult.image);
-      }
+      if (imageResult) this.publishImages(id, publicType, imageResult.image);
       return;
     }
     if (imageResult) {
-      if ("error" in imageResult) this.publishImageError(`${id}:images`, imageResult.error);
-      else this.publishImages(id, publicType, imageResult.image);
+      this.publishImages(id, publicType, imageResult.image);
       return;
     }
     const advisor = lowerType.includes("advisor") || lowerType === "aside";
@@ -1736,10 +1712,6 @@ export class OmpTimelineProjector {
       status: input.status,
       error: null,
     });
-  }
-
-  private publishImageError(id: string, message: string): void {
-    this.publish({ type: "error", id: `${id}:error`, message });
   }
 
   private publishImages(id: string, label: string, image: NativeImageEnvelope): void {

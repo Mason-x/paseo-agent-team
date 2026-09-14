@@ -71,7 +71,7 @@ Provider functionality outside the capability flags is tracked separately:
 | MCP server forwarding and host tools | **100%** | Configured MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Caller-scoped Paseo orchestration tools retain their native names, such as `create_agent` and `list_profiles`, so OMP skills can invoke them directly. Exact `toolPolicy` remains the separate 0% capability above. |
 | Denied native tools | **100%** | `disallowedTools` becomes an explicit OMP allow-list; unknown names fail closed. |
 | Commands and committed session state events | **100%** | Publishes `session.commands`, `session.opened`, `session.config`, `session.ready`, and request completion in protocol order. |
-| Built-in timeline snapshots | **100%** | Assistant, reasoning, tools, todos, notifications, errors, compaction, images, and friendly MCP labels use stable IDs and complete snapshots. |
+| Built-in timeline snapshots | **100%** | Assistant, reasoning, tools, todos, notifications, errors, compaction, and friendly MCP labels use stable IDs and complete snapshots. OMP emits client-safe PNG/JPEG when possible; validated legacy WebP images render on capable clients with an explicit per-image fallback elsewhere. |
 | Usage reporting | **100%** | Periodic, post-compaction, fallback, terminal, timeout, and recovered-runtime samples publish `session.usage`. |
 
 Tracking rules:

@@ -1390,6 +1390,7 @@ export function buildOmpSpawnRequest(
     options.inheritEnv,
     environmentSource,
   );
+  env.OMP_NO_WEBP = "1";
   return {
     command,
     args,

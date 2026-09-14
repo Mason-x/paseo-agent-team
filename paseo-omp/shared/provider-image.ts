@@ -9,6 +9,8 @@ const MAX_IMAGE_DETAILS_BYTES = 256 * 1024;
 const OMP_IMAGE_CALL_ID =
   /^omp:(?:tool:\d+|assistant:\d+:[A-Za-z0-9_-]+:content:\d+:image|custom:[A-Za-z0-9_-]+):images$/u;
 const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const OMP_IMAGE_DIMENSION_NOTE =
+  /^\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by \d+(?:\.\d+)? to map to original image\.\]$/u;
 
 function utf8Bytes(value: string): number {
   let bytes = 0;
@@ -68,6 +70,13 @@ function hasExpectedHeader(mimeType: string, bytes: readonly number[]): boolean 
   if (mimeType === "image/jpeg") {
     return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   }
+  if (mimeType === "image/webp") {
+    return (
+      bytes.length >= 12 &&
+      String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
+      String.fromCharCode(...bytes.slice(8, 12)) === "WEBP"
+    );
+  }
   return (
     bytes.length >= 6 && String.fromCharCode(...bytes.slice(0, 6)) in { GIF87a: true, GIF89a: true }
   );
@@ -76,7 +85,7 @@ function hasExpectedHeader(mimeType: string, bytes: readonly number[]): boolean 
 const ompImageSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{16}$/u),
   data: z.string().max(MAX_IMAGE_ENCODED_BYTES),
-  mimeType: z.enum(["image/gif", "image/jpeg", "image/png"]),
+  mimeType: z.enum(["image/gif", "image/jpeg", "image/png", "image/webp"]),
 });
 
 export const ompImageTimelineSchema = z
@@ -115,6 +124,16 @@ export const ompImageTimelineSchema = z
       context.addIssue({ code: "custom", path: ["details"], message: "image details too large" });
     }
   });
+
+export function visibleOmpImageText(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const visible = text
+    .split("\n")
+    .filter((line) => !OMP_IMAGE_DIMENSION_NOTE.test(line.trim()))
+    .join("\n")
+    .trim();
+  return visible || undefined;
+}
 
 export const ompImageToolMetadataSchema = z.object({
   ompImageOwner: z.literal("omp"),

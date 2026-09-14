@@ -70,6 +70,7 @@ describe("OMP provider option normalization", () => {
     ]);
     expect(request.env).toEqual({
       ...TEST_ENV,
+      OMP_NO_WEBP: "1",
       PROFILE_VALUE: "profile",
       SESSION_VALUE: "session-wins",
     });

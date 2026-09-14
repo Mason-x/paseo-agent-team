@@ -1,7 +1,11 @@
 import { existsSync, statSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { OmpImageMaterializer } from "../server/provider/image";
-import { ompImageTimelineSchema, transformOmpImageToolItem } from "../shared/provider-image";
+import {
+  ompImageTimelineSchema,
+  transformOmpImageToolItem,
+  visibleOmpImageText,
+} from "../shared/provider-image";
 
 const PNG = "iVBORw0KGgo=";
 
@@ -89,11 +93,24 @@ describe("OMP image timeline transformer", () => {
     });
   });
 
-  test("accepts PNG, JPEG, and GIF headers with multibyte labels", () => {
+  test("hides machine-facing coordinate notes from the image caption", () => {
+    const note =
+      "[Image: original 320x180, displayed at 356x200. Multiply coordinates by 0.90 to map to original image.]";
+    expect(visibleOmpImageText(`Screenshot captured\n${note}\nReleased managed tab`)).toBe(
+      "Screenshot captured\nReleased managed tab",
+    );
+    expect(visibleOmpImageText(note)).toBeUndefined();
+    expect(visibleOmpImageText("[Image: user-authored caption]")).toBe(
+      "[Image: user-authored caption]",
+    );
+  });
+
+  test("accepts PNG, JPEG, GIF, and WebP headers with multibyte labels", () => {
     for (const [mimeType, data] of [
       ["image/png", Buffer.from("89504e470d0a1a0a", "hex").toString("base64")],
       ["image/jpeg", Buffer.from("ffd8ff", "hex").toString("base64")],
       ["image/gif", Buffer.from("GIF89a").toString("base64")],
+      ["image/webp", Buffer.from("RIFF\0\0\0\0WEBP", "binary").toString("base64")],
     ] as const) {
       expect(
         ompImageTimelineSchema.safeParse({

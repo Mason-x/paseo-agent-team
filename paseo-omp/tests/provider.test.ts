@@ -6727,13 +6727,29 @@ describe("OMP direct provider", () => {
       },
     });
     await scheduler.flush();
-    expect(events).toContainEqual({
-      type: "timeline.item",
-      sessionId: "session-1",
-      item: {
-        type: "error",
-        id: "omp:assistant:1:-588CG_nYBzM:content:2:image:error",
-        message: "OMP image uses WebP, which is not supported on every Paseo client",
+    const webpCarrier = events.findLast(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.id.endsWith(":content:2:image:images"),
+    );
+    if (webpCarrier?.type !== "timeline.item" || webpCarrier.item.type !== "tool_call") {
+      throw new Error("Expected WebP assistant image carrier");
+    }
+    expect(transformOmpImageToolItem(webpCarrier.item)?.items[0]).toEqual({
+      type: "plugin",
+      id: webpCarrier.item.callId,
+      kind: "omp-images",
+      version: 1,
+      data: {
+        label: "Assistant image",
+        images: [
+          {
+            id: expect.stringMatching(/^[A-Za-z0-9_-]{16}$/u),
+            data: webpData,
+            mimeType: "image/webp",
+          },
+        ],
       },
     });
     await finishTurn(events, session, turnId);

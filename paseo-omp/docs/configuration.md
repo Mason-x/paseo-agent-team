@@ -108,3 +108,5 @@ The plugin validates and bounds native protocol data, but it does not heuristica
 Non-persisted sessions use `--no-session`. Persistent sessions keep a versioned native handle, replay before becoming ready, and recover with the effective launch configuration.
 
 For text-only models, image inputs are written to a private bounded temporary directory shared with the local OMP child and removed after the turn, session, or failed launch.
+
+Every OMP process launched by the plugin receives provider-owned `OMP_NO_WEBP=1` compatibility mode after caller environment validation, so generated and resized images use PNG or JPEG across Paseo clients without reducing the configured environment limits. Persisted or upstream WebP blocks are still retained: capable clients render them directly, while an unsupported client shows a per-image fallback instead of failing the timeline item.

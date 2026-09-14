@@ -1877,7 +1877,11 @@ describe("OMP RPC transport", () => {
         cwd: "/repo",
         mode: "full",
         model: "provider/model; touch /tmp/not-run",
-        env: { TEST_ENV: "explicit", CUSTOMER_API_KEY: "session-secret" },
+        env: {
+          TEST_ENV: "explicit",
+          CUSTOMER_API_KEY: "session-secret",
+          OMP_NO_WEBP: "0",
+        },
       },
       {
         ...TEST_RUNTIME_ENV,
@@ -1907,6 +1911,7 @@ describe("OMP RPC transport", () => {
       PLEXUS_API_KEY: "plexus-secret",
       ANTHROPIC_OAUTH_TOKEN: "anthropic-oauth-secret",
       CLOUDFLARE_AI_GATEWAY_API_KEY: "cloudflare-secret",
+      OMP_NO_WEBP: "1",
       TEST_ENV: "explicit",
       CUSTOMER_API_KEY: "session-secret",
     });
@@ -1923,6 +1928,7 @@ describe("OMP RPC transport", () => {
       ...TEST_RUNTIME_ENV,
       DEBUG: "1",
       NODE_ENV: "dev",
+      OMP_NO_WEBP: "1",
     });
     expect(
       buildOmpSpawnRequest(
@@ -1930,6 +1936,15 @@ describe("OMP RPC transport", () => {
         TEST_RUNTIME_ENV,
       ).env.API_TOKEN,
     ).toBe("x");
+    const fullSessionEnvironment = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [`SESSION_VALUE_${index}`, "x"]),
+    );
+    const fullEnvironmentRequest = buildOmpSpawnRequest(
+      { cwd: "/repo", mode: "full", env: fullSessionEnvironment },
+      TEST_RUNTIME_ENV,
+    );
+    expect(fullEnvironmentRequest.env.OMP_NO_WEBP).toBe("1");
+    expect(fullEnvironmentRequest.env.SESSION_VALUE_255).toBe("x");
     for (const proxy of [
       "https://abc:long-password@example.test",
       "https://example.test?token=xyz",
