@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
 import { parse as parseYaml } from "yaml";
 import type { ZodType } from "zod";
@@ -26,8 +26,11 @@ const CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
 
 type OmpConfigResult = { path: string; available: boolean; config: OmpConfig | null };
 
-async function readFirstExisting(dir: string): Promise<{ path: string; text: string } | undefined> {
-  for (const filename of CONFIG_FILENAMES) {
+async function readFirstExisting(
+  dir: string,
+  filenames: readonly string[] = CONFIG_FILENAMES,
+): Promise<{ path: string; text: string } | undefined> {
+  for (const filename of filenames) {
     const path = join(dir, filename);
     try {
       return { path, text: await readFile(path, "utf8") };
@@ -106,9 +109,12 @@ export function parseOmpConfig(raw: unknown): OmpConfig {
   return config;
 }
 
-export async function readOmpConfigFrom(dir: string): Promise<OmpConfigResult> {
-  const defaultPath = join(dir, CONFIG_FILENAMES[0]);
-  const found = await readFirstExisting(dir);
+export async function readOmpConfigFrom(
+  dir: string,
+  filenames: readonly string[] = CONFIG_FILENAMES,
+): Promise<OmpConfigResult> {
+  const defaultPath = join(dir, filenames[0] ?? CONFIG_FILENAMES[0]);
+  const found = await readFirstExisting(dir, filenames);
   if (!found) return { path: defaultPath, available: false, config: null };
   try {
     const raw: unknown = parseYaml(found.text);
@@ -120,7 +126,10 @@ export async function readOmpConfigFrom(dir: string): Promise<OmpConfigResult> {
 }
 
 export async function resolveListOmpConfig(
-  _input: RpcInput<typeof listOmpConfig>,
+  input: RpcInput<typeof listOmpConfig>,
 ): Promise<OmpConfigResult> {
+  if (input.cwd && isAbsolute(input.cwd) && !input.cwd.includes("\0")) {
+    return readOmpConfigFrom(join(input.cwd, ".omp"), [CONFIG_FILENAMES[0]]);
+  }
   return readOmpConfigFrom(ompAgentDir());
 }

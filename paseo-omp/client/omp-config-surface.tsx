@@ -1,4 +1,10 @@
-import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
+import {
+  type PluginSurfaceProps,
+  type PluginWorkspacePanelProps,
+  usePaseo,
+  useRpc,
+  useWorkspace,
+} from "@getpaseo/plugin/client";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -574,16 +580,18 @@ function ProcessSection({
 function ProviderHealthSection({
   theme,
   styles,
+  cwd,
 }: {
   theme: PluginSurfaceProps["theme"];
   styles: OmpConfigStyles;
+  cwd?: string;
 }) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
   const loadHealth = useRpc(getOmpProviderHealth);
   const health = useQuery({
-    queryKey: HEALTH_QUERY_KEY,
-    queryFn: () => loadHealth({}),
+    queryKey: [...HEALTH_QUERY_KEY, cwd ?? "global"],
+    queryFn: () => loadHealth({ ...(cwd ? { cwd } : {}) }),
   });
   const providers = useQuery({
     queryKey: PROVIDERS_QUERY_KEY,
@@ -593,8 +601,9 @@ function ProviderHealthSection({
     mutationFn: async () => {
       const result = await refreshProviderDiagnostics({
         providers: paseo.providers,
-        loadForcedHealth: () => loadHealth({ force: true }),
-        cacheHealth: (value) => queryClient.setQueryData(HEALTH_QUERY_KEY, value),
+        loadForcedHealth: () => loadHealth({ force: true, ...(cwd ? { cwd } : {}) }),
+        cacheHealth: (value) =>
+          queryClient.setQueryData([...HEALTH_QUERY_KEY, cwd ?? "global"], value),
         cacheProviders: (value) => queryClient.setQueryData(PROVIDERS_QUERY_KEY, value),
       });
       if (result.failed) throw new Error("Could not fully refresh OMP provider health.");
@@ -621,8 +630,9 @@ function ProviderHealthSection({
         </View>
       </View>
       <Text style={styles.muted}>
-        These checks use the daemon&apos;s global OMP command and default storage, not per-agent
-        profile overrides.
+        Binary probes run from {cwd ? "this workspace" : "the daemon working directory"}.
+        Configuration, storage, MCP, database, and Hub checks remain daemon-global; provider profile
+        overrides are not included.
       </Text>
 
       {health.isLoading ? <Text style={styles.muted}>Checking the omp installation…</Text> : null}
@@ -814,6 +824,8 @@ function EditableScalarValue({
   setting,
   draft,
   disabled,
+  resetLabel,
+  showReset,
   styles,
   onSet,
   onReset,
@@ -821,6 +833,8 @@ function EditableScalarValue({
   setting: OmpSetting;
   draft: SettingDraft | undefined;
   disabled: boolean;
+  resetLabel: string;
+  showReset: boolean;
   styles: OmpConfigStyles;
   onSet(value: string | boolean): void;
   onReset(): void;
@@ -829,7 +843,7 @@ function EditableScalarValue({
   return (
     <View style={styles.recordList}>
       {draft?.operation === "reset" ? (
-        <Text style={styles.muted}>Will reset to the OMP default</Text>
+        <Text style={styles.muted}>{resetLabel} when changes are applied</Text>
       ) : setting.type === "boolean" ? (
         <Switch
           accessibilityLabel={`Toggle ${formatOmpSettingLabel(setting.path)}`}
@@ -847,9 +861,11 @@ function EditableScalarValue({
           style={styles.scalarInput}
         />
       )}
-      <Pressable accessibilityRole="button" disabled={disabled} onPress={onReset}>
-        <Text style={styles.resetAction}>Reset to default</Text>
-      </Pressable>
+      {showReset ? (
+        <Pressable accessibilityRole="button" disabled={disabled} onPress={onReset}>
+          <Text style={styles.resetAction}>{resetLabel}</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -860,6 +876,7 @@ function ConfigurationCategory({
   settings,
   drafts,
   disabled,
+  workspaceScoped,
   onDraft,
   onOpenDocumentation,
 }: {
@@ -868,6 +885,7 @@ function ConfigurationCategory({
   settings: readonly OmpSetting[];
   drafts: Readonly<Record<string, SettingDraft>>;
   disabled: boolean;
+  workspaceScoped: boolean;
   onDraft(path: string, draft: SettingDraft): void;
   onOpenDocumentation(link: OmpDocumentationLink): void;
 }) {
@@ -897,6 +915,9 @@ function ConfigurationCategory({
           <View key={setting.path} style={styles.setting}>
             <View style={styles.settingHeader}>
               <Text style={styles.cardTitle}>{formatOmpSettingLabel(setting.path)}</Text>
+              {setting.workspaceOverride ? (
+                <Text style={styles.source}>Workspace override</Text>
+              ) : null}
               {!complex && !editable ? (
                 <StructuredSettingValue setting={setting} styles={styles} />
               ) : null}
@@ -918,6 +939,8 @@ function ConfigurationCategory({
                 setting={setting}
                 draft={drafts[setting.path]}
                 disabled={disabled}
+                resetLabel={workspaceScoped ? "Remove workspace override" : "Reset to default"}
+                showReset={!workspaceScoped || setting.workspaceOverride === true}
                 styles={styles}
                 onSet={(value) => onDraft(setting.path, { operation: "set", value })}
                 onReset={() => onDraft(setting.path, { operation: "reset" })}
@@ -965,19 +988,21 @@ function SurfaceTabs({
     </View>
   );
 }
-export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
+function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: string }) {
   const loadConfig = useRpc(listOmpConfig);
   const loadSettings = useRpc(listOmpSettings);
   const updateSettings = useRpc(updateOmpSettings);
   const queryClient = useQueryClient();
+  const context = cwd ? { cwd } : {};
   const configQuery = useQuery({
-    queryKey: ["paseo-omp", "config"],
-    queryFn: () => loadConfig({}),
+    queryKey: ["paseo-omp", "config", cwd ?? "global"],
+    queryFn: () => loadConfig(context),
     refetchInterval: CONFIG_POLL_MS,
   });
+  const settingsQueryKey = [...SETTINGS_QUERY_KEY, cwd ?? "global"];
   const settingsQuery = useQuery({
-    queryKey: SETTINGS_QUERY_KEY,
-    queryFn: () => loadSettings({}),
+    queryKey: settingsQueryKey,
+    queryFn: () => loadSettings(context),
     staleTime: Number.POSITIVE_INFINITY,
   });
   const [view, setView] = useState<SurfaceView>("overview");
@@ -1039,10 +1064,12 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
         }
         return { operation: "set" as const, path, value };
       });
-      return updateSettings({ revision, changes });
+      return updateSettings({ ...context, revision, changes });
     },
     onSuccess: (result) => {
-      queryClient.setQueryData(SETTINGS_QUERY_KEY, result.catalog);
+      queryClient.setQueryData(settingsQueryKey, result.catalog);
+      void queryClient.invalidateQueries({ queryKey: SETTINGS_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["paseo-omp", "config"] });
       if (
         !result.conflict &&
         !result.failed &&
@@ -1059,13 +1086,21 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const draftCount = Object.keys(drafts).length;
+  const workspaceOverrideCount = catalog.sourceSettings.filter(
+    (setting) => setting.workspaceOverride,
+  ).length;
   const displayedConfigPath = settingsQuery.data?.available
     ? settingsQuery.data.path
     : configQuery.data?.path;
 
   return (
     <ScrollView contentContainerStyle={styles.root}>
-      <Text style={styles.pageTitle}>OMP</Text>
+      <Text style={styles.pageTitle}>{cwd ? "Workspace OMP" : "OMP"}</Text>
+      {cwd ? (
+        <Text selectable style={styles.muted}>
+          Project-scoped view · {cwd}
+        </Text>
+      ) : null}
       <SurfaceTabs styles={styles} selected={view} onSelect={setView} />
 
       {view === "overview" ? (
@@ -1078,12 +1113,29 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
               Could not read the native OMP configuration.
             </Text>
           ) : (
-            <SectionCard styles={styles} title="Native configuration">
+            <SectionCard
+              styles={styles}
+              title={cwd ? "Workspace configuration" : "Native configuration"}
+            >
               <KeyValueRow
                 styles={styles}
                 label="Source"
                 value={displayedConfigPath ?? "Source unavailable"}
               />
+              {cwd ? (
+                <>
+                  <KeyValueRow styles={styles} label="Scope" value="Workspace / project" />
+                  <KeyValueRow
+                    styles={styles}
+                    label="Overrides"
+                    value={`${workspaceOverrideCount} project-specific settings`}
+                  />
+                  <Text style={styles.muted}>
+                    Settings without a workspace override inherit their effective global or default
+                    value.
+                  </Text>
+                </>
+              ) : null}
               <KeyValueRow
                 styles={styles}
                 label="Status"
@@ -1102,10 +1154,12 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
       {view === "plugin" ? <PluginConfigurationSection styles={styles} /> : null}
 
       {view === "plugins" ? (
-        <OmpPluginManagerSection theme={theme} compact={layout.compact} />
+        <OmpPluginManagerSection theme={theme} compact={layout.compact} cwd={cwd} />
       ) : null}
 
-      {view === "diagnostics" ? <ProviderHealthSection theme={theme} styles={styles} /> : null}
+      {view === "diagnostics" ? (
+        <ProviderHealthSection theme={theme} styles={styles} cwd={cwd} />
+      ) : null}
 
       {view === "configuration" ? (
         <>
@@ -1147,6 +1201,13 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
             ) : (
               <Text style={styles.source}>Source unavailable</Text>
             )}
+            {cwd ? (
+              <Text style={styles.muted}>
+                {workspaceOverrideCount} project-specific overrides. All other effective values
+                inherit global configuration or OMP defaults. Applying a change creates or updates
+                the override in .omp/config.yml; removing an override restores inheritance.
+              </Text>
+            ) : null}
           </View>
           {documentationError ? (
             <Text accessibilityRole="alert" style={styles.error}>
@@ -1256,6 +1317,7 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
                     settings={catalog.byCategory.get(selectedCategory.id) ?? []}
                     drafts={drafts}
                     disabled={!settingsQuery.data?.revision || save.isPending}
+                    workspaceScoped={cwd !== undefined}
                     onDraft={(path, draft) =>
                       setDrafts((current) => ({ ...current, [path]: draft }))
                     }
@@ -1271,4 +1333,28 @@ export function OmpConfigSurface({ theme, layout }: PluginSurfaceProps) {
       ) : null}
     </ScrollView>
   );
+}
+
+export function OmpConfigSurface(props: PluginSurfaceProps) {
+  return <OmpConfigContent {...props} />;
+}
+
+export function OmpWorkspacePanel(props: PluginWorkspacePanelProps) {
+  const cwd = useWorkspace(props.workspaceId, (workspace) => workspace.directory);
+  if (!cwd) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          padding: props.layout.compact ? 16 : 24,
+          backgroundColor: props.theme.colors.surface0,
+        }}
+      >
+        <Text style={{ color: props.theme.colors.foregroundMuted }}>
+          Loading workspace OMP settings…
+        </Text>
+      </View>
+    );
+  }
+  return <OmpConfigContent {...props} cwd={cwd} />;
 }

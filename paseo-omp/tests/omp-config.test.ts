@@ -96,6 +96,12 @@ dev:
     expect(result.config).toEqual({ symbolPreset: "ascii" });
   });
 
+  test("can restrict project discovery to canonical config.yml", async () => {
+    const dir = await tempConfigDir("config.yaml", "symbolPreset: ascii\n");
+    const result = await readOmpConfigFrom(dir, ["config.yml"]);
+    expect(result).toEqual({ path: join(dir, "config.yml"), available: false, config: null });
+  });
+
   test("reports unavailable with the canonical path when no config file exists", async () => {
     const dir = await mkdtemp(join(tmpdir(), "paseo-omp-config-"));
     temporaryDirectories.push(dir);

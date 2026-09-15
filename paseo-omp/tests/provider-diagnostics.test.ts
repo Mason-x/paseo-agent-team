@@ -482,6 +482,7 @@ describe("computeOmpProviderHealth", () => {
     await writeDaemonEntry(hubRunRoot, "project-a", "one");
     await writeDaemonEntry(hubRunRoot, "project-a", "two");
     const capturedEnvs: NodeJS.ProcessEnv[] = [];
+    const capturedCwds: Array<string | undefined> = [];
 
     const health = await computeOmpProviderHealth(
       baseDeps(agentDir, binaryDir, {
@@ -493,7 +494,7 @@ describe("computeOmpProviderHealth", () => {
           API_KEY: "must-not-reach-child",
           MCP_HEADERS: "must-not-reach-child",
         },
-        spawnFn: respondingSpawn({ captureEnv: capturedEnvs }),
+        spawnFn: respondingSpawn({ captureEnv: capturedEnvs, captureCwds: capturedCwds }),
       }),
     );
 
@@ -524,6 +525,7 @@ describe("computeOmpProviderHealth", () => {
     });
     expect(health.memoryBackend).toBe("mnemopi");
     expect(capturedEnvs).toHaveLength(2);
+    expect(capturedCwds).toEqual([agentDir, agentDir]);
     for (const env of capturedEnvs) {
       expect(env.API_KEY).toBeUndefined();
       expect(env.MCP_HEADERS).toBeUndefined();

@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { OmpWorkspaceCwdSchema } from "./hub";
 
 // Mirrors the safe, non-secret subset of omp's on-disk ~/.omp/agent/config.yml. That file is an
 // internal, unversioned config format owned by the omp harness (source: omp's
@@ -72,7 +73,7 @@ export type OmpConfig = z.infer<typeof OmpConfigSchema>;
 
 export const listOmpConfig = defineRpc({
   name: "paseo-omp.list-config",
-  input: z.object({}),
+  input: z.object({ cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
   output: z.object({
     path: z.string(),
     available: z.boolean(),

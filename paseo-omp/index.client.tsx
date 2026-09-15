@@ -7,7 +7,7 @@ import { OmpMcpAuthorizationCard } from "./client/mcp-authorization";
 import { McpPopover } from "./client/mcp-popover";
 import { OmpMemoryPanel } from "./client/memory-panel";
 import { MemoryPopover } from "./client/memory-popover";
-import { OmpConfigSurface } from "./client/omp-config-surface";
+import { OmpConfigSurface, OmpWorkspacePanel } from "./client/omp-config-surface";
 import { quotaProviderIcon } from "./client/provider-icon";
 import { OmpImageTimeline } from "./client/provider-image";
 import { QuotaPopover } from "./client/quota-popover";
@@ -76,6 +76,24 @@ export default function contribute(client: PluginClientContext) {
     context: "workspace",
     onSelect({ openPanel }) {
       openPanel("memory", { location: "explorer" });
+    },
+  });
+  const removeWorkspacePanel = client.addWorkspacePanel({
+    id: "workspace",
+    title: "OMP",
+    icon: "Settings",
+    context: "workspace",
+    locations: ["workspace", "explorer"],
+    Component: OmpWorkspacePanel,
+  });
+  const removeOpenWorkspace = client.addCommandCenterItem({
+    id: "open-workspace",
+    title: "Open Workspace OMP",
+    icon: "Settings",
+    keywords: ["omp", "workspace", "config", "plugins", "diagnostics"],
+    context: "workspace",
+    onSelect({ openPanel }) {
+      openPanel("workspace", { location: "workspace" });
     },
   });
   const removeConfigSurface = client.addSurface("config", OmpConfigSurface);
@@ -297,6 +315,8 @@ export default function contribute(client: PluginClientContext) {
     removeOpenConfig();
     removeConfigSidebarItem();
     removeConfigSurface();
+    removeOpenWorkspace();
+    removeWorkspacePanel();
     removeOpenMemory();
     removeMemoryPanel();
   };

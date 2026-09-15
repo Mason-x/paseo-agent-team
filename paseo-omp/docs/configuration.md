@@ -1,6 +1,6 @@
 # Configuration
 
-Open the **OMP** sidebar to browse the complete installed OMP settings catalog. Boolean, number, string, and enum settings support revision-checked Apply, Discard, and Reset actions; arrays, records, and credentials remain read-only. Configuration writes use OMP's native `config set` and `config reset` commands rather than rewriting YAML.
+Open the global **OMP** sidebar to browse and edit machine-wide state, or open the workspace **OMP** panel from the workspace tab or Explorer to manage project-scoped state. Scalar edits in the global surface use OMP's native `config set` and `config reset` commands. Workspace edits create validated overrides in `<workspace>/.omp/config.yml`; removing an override restores the effective global or default value. Arrays, records, and credentials remain read-only in both surfaces.
 
 The **Plugin** tab documents the supported `omp-plugin` launch options, including names-only inherited environment configuration. Paseo's public plugin API does not expose the effective provider options for active launches, so the tab does not claim profile values are active. Choose **OMP Plugin** when creating an agent. Model, mode, thinking level, system prompt, persistence, MCP servers, workspace, and agent environment use Paseo's standard provider controls.
 
@@ -49,9 +49,9 @@ These options cover every plugin-specific launch value. Values that belong to an
 
 ## OMP-native plugins
 
-Open **OMP → OMP plugins** to inspect plugins installed through OMP. The manager uses OMP's documented singular `omp plugin` CLI and supports user-scoped install, enable, disable, upgrade, and uninstall operations. Every state-changing action requires an explicit confirmation; already-running OMP sessions are unchanged.
+Open **OMP → OMP plugins** globally for user-scoped management, or use the workspace **OMP** panel to include project-scoped installations and effective project overrides. The manager uses OMP's documented singular `omp plugin` CLI and supports install, enable, disable, upgrade, and uninstall operations. Every state-changing action requires explicit confirmation; already-running OMP sessions are unchanged.
 
-Project-scoped installations remain visible but read-only because their lifecycle commands must run from that project's working directory. Plugin configuration exposes schema metadata without returning current or default values. Non-secret scalar plugin settings can be set or deleted through write-only controls. Secret settings are presence-only and delete-only because OMP's CLI would otherwise expose a new secret through process arguments.
+Project-scoped lifecycle commands run from the selected workspace and use `--scope project`. Duplicate path installations that share one npm package identity remain read-only because OMP's lifecycle CLI addresses npm plugins by package name rather than installation path. Plugin configuration exposes schema metadata without returning current or default values. Non-secret scalar plugin settings can be set or deleted through write-only controls. Secret settings are presence-only and delete-only because OMP's CLI would otherwise expose a new secret through process arguments.
 
 The Configuration view links to the official OMP settings reference, value parsing and precedence guides, relevant category sections, and a small curated set of setting-specific anchors.
 

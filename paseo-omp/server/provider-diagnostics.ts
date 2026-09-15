@@ -935,6 +935,7 @@ export async function computeOmpProviderHealth(
           versionTimeoutMs,
           killGraceMs,
           maxVersionBytes,
+          deps.cwd,
         )
       : null,
     installed
@@ -946,6 +947,7 @@ export async function computeOmpProviderHealth(
           helpTimeoutMs,
           killGraceMs,
           maxHelpBytes,
+          deps.cwd,
         )
       : null,
   ]);
@@ -1013,8 +1015,8 @@ export async function computeOmpProviderHealth(
   };
 }
 
-let cachedHealth: { value: OmpProviderHealth; expiresAt: number } | null = null;
-let inFlightHealth: Promise<OmpProviderHealth> | null = null;
+const cachedHealth = new Map<string, { value: OmpProviderHealth; expiresAt: number }>();
+const inFlightHealth = new Map<string, Promise<OmpProviderHealth>>();
 
 function defaultHubRunRoot(): string {
   return process.env.PASEO_OMP_RUN_DIR ?? join(homedir(), ".omp", "run", "daemons");
@@ -1029,15 +1031,18 @@ function defaultHubRunRoot(): string {
 export async function resolveGetOmpProviderHealth(
   input: RpcInput<typeof getOmpProviderHealth>,
 ): Promise<OmpProviderHealth> {
+  const cwd = input.cwd ?? process.cwd();
   const now = Date.now();
-  if (!input.force && cachedHealth && cachedHealth.expiresAt > now) return cachedHealth.value;
-  if (inFlightHealth) return inFlightHealth;
+  const cached = cachedHealth.get(cwd);
+  if (!input.force && cached && cached.expiresAt > now) return cached.value;
+  const inFlight = inFlightHealth.get(cwd);
+  if (inFlight) return inFlight;
 
   const computation = computeOmpProviderHealth({
     agentDir: ompAgentDir(),
     command: process.env.OMP_COMMAND ?? "omp",
     pathDirs: (process.env.PATH ?? "").split(delimiter),
-    cwd: process.cwd(),
+    cwd,
     platform: process.platform,
     pathExt: process.env.PATHEXT ?? WINDOWS_DEFAULT_PATHEXT,
     env: process.env,
@@ -1046,12 +1051,12 @@ export async function resolveGetOmpProviderHealth(
     homeDir: homedir(),
   })
     .then((value) => {
-      cachedHealth = { value, expiresAt: Date.now() + HEALTH_CACHE_TTL_MS };
+      cachedHealth.set(cwd, { value, expiresAt: Date.now() + HEALTH_CACHE_TTL_MS });
       return value;
     })
     .finally(() => {
-      inFlightHealth = null;
+      inFlightHealth.delete(cwd);
     });
-  inFlightHealth = computation;
+  inFlightHealth.set(cwd, computation);
   return computation;
 }

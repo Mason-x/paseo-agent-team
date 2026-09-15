@@ -23,7 +23,7 @@ export const HubProcessSchema = z.object({
   exitCode: z.number().nullable(),
 });
 export type HubProcess = z.infer<typeof HubProcessSchema>;
-const CwdSchema = z.string().min(1).max(4_096);
+export const OmpWorkspaceCwdSchema = z.string().min(1).max(4_096);
 const ProcessNameSchema = z
   .string()
   .min(1)
@@ -32,12 +32,12 @@ const ProcessNameSchema = z
 
 export const listHubProcesses = defineRpc({
   name: "paseo-omp.list-processes",
-  input: z.object({ cwd: CwdSchema }),
+  input: z.object({ cwd: OmpWorkspaceCwdSchema }),
   output: z.object({ processes: z.array(HubProcessSchema) }),
 });
 
 export const tailHubLog = defineRpc({
   name: "paseo-omp.tail-log",
-  input: z.object({ cwd: CwdSchema, name: ProcessNameSchema }),
+  input: z.object({ cwd: OmpWorkspaceCwdSchema, name: ProcessNameSchema }),
   output: z.object({ content: z.string(), truncated: z.boolean() }),
 });

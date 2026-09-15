@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
 import { z } from "zod";
 import {
@@ -78,7 +78,12 @@ export interface OmpPluginDependencies {
     args: readonly string[],
     outputLimit: number,
     timeoutMs: number,
+    cwd?: string,
   ): Promise<BoundedRun>;
+}
+
+function validWorkspaceCwd(cwd: string | undefined): boolean {
+  return cwd === undefined || (isAbsolute(cwd) && !cwd.includes("\0"));
 }
 
 function boundedText(value: unknown, maximum: number): string | null {
@@ -130,6 +135,7 @@ function parseNpmPlugin(raw: unknown): OmpInstalledPlugin | null {
     enabled: candidate.data.enabled,
     shadowed: false,
     path,
+    configAmbiguous: false,
     description,
     enabledFeatures,
     availableFeatures,
@@ -167,6 +173,7 @@ function parseMarketplacePlugin(raw: unknown): OmpInstalledPlugin | null {
     shadowed: candidate.data.shadowedBy === "project",
     path,
     description: null,
+    configAmbiguous: false,
     enabledFeatures: [],
     availableFeatures: [],
     configurable: false,
@@ -185,13 +192,24 @@ function pluginAliases(plugin: OmpInstalledPlugin): string[] {
 }
 
 function markAmbiguousPlugins(plugins: OmpInstalledPlugin[]): OmpInstalledPlugin[] {
-  const counts = new Map<string, number>();
+  const lifecycleCounts = new Map<string, number>();
+  const configCounts = new Map<string, number>();
+  const lifecycleKey = (plugin: OmpInstalledPlugin) =>
+    plugin.source === "marketplace"
+      ? `marketplace:${plugin.scope}:${plugin.id}`
+      : `npm:${plugin.id}`;
   for (const plugin of plugins) {
-    for (const alias of pluginAliases(plugin)) counts.set(alias, (counts.get(alias) ?? 0) + 1);
+    const key = lifecycleKey(plugin);
+    lifecycleCounts.set(key, (lifecycleCounts.get(key) ?? 0) + 1);
+    if (plugin.packageName) {
+      configCounts.set(plugin.packageName, (configCounts.get(plugin.packageName) ?? 0) + 1);
+    }
   }
   return plugins.map((plugin) => ({
     ...plugin,
-    ambiguous: pluginAliases(plugin).some((alias) => (counts.get(alias) ?? 0) > 1),
+    ambiguous: (lifecycleCounts.get(lifecycleKey(plugin)) ?? 0) > 1,
+    configAmbiguous:
+      plugin.packageName !== undefined && (configCounts.get(plugin.packageName) ?? 0) > 1,
   }));
 }
 
@@ -252,6 +270,7 @@ async function runOmpPlugin(
   args: readonly string[],
   outputLimit: number,
   timeoutMs: number,
+  cwd = process.cwd(),
 ): Promise<BoundedRun> {
   return runBounded(
     defaultSpawn,
@@ -261,7 +280,7 @@ async function runOmpPlugin(
     timeoutMs,
     KILL_GRACE_MS,
     outputLimit,
-    process.cwd(),
+    cwd,
   );
 }
 
@@ -270,7 +289,7 @@ async function enrichMarketplaceConfiguration(
 ): Promise<OmpInstalledPlugin[]> {
   const enriched = await Promise.all(
     plugins.map(async (plugin) => {
-      if (plugin.source !== "marketplace" || plugin.scope !== "user" || !plugin.path) return plugin;
+      if (plugin.source !== "marketplace" || !plugin.path) return plugin;
       try {
         const metadataPath = join(plugin.path, "package.json");
         const metadata = await stat(metadataPath);
@@ -301,6 +320,7 @@ const DEFAULT_DEPENDENCIES: OmpPluginDependencies = {
 async function loadPluginState(
   executable: string | null | undefined,
   dependencies: OmpPluginDependencies,
+  cwd?: string,
 ): Promise<OmpPluginState> {
   const resolved = executable === undefined ? await dependencies.resolveExecutable() : executable;
   if (!resolved) return unavailableState("The OMP executable could not be resolved.");
@@ -309,6 +329,7 @@ async function loadPluginState(
     ["plugin", "list", "--json"],
     LIST_OUTPUT_LIMIT,
     READ_TIMEOUT_MS,
+    cwd,
   );
   if (!runSucceeded(result)) return unavailableState(readFailure(result));
   try {
@@ -324,10 +345,11 @@ async function loadPluginState(
 }
 
 export async function listOmpPluginsWithDependencies(
-  _input: RpcInput<typeof listOmpPlugins>,
+  input: RpcInput<typeof listOmpPlugins>,
   dependencies: OmpPluginDependencies,
 ): Promise<OmpPluginState> {
-  return loadPluginState(undefined, dependencies);
+  if (!validWorkspaceCwd(input.cwd)) return unavailableState("The workspace path is invalid.");
+  return loadPluginState(undefined, dependencies, input.cwd);
 }
 
 export async function resolveListOmpPlugins(
@@ -417,12 +439,14 @@ async function loadPluginConfig(
   executable: string,
   plugin: string,
   dependencies: OmpPluginDependencies,
+  cwd?: string,
 ): Promise<OmpPluginConfigState> {
   const result = await dependencies.runPlugin(
     executable,
     ["plugin", "config", "list", plugin, "--json"],
     CONFIG_OUTPUT_LIMIT,
     READ_TIMEOUT_MS,
+    cwd,
   );
   if (!runSucceeded(result)) {
     return unavailableConfig(
@@ -443,9 +467,12 @@ export async function inspectOmpPluginConfigWithDependencies(
   input: RpcInput<typeof inspectOmpPluginConfig>,
   dependencies: OmpPluginDependencies,
 ): Promise<OmpPluginConfigState> {
+  if (!validWorkspaceCwd(input.cwd)) {
+    return unavailableConfig(input.plugin, "The workspace path is invalid.");
+  }
   const executable = await dependencies.resolveExecutable();
   return executable
-    ? loadPluginConfig(executable, input.plugin, dependencies)
+    ? loadPluginConfig(executable, input.plugin, dependencies, input.cwd)
     : unavailableConfig(input.plugin, "The OMP executable could not be resolved.");
 }
 
@@ -492,13 +519,17 @@ export async function mutateOmpPluginConfigWithDependencies(
   input: RpcInput<typeof mutateOmpPluginConfig>,
   dependencies: OmpPluginDependencies,
 ): Promise<{ ok: boolean; message: string; config: OmpPluginConfigState }> {
+  if (!validWorkspaceCwd(input.cwd)) {
+    const config = unavailableConfig(input.plugin, "The workspace path is invalid.");
+    return { ok: false, message: "The workspace path is invalid.", config };
+  }
   const executable = await dependencies.resolveExecutable();
   if (!executable) {
     const config = unavailableConfig(input.plugin, "The OMP executable could not be resolved.");
     return { ok: false, message: "The OMP executable could not be resolved.", config };
   }
 
-  const current = await loadPluginConfig(executable, input.plugin, dependencies);
+  const current = await loadPluginConfig(executable, input.plugin, dependencies, input.cwd);
   const setting = current.settings.find((candidate) => candidate.key === input.key);
   if (!current.available || !setting) {
     return {
@@ -526,8 +557,9 @@ export async function mutateOmpPluginConfigWithDependencies(
     buildOmpPluginConfigMutationArgs(input),
     MUTATION_OUTPUT_LIMIT,
     READ_TIMEOUT_MS,
+    input.cwd,
   );
-  const config = await loadPluginConfig(executable, input.plugin, dependencies);
+  const config = await loadPluginConfig(executable, input.plugin, dependencies, input.cwd);
   const mutationSucceeded = runSucceeded(mutation);
   const ok = mutationSucceeded && config.available;
   return {
@@ -553,7 +585,7 @@ export function resolveMutateOmpPluginConfig(
 
 export function buildOmpPluginMutationArgs(input: OmpPluginMutation): string[] {
   const target = input.action === "install" ? input.source : input.plugin;
-  return ["plugin", input.action, target, "--scope", "user", "--json"];
+  return ["plugin", input.action, target, "--scope", input.scope ?? "user", "--json"];
 }
 
 function mutationFailure(result: BoundedRun): string {
@@ -583,6 +615,10 @@ export async function mutateOmpPluginWithDependencies(
   input: RpcInput<typeof mutateOmpPlugin>,
   dependencies: OmpPluginDependencies,
 ): Promise<{ ok: boolean; message: string; state: OmpPluginState }> {
+  if (!validWorkspaceCwd(input.cwd)) {
+    const state = unavailableState("The workspace path is invalid.");
+    return { ok: false, message: "The workspace path is invalid.", state };
+  }
   const executable = await dependencies.resolveExecutable();
   if (!executable) {
     const state = unavailableState("The OMP executable could not be resolved.");
@@ -590,15 +626,26 @@ export async function mutateOmpPluginWithDependencies(
   }
 
   if (input.action !== "install") {
-    const before = await loadPluginState(executable, dependencies);
+    const before = await loadPluginState(executable, dependencies, input.cwd);
     if (!before.available) {
       return { ok: false, message: "OMP plugin state is unavailable.", state: before };
     }
-    const matches = before.plugins.filter((plugin) => pluginAliases(plugin).includes(input.plugin));
-    if (matches.length !== 1 || matches[0]?.ambiguous || matches[0]?.scope === "project") {
+    const matches = before.plugins.filter(
+      (plugin) =>
+        pluginAliases(plugin).includes(input.plugin) &&
+        (input.scope === undefined || plugin.scope === input.scope),
+    );
+    if (matches.length !== 1 || matches[0]?.ambiguous) {
       return {
         ok: false,
-        message: "The plugin target is ambiguous or not user-scoped.",
+        message: "The plugin target is ambiguous in this scope.",
+        state: before,
+      };
+    }
+    if (matches[0]?.scope === "project" && !input.cwd) {
+      return {
+        ok: false,
+        message: "Project-scoped plugin actions require a workspace.",
         state: before,
       };
     }
@@ -609,8 +656,9 @@ export async function mutateOmpPluginWithDependencies(
     buildOmpPluginMutationArgs(input),
     MUTATION_OUTPUT_LIMIT,
     MUTATION_TIMEOUT_MS,
+    input.cwd,
   );
-  const state = await loadPluginState(executable, dependencies);
+  const state = await loadPluginState(executable, dependencies, input.cwd);
   return {
     ok: runSucceeded(mutation),
     message: runSucceeded(mutation) ? mutationSuccess(input.action) : mutationFailure(mutation),

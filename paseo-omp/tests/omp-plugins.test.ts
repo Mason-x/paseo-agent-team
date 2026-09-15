@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   buildOmpPluginConfigMutationArgs,
@@ -119,14 +122,32 @@ describe("OMP plugin RPC validation", () => {
     }
   });
 
-  test("rejects project-scoped lifecycle mutations without project context", () => {
+  test("requires workspace context and rejects project-scoped installs", () => {
+    const mutation = {
+      action: "install" as const,
+      source: "plugin@catalog",
+      scope: "project" as const,
+    };
+    expect(OmpPluginMutationSchema.safeParse(mutation).success).toBe(false);
     expect(
       OmpPluginMutationSchema.safeParse({
         action: "install",
-        source: "plugin@catalog",
+        source: "@scope/package",
         scope: "project",
+        cwd: "/workspace/project",
       }).success,
     ).toBe(false);
+    expect(
+      OmpPluginMutationSchema.safeParse({ ...mutation, cwd: "/workspace/project" }).success,
+    ).toBe(false);
+    expect(
+      OmpPluginMutationSchema.safeParse({
+        action: "enable",
+        plugin: "plugin@catalog",
+        scope: "project",
+        cwd: "/workspace/project",
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -135,6 +156,14 @@ describe("OMP plugin command construction", () => {
     expect(
       buildOmpPluginMutationArgs({ action: "install", source: "plugin@catalog", scope: "user" }),
     ).toEqual(["plugin", "install", "plugin@catalog", "--scope", "user", "--json"]);
+    expect(
+      buildOmpPluginMutationArgs({
+        action: "enable",
+        plugin: "plugin@catalog",
+        scope: "project",
+        cwd: "/workspace/project",
+      }),
+    ).toEqual(["plugin", "enable", "plugin@catalog", "--scope", "project", "--json"]);
     expect(
       buildOmpPluginMutationArgs({ action: "enable", plugin: "plugin@catalog", scope: "user" }),
     ).toEqual(["plugin", "enable", "plugin@catalog", "--scope", "user", "--json"]);
@@ -198,6 +227,18 @@ describe("OMP plugin state", () => {
     expect(result).toEqual({ available: true, plugins: [], droppedCount: 0 });
   });
 
+  test("runs plugin discovery from the selected workspace", async () => {
+    const workingDirectories: Array<string | undefined> = [];
+    await listOmpPluginsWithDependencies(
+      { cwd: "/workspace/project" },
+      dependenciesFor(async (_executable, _args, _limit, _timeout, cwd) => {
+        workingDirectories.push(cwd);
+        return completed('{"npm":[],"marketplace":[]}');
+      }),
+    );
+
+    expect(workingDirectories).toEqual(["/workspace/project"]);
+  });
   test("maps bounded npm and marketplace identity, source, version, scope, and status", () => {
     expect(
       parseOmpPluginList({
@@ -248,6 +289,7 @@ describe("OMP plugin state", () => {
           availableFeatures: ["search", "web"],
           configurable: true,
           ambiguous: false,
+          configAmbiguous: false,
           usesDefaultFeatures: false,
         },
         {
@@ -263,6 +305,7 @@ describe("OMP plugin state", () => {
           availableFeatures: [],
           configurable: false,
           ambiguous: false,
+          configAmbiguous: false,
           usesDefaultFeatures: true,
         },
       ],
@@ -292,8 +335,50 @@ describe("OMP plugin state", () => {
       marketplace: [],
     });
 
+    expect(parsed.plugins.map(({ configAmbiguous }) => configAmbiguous)).toEqual([true, true]);
     expect(parsed.plugins.map(({ ambiguous }) => ambiguous)).toEqual([true, true]);
     expect(parsed.plugins.every(({ usesDefaultFeatures }) => usesDefaultFeatures)).toBe(true);
+  });
+
+  test("marks user and project marketplace packages as config-ambiguous", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paseo-omp-plugin-collision-"));
+    const userPath = join(root, "user");
+    const projectPath = join(root, "project");
+    try {
+      await Promise.all(
+        [userPath, projectPath].map(async (path) => {
+          await mkdir(path, { recursive: true });
+          await writeFile(join(path, "package.json"), '{"name":"shared-plugin"}');
+        }),
+      );
+      const state = await listOmpPluginsWithDependencies(
+        { cwd: root },
+        dependenciesFor(async () =>
+          completed(
+            JSON.stringify({
+              npm: [],
+              marketplace: [
+                {
+                  id: "shared@catalog",
+                  scope: "user",
+                  entries: [{ installPath: userPath, version: "1.0.0" }],
+                },
+                {
+                  id: "shared@catalog",
+                  scope: "project",
+                  entries: [{ installPath: projectPath, version: "2.0.0" }],
+                },
+              ],
+            }),
+          ),
+        ),
+      );
+
+      expect(state.plugins.map(({ ambiguous }) => ambiguous)).toEqual([false, false]);
+      expect(state.plugins.map(({ configAmbiguous }) => configAmbiguous)).toEqual([true, true]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("returns a sanitized failure without forwarding command output", async () => {

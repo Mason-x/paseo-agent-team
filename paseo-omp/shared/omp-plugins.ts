@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { OmpWorkspaceCwdSchema } from "./hub";
 
 export const OMP_PLUGIN_LIMIT = 256;
 export const OMP_PLUGIN_ARGUMENT_LIMIT = 512;
@@ -72,6 +73,7 @@ export const OmpInstalledPluginSchema = z
     availableFeatures: z.array(z.string().min(1).max(128)).max(128),
     configurable: z.boolean(),
     ambiguous: z.boolean(),
+    configAmbiguous: z.boolean(),
     usesDefaultFeatures: z.boolean(),
   })
   .strict();
@@ -89,7 +91,7 @@ export type OmpPluginState = z.infer<typeof OmpPluginStateSchema>;
 
 export const listOmpPlugins = defineRpc({
   name: "paseo-omp.list-plugins",
-  input: z.object({}).strict(),
+  input: z.object({ cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
   output: OmpPluginStateSchema,
 });
 
@@ -121,7 +123,7 @@ export type OmpPluginConfigState = z.infer<typeof OmpPluginConfigStateSchema>;
 
 export const inspectOmpPluginConfig = defineRpc({
   name: "paseo-omp.inspect-plugin-config",
-  input: z.object({ plugin: OmpPluginNameSchema }).strict(),
+  input: z.object({ plugin: OmpPluginNameSchema, cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
   output: OmpPluginConfigStateSchema,
 });
 
@@ -151,6 +153,7 @@ export const OmpPluginConfigMutationSchema = z.discriminatedUnion("action", [
       plugin: OmpPluginNameSchema,
       key: OmpPluginConfigKeySchema,
       value: z.union([OmpPluginConfigStringValueSchema, z.number().finite(), z.boolean()]),
+      cwd: OmpWorkspaceCwdSchema.optional(),
     })
     .strict(),
   z
@@ -158,6 +161,7 @@ export const OmpPluginConfigMutationSchema = z.discriminatedUnion("action", [
       action: z.literal("delete"),
       plugin: OmpPluginNameSchema,
       key: OmpPluginConfigKeySchema,
+      cwd: OmpWorkspaceCwdSchema.optional(),
     })
     .strict(),
 ]);
@@ -176,38 +180,63 @@ export const mutateOmpPluginConfig = defineRpc({
 });
 
 const ScopedMutationShape = {
-  scope: z.literal("user").optional(),
+  scope: OmpPluginScopeSchema.optional(),
+  cwd: OmpWorkspaceCwdSchema.optional(),
 };
-
-export const OmpPluginMutationSchema = z.discriminatedUnion("action", [
-  z
-    .object({
-      action: z.literal("install"),
-      source: OmpPluginInstallSourceSchema,
-      ...ScopedMutationShape,
-    })
-    .strict(),
-  z
-    .object({ action: z.literal("enable"), plugin: OmpPluginTargetSchema, ...ScopedMutationShape })
-    .strict(),
-  z
-    .object({ action: z.literal("disable"), plugin: OmpPluginTargetSchema, ...ScopedMutationShape })
-    .strict(),
-  z
-    .object({
-      action: z.literal("uninstall"),
-      plugin: OmpPluginTargetSchema,
-      ...ScopedMutationShape,
-    })
-    .strict(),
-  z
-    .object({
-      action: z.literal("upgrade"),
-      plugin: OmpMarketplacePluginIdSchema,
-      ...ScopedMutationShape,
-    })
-    .strict(),
-]);
+export const OmpPluginMutationSchema = z
+  .discriminatedUnion("action", [
+    z
+      .object({
+        action: z.literal("install"),
+        source: OmpPluginInstallSourceSchema,
+        ...ScopedMutationShape,
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal("enable"),
+        plugin: OmpPluginTargetSchema,
+        ...ScopedMutationShape,
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal("disable"),
+        plugin: OmpPluginTargetSchema,
+        ...ScopedMutationShape,
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal("uninstall"),
+        plugin: OmpPluginTargetSchema,
+        ...ScopedMutationShape,
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal("upgrade"),
+        plugin: OmpMarketplacePluginIdSchema,
+        ...ScopedMutationShape,
+      })
+      .strict(),
+  ])
+  .superRefine((input, context) => {
+    if (input.scope === "project" && input.cwd === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Project-scoped plugin actions require a workspace",
+        path: ["cwd"],
+      });
+    }
+    if (input.action === "install" && input.scope === "project") {
+      context.addIssue({
+        code: "custom",
+        message: "Project-scoped installation is not supported through this API",
+        path: ["scope"],
+      });
+    }
+  });
 export type OmpPluginMutation = z.infer<typeof OmpPluginMutationSchema>;
 
 export const mutateOmpPlugin = defineRpc({

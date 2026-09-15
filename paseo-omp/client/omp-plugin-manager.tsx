@@ -1,7 +1,7 @@
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
 import { Pressable, Switch, Text, View } from "react-native";
 import {
@@ -20,16 +20,23 @@ import {
 
 const PLUGINS_QUERY_KEY = ["paseo-omp", "plugins"] as const;
 
+type ConfirmationOrigin =
+  | { surface: "install" }
+  | { surface: "plugin"; key: string }
+  | { surface: "config"; key: string };
+
 type PendingConfirmation =
   | {
       kind: "plugin";
       input: OmpPluginMutation;
+      origin: ConfirmationOrigin;
       title: string;
       warning: string;
     }
   | {
       kind: "config";
       input: OmpPluginConfigMutation;
+      origin: ConfirmationOrigin;
       title: string;
       warning: string;
     };
@@ -229,13 +236,55 @@ function MetadataRow({
   );
 }
 
-function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
+function ConfirmationPanel({
+  confirmation,
+  busy,
+  styles,
+  onCancel,
+  onConfirm,
+}: {
+  confirmation: PendingConfirmation;
+  busy: boolean;
+  styles: PluginManagerStyles;
+  onCancel(): void;
+  onConfirm(): void;
+}) {
+  const action = confirmation.input.action;
+  const confirmLabel = action === "set" ? "Confirm change" : `Confirm ${action}`;
+  return (
+    <View accessibilityRole="alert" style={styles.confirmation}>
+      <Text style={styles.cardTitle}>{confirmation.title}</Text>
+      <Text style={styles.warning}>{confirmation.warning}</Text>
+      <View style={styles.actions}>
+        <ActionButton label="Cancel" disabled={busy} styles={styles} onPress={onCancel} />
+        <ActionButton
+          label={busy ? "Applying…" : confirmLabel}
+          disabled={busy}
+          primary
+          danger={action === "uninstall" || action === "delete"}
+          styles={styles}
+          onPress={onConfirm}
+        />
+      </View>
+    </View>
+  );
+}
+
+function pluginCardIdentity(plugin: OmpInstalledPlugin): string {
+  return `${plugin.source}:${plugin.scope ?? "global"}:${plugin.path ?? plugin.id}:${plugin.version ?? "unknown"}`;
+}
+
+function confirmationFor(
+  input: OmpPluginMutation,
+  origin: ConfirmationOrigin,
+): PendingConfirmation {
   const target = input.action === "install" ? input.source : input.plugin;
   switch (input.action) {
     case "install":
       return {
         kind: "plugin",
         input,
+        origin,
         title: `Install ${target}?`,
         warning:
           "OMP plugins are trusted code. Installing can fetch code and change persistent state; runtime extensions load in a future OMP session.",
@@ -244,6 +293,7 @@ function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
       return {
         kind: "plugin",
         input,
+        origin,
         title: `Enable ${target}?`,
         warning:
           "Enabling changes persistent state and permits this plugin's trusted code to load in future OMP sessions.",
@@ -252,6 +302,7 @@ function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
       return {
         kind: "plugin",
         input,
+        origin,
         title: `Disable ${target}?`,
         warning:
           "Disabling changes persistent state. OMP sessions that are already running are not unloaded.",
@@ -260,6 +311,7 @@ function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
       return {
         kind: "plugin",
         input,
+        origin,
         title: `Uninstall ${target}?`,
         warning:
           "Uninstalling removes the selected plugin registration and cached installation. Running OMP sessions are unchanged.",
@@ -268,6 +320,7 @@ function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
       return {
         kind: "plugin",
         input,
+        origin,
         title: `Upgrade ${target}?`,
         warning:
           "Upgrading fetches and replaces trusted plugin code. The updated runtime loads in a future OMP session.",
@@ -278,11 +331,13 @@ function confirmationFor(input: OmpPluginMutation): PendingConfirmation {
 function configConfirmationFor(
   input: OmpPluginConfigMutation,
   setting: OmpPluginConfigSetting,
+  origin: ConfirmationOrigin,
 ): PendingConfirmation {
   if (input.action === "delete") {
     return {
       kind: "config",
       input,
+      origin,
       title: `Delete ${setting.key}?`,
       warning:
         "This changes persistent OMP plugin configuration. Future sessions will use the setting's default or environment fallback.",
@@ -291,6 +346,7 @@ function configConfirmationFor(
   return {
     kind: "config",
     input,
+    origin,
     title: `Set ${setting.key}?`,
     warning: setting.secret
       ? "This writes a secret value to OMP's persistent plugin configuration. The value will remain write-only in Paseo."
@@ -302,18 +358,27 @@ function ConfigSettingEditor({
   plugin,
   setting,
   busy,
+  confirmation,
+  confirmationOpen,
   theme,
   styles,
+  onCancel,
+  onApply,
   onConfirm,
 }: {
   plugin: string;
   setting: OmpPluginConfigSetting;
   busy: boolean;
+  confirmation: PendingConfirmation | null;
+  confirmationOpen: boolean;
   theme: PluginSurfaceProps["theme"];
   styles: PluginManagerStyles;
+  onCancel(): void;
+  onApply(): void;
   onConfirm(input: OmpPluginConfigMutation, setting: OmpPluginConfigSetting): void;
 }) {
   const [draft, setDraft] = useState<string | boolean>(setting.type === "boolean" ? false : "");
+  const blocked = busy || confirmationOpen;
   let value: string | number | boolean | undefined;
   let validationMessage: string | null = null;
   if (!setting.secret) {
@@ -373,7 +438,7 @@ function ConfigSettingEditor({
         <View style={styles.metadataRow}>
           <Switch
             accessibilityLabel={`New value for ${setting.key}`}
-            disabled={busy}
+            disabled={blocked}
             value={draft === true}
             onValueChange={setDraft}
           />
@@ -387,8 +452,8 @@ function ConfigSettingEditor({
               <Pressable
                 key={option}
                 accessibilityRole="radio"
-                accessibilityState={{ checked: selected, disabled: busy }}
-                disabled={busy}
+                accessibilityState={{ checked: selected, disabled: blocked }}
+                disabled={blocked}
                 onPress={() => setDraft(option)}
                 style={[styles.scopeButton, selected ? styles.scopeButtonActive : null]}
               >
@@ -402,7 +467,7 @@ function ConfigSettingEditor({
       ) : (
         <TextInput
           accessibilityLabel={`New value for ${setting.key}`}
-          editable={!busy}
+          editable={!blocked}
           value={typeof draft === "string" ? draft : ""}
           onChangeText={setDraft}
           placeholder="Enter a new value"
@@ -416,28 +481,38 @@ function ConfigSettingEditor({
       {validationMessage && (setting.type !== "boolean" || value === undefined) ? (
         <Text style={styles.error}>{validationMessage}</Text>
       ) : null}
-      <View style={styles.actions}>
-        {!setting.secret ? (
-          <ActionButton
-            label="Review change"
-            disabled={busy || !candidate?.success}
-            primary
-            styles={styles}
-            onPress={() => {
-              if (candidate?.success) onConfirm(candidate.data, setting);
-            }}
-          />
-        ) : null}
-        {setting.configured ? (
-          <ActionButton
-            label="Delete setting"
-            disabled={busy}
-            danger
-            styles={styles}
-            onPress={() => onConfirm({ action: "delete", plugin, key: setting.key }, setting)}
-          />
-        ) : null}
-      </View>
+      {confirmation ? (
+        <ConfirmationPanel
+          confirmation={confirmation}
+          busy={busy}
+          styles={styles}
+          onCancel={onCancel}
+          onConfirm={onApply}
+        />
+      ) : (
+        <View style={styles.actions}>
+          {!setting.secret ? (
+            <ActionButton
+              label="Review change"
+              disabled={blocked || !candidate?.success}
+              primary
+              styles={styles}
+              onPress={() => {
+                if (candidate?.success) onConfirm(candidate.data, setting);
+              }}
+            />
+          ) : null}
+          {setting.configured ? (
+            <ActionButton
+              label="Delete setting"
+              disabled={blocked}
+              danger
+              styles={styles}
+              onPress={() => onConfirm({ action: "delete", plugin, key: setting.key }, setting)}
+            />
+          ) : null}
+        </View>
+      )}
     </View>
   );
 }
@@ -445,19 +520,32 @@ function ConfigSettingEditor({
 function PluginCard({
   plugin,
   busy,
+  confirmation,
+  confirmationOpen,
+  workspaceScoped,
   inspecting,
   styles,
+  onCancel,
+  onApply,
   onConfirm,
   onInspect,
 }: {
   plugin: OmpInstalledPlugin;
   busy: boolean;
+  confirmation: PendingConfirmation | null;
+  confirmationOpen: boolean;
+  workspaceScoped: boolean;
   inspecting: boolean;
   styles: PluginManagerStyles;
-  onConfirm(input: OmpPluginMutation): void;
+  onCancel(): void;
+  onApply(): void;
+  onConfirm(input: OmpPluginMutation, origin: ConfirmationOrigin): void;
   onInspect(plugin: string): void;
 }) {
-  const scope = plugin.scope === "user" ? "user" : undefined;
+  const scope = plugin.scope ?? undefined;
+  const identity = pluginCardIdentity(plugin);
+  const blocked = busy || confirmationOpen;
+  const projectUnavailable = plugin.scope === "project" && !workspaceScoped;
   return (
     <View style={styles.pluginCard}>
       <View style={styles.cardHeader}>
@@ -490,56 +578,85 @@ function PluginCard({
         ) : null}
         {plugin.scope === "project" ? (
           <Text style={styles.warning}>
-            Project-scoped actions require OMP to run from that project and are read-only here.
+            {workspaceScoped
+              ? "This installation is scoped to the current workspace."
+              : "Open this project's workspace OMP panel to manage this installation."}
           </Text>
         ) : null}
         {plugin.ambiguous ? (
           <Text style={styles.warning}>
-            Multiple installations share this package identity, so lifecycle actions are read-only.
+            Multiple installations share this lifecycle target, so path-specific actions remain
+            unavailable.
+          </Text>
+        ) : null}
+        {plugin.configAmbiguous ? (
+          <Text style={styles.warning}>
+            Multiple installations share this package identity, so settings are read-only.
           </Text>
         ) : null}
       </View>
-      <View style={styles.actions}>
-        <ActionButton
-          label={plugin.enabled ? "Disable" : "Enable"}
-          disabled={busy || plugin.scope === "project" || plugin.ambiguous}
+      {confirmation ? (
+        <ConfirmationPanel
+          confirmation={confirmation}
+          busy={busy}
           styles={styles}
-          onPress={() =>
-            onConfirm({
-              action: plugin.enabled ? "disable" : "enable",
-              plugin: plugin.id,
-              ...(scope ? { scope } : {}),
-            })
-          }
+          onCancel={onCancel}
+          onConfirm={onApply}
         />
-        {plugin.configurable && plugin.packageName ? (
+      ) : (
+        <View style={styles.actions}>
           <ActionButton
-            label={inspecting ? "Loading settings…" : "Configure settings"}
-            disabled={busy || inspecting || plugin.scope === "project" || plugin.ambiguous}
-            styles={styles}
-            onPress={() => onInspect(plugin.packageName ?? plugin.id)}
-          />
-        ) : null}
-        {plugin.source === "marketplace" ? (
-          <ActionButton
-            label="Upgrade"
-            disabled={busy || plugin.scope === "project" || plugin.ambiguous}
+            label={plugin.enabled ? "Disable" : "Enable"}
+            disabled={blocked || projectUnavailable || plugin.ambiguous}
             styles={styles}
             onPress={() =>
-              onConfirm({ action: "upgrade", plugin: plugin.id, ...(scope ? { scope } : {}) })
+              onConfirm(
+                {
+                  action: plugin.enabled ? "disable" : "enable",
+                  plugin: plugin.id,
+                  ...(scope ? { scope } : {}),
+                },
+                { surface: "plugin", key: identity },
+              )
             }
           />
-        ) : null}
-        <ActionButton
-          label="Uninstall"
-          disabled={busy || plugin.scope === "project" || plugin.ambiguous}
-          danger
-          styles={styles}
-          onPress={() =>
-            onConfirm({ action: "uninstall", plugin: plugin.id, ...(scope ? { scope } : {}) })
-          }
-        />
-      </View>
+          {plugin.configurable && plugin.packageName ? (
+            <ActionButton
+              label={inspecting ? "Loading settings…" : "Configure settings"}
+              disabled={
+                blocked || inspecting || plugin.scope === "project" || plugin.configAmbiguous
+              }
+              styles={styles}
+              onPress={() => onInspect(plugin.packageName ?? plugin.id)}
+            />
+          ) : null}
+          {plugin.source === "marketplace" ? (
+            <ActionButton
+              label="Upgrade"
+              disabled={blocked || projectUnavailable || plugin.ambiguous}
+              styles={styles}
+              onPress={() =>
+                onConfirm(
+                  { action: "upgrade", plugin: plugin.id, ...(scope ? { scope } : {}) },
+                  { surface: "plugin", key: identity },
+                )
+              }
+            />
+          ) : null}
+          <ActionButton
+            label="Uninstall"
+            disabled={blocked || projectUnavailable || plugin.ambiguous}
+            danger
+            styles={styles}
+            onPress={() =>
+              onConfirm(
+                { action: "uninstall", plugin: plugin.id, ...(scope ? { scope } : {}) },
+                { surface: "plugin", key: identity },
+              )
+            }
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -547,9 +664,11 @@ function PluginCard({
 export function OmpPluginManagerSection({
   theme,
   compact,
+  cwd,
 }: {
   theme: PluginSurfaceProps["theme"];
   compact: boolean;
+  cwd?: string;
 }) {
   const loadPlugins = useRpc(listOmpPlugins);
   const inspectPluginConfig = useRpc(inspectOmpPluginConfig);
@@ -564,14 +683,15 @@ export function OmpPluginManagerSection({
   const [configEditGenerations, setConfigEditGenerations] = useState<Record<string, number>>({});
   const inspectionGeneration = useRef(0);
   const plugins = useQuery({
-    queryKey: PLUGINS_QUERY_KEY,
-    queryFn: () => loadPlugins({}),
+    queryKey: [...PLUGINS_QUERY_KEY, cwd ?? "global"],
+    queryFn: () => loadPlugins({ ...(cwd ? { cwd } : {}) }),
     staleTime: Number.POSITIVE_INFINITY,
   });
   const mutation = useMutation({
     mutationFn: (input: OmpPluginMutation) => mutatePlugin(input),
     onSuccess: (result) => {
-      queryClient.setQueryData(PLUGINS_QUERY_KEY, result.state);
+      void queryClient.invalidateQueries({ queryKey: PLUGINS_QUERY_KEY });
+      queryClient.setQueryData([...PLUGINS_QUERY_KEY, cwd ?? "global"], result.state);
       setNotice({ tone: result.ok ? "success" : "error", text: result.message });
       if (result.ok && confirmation?.kind === "plugin" && confirmation.input.action === "install") {
         setSource("");
@@ -585,7 +705,7 @@ export function OmpPluginManagerSection({
   });
   const configInspection = useMutation({
     mutationFn: ({ plugin }: { plugin: string; generation: number }) =>
-      inspectPluginConfig({ plugin }),
+      inspectPluginConfig({ plugin, ...(cwd ? { cwd } : {}) }),
     onSuccess: (result, request) => {
       if (inspectionGeneration.current === request.generation) setInspected(result);
     },
@@ -594,7 +714,8 @@ export function OmpPluginManagerSection({
     },
   });
   const configMutation = useMutation({
-    mutationFn: (input: OmpPluginConfigMutation) => mutatePluginConfig(input),
+    mutationFn: (input: OmpPluginConfigMutation) =>
+      mutatePluginConfig({ ...input, ...(cwd ? { cwd } : {}) }),
     onSuccess: (result, input) => {
       if (result.config.available) setInspected(result.config);
       if (result.ok) {
@@ -604,6 +725,7 @@ export function OmpPluginManagerSection({
           [identity]: (current[identity] ?? 0) + 1,
         }));
       }
+      void queryClient.invalidateQueries({ queryKey: PLUGINS_QUERY_KEY });
       setNotice({ tone: result.ok ? "success" : "error", text: result.message });
       setConfirmation(null);
     },
@@ -613,6 +735,25 @@ export function OmpPluginManagerSection({
     },
   });
   const busy = mutation.isPending || configMutation.isPending;
+  useEffect(() => {
+    if (!confirmation) return;
+    const { origin } = confirmation;
+    if (
+      origin.surface === "plugin" &&
+      plugins.data?.available &&
+      !plugins.data.plugins.some((plugin) => pluginCardIdentity(plugin) === origin.key)
+    ) {
+      setConfirmation(null);
+      return;
+    }
+    if (
+      origin.surface === "config" &&
+      inspected &&
+      !inspected.settings.some((setting) => `${inspected.plugin}:${setting.key}` === origin.key)
+    ) {
+      setConfirmation(null);
+    }
+  }, [confirmation, inspected, plugins.data]);
 
   const requestInstall = () => {
     const parsed = OmpPluginInstallSourceSchema.safeParse(source);
@@ -624,18 +765,33 @@ export function OmpPluginManagerSection({
       return;
     }
     setNotice(null);
-    setConfirmation(confirmationFor({ action: "install", source: parsed.data, scope: "user" }));
+    setConfirmation(
+      confirmationFor(
+        {
+          action: "install",
+          source: parsed.data,
+          scope: "user",
+          ...(cwd ? { cwd } : {}),
+        },
+        { surface: "install" },
+      ),
+    );
   };
-  const requestMutation = (input: OmpPluginMutation) => {
+  const requestMutation = (input: OmpPluginMutation, origin: ConfirmationOrigin) => {
     setNotice(null);
-    setConfirmation(confirmationFor(input));
+    setConfirmation(confirmationFor({ ...input, ...(cwd ? { cwd } : {}) }, origin));
   };
   const requestConfigMutation = (
     input: OmpPluginConfigMutation,
     setting: OmpPluginConfigSetting,
   ) => {
     setNotice(null);
-    setConfirmation(configConfirmationFor(input, setting));
+    setConfirmation(
+      configConfirmationFor({ ...input, ...(cwd ? { cwd } : {}) }, setting, {
+        surface: "config",
+        key: `${input.plugin}:${input.key}`,
+      }),
+    );
   };
   const inspect = (plugin: string) => {
     inspectionGeneration.current += 1;
@@ -665,7 +821,7 @@ export function OmpPluginManagerSection({
         </View>
         <ActionButton
           label={plugins.isFetching ? "Refreshing…" : "Refresh"}
-          disabled={plugins.isFetching || busy}
+          disabled={plugins.isFetching || busy || confirmation !== null}
           styles={styles}
           onPress={() => {
             void plugins.refetch();
@@ -681,7 +837,7 @@ export function OmpPluginManagerSection({
         </Text>
         <TextInput
           accessibilityLabel="OMP plugin source"
-          editable={!busy}
+          editable={!busy && confirmation === null}
           value={source}
           onChangeText={setSource}
           placeholder="name@marketplace or package source"
@@ -690,43 +846,26 @@ export function OmpPluginManagerSection({
           autoCorrect={false}
           style={styles.input}
         />
-        <View style={styles.actions}>
-          <ActionButton
-            label="Review install"
-            disabled={busy || source.length === 0}
-            primary
+        {confirmation?.origin.surface === "install" ? (
+          <ConfirmationPanel
+            confirmation={confirmation}
+            busy={busy}
             styles={styles}
-            onPress={requestInstall}
+            onCancel={() => setConfirmation(null)}
+            onConfirm={applyConfirmation}
           />
-        </View>
-      </View>
-
-      {confirmation ? (
-        <View accessibilityRole="alert" style={styles.confirmation}>
-          <Text style={styles.cardTitle}>{confirmation.title}</Text>
-          <Text style={styles.warning}>{confirmation.warning}</Text>
+        ) : (
           <View style={styles.actions}>
             <ActionButton
-              label="Cancel"
-              disabled={busy}
-              styles={styles}
-              onPress={() => setConfirmation(null)}
-            />
-            <ActionButton
-              label={busy ? "Applying…" : "Confirm"}
-              disabled={busy}
+              label="Review install"
+              disabled={busy || confirmation !== null || source.length === 0}
               primary
-              danger={
-                confirmation.kind === "plugin"
-                  ? confirmation.input.action === "uninstall"
-                  : confirmation.input.action === "delete"
-              }
               styles={styles}
-              onPress={applyConfirmation}
+              onPress={requestInstall}
             />
           </View>
-        </View>
-      ) : null}
+        )}
+      </View>
 
       {notice ? (
         <Text
@@ -763,23 +902,34 @@ export function OmpPluginManagerSection({
 
       {plugins.data?.plugins.length ? (
         <View style={styles.pluginGrid}>
-          {plugins.data.plugins.map((plugin) => (
-            <PluginCard
-              key={`${plugin.source}:${plugin.scope ?? "global"}:${plugin.path ?? plugin.id}:${plugin.version ?? "unknown"}`}
-              plugin={plugin}
-              busy={busy}
-              inspecting={
-                configInspection.isPending &&
-                configInspection.variables?.plugin === plugin.packageName
-              }
-              styles={styles}
-              onConfirm={requestMutation}
-              onInspect={inspect}
-            />
-          ))}
+          {plugins.data.plugins.map((plugin) => {
+            const identity = pluginCardIdentity(plugin);
+            const localConfirmation =
+              confirmation?.origin.surface === "plugin" && confirmation.origin.key === identity
+                ? confirmation
+                : null;
+            return (
+              <PluginCard
+                key={identity}
+                plugin={plugin}
+                busy={busy}
+                confirmation={localConfirmation}
+                confirmationOpen={confirmation !== null}
+                workspaceScoped={cwd !== undefined}
+                inspecting={
+                  configInspection.isPending &&
+                  configInspection.variables?.plugin === plugin.packageName
+                }
+                styles={styles}
+                onCancel={() => setConfirmation(null)}
+                onApply={applyConfirmation}
+                onConfirm={requestMutation}
+                onInspect={inspect}
+              />
+            );
+          })}
         </View>
       ) : null}
-
       {configInspection.error || configMutation.error ? (
         <Text accessibilityRole="alert" style={styles.error}>
           Could not update OMP plugin settings.
@@ -791,7 +941,7 @@ export function OmpPluginManagerSection({
             <Text style={styles.cardTitle}>Settings · {inspected.plugin}</Text>
             <ActionButton
               label="Close"
-              disabled={busy}
+              disabled={busy || confirmation !== null}
               styles={styles}
               onPress={() => {
                 inspectionGeneration.current += 1;
@@ -814,17 +964,28 @@ export function OmpPluginManagerSection({
             <Text style={styles.muted}>This plugin declares no settings.</Text>
           ) : null}
           <View style={styles.settings}>
-            {inspected.settings.map((setting) => (
-              <ConfigSettingEditor
-                key={`${inspected.plugin}:${setting.key}:${configEditGenerations[`${inspected.plugin}:${setting.key}`] ?? 0}`}
-                plugin={inspected.plugin}
-                setting={setting}
-                busy={busy || confirmation !== null}
-                theme={theme}
-                styles={styles}
-                onConfirm={requestConfigMutation}
-              />
-            ))}
+            {inspected.settings.map((setting) => {
+              const identity = `${inspected.plugin}:${setting.key}`;
+              const localConfirmation =
+                confirmation?.origin.surface === "config" && confirmation.origin.key === identity
+                  ? confirmation
+                  : null;
+              return (
+                <ConfigSettingEditor
+                  key={`${identity}:${configEditGenerations[identity] ?? 0}`}
+                  plugin={inspected.plugin}
+                  setting={setting}
+                  busy={busy}
+                  confirmation={localConfirmation}
+                  confirmationOpen={confirmation !== null}
+                  theme={theme}
+                  styles={styles}
+                  onCancel={() => setConfirmation(null)}
+                  onApply={applyConfirmation}
+                  onConfirm={requestConfigMutation}
+                />
+              );
+            })}
           </View>
         </View>
       ) : null}

@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { OmpWorkspaceCwdSchema } from "./hub";
 
 // Health/compatibility facts about the omp CLI itself, surfaced on the global OMP page. This is
 // an explicit allowlist, not a passthrough: filesystem locations are sanitized display labels
@@ -112,6 +113,6 @@ export type OmpProviderHealth = z.infer<typeof OmpProviderHealthSchema>;
 
 export const getOmpProviderHealth = defineRpc({
   name: "paseo-omp.get-provider-health",
-  input: z.object({ force: z.boolean().optional() }),
+  input: z.object({ force: z.boolean().optional(), cwd: OmpWorkspaceCwdSchema.optional() }),
   output: OmpProviderHealthSchema,
 });
