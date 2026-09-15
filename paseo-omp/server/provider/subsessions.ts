@@ -304,6 +304,7 @@ export class OmpSubsessionProjector {
     private readonly scheduler: OmpTimelineScheduler,
     private readonly onActivityChange: () => void,
     private readonly outputRedactionValues: readonly string[],
+    private readonly pluginTimelineEnabled = false,
   ) {
     this.dataFilter = new OmpPublicDataSerializer(outputRedactionValues);
   }
@@ -540,6 +541,8 @@ export class OmpSubsessionProjector {
         this.emit,
         this.scheduler,
         this.outputRedactionValues,
+        false,
+        this.pluginTimelineEnabled,
       ),
     };
     this.children.set(sessionId, child);

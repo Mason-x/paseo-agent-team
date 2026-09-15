@@ -17,6 +17,7 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 import { AgentPermissionRequestPayloadSchema } from "@getpaseo/protocol/messages";
 import { describe, expect, onTestFinished, test } from "vitest";
+import { OmpBrowserAuthorizationRegistry } from "../server/mcp-browser";
 import { mapOmpModels, ompModelId } from "../server/provider/catalog";
 import { OmpNativeSessionReservations } from "../server/provider/connection";
 import { withOmpWorkspaceIdentity } from "../server/provider/host-tools";
@@ -898,7 +899,10 @@ async function createHarness(
   return { connection, events, runtime, scheduler };
 }
 
-async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
+async function createHostToolHarness(
+  runtime = new FakeOmpRuntime(),
+  browserAuthorizationRegistry?: OmpBrowserAuthorizationRegistry,
+) {
   const scheduler = new ManualScheduler();
   const connection = await createOmpProvider({
     runtime,
@@ -911,6 +915,7 @@ async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
       callTool: async () => ({ content: [{ type: "text", text: "bootstrap result" }] }),
       close: async () => {},
     }),
+    browserAuthorizationRegistry,
   }).connect({
     versions: [1],
     capabilities: [
@@ -921,6 +926,7 @@ async function createHostToolHarness(runtime = new FakeOmpRuntime()) {
       "session.configure",
       "permission",
       "session.persistence",
+      "timeline.plugin",
     ],
   });
   const events = new EventLog();
@@ -10053,6 +10059,50 @@ describe("OMP direct provider", () => {
       mcpServer.stop(true);
     }
   });
+  test("registers browser authorization only while the OMP session is active", async () => {
+    const browserAuthorizationRegistry = new OmpBrowserAuthorizationRegistry();
+    const { connection, events, runtime } = await createHostToolHarness(
+      new FakeOmpRuntime(),
+      browserAuthorizationRegistry,
+    );
+    await openHostToolSession(connection, events, "browser-registry-open");
+    sessionAt(runtime).emit({
+      type: "extension_ui_request",
+      id: "browser-auth-request",
+      method: "open_url",
+      url: "https://auth.example.test/authorize?state=opaque",
+      launchUrl: "http://127.0.0.1:4321/launch",
+    });
+    const card = await events.waitFor(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "plugin" &&
+        event.item.kind === "omp-mcp-authorization",
+    );
+    const authorizationToken =
+      card.type === "timeline.item" && card.item.type === "plugin"
+        ? (card.item.data as Record<string, unknown>).browserAuthorizationToken
+        : undefined;
+    expect(typeof authorizationToken).toBe("string");
+
+    await expect(browserAuthorizationRegistry.open(String(authorizationToken))).rejects.toThrow(
+      "Paseo browser tools are unavailable in this OMP session",
+    );
+
+    await connection.send({
+      type: "session.close",
+      requestId: "browser-registry-close",
+      sessionId: "session-1",
+    });
+    await events.waitFor(
+      (event) => event.type === "request.completed" && event.requestId === "browser-registry-close",
+    );
+    await expect(browserAuthorizationRegistry.open(String(authorizationToken))).rejects.toThrow(
+      "no longer available",
+    );
+    await connection.close();
+  });
+
   test("uses registered labels for direct and routed MCP timeline calls", async () => {
     const { connection, events, runtime } = await createHostToolHarness();
     await openHostToolSession(connection, events, "host-tool-labels");
@@ -11448,7 +11498,15 @@ describe("OMP direct provider", () => {
       url: "https://safe.example.com/callback",
       launchUrl: "file:///private/oauth-token",
     });
-    expect(events).toHaveLength(unsafeLaunchBaseline);
+    const unsafeLaunchItems = events
+      .slice(unsafeLaunchBaseline)
+      .flatMap((event) =>
+        event.type === "timeline.item" && event.item.type === "notification" ? [event.item] : [],
+      );
+    expect(unsafeLaunchItems).toHaveLength(2);
+    expect(
+      unsafeLaunchItems.every((item) => item.message === "https://safe.example.com/callback"),
+    ).toBe(true);
     expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
 
     const turnId = turnIdFrom(await startPrompt(connection, events, "after-passive", "continue"));
@@ -15834,7 +15892,8 @@ describe("OMP direct provider", () => {
         type: "timeline.item",
         item: expect.objectContaining({
           type: "notification",
-          message: "Open this link\nhttp://127.0.0.1:4321/launch",
+          message:
+            "Open this link\nhttps://example.com/oauth?token=public\nRemote client: if the localhost callback cannot connect, paste the final redirect URL or authorization code into the OMP prompt in this chat.",
         }),
       }),
     );
@@ -15847,6 +15906,62 @@ describe("OMP direct provider", () => {
       },
     });
     await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+  test("publishes remote-safe MCP authorization cards when negotiated", async () => {
+    const { connection, events, runtime } = await createHarness(
+      new FakeOmpRuntime(),
+      new ManualScheduler(),
+      ["prompt.message", "permission", "timeline.plugin"],
+    );
+    await openSession(connection, events);
+    sessionAt(runtime).emit({
+      type: "extension_ui_request",
+      id: "mcp-auth",
+      method: "open_url",
+      url: "https://auth.example.com/authorize?state=opaque",
+      launchUrl: "http://127.0.0.1:4321/launch",
+      instructions: "Authorize the MCP server",
+    });
+    sessionAt(runtime).emit({
+      type: "extension_ui_request",
+      id: "documentation-link",
+      method: "open_url",
+      url: "https://docs.example.com/mcp",
+      instructions: "Read the MCP guide",
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "timeline.item",
+        item: {
+          type: "plugin",
+          id: "omp:ui:1",
+          pluginId: "paseo-omp",
+          kind: "omp-mcp-authorization",
+          version: 1,
+          data: {
+            url: "https://auth.example.com/authorize?state=opaque",
+            instructions: "Authorize the MCP server",
+            loopbackCallback: true,
+          },
+        },
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "timeline.item",
+        item: {
+          type: "notification",
+          id: "omp:ui:2",
+          level: "info",
+          message: "Read the MCP guide\nhttps://docs.example.com/mcp",
+        },
+      }),
+    );
+    expect(
+      events.filter((event) => event.type === "timeline.item" && event.item.type === "plugin"),
+    ).toHaveLength(1);
     await connection.close();
   });
 

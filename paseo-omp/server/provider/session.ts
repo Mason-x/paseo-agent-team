@@ -813,6 +813,7 @@ export class OmpProviderSession {
       scheduler,
       outputRedactionValues,
       capabilities.includes("session.revert.conversation"),
+      capabilities.includes("timeline.plugin"),
       hostTools.labels,
     );
     this.subsessions = capabilities.includes("session.subsession")
@@ -825,12 +826,20 @@ export class OmpProviderSession {
           scheduler,
           () => this.resumeDeferredAgentEnd(),
           outputRedactionValues,
+          capabilities.includes("timeline.plugin"),
         )
       : null;
     this.bindRuntime(runtime);
   }
   get persistenceSessionId(): string | undefined {
     return this.persistSession ? this.nativeSessionId : undefined;
+  }
+  async openPaseoBrowser(url: string): Promise<void> {
+    if (this.closed) throw new OmpPublicError("The OMP session is closed");
+    await this.hostTools.openPaseoBrowser(url);
+  }
+  setBrowserAuthorizationIssuer(issue: ((url: string) => string | undefined) | null): void {
+    this.projector.setBrowserAuthorizationIssuer(issue);
   }
 
   private readonly imageMaterializer = new OmpImageMaterializer();

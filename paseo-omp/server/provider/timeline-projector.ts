@@ -4,6 +4,7 @@ import type {
   ProviderTimelineItem,
   ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
+import { OMP_MCP_AUTH_TIMELINE_KIND } from "../../shared/mcp";
 import { isOmpImageMimeType, isValidImagePayload, type OmpImageMimeType } from "./image";
 import type { OmpMessage, OmpRpcEvent } from "./omp-rpc";
 import {
@@ -196,6 +197,17 @@ function publishableHttpUrl(value: string | undefined): string | undefined {
     return undefined;
   }
 }
+function isOmpOAuthLaunchUrl(value: string | undefined): boolean {
+  const url = publishableHttpUrl(value);
+  if (!url) return false;
+  const parsed = new URL(url);
+  return (
+    (parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "[::1]") &&
+    parsed.pathname === "/launch"
+  );
+}
 
 function todoPublicId(nativeId: string | undefined, index: number): string {
   if (!nativeId) return `omp:todo:${index}`;
@@ -366,6 +378,7 @@ export class OmpTimelineProjector {
   private closed = false;
 
   private readonly dataFilter: OmpPublicDataSerializer;
+  private browserAuthorizationIssuer: ((url: string) => string | undefined) | null = null;
 
   constructor(
     private readonly sessionId: string,
@@ -373,9 +386,13 @@ export class OmpTimelineProjector {
     private readonly scheduler: OmpTimelineScheduler = defaultOmpTimelineScheduler,
     outputRedactionValues: readonly string[] = [],
     private readonly conversationRevertEnabled = false,
+    private readonly pluginTimelineEnabled = false,
     private readonly hostToolLabels: ReadonlyMap<string, string> = new Map(),
   ) {
     this.dataFilter = new OmpPublicDataSerializer(outputRedactionValues);
+  }
+  setBrowserAuthorizationIssuer(issue: ((url: string) => string | undefined) | null): void {
+    this.browserAuthorizationIssuer = issue;
   }
 
   project(event: OmpRpcEvent, turnId: string, bypassReplayFilter = false): void {
@@ -601,15 +618,40 @@ export class OmpTimelineProjector {
       return;
     }
     if (event.type === "extension_ui_request" && event.method === "open_url") {
-      const url = publishableHttpUrl(event.launchUrl ?? event.url);
+      const url = publishableHttpUrl(event.url);
       if (!url) return;
       this.noticeSequence += 1;
-      const message = [event.instructions, url].filter(Boolean).join("\n");
+      const instructions = event.instructions
+        ? this.dataFilter.text(event.instructions, 64 * 1024)
+        : undefined;
+      const publicUrl = this.dataFilter.text(url, 16_384);
+      const isMcpAuthorization = isOmpOAuthLaunchUrl(event.launchUrl);
+      if (this.pluginTimelineEnabled && isMcpAuthorization && publishableHttpUrl(publicUrl)) {
+        const browserAuthorizationToken = this.browserAuthorizationIssuer?.(publicUrl);
+        this.publish({
+          type: "plugin",
+          id: `omp:ui:${this.noticeSequence}`,
+          pluginId: "paseo-omp",
+          kind: OMP_MCP_AUTH_TIMELINE_KIND,
+          version: 1,
+          data: {
+            url: publicUrl,
+            ...(instructions ? { instructions } : {}),
+            loopbackCallback: true,
+            ...(browserAuthorizationToken ? { browserAuthorizationToken } : {}),
+          },
+        });
+        return;
+      }
+      const remoteHint = isMcpAuthorization
+        ? "Remote client: if the localhost callback cannot connect, paste the final redirect URL or authorization code into the OMP prompt in this chat."
+        : undefined;
+      const message = [instructions, publicUrl, remoteHint].filter(Boolean).join("\n");
       this.publish({
         type: "notification",
         id: `omp:ui:${this.noticeSequence}`,
         level: "info",
-        message: this.dataFilter.text(message, 64 * 1024),
+        message,
       });
       return;
     }
@@ -1027,6 +1069,7 @@ export class OmpTimelineProjector {
     if (this.currentTurnId) this.publishCommand(this.currentTurnId);
     this.retireCompactions("OMP compaction ended when the session closed");
     this.closed = true;
+    this.browserAuthorizationIssuer = null;
     this.clearFlushTimer();
     this.stream = null;
     this.tools.clear();

@@ -3,6 +3,8 @@ import type { PluginButtonRegistration, PluginClientContext } from "@getpaseo/pl
 import { OmpIcon } from "./client/hub-icon";
 import { HubPopover } from "./client/hub-popover";
 import { summarizeHubProcesses } from "./client/hub-status";
+import { OmpMcpAuthorizationCard } from "./client/mcp-authorization";
+import { McpPopover } from "./client/mcp-popover";
 import { OmpMemoryPanel } from "./client/memory-panel";
 import { MemoryPopover } from "./client/memory-popover";
 import { OmpConfigSurface } from "./client/omp-config-surface";
@@ -17,6 +19,7 @@ import {
 } from "./client/quota-state";
 import { SessionsPopover } from "./client/sessions-popover";
 import { listHubProcesses } from "./shared/hub";
+import { OMP_MCP_AUTH_TIMELINE_KIND, ompMcpAuthorizationTimelineSchema } from "./shared/mcp";
 import { ompImageTimelineSchema, transformOmpImageToolItem } from "./shared/provider-image";
 import { listOmpQuotas } from "./shared/quota";
 
@@ -30,6 +33,7 @@ type AgentEntry = PaseoAgentListResult["entries"][number];
 
 type PillEntry = {
   cwd: string;
+  provider: string;
   workspaceId: string;
   quotaProvider: string | null;
   quotaSeverity: QuotaSeverity;
@@ -37,6 +41,7 @@ type PillEntry = {
   memory: PluginButtonRegistration;
   sessions: PluginButtonRegistration;
   quota: PluginButtonRegistration;
+  mcp?: PluginButtonRegistration;
 };
 
 async function loadAgents(paseo: PaseoApi): Promise<AgentEntry[]> {
@@ -96,6 +101,12 @@ export default function contribute(client: PluginClientContext) {
     schema: ompImageTimelineSchema,
     Component: OmpImageTimeline,
   });
+  const removeMcpAuthorizationRenderer = client.addTimelineRenderer({
+    kind: OMP_MCP_AUTH_TIMELINE_KIND,
+    version: 1,
+    schema: ompMcpAuthorizationTimelineSchema,
+    Component: OmpMcpAuthorizationCard,
+  });
   const removeImageTransformer = client.addTimelineTransformer({
     id: "omp-images",
     query: { itemType: "tool_call" },
@@ -118,6 +129,7 @@ export default function contribute(client: PluginClientContext) {
       const current = pills.get(agent.id);
       if (
         current?.cwd === agent.cwd &&
+        current.provider === agent.provider &&
         current.workspaceId === agent.workspaceId &&
         current.quotaProvider === quotaProvider
       ) {
@@ -127,8 +139,24 @@ export default function contribute(client: PluginClientContext) {
       current?.memory.remove();
       current?.sessions.remove();
       current?.quota.remove();
+      current?.mcp?.remove();
       pills.set(agent.id, {
         cwd: agent.cwd,
+        provider: agent.provider,
+        mcp:
+          agent.provider === "omp-plugin"
+            ? client.addComposerPill({
+                id: "mcp",
+                workspaceId: agent.workspaceId,
+                agentId: agent.id,
+                button: {
+                  title: "Manage OMP MCP servers",
+                  icon: "Plug",
+                  label: "MCP",
+                  behavior: { kind: "popover", Content: McpPopover },
+                },
+              })
+            : undefined,
         workspaceId: agent.workspaceId,
         quotaProvider,
         quotaSeverity: "unknown",
@@ -186,6 +214,7 @@ export default function contribute(client: PluginClientContext) {
       pill.memory.remove();
       pill.sessions.remove();
       pill.quota.remove();
+      pill.mcp?.remove();
       pills.delete(agentId);
     }
     await Promise.all([refreshHubStatus(), refreshQuotaStatus()]);
@@ -259,9 +288,11 @@ export default function contribute(client: PluginClientContext) {
       pill.memory.remove();
       pill.sessions.remove();
       pill.quota.remove();
+      pill.mcp?.remove();
     }
     pills.clear();
     removeImageRenderer();
+    removeMcpAuthorizationRenderer();
     removeImageTransformer();
     removeOpenConfig();
     removeConfigSidebarItem();

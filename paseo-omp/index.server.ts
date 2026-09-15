@@ -1,5 +1,9 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { resolveListHubProcesses, resolveTailHubLog } from "./server/hub";
+import {
+  OmpBrowserAuthorizationRegistry,
+  resolveOpenOmpMcpAuthorizationInPaseoBrowser,
+} from "./server/mcp-browser";
 import { resolveListOmpMemory } from "./server/memory";
 import { resolveListOmpConfig } from "./server/omp-config";
 import {
@@ -15,6 +19,7 @@ import { resolveGetOmpProviderHealth } from "./server/provider-diagnostics";
 import { resolveListOmpQuotas } from "./server/quota";
 import { resolveListOmpSessions } from "./server/sessions";
 import { listHubProcesses, tailHubLog } from "./shared/hub";
+import { openOmpMcpAuthorizationInPaseoBrowser } from "./shared/mcp";
 import { listOmpMemory } from "./shared/memory";
 import { listOmpConfig } from "./shared/omp-config";
 import {
@@ -29,6 +34,7 @@ import { listOmpQuotas } from "./shared/quota";
 import { listOmpSessions } from "./shared/sessions";
 
 export default function contribute(server: PluginServerContext) {
+  const browserAuthorizationRegistry = new OmpBrowserAuthorizationRegistry();
   server.handle(listHubProcesses, resolveListHubProcesses);
   server.handle(tailHubLog, resolveTailHubLog);
   server.handle(listOmpQuotas, resolveListOmpQuotas);
@@ -42,10 +48,16 @@ export default function contribute(server: PluginServerContext) {
   server.handle(listOmpSettings, resolveListOmpSettings);
   server.handle(updateOmpSettings, resolveUpdateOmpSettings);
   server.handle(getOmpProviderHealth, resolveGetOmpProviderHealth);
+  server.handle(openOmpMcpAuthorizationInPaseoBrowser, (input) =>
+    resolveOpenOmpMcpAuthorizationInPaseoBrowser(input, browserAuthorizationRegistry),
+  );
   const removeIdentityHook = server.before("agent.session_open", ({ request }) => {
     if (request.provider !== "omp-plugin") return;
     return withOmpWorkspaceIdentity(request);
   });
-  server.registerProvider(createOmpProvider());
-  return () => removeIdentityHook();
+  server.registerProvider(createOmpProvider({ browserAuthorizationRegistry }));
+  return () => {
+    browserAuthorizationRegistry.clear();
+    removeIdentityHook();
+  };
 }

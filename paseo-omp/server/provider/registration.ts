@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
+import type { OmpBrowserAuthorizationRegistry } from "../mcp-browser";
 import { probeOmpAvailability } from "../provider-diagnostics";
 import { createOmpConnection, OmpNativeSessionReservations } from "./connection";
 import type { OmpMcpConnector } from "./host-tools";
@@ -48,6 +49,7 @@ const CAPABILITIES = [
   "session.subsession",
   "session.revert.conversation",
   "permission",
+  "timeline.plugin",
 ] as const;
 const ConnectRequestSchema = z.object({
   versions: z.array(z.number().int().positive().max(16)).min(1).max(8),
@@ -61,6 +63,7 @@ export interface OmpProviderOptions {
   environment?: NodeJS.ProcessEnv;
   mcpInitializationTimeoutMs?: number;
   mcpConnector?: OmpMcpConnector;
+  browserAuthorizationRegistry?: OmpBrowserAuthorizationRegistry;
   availabilityProbe?: (
     options: ProviderCatalogOptionsCompat,
     timeoutMs: number | undefined,
@@ -145,6 +148,7 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
         options.mcpConnector,
         options.mcpInitializationTimeoutMs,
         options.replayTimeoutMs,
+        options.browserAuthorizationRegistry,
       );
     },
   };

@@ -13,7 +13,7 @@ paseo plugin add omercnet/paseo-plugins:paseo-omp --ref paseo-omp-v<version>
 paseo plugin ls paseo-omp
 ```
 
-Open the **OMP** sidebar to review the provider-profile contract, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and inspect storage and process diagnostics. Then create an agent and select **OMP Plugin**. Normal use requires no plugin-specific settings.
+Open the **OMP** sidebar to review the provider-profile contract, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and inspect storage and process diagnostics. Then create an agent and select **OMP Plugin**. Its **MCP** composer control runs OMP-native management commands in the current session; setup questions and authorization stay in that chat timeline, where OAuth can open in a workspace-scoped Paseo Browser or on the current device. Normal use requires no plugin-specific settings.
 
 - [Install, update, rollback, and local development](docs/installation.md)
 - [Configuration and every provider option](docs/configuration.md)
@@ -28,7 +28,7 @@ The plugin uses only public Paseo 0.8 provider contracts and registers the disti
 
 This matrix inventories the complete capability set exported by the pinned `@getpaseo/plugin` 0.8.0 provider SDK. It measures strict SDK surface coverage, not general product quality.
 
-**Current capability completeness: 55.9%.** The provider advertises 10 of 17 capabilities (58.8%); nine are complete and `session.configure` is partial.
+**Current capability completeness: 61.8%.** The provider advertises 11 of 17 capabilities (64.7%); ten are complete and `session.configure` is partial.
 
 Scoring is deliberately mechanical so releases remain comparable:
 
@@ -55,7 +55,7 @@ Scoring is deliberately mechanical so releases remain comparable:
 | `session.unarchive` | **0%** | Not advertised; there is no native OMP archive state to reverse. |
 | `permission` | **100%** | Typed tool permissions when negotiated, with a bounded generic interaction fallback for OMP 18.1.15. Allow, deny, cancel, timeout, and interruption are covered. |
 | `permission.tool_policy` | **0%** | Not advertised. Exact MCP preapproval policy cannot be preserved through OMP `set_host_tools`, so the plugin fails closed instead of broadening access. |
-| `timeline.plugin` | **0%** | Not advertised. The provider currently expresses all output with Paseo's built-in timeline item types and registers no provider-owned custom timeline renderer. |
+| `timeline.plugin` | **100%** | Negotiated OMP MCP authorization requests render as interactive, schema-validated cards that can open a workspace-scoped Paseo Browser tab, with an on-device and built-in-notification fallback. |
 
 Provider functionality outside the capability flags is tracked separately:
 
@@ -68,7 +68,7 @@ Provider functionality outside the capability flags is tracked separately:
 | Models, modes, and thinking catalog | **100%** | Native catalog is mapped to opaque public model IDs with committed defaults and permission-gated modes. |
 | Connection `send` / `onEvent` / `close` lifecycle | **100%** | Request correlation, multi-session ownership, process recovery, teardown, and provider reload/removal are covered. |
 | Session launch: cwd, env, system prompt, title, and persistence | **100%** | Complete launch configuration is bounded, validated, forwarded, and re-read on recovery; selected daemon environment values are resolved only when catalog and session children spawn. |
-| MCP server forwarding and host tools | **100%** | Configured MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Caller-scoped Paseo orchestration tools retain their native names, such as `create_agent` and `list_profiles`, so OMP skills can invoke them directly. Exact `toolPolicy` remains the separate 0% capability above. |
+| MCP server forwarding and host tools | **100%** | Configured MCP tools are discovered, namespaced, labeled, executed, canceled, and bounded. Caller-scoped Paseo orchestration tools retain their native names, such as `create_agent` and `list_profiles`, so OMP skills can invoke them directly. The MCP composer control delegates native server management to OMP instead of duplicating its profile and workspace precedence. Exact `toolPolicy` remains the separate 0% capability above. |
 | Denied native tools | **100%** | `disallowedTools` becomes an explicit OMP allow-list; unknown names fail closed. |
 | Commands and committed session state events | **100%** | Publishes `session.commands`, `session.opened`, `session.config`, `session.ready`, and request completion in protocol order. |
 | Built-in timeline snapshots | **100%** | Assistant, reasoning, tools, todos, notifications, errors, compaction, and friendly MCP labels use stable IDs and complete snapshots. OMP emits client-safe PNG/JPEG when possible; validated legacy WebP images render on capable clients with an explicit per-image fallback elsewhere. |

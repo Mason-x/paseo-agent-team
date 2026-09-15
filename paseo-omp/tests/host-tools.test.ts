@@ -232,6 +232,75 @@ describe("OMP host tool bridge", () => {
     ]);
     await bridge.close();
   });
+  test("opens authorization URLs through the caller-scoped Paseo browser tool", async () => {
+    const paseo = new FakeConnection(
+      [
+        {
+          name: "browser_new_tab",
+          title: "Create browser tab",
+          inputSchema: { type: "object" },
+        },
+      ],
+      { content: [], structuredContent: { browserId: "browser-1" } },
+    );
+    const bridge = await OmpHostToolsBridge.open(
+      sessionConfig({
+        env: { PASEO_AGENT_ID: "agent-1", PASEO_WORKSPACE_ID: "workspace-1" },
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:4567/mcp/agents?callerAgentId=agent-1",
+          },
+        },
+      }),
+      { connectMcp: async () => paseo },
+    );
+    await bridge.bind(new FakeRuntime() as unknown as OmpRuntimeSession);
+
+    await bridge.openPaseoBrowser("https://auth.example.test/authorize?state=opaque");
+
+    expect(paseo.calls).toEqual([
+      expect.objectContaining({
+        name: "browser_new_tab",
+        input: {
+          i: "Opening MCP authorization",
+          url: "https://auth.example.test/authorize?state=opaque",
+        },
+      }),
+    ]);
+    await expect(bridge.openPaseoBrowser("javascript:alert(1)")).rejects.toThrow(
+      "not safe to open",
+    );
+    await bridge.close();
+  });
+
+  test("reports an unavailable Paseo browser host without leaking MCP errors", async () => {
+    const paseo = new FakeConnection(
+      [{ name: "browser_new_tab", inputSchema: { type: "object" } }],
+      { content: [] },
+      async () => {
+        throw new Error("browser_no_host: internal transport detail");
+      },
+    );
+    const bridge = await OmpHostToolsBridge.open(
+      sessionConfig({
+        env: { PASEO_AGENT_ID: "agent-1", PASEO_WORKSPACE_ID: "workspace-1" },
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:4567/mcp/agents?callerAgentId=agent-1",
+          },
+        },
+      }),
+      { connectMcp: async () => paseo },
+    );
+    await bridge.bind(new FakeRuntime() as unknown as OmpRuntimeSession);
+
+    await expect(bridge.openPaseoBrowser("https://auth.example.test/authorize")).rejects.toThrow(
+      "No Paseo desktop browser host is connected",
+    );
+    await bridge.close();
+  });
 
   test("renders bounded structured content when MCP content is empty", async () => {
     const details = { summary: "model-visible", payload: "x".repeat(1_100_000) };

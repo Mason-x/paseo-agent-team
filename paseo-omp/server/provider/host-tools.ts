@@ -42,6 +42,8 @@ const MAX_PENDING_HOST_TOOL_CALLS = 64;
 const MAX_PENDING_HOST_TOOL_BYTES = 8 * 1024 * 1024;
 const DEFAULT_INITIALIZATION_TIMEOUT_MS = 20_000;
 const DEFAULT_MCP_CALL_LIFETIME_MS = 5 * 60 * 1000;
+const MAX_DIRECT_BROWSER_CALLS = 4;
+const BROWSER_CALL_TIMEOUT_MS = 20_000;
 
 export type OmpMcpTool = ConnectedMcpTool;
 export type OmpMcpToolPage = ConnectedMcpToolPage;
@@ -331,6 +333,17 @@ async function settleCleanup(promises: readonly Promise<void>[]): Promise<void> 
     .map((result) => result.reason);
   if (failures.length > 0) throw new AggregateError(failures, "OMP MCP cleanup failed");
 }
+function paseoBrowserFailure(error: unknown): OmpPublicError {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/browser_no_host/iu.test(detail)) {
+    return new OmpPublicError("No Paseo desktop browser host is connected");
+  }
+  if (/browser_disabled/iu.test(detail)) {
+    return new OmpPublicError("Paseo browser tools are disabled on this host");
+  }
+  return new OmpPublicError("Paseo could not open the MCP authorization browser tab");
+}
+
 export class OmpHostToolsBridge {
   private runtime: OmpRuntimeSession | null = null;
   private readonly pending = new Map<string, PendingCall>();
@@ -338,6 +351,7 @@ export class OmpHostToolsBridge {
   private generation = 0;
   private closePromise: Promise<void> | null = null;
   private fatalHandler: ((error: Error) => void) | null = null;
+  private activeDirectBrowserCalls = 0;
 
   readonly labels: ReadonlyMap<string, string>;
   private constructor(
@@ -514,6 +528,63 @@ export class OmpHostToolsBridge {
 
   onFatal(handler: (error: Error) => void): void {
     this.fatalHandler = handler;
+  }
+  async openPaseoBrowser(url: string): Promise<void> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new OmpPublicError("MCP authorization URL is invalid");
+    }
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.username ||
+      parsed.password
+    ) {
+      throw new OmpPublicError("MCP authorization URL is not safe to open");
+    }
+    if (!this.runtime || this.closePromise) {
+      throw new OmpPublicError("The OMP session is not ready for browser authorization");
+    }
+    const target = this.targets.get("browser_new_tab");
+    if (!target) {
+      throw new OmpPublicError("Paseo browser tools are unavailable in this OMP session");
+    }
+    if (this.activeDirectBrowserCalls >= MAX_DIRECT_BROWSER_CALLS) {
+      throw new OmpPublicError("Too many Paseo browser requests are already running");
+    }
+
+    this.activeDirectBrowserCalls += 1;
+    const controller = new AbortController();
+    const deadline = this.callScheduler.set(
+      () => controller.abort(new Error("Paseo browser request timed out")),
+      BROWSER_CALL_TIMEOUT_MS,
+    );
+    try {
+      const result = normalizeResult(
+        await target.connection.callTool(
+          target.toolName,
+          { i: "Opening MCP authorization", url },
+          {
+            signal: controller.signal,
+            maxTotalTimeoutMs: BROWSER_CALL_TIMEOUT_MS,
+            onProgress() {},
+          },
+        ),
+      );
+      if (result.isError) {
+        const detail = result.content
+          .flatMap((part) => (part.type === "text" && part.text ? [part.text] : []))
+          .join("\n");
+        throw paseoBrowserFailure(new Error(detail));
+      }
+    } catch (error) {
+      if (error instanceof OmpPublicError) throw error;
+      throw paseoBrowserFailure(error);
+    } finally {
+      this.callScheduler.clear(deadline);
+      this.activeDirectBrowserCalls -= 1;
+    }
   }
 
   handle(

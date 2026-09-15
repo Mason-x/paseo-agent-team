@@ -7,6 +7,7 @@ import {
   ProviderInputSchema,
   requireProviderCapabilities,
 } from "@getpaseo/plugin/server/provider";
+import type { OmpBrowserAuthorizationRegistry } from "../mcp-browser";
 import { discoverOmpCatalog } from "./catalog";
 import { normalizeOmpCatalogOptions } from "./config-normalization";
 import type { OmpMcpConnector } from "./host-tools";
@@ -39,6 +40,7 @@ const SUPPORTED_CAPABILITIES: Readonly<Record<string, true>> = {
   "session.subsession": true,
   "session.revert.conversation": true,
   permission: true,
+  "timeline.plugin": true,
 };
 const SUPPORTED_INPUTS: Readonly<Record<string, true>> = {
   catalog: true,
@@ -494,6 +496,7 @@ export function createOmpConnection(
   mcpConnector?: OmpMcpConnector,
   mcpInitializationTimeoutMs?: number,
   replayTimeoutMs?: number,
+  browserAuthorizationRegistry?: OmpBrowserAuthorizationRegistry,
 ): ProviderConnection {
   const safeCapabilities = [...new Set(capabilities)].filter(
     (capability) =>
@@ -504,7 +507,12 @@ export function createOmpConnection(
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<
     string,
-    { token: symbol; session: OmpProviderSession; nativeSessionId?: string }
+    {
+      token: symbol;
+      session: OmpProviderSession;
+      nativeSessionId?: string;
+      removeBrowserAuthorization?: () => void;
+    }
   >();
   const opening = new Map<
     string,
@@ -524,6 +532,13 @@ export function createOmpConnection(
   const emit = (event: ProviderEvent) => {
     if (closed) return;
     for (const listener of listeners) listener(event);
+  };
+  const deleteSession = (sessionId: string, token: symbol): boolean => {
+    const slot = sessions.get(sessionId);
+    if (slot?.token !== token) return false;
+    sessions.delete(sessionId);
+    slot.removeBrowserAuthorization?.();
+    return true;
   };
 
   const requestFailure = (
@@ -696,7 +711,7 @@ export function createOmpConnection(
             );
           };
           const retireRewindSession = () => {
-            if (sessions.get(input.sessionId)?.token === token) sessions.delete(input.sessionId);
+            deleteSession(input.sessionId, token);
           };
           session = await OmpProviderSession.open(
             input,
@@ -735,19 +750,36 @@ export function createOmpConnection(
             nativeReservations.release(nativeSessionId, token);
             return;
           }
-          sessions.set(input.sessionId, { token, session, nativeSessionId });
+          const browserAgentId = input.config.env.PASEO_AGENT_ID?.trim() || input.sessionId;
+          const browserAuthorization = browserAuthorizationRegistry?.register(
+            browserAgentId,
+            session.openPaseoBrowser.bind(session),
+          );
+          session.setBrowserAuthorizationIssuer(browserAuthorization?.issue ?? null);
+          const removeBrowserAuthorization = browserAuthorization
+            ? () => {
+                session?.setBrowserAuthorizationIssuer(null);
+                browserAuthorization.remove();
+              }
+            : undefined;
+          sessions.set(input.sessionId, {
+            token,
+            session,
+            nativeSessionId,
+            ...(removeBrowserAuthorization ? { removeBrowserAuthorization } : {}),
+          });
           await session.publishOpened(input.requestId);
           if (
             closing ||
             controller.signal.aborted ||
             opening.get(input.sessionId)?.token !== token
           ) {
-            if (sessions.get(input.sessionId)?.token === token) sessions.delete(input.sessionId);
+            deleteSession(input.sessionId, token);
             await session.close();
             nativeReservations.release(nativeSessionId, token);
           }
         } catch (error) {
-          if (sessions.get(input.sessionId)?.token === token) sessions.delete(input.sessionId);
+          deleteSession(input.sessionId, token);
           let cleanupError: unknown;
           if (session) {
             try {
@@ -841,11 +873,11 @@ export function createOmpConnection(
         try {
           await slot.session.close();
         } catch (error) {
-          if (sessions.get(input.sessionId)?.token === slot.token) sessions.delete(input.sessionId);
+          deleteSession(input.sessionId, slot.token);
           quarantineFailedCleanup(input.sessionId, slot.token, error, slot.nativeSessionId);
           throw new OmpPublicError("OMP session close failed");
         }
-        if (sessions.get(input.sessionId)?.token === slot.token) sessions.delete(input.sessionId);
+        deleteSession(input.sessionId, slot.token);
         nativeReservations.release(slot.nativeSessionId, slot.token);
         emit({ type: "request.completed", requestId: input.requestId });
         return;
@@ -862,6 +894,7 @@ export function createOmpConnection(
     shutdown.abort(shutdownReason);
     for (const { controller } of opening.values()) controller.abort(shutdownReason);
     for (const { session } of sessions.values()) session.beginConnectionShutdown();
+    for (const slot of sessions.values()) slot.removeBrowserAuthorization?.();
     const failures: unknown[] = [];
     const operationBatch = [...activeOperations];
     const operationResults = await Promise.allSettled(operationBatch);

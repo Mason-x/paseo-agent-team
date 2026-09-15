@@ -56,9 +56,13 @@ Project-scoped installations remain visible but read-only because their lifecycl
 The Configuration view links to the official OMP settings reference, value parsing and precedence guides, relevant category sections, and a small curated set of setting-specific anchors.
 
 
-## MCP tools and policy boundary
+## MCP tools, management, and policy boundary
 
 Configured MCP servers and Paseo's caller-scoped MCP tools are supported. The plugin discovers their schemas, assigns collision-safe OMP names, binds them before `session.ready`, forwards progress and terminal results, propagates cancellation, and renders calls with friendly labels.
+
+Use the **MCP** control beside the composer on an **OMP Plugin** agent to run OMP's native list, add, reload, test, authorize, enable, disable, resource, and prompt commands. The control is agent-scoped because OMP MCP discovery depends on both the active profile and the workspace directory. The global OMP sidebar remains a host-level health and settings surface; a separate workspace manager would duplicate OMP's own discovery and precedence rules.
+
+Command output, setup questions, and OAuth prompts appear in the agent timeline. OAuth URLs render as an interactive card and always retain the full provider authorization URL, never substituting OMP's daemon-local `/launch` shortcut. **Open in Paseo Browser** calls the current agent's caller-scoped `browser_new_tab` tool, so the authorization page becomes a browser tab in the same workspace; it requires Paseo tools to be injected into the agent, browser tools to be enabled, and a connected Paseo desktop browser host. **Open on this device** remains available when no browser host is connected. For a loopback callback to complete automatically, the chosen browser host must run on the daemon machine. Otherwise, finish authorization in either browser, copy the final redirect URL or authorization code, and submit it in the OMP authorization prompt. Tokens and refresh material are stored by OMP on the daemon (or its configured auth broker), never in the Paseo client or plugin timeline.
 
 Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP's `set_host_tools` contract. The plugin cannot preserve that policy exactly, so any non-empty `toolPolicy` rejects session startup. It never converts exact grants into broader access. `disallowedTools` is separate: it controls only recognized native OMP built-ins and rejects unknown names.
 
