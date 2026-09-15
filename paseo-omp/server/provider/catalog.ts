@@ -18,7 +18,7 @@ export const OMP_MODES: readonly ProviderMode[] = [
   {
     id: "full",
     label: "Full Access",
-    description: "Launches OMP with yolo approval mode so tools run without prompts.",
+    description: "Runs all tools without approval prompts.",
     icon: "ShieldOff",
     colorTier: "dangerous",
     isUnattended: true,
@@ -26,15 +26,14 @@ export const OMP_MODES: readonly ProviderMode[] = [
   {
     id: "write",
     label: "Write Approval",
-    description:
-      "Launches OMP with write approval mode; reads are free and writes require approval.",
+    description: "Runs reads without approval; writes require approval.",
     icon: "ShieldAlert",
     colorTier: "moderate",
   },
   {
     id: "ask",
     label: "Always Ask",
-    description: "Launches OMP with always-ask approval mode for write and exec tools.",
+    description: "Requires approval for write and execution tools.",
     icon: "ShieldCheck",
     colorTier: "safe",
   },

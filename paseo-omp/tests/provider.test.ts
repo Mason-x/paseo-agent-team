@@ -1955,7 +1955,7 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("publishes opened, committed config, then ready", async () => {
+  test("publishes the launch mode as immutable session status", async () => {
     const { connection, events, runtime } = await createHarness();
     await openSession(connection, events);
 
@@ -1971,11 +1971,14 @@ describe("OMP direct provider", () => {
         config: expect.objectContaining({
           model: MODEL_PUBLIC_ID,
           mode: "full",
-          modes: expect.arrayContaining([
-            expect.objectContaining({ id: "full" }),
-            expect.objectContaining({ id: "write" }),
-            expect.objectContaining({ id: "ask" }),
-          ]),
+          modes: [
+            expect.objectContaining({
+              id: "full",
+              label: "Full Access (fixed for session)",
+              description:
+                "Runs all tools without approval prompts. Approval mode is fixed for this session; create a new session to choose another mode.",
+            }),
+          ],
           thinkingOption: "medium",
         }),
       }),

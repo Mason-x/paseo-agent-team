@@ -140,6 +140,16 @@ function applicableThinkingLevel(
   return model?.reasoning === false ? undefined : level;
 }
 
+function fixedSessionMode(modeId = "full") {
+  const mode = OMP_MODES.find((candidate) => candidate.id === modeId);
+  if (!mode) throw new OmpPublicError("OMP mode is unavailable");
+  return {
+    ...mode,
+    label: `${mode.label} (fixed for session)`,
+    description: `${mode.description} Approval mode is fixed for this session; create a new session to choose another mode.`,
+  };
+}
+
 export function ompPersistenceSessionId(input: SessionOpenInput): string | undefined {
   if (!input.persistence) return;
   if (input.persistence.version !== 1) {
@@ -985,10 +995,12 @@ export class OmpProviderSession {
       }
       const configState: ProviderConfigState = {
         ...(state.model ? { model: ompModelId(state.model) } : {}),
-        mode: normalizedConfig.mode,
+        mode: normalizedConfig.mode ?? "full",
         ...(committedThinkingLevel ? { thinkingOption: committedThinkingLevel } : {}),
         models,
-        modes: OMP_MODES,
+        // OMP fixes approval mode at process launch. Publish only the selected mode so
+        // Paseo shows the security state without offering unsupported transitions.
+        modes: [fixedSessionMode(normalizedConfig.mode)],
         thinkingOptions,
         settings: [],
       };
