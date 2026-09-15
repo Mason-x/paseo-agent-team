@@ -463,7 +463,7 @@ describe("OMP RPC transport", () => {
     await session.close();
   });
 
-  test("emits a late same-id prompt scheduling failure after success acknowledgement", async () => {
+  test("preserves a bounded late prompt scheduling failure after success acknowledgement", async () => {
     const child = new FakeRpcChild();
     observeCommands(child, (command) => {
       if (command.type === "negotiate_protocol") {
@@ -489,7 +489,8 @@ describe("OMP RPC transport", () => {
             id: command.id,
             command: "prompt",
             success: false,
-            error: "secret scheduling failure",
+            error: "Session is already processing a prompt",
+            code: "session_busy",
           });
         });
       }
@@ -502,7 +503,177 @@ describe("OMP RPC transport", () => {
     await expect(failure).resolves.toEqual({
       type: "prompt_error",
       id: acknowledgement.requestId,
-      error: "OMP prompt scheduling failed",
+      error: "Session is already processing a prompt",
+      code: "session_busy",
+    });
+    await session.close();
+  });
+
+  test.each([
+    [
+      "malformed error",
+      { error: { message: "unsafe" }, code: "session_busy" },
+      { error: "OMP prompt scheduling failed", code: "session_busy" },
+    ],
+    [
+      "deep malformed error",
+      {
+        error: Array.from({ length: 17 }).reduce<unknown>((cause) => ({ cause }), "unsafe"),
+        code: "session_busy",
+      },
+      { error: "OMP prompt scheduling failed", code: "session_busy" },
+    ],
+    [
+      "oversized error",
+      { error: "é".repeat(2_049), code: "session_busy" },
+      { error: "OMP prompt scheduling failed", code: "session_busy" },
+    ],
+    ["malformed code", { error: "native failure", code: 42 }, { error: "native failure" }],
+    [
+      "wide malformed code",
+      { error: "native failure", code: Array(1_025).fill("unsafe") },
+      { error: "native failure" },
+    ],
+    [
+      "oversized code",
+      { error: "native failure", code: "é".repeat(129) },
+      { error: "native failure" },
+    ],
+  ])("sanitizes %s in late prompt scheduling failures", async (_name, rejected, expected) => {
+    const child = new FakeRpcChild();
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      }
+      if (command.type === "prompt") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "prompt",
+          success: true,
+          data: { agentInvoked: true },
+        });
+        queueMicrotask(() => {
+          child.write({
+            type: "response",
+            id: command.id,
+            command: "prompt",
+            success: false,
+            ...rejected,
+          });
+        });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    const failure = nextEvent((listener) => session.onEvent(listener));
+    const acknowledgement = await session.prompt("work");
+    child.write({ type: "notice", level: "info", message: "after failure" });
+    await expect(failure).resolves.toEqual({
+      type: "prompt_error",
+      id: acknowledgement.requestId,
+      ...expected,
+    });
+    await session.close();
+  });
+
+  test("ignores unmatched prompt failures", async () => {
+    const child = new FakeRpcChild();
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    const next = nextEvent((listener) => session.onEvent(listener));
+    child.write({
+      type: "response",
+      id: "unknown-prompt",
+      command: "prompt",
+      success: false,
+      error: "Session is already processing a prompt",
+      code: "session_busy",
+    });
+    child.write({ type: "notice", level: "info", message: "still healthy" });
+    await expect(next).resolves.toEqual({
+      type: "notice",
+      level: "info",
+      message: "still healthy",
+    });
+    await session.close();
+  });
+
+  test("ignores a repeated success response for an accepted prompt", async () => {
+    const child = new FakeRpcChild();
+    let promptId: string | undefined;
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      }
+      if (command.type === "prompt") {
+        promptId = command.id as string;
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "prompt",
+          success: true,
+          data: { agentInvoked: true },
+        });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    await session.prompt("work");
+    const next = nextEvent((listener) => session.onEvent(listener));
+    child.write({
+      type: "response",
+      id: promptId,
+      command: "prompt",
+      success: true,
+      data: { agentInvoked: true },
+    });
+    child.write({ type: "notice", level: "info", message: "still healthy" });
+    await expect(next).resolves.toEqual({
+      type: "notice",
+      level: "info",
+      message: "still healthy",
+    });
+    const failure = nextEvent((listener) => session.onEvent(listener));
+    child.write({
+      type: "response",
+      id: promptId,
+      command: "prompt",
+      success: false,
+      error: "native failure",
+      code: "session_busy",
+    });
+    await expect(failure).resolves.toEqual({
+      type: "prompt_error",
+      id: promptId,
+      error: "native failure",
+      code: "session_busy",
     });
     await session.close();
   });

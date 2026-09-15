@@ -8444,12 +8444,27 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("fails an acknowledged turn on a late correlated scheduling error", async () => {
+  test("fails an acknowledged turn with the late native scheduling error", async () => {
     const { connection, events, runtime } = await createHarness();
-    await openSession(connection, events);
+    await openSession(
+      connection,
+      events,
+      "late-error-open",
+      "session-1",
+      { PROMPT_ERROR_SECRET: "scheduling-secret" },
+      MODEL_PUBLIC_ID,
+      "medium",
+      true,
+      { providerOptions: { outputRedaction: "configured-values" } },
+    );
     const session = sessionAt(runtime);
     session.promptEvents = [
-      { type: "prompt_error", id: "rpc-prompt-1", error: "OMP prompt scheduling failed" },
+      {
+        type: "prompt_error",
+        id: "rpc-prompt-1",
+        error: "Session is already processing scheduling-secret",
+        code: "session_busy:scheduling-secret",
+      },
     ];
     const result = await startPrompt(connection, events, "late-error", "work");
     const turnId = turnIdFrom(result);
@@ -8458,7 +8473,12 @@ describe("OMP direct provider", () => {
         event.type === "session.turn" && event.turnId === turnId && event.state === "failed",
     );
     expect(terminal).toEqual(
-      expect.objectContaining({ error: { message: "OMP prompt scheduling failed" } }),
+      expect.objectContaining({
+        error: {
+          message: "Session is already processing <redacted>",
+          code: "session_busy:<redacted>",
+        },
+      }),
     );
     await connection.close();
   });

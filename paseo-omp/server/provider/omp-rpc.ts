@@ -63,6 +63,9 @@ const MAX_PATH_LENGTH = 4_096;
 const WINDOWS_DEFAULT_SYSTEM_ROOT = "C:\\Windows";
 const MAX_TOKEN_COUNT = Number.MAX_SAFE_INTEGER;
 const MAX_COST_USD = 1_000_000_000;
+const MAX_RPC_ERROR_BYTES = 4_096;
+const MAX_RPC_ERROR_CODE_BYTES = 256;
+const PROMPT_SCHEDULING_FAILURE = "OMP prompt scheduling failed";
 const MAX_CONTEXT_PERCENT = 1_000_000;
 function boundedJsonString(maxBytes: number, minBytes = 0) {
   return z.string().refine((value) => {
@@ -387,7 +390,8 @@ const OmpResponseFrameSchema = z.object({
   id: IDENTIFIER,
   success: z.boolean(),
   data: z.unknown().optional(),
-  error: boundedString(4_096).optional(),
+  error: boundedString(MAX_RPC_ERROR_BYTES).optional(),
+  code: boundedString(MAX_RPC_ERROR_CODE_BYTES, 1).optional(),
 });
 const OmpChunkFrameSchema = z.object({
   type: z.literal("rpc_chunk"),
@@ -924,7 +928,7 @@ export function parseOmpHostToolAgentResult(value: unknown): OmpHostToolResult["
 }
 export type OmpRpcEvent =
   | z.infer<typeof OmpRuntimeEventSchema>
-  | { type: "prompt_error"; id: string; error: string }
+  | { type: "prompt_error"; id: string; error: string; code?: string }
   | { type: "process_exit"; error: string };
 export type OmpAgentSessionEvent = z.infer<typeof OmpAgentSessionEventSchema>;
 export type OmpSubagentSnapshot = z.infer<typeof OmpSubagentsResultSchema>["subagents"][number];
@@ -2074,7 +2078,11 @@ class OmpRpcProcess {
   private receiveKnownResponse(value: unknown): boolean {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const frame = value as Record<string, unknown>;
-    if (frame.type !== "response" || typeof frame.id !== "string" || !this.pending.has(frame.id)) {
+    if (
+      frame.type !== "response" ||
+      typeof frame.id !== "string" ||
+      (!this.pending.has(frame.id) && !this.acceptedPromptIds.has(frame.id))
+    ) {
       return false;
     }
     this.receiveResponse(frame);
@@ -2088,19 +2096,15 @@ class OmpRpcProcess {
     if (!response.success) {
       if (rawId && knownPending) {
         this.takePending(rawId)?.reject(new Error("OMP RPC response is invalid"));
-      } else {
+      } else if (!rawId || !this.emitAcceptedPromptFailure(rawId, frame)) {
         this.recordProtocolViolation();
       }
       return;
     }
     const pending = this.pending.get(response.data.id);
     if (!pending) {
-      if (!response.data.success && this.acceptedPromptIds.delete(response.data.id)) {
-        this.emit({
-          type: "prompt_error",
-          id: response.data.id,
-          error: "OMP prompt scheduling failed",
-        });
+      if (!response.data.success) {
+        this.emitAcceptedPromptFailure(response.data.id, response.data);
       }
       return;
     }
@@ -2146,6 +2150,22 @@ class OmpRpcProcess {
     } else {
       settled.reject(new Error("OMP RPC request failed"));
     }
+  }
+
+  private emitAcceptedPromptFailure(id: string, frame: Record<string, unknown>): boolean {
+    if (frame.success !== false || !this.acceptedPromptIds.delete(id)) return false;
+    const error = typeof frame.error === "string" ? frame.error : undefined;
+    const nativeError =
+      error && utf8Bytes(error) <= MAX_RPC_ERROR_BYTES ? error : PROMPT_SCHEDULING_FAILURE;
+    const code = typeof frame.code === "string" ? frame.code : undefined;
+    const nativeCode = code && utf8Bytes(code) <= MAX_RPC_ERROR_CODE_BYTES ? code : undefined;
+    this.emit({
+      type: "prompt_error",
+      id,
+      error: nativeError,
+      ...(nativeCode ? { code: nativeCode } : {}),
+    });
+    return true;
   }
 
   private takePending(id: string): PendingRequest | undefined {

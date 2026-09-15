@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   ProviderConfigState,
   ProviderContent,
+  ProviderError,
   ProviderEvent,
   ProviderInput,
   ProviderPermissionResponse,
@@ -332,7 +333,7 @@ type VoidDeferred = {
 
 type TurnOutcome = {
   state: "completed" | "failed" | "canceled";
-  error?: { message: string };
+  error?: ProviderError;
   usageSampled: boolean;
 };
 
@@ -2966,7 +2967,10 @@ export class OmpProviderSession {
     }
     if (event.type === "prompt_error") {
       if (event.id !== turn.nativeRequestId) return;
-      const error = { message: event.error };
+      const error: ProviderError = {
+        message: this.dataFilter.text(event.error, 4_096),
+        ...(event.code ? { code: this.dataFilter.text(event.code, 256) } : {}),
+      };
       this.publishPendingUsers(turn);
       void this.finishTurn(turn, "failed", error);
       return;
@@ -4329,7 +4333,7 @@ export class OmpProviderSession {
   private finishTurn(
     turn: ActiveTurn,
     state: "completed" | "failed" | "canceled",
-    error?: { message: string },
+    error?: ProviderError,
     usageSampled = false,
     override = false,
     preserveCompactions = false,
