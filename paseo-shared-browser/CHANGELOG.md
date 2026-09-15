@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/omercnet/paseo-plugins/compare/shared-browser-v0.3.0...shared-browser-v0.3.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **shared-browser:** support system Chromium on Linux ARM64 ([#58](https://github.com/omercnet/paseo-plugins/issues/58)) ([f9c3dcb](https://github.com/omercnet/paseo-plugins/commit/f9c3dcb1031840c7cd0aed4a70f984d9d9bd24c1))
+
 ## [0.3.0](https://github.com/omercnet/paseo-plugins/compare/shared-browser-v0.2.2...shared-browser-v0.3.0) (2026-09-12)
 
 
