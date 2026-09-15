@@ -319,6 +319,8 @@ class FakeOmpSession implements OmpRuntimeSession {
   readonly autoCompactionChanges: boolean[] = [];
   readonly handoffs: Array<string | undefined> = [];
   readonly followUps: string[] = [];
+  handoffGate: Promise<void> | null = null;
+  handoffObserved: (() => void) | null = null;
   autoCompactionEnabled = true;
   steerGate: Promise<void> | null = null;
   steerObserved: (() => void) | null = null;
@@ -638,6 +640,8 @@ class FakeOmpSession implements OmpRuntimeSession {
   }
 
   async handoff(customInstructions?: string) {
+    this.handoffObserved?.();
+    if (this.handoffGate) await this.handoffGate;
     this.handoffs.push(customInstructions);
   }
 
@@ -6987,6 +6991,60 @@ describe("OMP direct provider", () => {
     expect(session.promptCount).toBe(1);
     await finishTurn(events, session, turnId);
     await connection.close();
+  });
+
+  test("settles queued auto steering before connection shutdown joins active operations", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const promptGate = Promise.withResolvers<void>();
+    const promptObserved = Promise.withResolvers<void>();
+    session.promptGate = promptGate.promise;
+    session.promptObserved = promptObserved.resolve;
+
+    const firstPrompt = startPrompt(connection, events, "closing-prompt", "start");
+    await promptObserved.promise;
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "closing-auto-steer",
+        delivery: "auto",
+        input: { type: "message", content: [{ type: "text", text: "change direction" }] },
+      },
+    });
+    await Promise.resolve();
+
+    const closing = connection.close();
+    await Promise.resolve();
+    await Promise.resolve();
+    const promptResults = events.filter(
+      (event) =>
+        event.type === "session.prompt_result" &&
+        ["closing-prompt", "closing-auto-steer"].includes(event.clientMessageId),
+    );
+    promptGate.resolve();
+
+    expect(promptResults).toEqual([
+      expect.objectContaining({
+        clientMessageId: "closing-prompt",
+        result: {
+          type: "failed",
+          error: { message: "OMP session closed before the prompt was accepted" },
+        },
+      }),
+      expect.objectContaining({
+        clientMessageId: "closing-auto-steer",
+        result: {
+          type: "failed",
+          error: { message: "There is no active OMP turn to steer" },
+        },
+      }),
+    ]);
+    await firstPrompt;
+    await closing;
+    expect(session.steers).toEqual([]);
+    expect(session.closes).toBe(1);
   });
 
   test("does not convert auto-delivered structured commands into steering text", async () => {
@@ -15759,6 +15817,88 @@ describe("OMP direct provider", () => {
       events.some((event) => event.type === "request.completed" && event.requestId === "close-1"),
     ).toBe(false);
     await connection.close().catch(() => undefined);
+  });
+
+  test("reserves recovered command admission without orphaning queued auto steering", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const recoveryGate = Promise.withResolvers<void>();
+    const recoveryObserved = Promise.withResolvers<void>();
+    const handoffGate = Promise.withResolvers<void>();
+    const handoffObserved = Promise.withResolvers<void>();
+    runtime.startGate = recoveryGate.promise;
+    runtime.startObserved = recoveryObserved.resolve;
+    runtime.sessionCreated = (session) => {
+      session.handoffGate = handoffGate.promise;
+      session.handoffObserved = handoffObserved.resolve;
+    };
+    sessionAt(runtime).emit({ type: "process_exit", error: "restart before commands" });
+
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "recovering-handoff",
+        delivery: "auto",
+        input: { type: "command", name: "handoff", arguments: "first" },
+      },
+    });
+    await recoveryObserved.promise;
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "recovering-auto-steer",
+        delivery: "auto",
+        input: { type: "message", content: [{ type: "text", text: "change direction" }] },
+      },
+    });
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "recovering-follow-up",
+        delivery: "auto",
+        input: { type: "command", name: "follow-up", arguments: "second" },
+      },
+    });
+
+    runtime.startGate = null;
+    recoveryGate.resolve();
+    await handoffObserved.promise;
+    const rejected = await events.waitFor(
+      (event) =>
+        event.type === "session.prompt_result" && event.clientMessageId === "recovering-follow-up",
+    );
+    expect(rejected).toEqual(
+      expect.objectContaining({
+        result: {
+          type: "failed",
+          error: { message: "OMP already has an active turn; send this message as a steer" },
+        },
+      }),
+    );
+
+    handoffGate.resolve();
+    const commandTurnId = turnIdFrom(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.prompt_result" && event.clientMessageId === "recovering-handoff",
+      ),
+    );
+    const steerResult = await events.waitFor(
+      (event) =>
+        event.type === "session.prompt_result" && event.clientMessageId === "recovering-auto-steer",
+    );
+    expect(steerResult).toEqual(
+      expect.objectContaining({ result: { type: "steer", turnId: commandTurnId } }),
+    );
+    const recovered = sessionAt(runtime, 1);
+    expect(recovered.handoffs).toEqual(["first"]);
+    expect(recovered.followUps).toEqual([]);
+    expect(recovered.steers).toEqual(["change direction"]);
+    await finishTurn(events, recovered, commandTurnId);
+    await connection.close();
   });
 
   test("publishes and executes OMP out-of-band commands", async () => {
