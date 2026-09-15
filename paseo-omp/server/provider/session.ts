@@ -73,6 +73,7 @@ type OmpQuestionRequest = Extract<
 type Emit = (event: ProviderEvent) => void;
 const LOCAL_ONLY_SETTLE_MS = 5_000;
 const AGENT_END_STATE_TIMEOUT_MS = 2_000;
+const AGENT_END_HISTORY_TIMEOUT_MS = 2_000;
 const CONFIG_REFRESH_RETRY_BASE_MS = 250;
 const CONFIG_REFRESH_MAX_ATTEMPTS = 3;
 const USAGE_POLL_MS = 1_000;
@@ -83,6 +84,7 @@ const AGENT_END_SETTLE_MS = 5_000;
 const MAX_PROMPT_PARTS = 64;
 const MAX_PROMPT_TEXT_LENGTH = 1024 * 1024;
 const RPC_REQUEST_ID_BYTES = 36;
+const MAX_AGENT_END_CORRELATION_MESSAGES = 512;
 const MAX_TRACKED_ENTRY_IDS = 1_024;
 const MAX_UNCLAIMED_BRANCH_ENTRIES = 1_024;
 const MAX_PENDING_USERS = 256;
@@ -275,7 +277,10 @@ type ActiveTurn = {
   userCorrelationActive: boolean;
   userLookups: Set<Promise<void>>;
   completedMessageCount: number;
-  lastCompletedAssistantFailed?: boolean;
+  streamedMessageEntryIds: string[];
+  streamedMessageIdentityComplete: boolean;
+  lastCompletedAssistantOutcome?: AgentEndOutcome;
+  lastCompletedAssistantEntryId?: string;
 };
 
 type PendingAbort = {
@@ -609,30 +614,130 @@ function nativeEntryId(message: OmpMessage): string | undefined {
   return message.entryId;
 }
 
-function terminalError(
+type AgentEndOutcome = "completed" | "failed" | "canceled";
+type AssistantTerminalStatus = AgentEndOutcome | "unavailable";
+
+function assistantTerminalOutcome(
+  message: Extract<OmpMessage, { role: "assistant" }>,
+): AgentEndOutcome {
+  const stopReason = message.stopReason?.toLowerCase();
+  if (stopReason === "aborted" || stopReason === "canceled" || stopReason === "cancelled") {
+    return "canceled";
+  }
+  return stopReason === "error" || message.errorMessage ? "failed" : "completed";
+}
+
+function lastAssistantStatus(
+  messages: readonly OmpMessage[],
+  startIndex = 0,
+): AssistantTerminalStatus {
+  for (let index = messages.length - 1; index >= startIndex; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    return assistantTerminalOutcome(message);
+  }
+  return "unavailable";
+}
+
+function terminalOutcome(
   event: Extract<OmpRpcEvent, { type: "agent_end" }>,
-  turn: Pick<ActiveTurn, "completedMessageCount" | "lastCompletedAssistantFailed">,
-): string | undefined {
+  turn: Pick<ActiveTurn, "completedMessageCount" | "lastCompletedAssistantOutcome">,
+): AgentEndOutcome | undefined {
   const messages = event.messages;
-  if (messages) {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message?.role !== "assistant") continue;
-      return message.stopReason === "error" || message.errorMessage
-        ? "OMP assistant turn failed"
-        : undefined;
-    }
-  }
-  if (messages && event.messageCount === undefined) return undefined;
-  if (event.messageCount === 0) return undefined;
   if (
-    turn.lastCompletedAssistantFailed !== undefined &&
-    (event.messageCount === undefined ||
-      turn.completedMessageCount + (messages?.length ?? 0) >= event.messageCount)
+    messages !== undefined &&
+    (event.messageCount === undefined || messages.length >= event.messageCount)
   ) {
-    return turn.lastCompletedAssistantFailed ? "OMP assistant turn failed" : undefined;
+    const status = lastAssistantStatus(messages);
+    return status === "unavailable" ? "completed" : status;
   }
-  return "OMP agent_end omitted terminal messages; outcome is unknown";
+  if (event.messageCount === 0) return "completed";
+  if (
+    turn.lastCompletedAssistantOutcome !== undefined &&
+    (event.messageCount === undefined || turn.completedMessageCount >= event.messageCount)
+  ) {
+    return turn.lastCompletedAssistantOutcome;
+  }
+  return undefined;
+}
+
+function historyTerminalOutcome(
+  messages: readonly OmpMessage[],
+  declaredCount: number,
+  turn: Pick<
+    ActiveTurn,
+    | "streamedMessageEntryIds"
+    | "streamedMessageIdentityComplete"
+    | "lastCompletedAssistantOutcome"
+    | "lastCompletedAssistantEntryId"
+  >,
+  retainedMessages: readonly OmpMessage[],
+): AgentEndOutcome | undefined {
+  if (
+    messages.length < declaredCount ||
+    !turn.streamedMessageIdentityComplete ||
+    turn.streamedMessageEntryIds.length === 0
+  ) {
+    return undefined;
+  }
+  const startIndex = messages.length - declaredCount;
+  let historyIndex = startIndex;
+  for (const entryId of turn.streamedMessageEntryIds) {
+    while (historyIndex < messages.length) {
+      const historyMessage = messages[historyIndex];
+      if (historyMessage && nativeEntryId(historyMessage) === entryId) break;
+      historyIndex += 1;
+    }
+    if (historyIndex >= messages.length) return undefined;
+    const correlated = messages[historyIndex];
+    if (
+      entryId === turn.lastCompletedAssistantEntryId &&
+      (correlated?.role !== "assistant" ||
+        assistantTerminalOutcome(correlated) !== turn.lastCompletedAssistantOutcome)
+    )
+      return undefined;
+    historyIndex += 1;
+  }
+  historyIndex = startIndex;
+  for (const retained of retainedMessages) {
+    const entryId = nativeEntryId(retained);
+    if (!entryId) return undefined;
+    while (historyIndex < messages.length) {
+      const historyMessage = messages[historyIndex];
+      if (historyMessage && nativeEntryId(historyMessage) === entryId) break;
+      historyIndex += 1;
+    }
+    if (historyIndex >= messages.length) return undefined;
+    const correlated = messages[historyIndex];
+    if (!correlated || correlated.role !== retained.role) return undefined;
+    if (
+      retained.role === "assistant" &&
+      correlated.role === "assistant" &&
+      assistantTerminalOutcome(retained) !== assistantTerminalOutcome(correlated)
+    )
+      return undefined;
+    historyIndex += 1;
+  }
+  const status = lastAssistantStatus(messages, startIndex);
+  return status === "unavailable" ? undefined : status;
+}
+
+function unknownTerminalOutcomeError(
+  event: Extract<OmpRpcEvent, { type: "agent_end" }>,
+  turn: Pick<ActiveTurn, "completedMessageCount" | "lastCompletedAssistantOutcome">,
+): string {
+  const retainedMessages = event.messages?.length ?? 0;
+  const retainedStatus = event.messages ? lastAssistantStatus(event.messages) : "unavailable";
+  const lastStatus =
+    retainedStatus === "unavailable"
+      ? (turn.lastCompletedAssistantOutcome ?? "unavailable")
+      : retainedStatus;
+  return (
+    "OMP agent_end omitted terminal messages; outcome is unknown " +
+    `(declaredCount=${event.messageCount ?? "unavailable"}, ` +
+    `observedCount=${turn.completedMessageCount}, ` +
+    `retainedTerminalMessages=${retainedMessages}, lastAssistantStatus=${lastStatus})`
+  );
 }
 
 function isNativeTurnActivity(event: OmpRpcEvent): boolean {
@@ -715,6 +820,8 @@ function createActiveTurn(
     userEchoes: [],
     completedMessageCount: 0,
     bufferedEvents: [],
+    streamedMessageEntryIds: [],
+    streamedMessageIdentityComplete: true,
     pendingUsers: [
       {
         clientMessageId,
@@ -2351,6 +2458,23 @@ export class OmpProviderSession {
     }
   }
 
+  private async readRuntimeHistoryWithTimeout(
+    runtime: OmpRuntimeSession,
+  ): Promise<OmpMessage[] | undefined> {
+    if (!runtime.canReplayHistory) return undefined;
+    const historyRequest = runtime.getMessages();
+    void historyRequest.catch(() => undefined);
+    const timeout = Promise.withResolvers<null>();
+    const timer = this.scheduler.set(() => timeout.resolve(null), AGENT_END_HISTORY_TIMEOUT_MS);
+    try {
+      return (await Promise.race([historyRequest, timeout.promise])) ?? undefined;
+    } catch {
+      return undefined;
+    } finally {
+      this.scheduler.clear(timer);
+    }
+  }
+
   private publishCommittedConfig(
     state: OmpSessionState,
     runtime: OmpRuntimeSession,
@@ -2988,10 +3112,16 @@ export class OmpProviderSession {
       return;
     }
     if (event.type === "message_end") {
+      const entryId = nativeEntryId(event.message);
+      if (!entryId || turn.streamedMessageEntryIds.length >= MAX_AGENT_END_CORRELATION_MESSAGES) {
+        turn.streamedMessageIdentityComplete = false;
+      } else {
+        turn.streamedMessageEntryIds.push(entryId);
+      }
       turn.completedMessageCount += 1;
       if (event.message.role === "assistant") {
-        turn.lastCompletedAssistantFailed =
-          event.message.stopReason === "error" || !!event.message.errorMessage;
+        turn.lastCompletedAssistantOutcome = assistantTerminalOutcome(event.message);
+        turn.lastCompletedAssistantEntryId = entryId;
       }
     }
     if (event.type === "prompt_error") {
@@ -4327,7 +4457,7 @@ export class OmpProviderSession {
         this.scheduleTerminalOwnershipTimeout(turn);
         return;
       }
-      await this.completeAgentEnd(turn, event);
+      await this.completeAgentEnd(turn, event, true);
       return;
     }
     if (turn.userEchoObserved) {
@@ -4345,17 +4475,53 @@ export class OmpProviderSession {
   private async completeAgentEnd(
     turn: ActiveTurn,
     event: Extract<OmpRpcEvent, { type: "agent_end" }>,
-    usageSampled = false,
+    providerIdle = false,
   ): Promise<void> {
     if (turn.terminal || this.activeTurn !== turn) return;
-    const error = terminalError(event, turn);
-    if (turn.interrupted) this.subsessions?.terminalize("canceled");
-    else if (error) this.subsessions?.terminalize("failed");
-    if (turn.interrupted) await this.finishTurn(turn, "canceled", undefined, usageSampled);
-    else if (error) await this.finishTurn(turn, "failed", { message: error }, usageSampled);
-    else await this.finishTurn(turn, "completed", undefined, usageSampled);
+    let outcome = turn.interrupted ? ("canceled" as const) : terminalOutcome(event, turn);
+    if (!outcome && providerIdle && event.messageCount !== undefined) {
+      const runtime = this.runtime;
+      const history = await this.readRuntimeHistoryWithTimeout(runtime);
+      if (
+        history &&
+        history.length <= MAX_REPLAY_MESSAGES &&
+        this.isCurrentRuntime(runtime, turn.generation) &&
+        !turn.terminal &&
+        !turn.interrupted &&
+        this.activeTurn === turn
+      ) {
+        const state = await this.boundedTerminalState(turn, FINAL_USAGE_WAIT_MS);
+        if (
+          turn.terminal ||
+          this.activeTurn !== turn ||
+          !this.isCurrentRuntime(runtime, turn.generation)
+        )
+          return;
+        if (!turn.interrupted && state && (state.isStreaming || state.isCompacting)) {
+          turn.agentEndPending = false;
+          turn.deferredAgentEnd = undefined;
+          return;
+        }
+        if (state && !state.isStreaming && !state.isCompacting) {
+          outcome = historyTerminalOutcome(history, event.messageCount, turn, event.messages ?? []);
+        }
+      }
+    }
+    if (turn.terminal || this.activeTurn !== turn) return;
+    if (turn.interrupted || outcome === "canceled") {
+      this.subsessions?.terminalize("canceled");
+      await this.finishTurn(turn, "canceled");
+      return;
+    }
+    if (outcome === "completed") {
+      await this.finishTurn(turn, "completed");
+      return;
+    }
+    const error =
+      outcome === "failed" ? "OMP assistant turn failed" : unknownTerminalOutcomeError(event, turn);
+    this.subsessions?.terminalize("failed");
+    await this.finishTurn(turn, "failed", { message: error });
   }
-
   private publishPendingUsers(turn: ActiveTurn): void {
     for (const pending of turn.pendingUsers.splice(0)) {
       for (const echo of pending.bufferedEchoes) {
