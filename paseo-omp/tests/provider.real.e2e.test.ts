@@ -121,7 +121,7 @@ async function createHarness(): Promise<RealHarness> {
   });
   await writeFile(
     join(agentDir, "models.yml"),
-    `providers:\n  paseo-ci:\n    baseUrl: http://127.0.0.1:${modelServer.port}/v1\n    auth: none\n    api: openai-completions\n    models:\n      - id: conformance-model\n        name: Conformance Model\n        reasoning: false\n        input: [text]\n        contextWindow: 32000\n        maxTokens: 4096\n`,
+    `providers:\n  paseo-ci:\n    baseUrl: http://127.0.0.1:${modelServer.port}/v1\n    auth: none\n    api: openai-completions\n    models:\n      - id: conformance-model\n        name: Conformance Model\n        reasoning: false\n        input: [text, image]\n        contextWindow: 32000\n        maxTokens: 4096\n`,
   );
   const registration = createOmpProvider({
     environment: {
@@ -230,6 +230,57 @@ describe("OMP 18.1.15 real provider", () => {
         } finally {
           unsubscribe();
         }
+      } finally {
+        await session?.close();
+        await harness.registry.shutdown();
+        harness.modelServer.stop(true);
+      }
+    },
+    180_000,
+  );
+
+  testReal(
+    "runs an oversized pasted image through the real OMP transport",
+    async () => {
+      const harness = await createHarness();
+      let session: AgentSession | undefined;
+      try {
+        const catalog = await harness.client.fetchCatalog({
+          scope: "workspace",
+          cwd: harness.cwd,
+          force: true,
+        });
+        const model = catalog.models.find(
+          (candidate) => candidate.label === "paseo-ci/Conformance Model",
+        );
+        if (!model) throw new Error("OMP did not load the hermetic CI model");
+        session = await harness.client.createSession(
+          {
+            provider: "omp-plugin",
+            cwd: harness.cwd,
+            model: model.id,
+            modeId: "full",
+            thinkingOptionId: model.defaultThinkingOptionId,
+            featureValues: {},
+          },
+          undefined,
+          { persistSession: false },
+        );
+        const largePng = Buffer.concat([
+          Buffer.from("89504e470d0a1a0a", "hex"),
+          Buffer.alloc(768 * 1024 - 8),
+        ]).toString("base64");
+        const result = await session.run(
+          [
+            { type: "text", text: "Process this pasted image." },
+            { type: "image", data: largePng, mimeType: "image/png" },
+          ],
+          { clientMessageId: "real-omp-large-image" },
+        );
+
+        expect(result.finalText).toBe("REAL_OMP_DONE");
+        expect(result.timeline.some((item) => item.type === "error")).toBe(false);
+        expect(harness.requests).toHaveLength(2);
       } finally {
         await session?.close();
         await harness.registry.shutdown();

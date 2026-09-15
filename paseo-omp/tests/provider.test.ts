@@ -297,6 +297,7 @@ class FakeOmpSession implements OmpRuntimeSession {
   canReplayHistory = true;
   supportsTypedToolApprovals = true;
   inheritedRedactionValues: readonly string[] = [];
+  maxInputFrameBytes: number | undefined;
   readonly listeners = new Set<(event: OmpRpcEvent) => void>();
   readonly prompts: string[] = [];
   readonly promptImages: OmpImage[][] = [];
@@ -5030,6 +5031,66 @@ describe("OMP direct provider", () => {
 
     expect(session.prompts).toEqual([]);
     expect(session.promptImages).toEqual([]);
+    await connection.close();
+  });
+
+  test("materializes images when an inline prompt exceeds the OMP input frame", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.maxInputFrameBytes = 1024 * 1024;
+    const smallPng = "iVBORw0KGgo=";
+
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "small-inline-image",
+        delivery: "auto",
+        input: {
+          type: "message",
+          content: [{ type: "image", data: smallPng, mimeType: "image/png" }],
+        },
+      },
+    });
+    const inlineResult = await events.waitFor(
+      (event) =>
+        event.type === "session.prompt_result" && event.clientMessageId === "small-inline-image",
+    );
+    expect(session.promptImages.at(-1)).toEqual([
+      { type: "image", data: smallPng, mimeType: "image/png" },
+    ]);
+    await finishTurn(events, session, turnIdFrom(inlineResult));
+
+    const largePng = Buffer.concat([
+      Buffer.from("89504e470d0a1a0a", "hex"),
+      Buffer.alloc(768 * 1024 - 8),
+    ]).toString("base64");
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "oversized-inline-image",
+        delivery: "auto",
+        input: {
+          type: "message",
+          content: [{ type: "image", data: largePng, mimeType: "image/png" }],
+        },
+      },
+    });
+    const materializedResult = await events.waitFor(
+      (event) =>
+        event.type === "session.prompt_result" &&
+        event.clientMessageId === "oversized-inline-image",
+    );
+    expect(session.promptImages.at(-1)).toEqual([]);
+    const materialized = session.prompts
+      .at(-1)
+      ?.match(/^\[Image available at: (?<path>.*[\\/][0-9a-f]{64}\.png)\]$/u)?.groups?.path;
+    if (!materialized) throw new Error("Expected oversized image path");
+    expect(existsSync(materialized)).toBe(true);
+    await finishTurn(events, session, turnIdFrom(materializedResult));
+    expect(existsSync(materialized)).toBe(false);
     await connection.close();
   });
 

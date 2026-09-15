@@ -162,6 +162,7 @@ describe("OMP RPC transport", () => {
     const opening = runtime.startSession({ cwd: "/repo", mode: "full" });
     child.write(READY_FRAME);
     const session = await opening;
+    expect(session.maxInputFrameBytes).toBe(READY_FRAME.maxFrameBytes);
     const promptResult = nextEvent((listener) => session.onEvent(listener));
     child.write({ type: "prompt_result", id: "prompt-1", agentInvoked: false });
     await expect(promptResult).resolves.toEqual({

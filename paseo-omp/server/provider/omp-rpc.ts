@@ -978,6 +978,8 @@ export type OmpExtensionUiResponse =
 
 export interface OmpRuntimeSession {
   readonly maxHostToolFrameBytes?: number;
+  /** Maximum bytes accepted for one unchunked stdin JSONL frame, including its newline. */
+  readonly maxInputFrameBytes?: number;
   readonly supportsTypedToolApprovals: boolean;
   onEvent(listener: (event: OmpRpcEvent) => void): () => void;
   getState(): Promise<OmpSessionState>;
@@ -2441,6 +2443,9 @@ function validateReadyMetadata(frame: ReadyFrame): void {
 
 class OmpRpcSession implements OmpRuntimeSession {
   get maxHostToolFrameBytes(): number {
+    return this.process.outboundFrameLimit;
+  }
+  get maxInputFrameBytes(): number {
     return this.process.outboundFrameLimit;
   }
 

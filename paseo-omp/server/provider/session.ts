@@ -81,6 +81,7 @@ const COMPACTION_MAX_WAIT_MS = 5 * 60_000;
 const AGENT_END_SETTLE_MS = 5_000;
 const MAX_PROMPT_PARTS = 64;
 const MAX_PROMPT_TEXT_LENGTH = 1024 * 1024;
+const RPC_REQUEST_ID_BYTES = 36;
 const MAX_TRACKED_ENTRY_IDS = 1_024;
 const MAX_UNCLAIMED_BRANCH_ENTRIES = 1_024;
 const MAX_PENDING_USERS = 256;
@@ -563,6 +564,23 @@ function promptPayload(input: SessionPromptInput): OmpPromptPayload {
   const text = parts.join("\n\n").trim();
   if (!text && images.length === 0) throw new OmpPublicError("OMP prompt cannot be empty");
   return { text, images };
+}
+
+function inlinePromptFrameBytes(payload: OmpPromptPayload, delivery: "prompt" | "steer"): number {
+  const images = payload.images.map(({ type, mimeType }) => ({ type, data: "", mimeType }));
+  const frame = {
+    type: delivery,
+    message: payload.text,
+    ...(images.length > 0 ? { images } : {}),
+    ...(delivery === "prompt" ? { id: "" } : {}),
+  };
+  const requestIdBytes = delivery === "prompt" ? RPC_REQUEST_ID_BYTES : 0;
+  return (
+    utf8Bytes(JSON.stringify(frame)) +
+    requestIdBytes +
+    payload.images.reduce((total, image) => total + image.data.length, 0) +
+    1
+  );
 }
 
 function slashCommandName(text: string): string | undefined {
@@ -1672,7 +1690,7 @@ export class OmpProviderSession {
     }
     let materializedPaths: string[] = [];
     try {
-      const prepared = this.preparePromptPayload(payload);
+      const prepared = this.preparePromptPayload(payload, "prompt");
       payload = prepared.payload;
       materializedPaths = prepared.materializedPaths;
     } catch (error) {
@@ -1777,14 +1795,24 @@ export class OmpProviderSession {
       }
     }
   }
-  private preparePromptPayload(payload: OmpPromptPayload): {
+  private preparePromptPayload(
+    payload: OmpPromptPayload,
+    delivery: "prompt" | "steer",
+  ): {
     payload: OmpPromptPayload;
     materializedPaths: string[];
   } {
     const currentModel = this.configState.model
       ? this.nativeModelsByPublicId.get(this.configState.model)
       : undefined;
-    if (payload.images.length === 0 || currentModel?.input?.includes("image")) {
+    // OMP chunks protocol v2 output only; every stdin command must fit one physical frame.
+    const inlineImagesFit =
+      this.runtime.maxInputFrameBytes === undefined ||
+      inlinePromptFrameBytes(payload, delivery) <= this.runtime.maxInputFrameBytes;
+    if (
+      payload.images.length === 0 ||
+      (currentModel?.input?.includes("image") && inlineImagesFit)
+    ) {
       return { payload, materializedPaths: [] };
     }
     const materializedPaths: string[] = [];
@@ -2683,7 +2711,7 @@ export class OmpProviderSession {
 
     let materializedPaths: string[] = [];
     try {
-      const prepared = this.preparePromptPayload(payload);
+      const prepared = this.preparePromptPayload(payload, "steer");
       payload = prepared.payload;
       materializedPaths = prepared.materializedPaths;
     } catch (error) {
