@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.2.0...paseo-omp-v0.2.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **paseo-omp:** handle oversized pasted images ([#55](https://github.com/omercnet/paseo-plugins/issues/55)) ([4b6ed7d](https://github.com/omercnet/paseo-plugins/commit/4b6ed7d3015f1f85dcc13a9dd29061efef5f22c7))
+* **paseo-omp:** preserve buffered terminal ownership evidence ([#54](https://github.com/omercnet/paseo-plugins/issues/54)) ([b49400e](https://github.com/omercnet/paseo-plugins/commit/b49400e09d73cd67a23986f52c17bfc1f23cd297))
+* **paseo-omp:** steer auto messages during active turns ([#61](https://github.com/omercnet/paseo-plugins/issues/61)) ([b36002b](https://github.com/omercnet/paseo-plugins/commit/b36002bbc5b108cd525dd9c356fbdb89d6a9f3e6))
+
 ## [0.2.0](https://github.com/omercnet/paseo-plugins/compare/paseo-omp-v0.1.2...paseo-omp-v0.2.0) (2026-09-14)
 
 
