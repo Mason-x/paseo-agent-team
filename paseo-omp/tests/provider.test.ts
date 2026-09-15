@@ -6904,6 +6904,112 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
+  test("routes auto delivery through native steering while a turn is active", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const turnId = turnIdFrom(await startPrompt(connection, events));
+    const session = sessionAt(runtime);
+
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "auto-steer",
+        delivery: "auto",
+        input: { type: "message", content: [{ type: "text", text: "change direction" }] },
+      },
+    });
+    const result = await events.waitFor(
+      (event) => event.type === "session.prompt_result" && event.clientMessageId === "auto-steer",
+    );
+
+    expect(result).toEqual({
+      type: "session.prompt_result",
+      sessionId: "session-1",
+      clientMessageId: "auto-steer",
+      result: { type: "steer", turnId },
+    });
+    expect(session.steers).toEqual(["change direction"]);
+    expect(session.promptCount).toBe(1);
+    expect(session.aborts).toBe(0);
+    await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+  test("waits for prompt acknowledgement before auto-steering the same turn", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const promptGate = Promise.withResolvers<void>();
+    const promptObserved = Promise.withResolvers<void>();
+    session.promptGate = promptGate.promise;
+    session.promptObserved = promptObserved.resolve;
+
+    const firstPrompt = startPrompt(connection, events, "pending-prompt", "start");
+    await promptObserved.promise;
+    const autoSteer = connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "pending-auto-steer",
+        delivery: "auto",
+        input: { type: "message", content: [{ type: "text", text: "change direction" }] },
+      },
+    });
+
+    expect(session.steers).toEqual([]);
+    promptGate.resolve();
+    const turnId = turnIdFrom(await firstPrompt);
+    await autoSteer;
+    const result = await events.waitFor(
+      (event) =>
+        event.type === "session.prompt_result" && event.clientMessageId === "pending-auto-steer",
+    );
+
+    expect(result).toEqual({
+      type: "session.prompt_result",
+      sessionId: "session-1",
+      clientMessageId: "pending-auto-steer",
+      result: { type: "steer", turnId },
+    });
+    expect(session.steers).toEqual(["change direction"]);
+    expect(session.promptCount).toBe(1);
+    await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+
+  test("does not convert auto-delivered structured commands into steering text", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const turnId = turnIdFrom(await startPrompt(connection, events));
+    const session = sessionAt(runtime);
+
+    await connection.send({
+      type: "session.prompt",
+      sessionId: "session-1",
+      prompt: {
+        clientMessageId: "auto-command",
+        delivery: "auto",
+        input: { type: "command", name: "removed-command", arguments: "now" },
+      },
+    });
+    const result = await events.waitFor(
+      (event) => event.type === "session.prompt_result" && event.clientMessageId === "auto-command",
+    );
+
+    expect(result).toEqual({
+      type: "session.prompt_result",
+      sessionId: "session-1",
+      clientMessageId: "auto-command",
+      result: {
+        type: "failed",
+        error: { message: "OMP already has an active turn; send this message as a steer" },
+      },
+    });
+    expect(session.steers).toEqual([]);
+    await finishTurn(events, session, turnId);
+    await connection.close();
+  });
+
   test("keeps one user bubble through hidden notices and mid-turn steering", async () => {
     const { connection, events, runtime } = await createHarness();
     await openSession(connection, events);

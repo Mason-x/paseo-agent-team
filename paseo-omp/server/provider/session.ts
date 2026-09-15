@@ -255,6 +255,7 @@ type ActiveTurn = {
   terminalization?: Promise<void>;
   terminalOutcome?: TurnOutcome;
   terminalWake?: VoidDeferred;
+  steerReady: VoidDeferred;
   steersInFlight: number;
   deferredAgentEnd?: Extract<OmpRpcEvent, { type: "agent_end" }>;
   bufferedEvents: OmpRpcEvent[];
@@ -697,6 +698,7 @@ function createActiveTurn(
     bufferedTerminalOwnershipEvidence: false,
     terminalOwnershipRequired,
     steersInFlight: 0,
+    steerReady: Promise.withResolvers<void>(),
     userCorrelationActive: false,
     userLookups: new Set(),
     userEchoes: [],
@@ -1619,15 +1621,12 @@ export class OmpProviderSession {
       return;
     }
     if (this.activeTurn) {
-      this.emit({
-        type: "session.prompt_result",
-        sessionId: this.id,
-        clientMessageId: input.prompt.clientMessageId,
-        result: {
-          type: "failed",
-          error: { message: "OMP already has an active turn; send this message as a steer" },
-        },
-      });
+      await this.routeActivePrompt(
+        input.prompt.clientMessageId,
+        payload,
+        this.activeTurn,
+        input.prompt.delivery === "auto" && input.prompt.input.type === "message",
+      );
       return;
     }
     try {
@@ -1660,15 +1659,12 @@ export class OmpProviderSession {
       return;
     }
     if (this.activeTurn) {
-      this.emit({
-        type: "session.prompt_result",
-        sessionId: this.id,
-        clientMessageId: input.prompt.clientMessageId,
-        result: {
-          type: "failed",
-          error: { message: "OMP already has an active turn; send this message as a steer" },
-        },
-      });
+      await this.routeActivePrompt(
+        input.prompt.clientMessageId,
+        payload,
+        this.activeTurn,
+        input.prompt.delivery === "auto" && input.prompt.input.type === "message",
+      );
       return;
     }
     if (this.activeAbort) {
@@ -1792,6 +1788,7 @@ export class OmpProviderSession {
       this.subsessions?.terminalize("failed");
       if (turn.started) await this.finishTurn(turn, "failed", failure);
       else {
+        turn.steerReady.resolve();
         turn.terminal = true;
         this.finishCompaction("failed", { message: "OMP prompt failed" });
         this.resolveTurnPermissions(turn.turnId);
@@ -1937,6 +1934,7 @@ export class OmpProviderSession {
       const failure = providerError(error, "OMP command failed");
       this.publishPendingUsers(turn);
       this.publishPromptResult(turn, { type: "failed", error: failure });
+      turn.steerReady.resolve();
       turn.terminal = true;
       this.imageMaterializer.clear();
       this.resolveTurnPermissions(turn.turnId);
@@ -2501,6 +2499,7 @@ export class OmpProviderSession {
       });
       if (turn.started) await this.finishTurn(turn, "canceled", undefined, true, true);
       else {
+        turn.steerReady.resolve();
         turn.terminal = true;
         this.stopUsagePoll(turn);
         this.finishCompaction("canceled");
@@ -2692,8 +2691,29 @@ export class OmpProviderSession {
       throw error;
     }
   }
-  private async steer(clientMessageId: string, payload: OmpPromptPayload): Promise<void> {
-    const turn = this.activeTurn;
+  private async routeActivePrompt(
+    clientMessageId: string,
+    payload: OmpPromptPayload,
+    turn: ActiveTurn,
+    autoSteer: boolean,
+  ): Promise<void> {
+    if (!autoSteer) {
+      this.publishSteerFailure(
+        clientMessageId,
+        "OMP already has an active turn; send this message as a steer",
+      );
+      return;
+    }
+    if (turn.starting) await turn.steerReady.promise;
+    await this.steer(clientMessageId, payload, turn);
+  }
+
+  private async steer(
+    clientMessageId: string,
+    payload: OmpPromptPayload,
+    expectedTurn = this.activeTurn,
+  ): Promise<void> {
+    const turn = expectedTurn;
     if (!this.isSteerableTurn(turn)) {
       this.publishSteerFailure(clientMessageId, "There is no active OMP turn to steer");
       return;
@@ -4280,6 +4300,8 @@ export class OmpProviderSession {
   private startTurn(turn: ActiveTurn, pollUsage = true): void {
     if (turn.started || turn.terminal) return;
     turn.started = true;
+    turn.starting = false;
+    turn.steerReady.resolve();
     this.emit({ type: "session.turn", sessionId: this.id, turnId: turn.turnId, state: "started" });
     if (pollUsage) this.pollUsage(turn);
   }
@@ -4291,6 +4313,7 @@ export class OmpProviderSession {
     override = false,
     preserveCompactions = false,
   ): Promise<void> {
+    turn.steerReady.resolve();
     if (turn.terminal) return Promise.resolve();
     const current = turn.terminalOutcome;
     if (
@@ -4419,6 +4442,7 @@ export class OmpProviderSession {
     this.publishPromptResult(turn, { type: "failed", error: { message } });
     if (turn.started) void this.finishTurn(turn, "failed", { message }, true, true);
     else {
+      turn.steerReady.resolve();
       turn.terminal = true;
       this.projector.finishTurn(turn.turnId);
       if (this.activeTurn === turn) this.activeTurn = null;
