@@ -462,15 +462,8 @@ try {
   await client.rewindAgent(rewindAgent.id, rewindMessage.item.messageId, "conversation");
   await client.sendAgentMessage(rewindAgent.id, "REWIND_RESUMED");
   const rewindResult = await client.waitForFinish(rewindAgent.id, 120_000);
-  if (
-    rewindResult.status === "error" &&
-    rewindResult.error === "OMP terminal ownership could not be confirmed"
-  ) {
-    summary.rewind = { passed: false, knownIssue: rewindResult.error };
-  } else {
-    assertFinished(rewindResult, "CANARY_MOCK_OK");
-    summary.rewind = { passed: true };
-  }
+  assertFinished(rewindResult, "CANARY_MOCK_OK");
+  summary.rewind = { passed: true };
 
   const pluginCatalog = await client.getPluginCatalog();
   assert(

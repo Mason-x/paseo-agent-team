@@ -235,6 +235,7 @@ type ActiveTurn = {
   terminalOwnershipEvidence: boolean;
   terminalOwnershipRequired: boolean;
   replayingBufferedEvents: boolean;
+  bufferedTerminalOwnershipEvidence: boolean;
   agentInvoked?: boolean;
   nativeRequestId?: string;
   promptAcceptedEventIndex?: number;
@@ -693,6 +694,7 @@ function createActiveTurn(
     acknowledged: false,
     terminalOwnershipEvidence: false,
     replayingBufferedEvents: false,
+    bufferedTerminalOwnershipEvidence: false,
     terminalOwnershipRequired,
     steersInFlight: 0,
     userCorrelationActive: false,
@@ -1767,6 +1769,9 @@ export class OmpProviderSession {
       this.projector.acceptLiveTurn(turn.turnId);
       for (const event of bufferedEvents) this.handleTurnEvent(turn, event);
       turn.replayingBufferedEvents = false;
+      if (acknowledgement.agentInvoked === true && turn.bufferedTerminalOwnershipEvidence) {
+        this.markTerminalOwnershipEvidence(turn);
+      }
       if (
         acknowledgement.agentInvoked === false &&
         turn.agentInvoked !== true &&
@@ -2929,7 +2934,8 @@ export class OmpProviderSession {
       if (!event.id || event.id !== turn.nativeRequestId) return;
       if (event.agentInvoked) {
         this.markAgentEvidence(turn);
-        if (!turn.replayingBufferedEvents) this.markTerminalOwnershipEvidence(turn);
+        if (turn.replayingBufferedEvents) turn.bufferedTerminalOwnershipEvidence = true;
+        else this.markTerminalOwnershipEvidence(turn);
         return;
       }
       if (turn.localOnlyDisabled || turn.steersInFlight > 0) return;

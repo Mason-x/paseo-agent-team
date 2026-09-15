@@ -10592,8 +10592,8 @@ describe("OMP direct provider", () => {
     }
   });
 
-  test("does not grant terminal ownership to a buffered positive prompt result", async () => {
-    const { connection, events, runtime } = await createHarness();
+  test("grants terminal ownership to a buffered result confirmed by the prompt acknowledgement", async () => {
+    const { connection, events, runtime, scheduler } = await createHarness();
     await openSession(connection, events);
     const session = sessionAt(runtime);
     const firstTurn = turnIdFrom(
@@ -10604,7 +10604,40 @@ describe("OMP direct provider", () => {
     session.promptAgentInvoked = true;
     session.promptEvents = [{ type: "prompt_result", id: "rpc-prompt-2", agentInvoked: true }];
     const secondTurn = turnIdFrom(
-      await startPrompt(connection, events, "buffered-owner-b", "second"),
+      await startPrompt(connection, events, "buffered-owner-b", "/mcp list"),
+    );
+    session.promptEvents = [];
+    session.emit({ type: "agent_end", messages: [], isTerminal: true });
+    const terminal = await events.waitFor(
+      (event) =>
+        event.type === "session.turn" && event.turnId === secondTurn && event.state !== "started",
+    );
+    await scheduler.flush(2_000);
+
+    expect(terminal).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "session.turn" && event.turnId === secondTurn && event.state !== "started",
+      ),
+    ).toHaveLength(1);
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+
+    const thirdTurn = turnIdFrom(
+      await startPrompt(connection, events, "buffered-owner-c", "continue"),
+    );
+    await finishTurn(events, session, thirdTurn);
+    await connection.close();
+  });
+
+  test("does not grant terminal ownership to a mismatched buffered prompt result", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.promptAgentInvoked = true;
+    session.promptEvents = [{ type: "prompt_result", id: "rpc-prompt-stale", agentInvoked: true }];
+    const turnId = turnIdFrom(
+      await startPrompt(connection, events, "buffered-owner-mismatch", "work"),
     );
     session.promptEvents = [];
     session.emit({ type: "agent_end", messages: [], isTerminal: true });
@@ -10612,19 +10645,15 @@ describe("OMP direct provider", () => {
     expect(
       events.filter(
         (event) =>
-          event.type === "session.turn" && event.turnId === secondTurn && event.state !== "started",
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
       ),
     ).toHaveLength(0);
 
-    session.emit({ type: "prompt_result", id: "rpc-prompt-2", agentInvoked: true });
-    session.emit({
-      type: "agent_end",
-      messages: [{ role: "assistant", content: "second complete" }],
-      isTerminal: true,
-    });
+    establishTerminalOwnership(session);
+    session.emit({ type: "agent_end", messages: [], isTerminal: true });
     const terminal = await events.waitFor(
       (event) =>
-        event.type === "session.turn" && event.turnId === secondTurn && event.state !== "started",
+        event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
     );
     expect(terminal).toEqual(expect.objectContaining({ state: "completed" }));
     await connection.close();
