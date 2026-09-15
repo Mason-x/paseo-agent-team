@@ -81,10 +81,11 @@ paseo plugin install "$PWD"
 ```
 
 The build requires Node.js 24 or newer and npm on the daemon host. The runtime also needs a
-Chromium-compatible executable. Linux ARM64 requires a native ARM64 Chromium installation because
-the bundled download is not available for that target; set
-`PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE` to its absolute executable path before installing or
-starting the plugin. The plugin does not emulate x64 Chromium.
+Chromium-compatible executable. On Linux ARM64, where the bundled download is unavailable, the
+installer automatically uses native Chromium from `/usr/bin/chromium`. Install a non-Snap Chromium
+build with the system package manager before adding the plugin. Set
+`PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE` to an absolute path when Chromium is installed elsewhere.
+The plugin does not emulate x64 Chromium.
 
 Open a workspace, search the Command Center for **Open Shared Browser**, or tap the **Shared
 Browser** composer pill while a workspace session is open.
@@ -116,11 +117,11 @@ disconnect does not close or reset either process.
 
 The plugin recognizes only these deployment overrides:
 
-| Variable                                    | Meaning                                                                                                                                                                                            |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PASEO_HOME`                                | Paseo data root. Defaults to `~/.paseo`; browser runtime, supervisor IPC, and profiles live below `plugin-data/shared-browser`.                                                                    |
-| `PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY` | Absolute path to the pinned `agent-browser` executable. Defaults to `$PASEO_HOME/plugin-data/shared-browser/runtime/node_modules/.bin/agent-browser`.                                              |
-| `PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE`  | Absolute path to Chromium. Defaults to `$PASEO_HOME/plugin-data/shared-browser/runtime/chromium/chrome`. Required for Linux ARM64 unless that default path is populated with a native ARM64 build. |
+| Variable                                    | Meaning                                                                                                                                                                                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PASEO_HOME`                                | Paseo data root. Defaults to `~/.paseo`; browser runtime, supervisor IPC, and profiles live below `plugin-data/shared-browser`.                                                                                                             |
+| `PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY` | Absolute path to the pinned `agent-browser` executable. Defaults to `$PASEO_HOME/plugin-data/shared-browser/runtime/node_modules/.bin/agent-browser`.                                                                                       |
+| `PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE`  | Absolute path to Chromium. Defaults to `$PASEO_HOME/plugin-data/shared-browser/runtime/chromium/chrome`. On Linux ARM64, installation automatically links `/usr/bin/chromium`; use this override for another compatible, non-Snap location. |
 
 User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
 

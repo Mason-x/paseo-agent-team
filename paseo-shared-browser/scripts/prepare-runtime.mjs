@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { constants } from "node:fs";
-import { homedir } from "node:os";
+import { arch, homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -77,6 +77,27 @@ async function applyPrivatePermissions(path) {
   await chmod(path, metadata.mode & 0o111 ? 0o700 : 0o600);
 }
 
+async function stageChromiumExecutable(executable) {
+  const chromiumRoot = join(stagingRoot, "chromium");
+  await mkdir(chromiumRoot, { recursive: true, mode: 0o700 });
+  await symlink(executable, join(chromiumRoot, "chrome"));
+}
+
+async function findLinuxArm64Chromium() {
+  if (platform() !== "linux" || arch() !== "arm64") return null;
+
+  const candidate = "/usr/bin/chromium";
+  try {
+    return await requireExecutable(candidate, "System Chromium executable");
+  } catch {
+    throw new Error(
+      `Linux ARM64 requires native Chromium at ${candidate}. ` +
+        "Install a non-Snap Chromium build or set " +
+        "PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE to its absolute path.",
+    );
+  }
+}
+
 async function installChromium() {
   const override = process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE;
   if (override) {
@@ -84,9 +105,14 @@ async function installChromium() {
       override,
       "PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE",
     );
-    const chromiumRoot = join(stagingRoot, "chromium");
-    await mkdir(chromiumRoot, { recursive: true, mode: 0o700 });
-    await symlink(executable, join(chromiumRoot, "chrome"));
+    await stageChromiumExecutable(executable);
+    return;
+  }
+
+  const systemChromium = await findLinuxArm64Chromium();
+  if (systemChromium) {
+    await stageChromiumExecutable(systemChromium);
+    console.log(`Using system Chromium at ${systemChromium}`);
     return;
   }
 
