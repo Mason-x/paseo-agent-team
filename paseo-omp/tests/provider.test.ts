@@ -14031,7 +14031,7 @@ describe("OMP direct provider", () => {
     if (opened?.type !== "session.opened") throw new Error("Missing child session");
     expect(opened).toEqual(
       expect.objectContaining({
-        capabilities: [],
+        capabilities: ["session.subsession"],
         restoration: "parent",
         title: "<redacted> scout",
         description: "Inspect <redacted>",
@@ -14465,6 +14465,7 @@ describe("OMP direct provider", () => {
       (event) => event.type === "session.opened" && event.parentSessionId === "session-1",
     );
     if (parentChild?.type !== "session.opened") throw new Error("Missing parent child session");
+    expect(parentChild.capabilities).toEqual(["session.subsession"]);
     for (const event of [
       {
         type: "tool_execution_start" as const,
@@ -14499,6 +14500,7 @@ describe("OMP direct provider", () => {
       expect.objectContaining({
         type: "session.opened",
         parentSessionId: parentChild.sessionId,
+        capabilities: ["session.subsession"],
       }),
     );
     expect(grandchild).not.toEqual(expect.objectContaining({ parentSessionId: "session-1" }));
