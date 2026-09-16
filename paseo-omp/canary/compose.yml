@@ -24,7 +24,11 @@ services:
     build:
       context: ../..
       dockerfile: paseo-omp/canary/Dockerfile
-    image: paseo-omp-canary:local
+      args:
+        OMP_VERSION: ${PASEO_CANARY_OMP_VERSION:-18.1.15}
+        OMP_SHA256_AMD64: ${PASEO_CANARY_OMP_SHA256_AMD64:-747518a41fbb32ac47491b4677a7a921d0d9e5977ae006c358d6836813149adc}
+        OMP_SHA256_ARM64: ${PASEO_CANARY_OMP_SHA256_ARM64:-2e1142ccd4bb76413b63a05711ac51c7b95551f36387ef295661bb86f0576189}
+    image: ${PASEO_CANARY_IMAGE:-paseo-omp-canary:local}
     depends_on:
       mock-llm:
         condition: service_healthy
@@ -34,6 +38,12 @@ services:
       PASEO_VOICE_MODE_ENABLED: "false"
     ports:
       - "${PASEO_CANARY_BIND:-127.0.0.1}:${PASEO_CANARY_PORT:-6768}:6767"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:6767/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
     volumes:
       - ${PASEO_CANARY_WORKSPACE:-../..}:/workspace/paseo-plugins
     stop_grace_period: 15s

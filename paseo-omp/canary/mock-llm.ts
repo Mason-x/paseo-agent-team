@@ -127,6 +127,32 @@ async function chatResponse(payload: Record<string, unknown>): Promise<Response>
     });
   }
 
+  if (!hasToolResult && hasTool(tools, "task") && prompt.includes("CANARY_NESTED_ROOT")) {
+    return toolCallResponse(base, "call_canary_nested_root", "task", {
+      context:
+        "# Goal\nExercise nested Docker canary subagents.\n# Constraints\nDo not edit files.\n# Contract\nReturn CANARY_NESTED_CHILD_OK.",
+      tasks: [
+        {
+          name: "CanaryNestedChild",
+          task: "# Target\nNo files.\n# Change\nRun a task whose prompt contains CANARY_NESTED_LEAF, then return CANARY_NESTED_CHILD_OK.\n# Acceptance\nThe response contains CANARY_NESTED_CHILD_OK.",
+        },
+      ],
+    });
+  }
+
+  if (!hasToolResult && hasTool(tools, "task") && prompt.includes("CANARY_NESTED_CHILD")) {
+    return toolCallResponse(base, "call_canary_nested_child", "task", {
+      context:
+        "# Goal\nComplete the nested Docker canary leaf.\n# Constraints\nDo not edit files.\n# Contract\nReturn CANARY_NESTED_LEAF_OK.",
+      tasks: [
+        {
+          name: "CanaryNestedLeaf",
+          task: "# Target\nNo files.\n# Change\nReturn CANARY_NESTED_LEAF_OK.\n# Acceptance\nThe response contains CANARY_NESTED_LEAF_OK.",
+        },
+      ],
+    });
+  }
+
   if (!hasToolResult && hasTool(tools, "task") && prompt.includes("CANARY_SUBAGENT")) {
     return toolCallResponse(base, "call_canary_task", "task", {
       context:
@@ -147,14 +173,20 @@ async function chatResponse(payload: Record<string, unknown>): Promise<Response>
   }
 
   const content = hasToolResult
-    ? prompt.includes("CANARY_SUBAGENT")
-      ? "CANARY_SUBAGENT_OK"
-      : prompt.includes("CANARY_HUB_START")
-        ? "CANARY_HUB_OK"
-        : prompt.includes("CANARY_MCP")
-          ? "CANARY_MCP_OK"
-          : "CANARY_TOOL_OK"
-    : "CANARY_MOCK_OK";
+    ? prompt.includes("CANARY_NESTED_ROOT")
+      ? "CANARY_NESTED_ROOT_OK"
+      : prompt.includes("CANARY_NESTED_CHILD")
+        ? "CANARY_NESTED_CHILD_OK"
+        : prompt.includes("CANARY_SUBAGENT")
+          ? "CANARY_SUBAGENT_OK"
+          : prompt.includes("CANARY_HUB_START")
+            ? "CANARY_HUB_OK"
+            : prompt.includes("CANARY_MCP")
+              ? "CANARY_MCP_OK"
+              : "CANARY_TOOL_OK"
+    : prompt.includes("CANARY_NESTED_LEAF")
+      ? "CANARY_NESTED_LEAF_OK"
+      : "CANARY_MOCK_OK";
   return stream([
     {
       ...base,

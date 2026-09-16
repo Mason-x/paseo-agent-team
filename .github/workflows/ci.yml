@@ -115,9 +115,27 @@ jobs:
         run: npm run test:integration:docker
 
   omp-real-e2e:
-    name: paseo-omp real OMP 18.1.15
+    name: paseo-omp real OMP ${{ matrix.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "17.2.15"
+            sha256: "fa884941f932f4f5d2046acba971790ae6aae18fd4806472b01f041de670368a"
+          - version: "17.3.4"
+            sha256: "3fce4b25628064b0cd7bfbc6245ecdada331750ed4b341aca6bd29ba4478aab5"
+          - version: "18.0.11"
+            sha256: "6054460b29e9bad5eba78336f291e1979c2fa0a5cd96fc2d92afd666cc681d26"
+          - version: "18.1.10"
+            sha256: "e91d5598ee47e1d4099fd8686dc9f61c9b755f2ea077d5f1774aba1072321f9e"
+          - version: "18.1.15"
+            sha256: "747518a41fbb32ac47491b4677a7a921d0d9e5977ae006c358d6836813149adc"
+          - version: "18.1.22"
+            sha256: "9ccddf1091e01e08fea1f8e1208f8901cc90d5d098b16581672eeab03f118b81"
+          - version: "18.2.0"
+            sha256: "41b67a43f18a7cd33cc0dd772a4fa042cd20ab6c57e6bd451ff6dbe55a7978d8"
     defaults:
       run:
         working-directory: paseo-omp
@@ -136,18 +154,19 @@ jobs:
         run: npm ci
       - name: Install pinned OMP
         env:
-          OMP_SHA256: 747518a41fbb32ac47491b4677a7a921d0d9e5977ae006c358d6836813149adc
-          OMP_URL: https://github.com/can1357/oh-my-pi/releases/download/v18.1.15/omp-linux-x64
+          OMP_SHA256: ${{ matrix.sha256 }}
+          OMP_URL: https://github.com/can1357/oh-my-pi/releases/download/v${{ matrix.version }}/omp-linux-x64
         run: |
           install -d "$RUNNER_TEMP/omp-bin"
           curl --fail --location --retry 3 --max-time 300 "$OMP_URL" --output "$RUNNER_TEMP/omp-bin/omp"
           echo "$OMP_SHA256  $RUNNER_TEMP/omp-bin/omp" | sha256sum --check --strict
           chmod 0755 "$RUNNER_TEMP/omp-bin/omp"
           echo "$RUNNER_TEMP/omp-bin" >> "$GITHUB_PATH"
-          test "$("$RUNNER_TEMP/omp-bin/omp" --version)" = "omp/18.1.15"
+          test "$("$RUNNER_TEMP/omp-bin/omp" --version)" = "omp/${{ matrix.version }}"
       - name: Run real OMP provider scenarios
         env:
           PASEO_OMP_REAL_E2E: "1"
+          PASEO_OMP_VERSION: ${{ matrix.version }}
         run: npm test -- tests/provider.real.e2e.test.ts
 
   shared-browser:

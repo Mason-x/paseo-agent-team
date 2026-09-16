@@ -10,6 +10,8 @@ FROM ghcr.io/getpaseo/paseo:0.8.0@sha256:5518da7cdd35f132e8a944c35e509c677a90a8f
 
 ARG TARGETARCH
 ARG OMP_VERSION=18.1.15
+ARG OMP_SHA256_AMD64=747518a41fbb32ac47491b4677a7a921d0d9e5977ae006c358d6836813149adc
+ARG OMP_SHA256_ARM64=2e1142ccd4bb76413b63a05711ac51c7b95551f36387ef295661bb86f0576189
 
 USER root
 RUN apt-get update \
@@ -20,10 +22,11 @@ COPY --chown=1000:1000 paseo-omp/canary/paseo.config.json /home/paseo/.paseo/con
 COPY --chown=1000:1000 paseo-omp/canary/models.yml /home/paseo/.omp/agent/models.yml
 COPY --chown=1000:1000 paseo-omp/canary/omp.config.yml /home/paseo/.omp/agent/config.yml
 RUN case "${TARGETARCH}" in \
-      amd64) omp_asset="omp-linux-x64"; omp_sha="747518a41fbb32ac47491b4677a7a921d0d9e5977ae006c358d6836813149adc" ;; \
-      arm64) omp_asset="omp-linux-arm64"; omp_sha="2e1142ccd4bb76413b63a05711ac51c7b95551f36387ef295661bb86f0576189" ;; \
+      amd64) omp_asset="omp-linux-x64"; omp_sha="${OMP_SHA256_AMD64}" ;; \
+      arm64) omp_asset="omp-linux-arm64"; omp_sha="${OMP_SHA256_ARM64}" ;; \
       *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
+  && test -n "${omp_sha}" \
   && curl --fail --location --retry 3 --max-time 300 \
     "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_asset}" \
     --output /usr/local/bin/omp \

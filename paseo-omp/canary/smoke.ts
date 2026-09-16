@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { DaemonClient, type WaitForFinishResult } from "@getpaseo/client/internal/daemon-client";
 
 const url = process.env.PASEO_CANARY_URL ?? "ws://127.0.0.1:6768/ws";
 const password = process.env.PASEO_CANARY_PASSWORD;
 const cwd = process.env.PASEO_CANARY_CWD ?? "/workspace/paseo-plugins";
 const provider = "omp-plugin";
+const expectedOmpVersion = process.env.PASEO_CANARY_OMP_VERSION ?? "18.1.15";
 
 if (!password) throw new Error("PASEO_CANARY_PASSWORD is required");
 
@@ -13,10 +14,7 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function assertFinished(
-  result: Awaited<ReturnType<DaemonClient["waitForFinish"]>>,
-  expected: string,
-): void {
+function assertFinished(result: WaitForFinishResult, expected: string): void {
   assert(
     result.status === "idle",
     `Expected idle result, received ${result.status}: ${result.error ?? result.lastMessage ?? "no detail"}`,
@@ -25,19 +23,83 @@ function assertFinished(
   assert(result.lastMessage === expected, `Expected ${expected}, received ${result.lastMessage}`);
 }
 
-const client = new DaemonClient({
-  url,
-  password,
-  clientId: `paseo-omp-canary-${randomUUID()}`,
-  clientType: "cli",
-  appVersion: "0.8.0",
-  reconnect: { enabled: false },
-});
+async function connectCanaryClient(): Promise<DaemonClient> {
+  const deadline = Date.now() + 60_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    const candidate = new DaemonClient({
+      url,
+      password,
+      clientId: `paseo-omp-canary-${randomUUID()}`,
+      clientType: "cli",
+      appVersion: "0.8.0",
+      reconnect: { enabled: false },
+    });
+    try {
+      await candidate.connect();
+      const catalog = await candidate.getPluginCatalog();
+      if (catalog.some((plugin) => plugin.id === "paseo-omp")) return candidate;
+      lastError = new Error("paseo-omp is not registered yet");
+    } catch (error) {
+      lastError = error;
+    }
+    await candidate.close().catch(() => undefined);
+    await sleep(250);
+  }
+  throw new Error(`Paseo canary did not become ready: ${String(lastError)}`);
+}
+
+const client = await connectCanaryClient();
 const createdAgentIds: string[] = [];
 const summary: Record<string, unknown> = {};
+const compatibilityFailures: string[] = [];
+
+async function deleteTrackedAgent(agentId: string): Promise<void> {
+  await client.deleteAgent(agentId);
+  const index = createdAgentIds.indexOf(agentId);
+  if (index >= 0) createdAgentIds.splice(index, 1);
+}
+
+async function allowPendingPermissions(
+  agentId: string,
+  result: WaitForFinishResult,
+): Promise<{ result: WaitForFinishResult; rounds: number }> {
+  let current = result;
+  let rounds = 0;
+  while (current.status === "permission" && rounds < 4) {
+    const request = current.final?.pendingPermissions[0];
+    assert(request, "Permission status did not include a pending request");
+    const action = request.actions?.find((candidate) => candidate.behavior === "allow");
+    await client.respondToPermission(agentId, request.id, {
+      behavior: "allow",
+      ...(action ? { selectedActionId: action.id } : {}),
+    });
+    rounds += 1;
+    current = await client.waitForFinish(agentId, 120_000);
+  }
+  return { result: current, rounds };
+}
 
 try {
-  await client.connect();
+  const health = (await client.invokePluginRpc("paseo-omp", "paseo-omp.get-provider-health", {
+    force: true,
+  })) as {
+    binary?: {
+      version?: { major?: number; minor?: number; patch?: number } | null;
+      versionStatus?: string;
+    };
+    rpcUi?: { supported?: boolean | null };
+  };
+  const actualOmpVersion = health.binary?.version
+    ? `${health.binary.version.major}.${health.binary.version.minor}.${health.binary.version.patch}`
+    : null;
+  assert(health.binary?.versionStatus === "ok", "OMP version health probe did not pass");
+  assert(
+    actualOmpVersion === expectedOmpVersion,
+    `Expected OMP ${expectedOmpVersion}, got ${actualOmpVersion}`,
+  );
+  assert(health.rpcUi?.supported === true, "OMP rpc-ui health probe did not pass");
+  summary.runtime = { version: actualOmpVersion, rpcUi: true };
   const modelsPayload = await client.listProviderModels(provider, { cwd });
   assert(!modelsPayload.error, `Model discovery failed: ${modelsPayload.error}`);
   const models = modelsPayload.models ?? [];
@@ -146,18 +208,19 @@ try {
   });
   assertFinished(await client.waitForFinish(primary.id, 120_000), "CANARY_MOCK_OK");
 
+  const canaryMcpServers = {
+    canary: {
+      type: "stdio" as const,
+      command: "node",
+      args: ["/opt/paseo-omp/canary/mcp-server.ts"],
+    },
+  };
   const mcpAgent = await client.createAgent({
     provider,
     cwd,
     model: mockModel.id,
     modeId: "full",
-    mcpServers: {
-      canary: {
-        type: "stdio",
-        command: "node",
-        args: ["/opt/paseo-omp/canary/mcp-server.ts"],
-      },
-    },
+    mcpServers: canaryMcpServers,
     initialPrompt: "CANARY_MCP",
   });
   createdAgentIds.push(mcpAgent.id);
@@ -178,7 +241,20 @@ try {
     ),
     "Configured MCP tool did not complete",
   );
-  summary.mcp = true;
+  const mcpSnapshot = await client.fetchAgent(mcpAgent.id);
+  const mcpPersistence = mcpSnapshot?.agent.persistence;
+  assert(mcpPersistence, "MCP agent persistence handle is missing");
+  await deleteTrackedAgent(mcpAgent.id);
+  const resumedMcpAgent = await client.resumeAgent(mcpPersistence, {
+    cwd,
+    model: mockModel.id,
+    modeId: "full",
+    mcpServers: canaryMcpServers,
+  });
+  createdAgentIds.push(resumedMcpAgent.id);
+  await client.sendAgentMessage(resumedMcpAgent.id, "CANARY_MCP");
+  assertFinished(await client.waitForFinish(resumedMcpAgent.id, 120_000), "CANARY_MCP_OK");
+  summary.mcp = { initial: true, resumed: true };
 
   const refreshed = await client.fetchAgent(primary.id);
   const persistence = refreshed?.agent.persistence;
@@ -203,8 +279,7 @@ try {
       : null;
   assert(persistedSessionId, "Native persistence session ID is missing");
 
-  await client.deleteAgent(primary.id);
-  createdAgentIds.splice(createdAgentIds.indexOf(primary.id), 1);
+  await deleteTrackedAgent(primary.id);
   const resumed = await client.resumeAgent(persistence, {
     cwd,
     model: mockModel.id,
@@ -214,8 +289,7 @@ try {
   await client.sendAgentMessage(resumed.id, "RESUMED");
   assertFinished(await client.waitForFinish(resumed.id, 120_000), "CANARY_MOCK_OK");
 
-  await client.deleteAgent(resumed.id);
-  createdAgentIds.splice(createdAgentIds.indexOf(resumed.id), 1);
+  await deleteTrackedAgent(resumed.id);
   const hostRecentSessions = await client.fetchRecentProviderSessions({
     providers: [provider],
     limit: 50,
@@ -261,21 +335,29 @@ try {
     initialPrompt: "CANARY_TOOL",
   });
   createdAgentIds.push(permissionAgent.id);
-  let permissionResult = await client.waitForFinish(permissionAgent.id, 120_000);
-  let permissionRounds = 0;
-  while (permissionResult.status === "permission" && permissionRounds < 4) {
-    const request = permissionResult.final?.pendingPermissions[0];
-    assert(request, "Permission status did not include a pending request");
-    const action = request.actions?.find((candidate) => candidate.behavior === "allow");
-    await client.respondToPermission(permissionAgent.id, request.id, {
-      behavior: "allow",
-      ...(action ? { selectedActionId: action.id } : {}),
-    });
-    permissionRounds += 1;
-    permissionResult = await client.waitForFinish(permissionAgent.id, 120_000);
-  }
-  assert(permissionRounds > 0, "Ask mode did not request permission");
-  assertFinished(permissionResult, "CANARY_TOOL_OK");
+  const allowed = await allowPendingPermissions(
+    permissionAgent.id,
+    await client.waitForFinish(permissionAgent.id, 120_000),
+  );
+  assert(allowed.rounds > 0, "Ask mode did not request permission");
+  assertFinished(allowed.result, "CANARY_TOOL_OK");
+  const permissionSnapshot = await client.fetchAgent(permissionAgent.id);
+  const permissionPersistence = permissionSnapshot?.agent.persistence;
+  assert(permissionPersistence, "Permission agent persistence handle is missing");
+  await deleteTrackedAgent(permissionAgent.id);
+  const resumedPermissionAgent = await client.resumeAgent(permissionPersistence, {
+    cwd,
+    model: mockModel.id,
+    modeId: "ask",
+  });
+  createdAgentIds.push(resumedPermissionAgent.id);
+  await client.sendAgentMessage(resumedPermissionAgent.id, "CANARY_TOOL");
+  const resumedAllowed = await allowPendingPermissions(
+    resumedPermissionAgent.id,
+    await client.waitForFinish(resumedPermissionAgent.id, 120_000),
+  );
+  assert(resumedAllowed.rounds > 0, "Resumed ask-mode session did not request permission");
+  assertFinished(resumedAllowed.result, "CANARY_TOOL_OK");
   const deniedAgent = await client.createAgent({
     provider,
     cwd,
@@ -350,7 +432,8 @@ try {
     "Canceled permission remained pending",
   );
   summary.permissions = {
-    allowRounds: permissionRounds,
+    allowRounds: allowed.rounds,
+    resumedAllowRounds: resumedAllowed.rounds,
     denyRounds,
     cancel: cancelIssue ? { passed: false, knownIssue: cancelIssue } : { passed: true },
   };
@@ -382,37 +465,98 @@ try {
   assert(interruptedResult.status === "idle", "Interrupted agent did not return to idle");
   summary.interrupt = true;
 
-  const subagent = await client.createAgent({
+  const nestedAgent = await client.createAgent({
     provider,
     cwd,
     model: mockModel.id,
     modeId: "full",
-    initialPrompt: "CANARY_SUBAGENT",
+    initialPrompt: "CANARY_NESTED_ROOT",
   });
-  createdAgentIds.push(subagent.id);
-  const subagentResult = await client.waitForFinish(subagent.id, 120_000);
-  assert(subagentResult.status === "idle", `Subagent scenario ended as ${subagentResult.status}`);
-  assert(subagentResult.error === null, `Subagent scenario failed: ${subagentResult.error}`);
-  const subagentTimeline = await client.fetchAgentTimeline(subagent.id, {
+  createdAgentIds.push(nestedAgent.id);
+  const nestedResult = await client.waitForFinish(nestedAgent.id, 120_000);
+  assert(
+    nestedResult.status === "idle",
+    `Nested subagent scenario ended as ${nestedResult.status}`,
+  );
+  assert(nestedResult.error === null, `Nested subagent scenario failed: ${nestedResult.error}`);
+  const nestedTimeline = await client.fetchAgentTimeline(nestedAgent.id, {
     direction: "tail",
     limit: 500,
     projection: "projected",
   });
   assert(
-    subagentTimeline.entries.some(
+    nestedTimeline.entries.some(
       (entry) => entry.item.type === "tool_call" && entry.item.name === "task",
     ),
-    "Subagent task lifecycle is missing from the timeline",
+    "Nested subagent task lifecycle is missing from the parent timeline",
   );
   assert(
-    subagentTimeline.entries.some(
+    nestedTimeline.entries.some(
       (entry) =>
-        entry.item.type === "assistant_message" && entry.item.text.includes("CANARY_SUBAGENT_OK"),
+        entry.item.type === "assistant_message" &&
+        entry.item.text.includes("CANARY_NESTED_ROOT_OK"),
     ),
-    "Subagent parent completion is missing from the timeline",
+    `Nested parent completion is missing: ${nestedResult.lastMessage ?? "no final message"}`,
   );
-  summary.subagent = true;
-
+  const nestedSubagents = await client.listProviderSubagents(nestedAgent.id);
+  assert(
+    nestedSubagents.error === null,
+    `Nested subagent listing failed: ${nestedSubagents.error}`,
+  );
+  const directChild = nestedSubagents.subagents.find(
+    (candidate) => candidate.parentSubagentId == null,
+  );
+  assert(directChild, "Direct provider subagent is missing");
+  const nestedChild = nestedSubagents.subagents.find(
+    (candidate) => candidate.parentSubagentId === directChild.id,
+  );
+  if (!nestedChild) {
+    compatibilityFailures.push(
+      `nested subagent ancestry missing: ${JSON.stringify(nestedSubagents.subagents)}`,
+    );
+    summary.subagents = {
+      passed: false,
+      direct: directChild.id,
+      observed: nestedSubagents.subagents,
+    };
+  } else {
+    assert(directChild.status === "completed", `Direct subagent ended as ${directChild.status}`);
+    assert(nestedChild.status === "completed", `Nested subagent ended as ${nestedChild.status}`);
+    const directTimeline = await client.fetchProviderSubagentTimeline(
+      nestedAgent.id,
+      directChild.id,
+      {
+        direction: "tail",
+        limit: 500,
+      },
+    );
+    const nestedChildTimeline = await client.fetchProviderSubagentTimeline(
+      nestedAgent.id,
+      nestedChild.id,
+      { direction: "tail", limit: 500 },
+    );
+    assert(
+      directTimeline.error === null,
+      `Direct subagent timeline failed: ${directTimeline.error}`,
+    );
+    assert(
+      nestedChildTimeline.error === null,
+      `Nested subagent timeline failed: ${nestedChildTimeline.error}`,
+    );
+    assert(
+      nestedChildTimeline.rows.some(
+        (row) =>
+          row.item.type === "assistant_message" && row.item.text.includes("CANARY_NESTED_LEAF_OK"),
+      ),
+      "Nested subagent completion is missing from its timeline",
+    );
+    summary.subagents = {
+      passed: true,
+      direct: directChild.id,
+      nested: nestedChild.id,
+      nestedParent: nestedChild.parentSubagentId,
+    };
+  }
   const hubAgent = await client.createAgent({
     provider,
     cwd,
@@ -463,7 +607,19 @@ try {
   await client.sendAgentMessage(rewindAgent.id, "REWIND_RESUMED");
   const rewindResult = await client.waitForFinish(rewindAgent.id, 120_000);
   assertFinished(rewindResult, "CANARY_MOCK_OK");
-  summary.rewind = { passed: true };
+  const rewoundSnapshot = await client.fetchAgent(rewindAgent.id);
+  const rewindPersistence = rewoundSnapshot?.agent.persistence;
+  assert(rewindPersistence, "Rewound agent persistence handle is missing");
+  await deleteTrackedAgent(rewindAgent.id);
+  const resumedRewindAgent = await client.resumeAgent(rewindPersistence, {
+    cwd,
+    model: mockModel.id,
+    modeId: "full",
+  });
+  createdAgentIds.push(resumedRewindAgent.id);
+  await client.sendAgentMessage(resumedRewindAgent.id, "REWIND_DURABLE");
+  assertFinished(await client.waitForFinish(resumedRewindAgent.id, 120_000), "CANARY_MOCK_OK");
+  summary.rewind = { passed: true, resumed: true };
 
   const pluginCatalog = await client.getPluginCatalog();
   assert(
@@ -480,7 +636,31 @@ try {
   ]);
   summary.pluginRpcs = rpcResults.map((result) => Object.keys(result as Record<string, unknown>));
 
+  const cleanupProcessName = hubProcess.name;
+  while (createdAgentIds.length > 0) {
+    const agentId = createdAgentIds.at(-1);
+    assert(agentId, "Tracked agent cleanup lost its final ID");
+    await deleteTrackedAgent(agentId);
+  }
+  const cleanupDeadline = Date.now() + 10_000;
+  let lingeringHubProcess = true;
+  while (lingeringHubProcess && Date.now() < cleanupDeadline) {
+    const processes = (await client.invokePluginRpc("paseo-omp", "paseo-omp.list-processes", {
+      cwd,
+    })) as { processes?: Array<{ name?: string; state?: string }> };
+    lingeringHubProcess =
+      processes.processes?.some(
+        (process) => process.name === cleanupProcessName && process.state === "running",
+      ) ?? false;
+    if (lingeringHubProcess) await sleep(100);
+  }
+  assert(!lingeringHubProcess, "Deleting the owning agent left its Hub process running");
+  summary.cleanup = { agents: true, hubProcess: true };
+
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+  if (compatibilityFailures.length > 0) {
+    throw new Error(`Canary compatibility failures: ${compatibilityFailures.join("; ")}`);
+  }
 } finally {
   for (const agentId of createdAgentIds.reverse()) {
     await client.deleteAgent(agentId).catch(() => undefined);
