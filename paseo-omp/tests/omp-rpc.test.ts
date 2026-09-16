@@ -133,6 +133,58 @@ function nextEvent(
 }
 
 describe("OMP RPC transport", () => {
+  test("accepts a bounded multi-provider model catalog without relaxing other response limits", async () => {
+    const child = new FakeRpcChild();
+    let oversized = false;
+    const models = Array.from({ length: 53 }, (_, index) => ({
+      provider: `provider-${index % 3}`,
+      id: `model-${index}`,
+      reasoning: true,
+      thinking: {
+        efforts: Array.from({ length: 16 }, (_, n) => `effort-${n}`),
+        defaultLevel: "high",
+      },
+      input: Array.from({ length: 16 }, (_, n) => `input-${n}`),
+      contextWindow: 200_000,
+    }));
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      } else if (command.type === "get_available_models") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: {
+            models: oversized
+              ? models.map((model) => ({ ...model, extra: Array(512).fill(0) }))
+              : models,
+          },
+        });
+      } else if (command.type === "get_state") {
+        child.write({ type: "response", id: command.id, success: true, data: { nested: models } });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    try {
+      expect(await session.getAvailableModels()).toHaveLength(53);
+      await expect(session.getState()).rejects.toThrow("response exceeded command limits");
+      oversized = true;
+      await expect(session.getAvailableModels()).rejects.toThrow(
+        "response exceeded command limits",
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   test("sends steering and out-of-band commands with native wire shapes", async () => {
     const child = new FakeRpcChild();
     const launches: OmpSpawnRequest[] = [];

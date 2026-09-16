@@ -2116,7 +2116,15 @@ class OmpRpcProcess {
       isBranchHistory || isHistory
         ? Math.min(MAX_REASSEMBLED_FRAME_BYTES, this.reassembledFrameLimit)
         : 2 * 1024 * 1024;
-    const responseNodeLimit = isBranchHistory ? 4_096 : isHistory ? 400_000 : 2_048;
+    // A model catalog contains up to 256 structured models, so its aggregate
+    // node budget must exceed the small state/command-response budget.
+    const responseNodeLimit = isBranchHistory
+      ? 4_096
+      : isHistory
+        ? 400_000
+        : pending.command === "get_available_models"
+          ? 16_384
+          : 2_048;
     if (
       boundedJsonBytes(
         frame,
