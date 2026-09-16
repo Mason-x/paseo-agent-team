@@ -83,8 +83,12 @@ describe("plugin server bundle", () => {
       `(function(require) {\nconst module = { exports: {} };\nconst exports = module.exports;\n${code}\nreturn module.exports;\n})`,
     ) as (require: (name: string) => unknown) => { default?: unknown };
     const originalCwd = process.cwd();
+    const originalHome = process.env.HOME;
+    const originalConfigDir = process.env.PI_CONFIG_DIR;
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "paseo-omp-bundle-"));
     process.chdir(temporaryDirectory);
+    process.env.HOME = temporaryDirectory;
+    process.env.PI_CONFIG_DIR = ".omp";
     try {
       const module = factory(runtimeRequire);
       if (typeof module.default !== "function") throw new Error("Missing server contribution");
@@ -99,7 +103,7 @@ describe("plugin server bundle", () => {
         handle: (...args: unknown[]) => handlers.push(args),
         registerProvider: (provider: ProviderRegistration) => providers.push(provider),
       });
-      expect(handlers).toHaveLength(14);
+      expect(handlers).toHaveLength(15);
       expect(beforeHooks).toHaveLength(1);
       const [hookName, hook] = beforeHooks[0] as [
         string,
@@ -161,6 +165,10 @@ describe("plugin server bundle", () => {
       expect(typeof cleanup).toBe("function");
     } finally {
       process.chdir(originalCwd);
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
+      else process.env.PI_CONFIG_DIR = originalConfigDir;
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
   });

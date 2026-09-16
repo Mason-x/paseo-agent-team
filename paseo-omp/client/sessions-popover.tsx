@@ -2,7 +2,9 @@ import { type PluginButtonContentProps, useAgent, useRpc } from "@getpaseo/plugi
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { ScrollView, Text, View } from "react-native";
+import { storeForProvider, storeLabel } from "../shared/omp-store";
 import { listOmpSessions } from "../shared/sessions";
+import { ompStoreKey } from "./omp-store-state";
 
 const SESSIONS_POLL_MS = 20_000;
 const PREVIEW_LIMIT = 20;
@@ -20,11 +22,13 @@ function age(epochSeconds: number): string {
 export function SessionsPopover(props: PluginButtonContentProps) {
   const { theme, layout } = props;
   const agentId = props.context === "agent" ? props.agentId : "";
-  const cwd = useAgent(agentId, (agent) => agent.cwd) ?? "";
+  const agent = useAgent(agentId, ({ cwd, provider }) => ({ cwd, provider }));
+  const cwd = agent?.cwd ?? "";
+  const store = storeForProvider(agent?.provider);
   const loadSessions = useRpc(listOmpSessions);
   const sessions = useQuery({
-    queryKey: ["paseo-omp", "sessions", cwd],
-    queryFn: () => loadSessions({ cwd }),
+    queryKey: ["paseo-omp", "sessions", ompStoreKey(store), cwd],
+    queryFn: () => loadSessions({ cwd, store }),
     enabled: cwd.length > 0,
     refetchInterval: SESSIONS_POLL_MS,
   });
@@ -56,6 +60,7 @@ export function SessionsPopover(props: PluginButtonContentProps) {
 
   return (
     <ScrollView contentContainerStyle={styles.root}>
+      <Text style={styles.muted}>{storeLabel(store)}</Text>
       {items.slice(0, PREVIEW_LIMIT).map((entry) => (
         <View key={entry.id} style={styles.row}>
           {entry.title ? <Text style={styles.title}>{entry.title}</Text> : null}

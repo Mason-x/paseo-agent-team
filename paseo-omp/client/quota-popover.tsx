@@ -3,7 +3,9 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Text, View } from "react-native";
+import { storeForProvider, storeLabel } from "../shared/omp-store";
 import { listOmpQuotas } from "../shared/quota";
+import { ompStoreKey } from "./omp-store-state";
 import {
   type QuotaProviderGroup,
   quotaProviderFromSession,
@@ -21,10 +23,12 @@ export function QuotaPopover(props: PluginButtonContentProps) {
   const agentId = props.context === "agent" ? props.agentId : "";
   const session = useAgent(agentId, (agent) => ({ model: agent.model, provider: agent.provider }));
   const currentProvider = quotaProviderFromSession(session?.provider ?? "", session?.model ?? null);
+  const store = storeForProvider(session?.provider);
   const loadQuotas = useRpc(listOmpQuotas);
   const quotas = useQuery({
-    queryKey: ["paseo-omp", "quotas"],
-    queryFn: () => loadQuotas({}),
+    queryKey: ["paseo-omp", "quotas", ompStoreKey(store)],
+    queryFn: () => loadQuotas({ store }),
+    enabled: session !== undefined && session !== null,
     refetchInterval: QUOTA_POLL_MS,
   });
 
@@ -84,7 +88,7 @@ export function QuotaPopover(props: PluginButtonContentProps) {
     [layout.compact, theme],
   );
 
-  if (quotas.isLoading) return <Text style={styles.muted}>Loading omp quotas…</Text>;
+  if (!session || quotas.isLoading) return <Text style={styles.muted}>Loading omp quotas…</Text>;
   if (quotas.error) return <Text style={styles.error}>Could not read omp quota state.</Text>;
 
   const groups = quotaProviderGroups(quotas.data?.quotas ?? [], currentProvider);
@@ -96,6 +100,7 @@ export function QuotaPopover(props: PluginButtonContentProps) {
 
   return (
     <View style={styles.root}>
+      <Text style={styles.muted}>{storeLabel(store)}</Text>
       {currentProvider && !hasCurrent ? (
         <Text style={styles.muted}>
           {`No recorded quota yet for ${quotaProviderLabel(currentProvider)} (this session's provider).`}

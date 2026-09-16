@@ -1,4 +1,5 @@
 import type { OmpQuota } from "../shared/quota";
+import { isOmpProvider } from "./omp-store-state";
 
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
@@ -37,9 +38,9 @@ export function quotaProviderFromSession(
   model: string | null = null,
 ): string | null {
   const [runtime, modelProvider] = provider.split("/");
-  if (runtime !== "omp") return null;
+  if (!isOmpProvider(runtime)) return null;
   if (modelProvider) return modelProvider;
-  return model?.split("/")[0] ?? null;
+  return model?.includes("/") ? model.split("/")[0] : null;
 }
 
 export function quotaProviderLabel(provider: string | null): string {
@@ -51,32 +52,40 @@ export function quotaProviderLabel(provider: string | null): string {
 export function quotasForProvider(
   quotas: readonly OmpQuota[],
   provider: string | null,
+  includeAll = false,
 ): OmpQuota[] {
-  return provider ? quotas.filter((quota) => quota.provider === provider) : [];
+  return provider
+    ? quotas.filter((quota) => quota.provider === provider)
+    : includeAll
+      ? [...quotas]
+      : [];
 }
 
 export function quotaSummaryForProvider(
   quotas: readonly OmpQuota[],
   provider: string | null,
+  includeAll = false,
 ): { visible: boolean; label: string } {
-  const matching = quotasForProvider(quotas, provider);
+  const matching = quotasForProvider(quotas, provider, includeAll);
+  const label = provider ? quotaProviderLabel(provider) : "Quotas";
   const used = matching.flatMap((quota) =>
     quota.usedFraction === null ? [] : [quota.usedFraction],
   );
   if (used.length === 0) {
     return provider
       ? { visible: true, label: `${quotaProviderLabel(provider)} · —` }
-      : { visible: false, label: "Quota" };
+      : { visible: includeAll, label: "Quotas · —" };
   }
   const peak = Math.round(Math.max(...used) * 100);
-  return { visible: true, label: `${quotaProviderLabel(provider)} · ${peak}%` };
+  return { visible: true, label: `${label} · ${peak}%` };
 }
 
 export function quotaSeverityForProvider(
   quotas: readonly OmpQuota[],
   provider: string | null,
+  includeAll = false,
 ): QuotaSeverity {
-  const used = quotasForProvider(quotas, provider).flatMap((quota) =>
+  const used = quotasForProvider(quotas, provider, includeAll).flatMap((quota) =>
     quota.usedFraction === null ? [] : [quota.usedFraction],
   );
   return used.length === 0 ? "unknown" : quotaSeverityFromFraction(Math.max(...used));

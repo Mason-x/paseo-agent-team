@@ -9,9 +9,10 @@ import type {
   PathState,
 } from "../shared/provider-diagnostics";
 
+import { isOmpProvider } from "./omp-store-state";
+
 export type ProviderHealthTone = "ok" | "warning" | "danger" | "muted";
 export const OMP_PROVIDER_IDS = ["omp", "omp-plugin"] as const;
-const OMP_PROVIDER_ID_SET: ReadonlySet<string> = new Set(OMP_PROVIDER_IDS);
 
 export function isUnsupportedHostError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
@@ -40,6 +41,7 @@ export async function loadReadyProviderSnapshot(
 
 export interface RefreshDiagnosticsOptions {
   providers: ProviderActions;
+  providerIds?: readonly string[];
   loadForcedHealth(): Promise<OmpProviderHealth>;
   cacheHealth(health: OmpProviderHealth): void;
   cacheProviders(snapshot: PaseoProviderSnapshotResult): void;
@@ -51,7 +53,11 @@ export async function refreshProviderDiagnostics(
   options: RefreshDiagnosticsOptions,
 ): Promise<{ failed: boolean }> {
   const [providerRefresh, forcedHealth] = await Promise.allSettled([
-    options.providers.refresh({ providers: [...OMP_PROVIDER_IDS] }),
+    options.providers.refresh({
+      providers: [
+        ...new Set([...OMP_PROVIDER_IDS, ...(options.providerIds ?? []).filter(isOmpProvider)]),
+      ],
+    }),
     options.loadForcedHealth(),
   ]);
   if (forcedHealth.status === "fulfilled") options.cacheHealth(forcedHealth.value);
@@ -152,15 +158,21 @@ export function summarizeProcessDiagnostics(diagnostics: OmpProcessDiagnostics):
   if (diagnostics.status === "unavailable") return "No hub run directory found";
   if (diagnostics.status === "unknown") return "Unknown (could not read the hub run directory)";
   const count = diagnostics.trackedCount ?? 0;
-  if (diagnostics.status === "partial") return `${count} tracked (partial: some inaccessible)`;
-  return `${count} tracked`;
+  const statesKnown =
+    diagnostics.activeCount != null &&
+    diagnostics.historicalCount != null &&
+    diagnostics.unknownCount != null;
+  const detail = statesKnown
+    ? `${diagnostics.activeCount} active-state, ${diagnostics.historicalCount} historical, ${diagnostics.unknownCount} unknown`
+    : "states not reported";
+  return `${count} metadata records (${detail}${diagnostics.status === "partial" ? "; partial access" : ""}); live processes not verified`;
 }
 
 export function processTone(diagnostics: OmpProcessDiagnostics): ProviderHealthTone {
   if (diagnostics.status === "unknown") return "warning";
   if (diagnostics.status === "partial") return "warning";
   if (diagnostics.status === "unavailable") return "muted";
-  return diagnostics.trackedCount && diagnostics.trackedCount > 0 ? "ok" : "muted";
+  return "muted";
 }
 
 const PATH_STATE_LABELS: Record<PathState, string> = {
@@ -236,7 +248,7 @@ export function selectKnownOmpProviders(
   entries: readonly PaseoProviderSnapshotResult["entries"][number][],
 ): KnownOmpProviderSummary[] {
   return entries.flatMap((entry) =>
-    OMP_PROVIDER_ID_SET.has(entry.provider)
+    isOmpProvider(entry.provider)
       ? [
           {
             id: entry.provider,

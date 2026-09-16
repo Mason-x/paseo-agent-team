@@ -61,6 +61,8 @@ export interface OmpProviderOptions {
   timelineScheduler?: OmpTimelineScheduler;
   replayTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
+  /** Fixed, non-secret profile/store identity for providers whose configuration is server-owned. */
+  catalogIdentity?: Readonly<Record<string, string>>;
   mcpInitializationTimeoutMs?: number;
   mcpConnector?: OmpMcpConnector;
   browserAuthorizationRegistry?: OmpBrowserAuthorizationRegistry;
@@ -93,9 +95,14 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
     providerOptionsSchema: OmpProviderOptionsSchema,
     async getCatalogCacheKey(catalogOptions) {
       const providerOptions = parseOmpProviderOptions(catalogOptions.providerOptions);
+      // Profile providers cannot safely hash explicit environment values because they may be
+      // credentials. Disable sharing for that case; otherwise retain every normalized option
+      // that can change discovery alongside the fixed, non-secret store identity.
+      if (options.catalogIdentity && Object.keys(providerOptions.env ?? {}).length > 0) return;
       const identity = {
         scope: catalogOptions.scope,
         ...(catalogOptions.scope === "workspace" ? { cwd: catalogOptions.cwd } : {}),
+        ...(options.catalogIdentity ? { store: options.catalogIdentity } : {}),
         providerOptions,
         settings: catalogOptions.settings ?? {},
         defaultCommand: (options.environment ?? process.env).OMP_COMMAND ?? "omp",

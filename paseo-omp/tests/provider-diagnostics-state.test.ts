@@ -120,13 +120,15 @@ describe("compatibility and process summaries", () => {
       reason: null,
     };
     expect(mcpTone(configuredMcp)).toBe("ok");
-    expect(summarizeProcessDiagnostics({ status: "ok", trackedCount: 3 })).toBe("3 tracked");
-    expect(processTone({ status: "ok", trackedCount: 3 })).toBe("ok");
+    expect(summarizeProcessDiagnostics({ status: "ok", trackedCount: 3 })).toBe(
+      "3 metadata records (states not reported); live processes not verified",
+    );
+    expect(processTone({ status: "ok", trackedCount: 3 })).toBe("muted");
     expect(summarizeProcessDiagnostics({ status: "unavailable", trackedCount: null })).toBe(
       "No hub run directory found",
     );
     expect(summarizeProcessDiagnostics({ status: "partial", trackedCount: 1 })).toBe(
-      "1 tracked (partial: some inaccessible)",
+      "1 metadata records (states not reported; partial access); live processes not verified",
     );
     expect(processTone({ status: "partial", trackedCount: 1 })).toBe("warning");
   });
@@ -164,6 +166,8 @@ describe("selectKnownOmpProviders", () => {
     const entries: PaseoProviderSnapshotResult["entries"] = [
       { provider: "omp", status: "ready", enabled: true, label: "OMP" },
       { provider: "omp-plugin", status: "ready", enabled: true, label: "OMP Plugin" },
+      { provider: "omp-plugin-team-beta", status: "ready", enabled: true, label: "OMP Team Beta" },
+      { provider: "omp-plugin-invalid/name", status: "ready", enabled: true },
       { provider: "constructor", status: "ready", enabled: true },
       { provider: "toString", status: "ready", enabled: true },
       { provider: "claude", status: "ready", enabled: true, label: "Claude" },
@@ -172,6 +176,7 @@ describe("selectKnownOmpProviders", () => {
     expect(selectKnownOmpProviders(entries)).toEqual([
       { id: "omp", label: "OMP", status: "ready", enabled: true },
       { id: "omp-plugin", label: "OMP Plugin", status: "ready", enabled: true },
+      { id: "omp-plugin-team-beta", label: "OMP Team Beta", status: "ready", enabled: true },
     ]);
   });
 });
@@ -285,4 +290,57 @@ describe("provider snapshot convergence and forced refresh", () => {
 
     expect(result.failed).toBe(false);
   });
+});
+
+test("Hub historical metadata is never presented as live process health", () => {
+  const historical = {
+    status: "ok" as const,
+    trackedCount: 22,
+    activeCount: 0,
+    historicalCount: 22,
+    unknownCount: 0,
+  };
+  expect(summarizeProcessDiagnostics(historical)).toBe(
+    "22 metadata records (0 active-state, 22 historical, 0 unknown); live processes not verified",
+  );
+  expect(processTone(historical)).toBe("muted");
+  expect(
+    summarizeProcessDiagnostics({
+      status: "partial",
+      trackedCount: 3,
+      activeCount: 1,
+      historicalCount: 1,
+      unknownCount: 1,
+    }),
+  ).toContain("1 unknown; partial access");
+});
+
+test("provider refresh includes registered profile aliases but excludes other runtimes", async () => {
+  let requested: string[] | undefined;
+  const snapshot: PaseoProviderSnapshotResult = {
+    entries: [],
+    generatedAt: "2026-09-16T00:00:00Z",
+    requestId: "test",
+  };
+  await refreshProviderDiagnostics({
+    providers: {
+      async refresh(input) {
+        requested = input?.providers;
+        return { requestId: "refresh", acknowledged: true };
+      },
+      async snapshot() {
+        return snapshot;
+      },
+      async waitForReady() {
+        return snapshot;
+      },
+    },
+    providerIds: ["omp-plugin-team-beta", "omp-plugin", "codex", "omp-plugin-../invalid"],
+    async loadForcedHealth() {
+      return health();
+    },
+    cacheHealth() {},
+    cacheProviders() {},
+  });
+  expect(requested).toEqual(["omp", "omp-plugin", "omp-plugin-team-beta"]);
 });

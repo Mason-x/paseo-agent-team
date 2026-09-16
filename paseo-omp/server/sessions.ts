@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { RpcInput } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { listOmpSessions, OmpSessionEntry } from "../shared/sessions";
-import { ompAgentDir } from "./paths";
+import { ompDataDir } from "./paths";
 
 const PROMPT_LIMIT = 400;
 const ROW_LIMIT = 100;
@@ -54,5 +54,5 @@ export function listOmpSessionsFrom(path: string, cwd: string): OmpSessionEntry[
 export function resolveListOmpSessions({ cwd }: RpcInput<typeof listOmpSessions>): {
   sessions: OmpSessionEntry[];
 } {
-  return { sessions: listOmpSessionsFrom(join(ompAgentDir(), "history.db"), cwd) };
+  return { sessions: listOmpSessionsFrom(join(ompDataDir(), "history.db"), cwd) };
 }

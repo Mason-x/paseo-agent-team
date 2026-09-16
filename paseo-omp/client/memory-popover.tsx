@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Text, View } from "react-native";
 import { listOmpMemory } from "../shared/memory";
+import { storeForProvider, storeLabel } from "../shared/omp-store";
+import { ompStoreKey } from "./omp-store-state";
 
 const MEMORY_POLL_MS = 15_000;
 const PREVIEW_LIMIT = 20;
@@ -10,11 +12,13 @@ const PREVIEW_LIMIT = 20;
 export function MemoryPopover(props: PluginButtonContentProps) {
   const { theme, layout } = props;
   const agentId = props.context === "agent" ? props.agentId : "";
-  const cwd = useAgent(agentId, (agent) => agent.cwd) ?? "";
+  const agent = useAgent(agentId, ({ cwd, provider }) => ({ cwd, provider }));
+  const cwd = agent?.cwd ?? "";
+  const store = storeForProvider(agent?.provider);
   const loadMemory = useRpc(listOmpMemory);
   const memory = useQuery({
-    queryKey: ["paseo-omp", "memory", cwd],
-    queryFn: () => loadMemory({ cwd }),
+    queryKey: ["paseo-omp", "memory", ompStoreKey(store), cwd],
+    queryFn: () => loadMemory({ cwd, store }),
     enabled: cwd.length > 0,
     refetchInterval: MEMORY_POLL_MS,
   });
@@ -50,7 +54,7 @@ export function MemoryPopover(props: PluginButtonContentProps) {
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Text style={styles.title}>OMP Memory</Text>
+        <Text style={styles.title}>OMP Memory · {storeLabel(store)}</Text>
         <Text style={styles.muted}>{facts.length} facts</Text>
       </View>
       <Text style={styles.muted}>{memory.data?.bank ?? "Workspace memory"}</Text>

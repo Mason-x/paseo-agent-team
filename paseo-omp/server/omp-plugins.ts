@@ -19,6 +19,7 @@ import {
   type OmpPluginState,
 } from "../shared/omp-plugins";
 import { SerialMutationQueue } from "./mutation-queue";
+import { currentOmpEnvironment } from "./paths";
 import {
   type BoundedRun,
   buildStatefulCommandEnv,
@@ -255,12 +256,12 @@ function readFailure(result: BoundedRun): string {
 
 async function resolveOmpExecutable(): Promise<string | null> {
   return resolveExecutablePath(
-    process.env.OMP_COMMAND ?? "omp",
-    (process.env.PATH ?? "").split(delimiter),
+    currentOmpEnvironment().OMP_COMMAND ?? "omp",
+    (currentOmpEnvironment().PATH ?? "").split(delimiter),
     {
       cwd: process.cwd(),
       platform: process.platform,
-      pathExt: process.env.PATHEXT ?? WINDOWS_DEFAULT_PATHEXT,
+      pathExt: currentOmpEnvironment().PATHEXT ?? WINDOWS_DEFAULT_PATHEXT,
     },
   );
 }
@@ -276,7 +277,7 @@ async function runOmpPlugin(
     defaultSpawn,
     executable,
     args,
-    buildStatefulCommandEnv(process.env),
+    buildStatefulCommandEnv(currentOmpEnvironment()),
     timeoutMs,
     KILL_GRACE_MS,
     outputLimit,

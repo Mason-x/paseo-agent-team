@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { OmpWorkspaceCwdSchema } from "./hub";
+import { OmpStoreSchema } from "./omp-store";
 
 // Health/compatibility facts about the omp CLI itself, surfaced on the global OMP page. This is
 // an explicit allowlist, not a passthrough: filesystem locations are sanitized display labels
@@ -49,9 +50,12 @@ export const OmpProcessDiagnosticsSchema = z.object({
   /** "partial" means a project daemon directory or candidate metadata file could not be
    * inspected; the count reflects only entries whose metadata was confirmed. */
   status: z.enum(["ok", "partial", "unavailable", "unknown"]),
-  /** Count of daemon-supervised process entries tracked under the hub run root; null
-   * unless "ok" or "partial". */
+  /** Metadata file count under the hub run root, never a count of verified live processes. */
   trackedCount: z.number().int().nonnegative().nullable(),
+  /** Counts by recorded state only; optional for compatibility with older plugin hosts. */
+  activeCount: z.number().int().nonnegative().nullable().optional(),
+  historicalCount: z.number().int().nonnegative().nullable().optional(),
+  unknownCount: z.number().int().nonnegative().nullable().optional(),
 });
 export type OmpProcessDiagnostics = z.infer<typeof OmpProcessDiagnosticsSchema>;
 
@@ -113,6 +117,10 @@ export type OmpProviderHealth = z.infer<typeof OmpProviderHealthSchema>;
 
 export const getOmpProviderHealth = defineRpc({
   name: "paseo-omp.get-provider-health",
-  input: z.object({ force: z.boolean().optional(), cwd: OmpWorkspaceCwdSchema.optional() }),
+  input: z.object({
+    store: OmpStoreSchema.optional(),
+    force: z.boolean().optional(),
+    cwd: OmpWorkspaceCwdSchema.optional(),
+  }),
   output: OmpProviderHealthSchema,
 });

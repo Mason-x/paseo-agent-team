@@ -6,7 +6,7 @@ import {
   useWorkspace,
 } from "@getpaseo/plugin/client";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
@@ -22,6 +22,7 @@ import {
   type OmpSettingCategory,
   updateOmpSettings,
 } from "../shared/omp-settings";
+import { type OmpStore, storeLabel } from "../shared/omp-store";
 import { getOmpProviderHealth, type OmpProviderHealth } from "../shared/provider-diagnostics";
 import {
   documentationForSettingCategory,
@@ -31,6 +32,8 @@ import {
   type OmpDocumentationLink,
 } from "./omp-doc-links";
 import { OmpPluginManagerSection } from "./omp-plugin-manager";
+import { OmpStorePicker } from "./omp-store-picker";
+import { ompStoreKey } from "./omp-store-state";
 import {
   type BinaryHealthSummary,
   loadReadyProviderSnapshot,
@@ -566,7 +569,7 @@ function ProcessSection({
   health: OmpProviderHealth;
 }) {
   return (
-    <SectionCard styles={styles} title="Processes">
+    <SectionCard styles={styles} title="Hub metadata">
       <KeyValueRow
         styles={styles}
         label="OMP Hub"
@@ -581,17 +584,19 @@ function ProviderHealthSection({
   theme,
   styles,
   cwd,
+  store,
 }: {
   theme: PluginSurfaceProps["theme"];
   styles: OmpConfigStyles;
   cwd?: string;
+  store?: OmpStore;
 }) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
   const loadHealth = useRpc(getOmpProviderHealth);
   const health = useQuery({
-    queryKey: [...HEALTH_QUERY_KEY, cwd ?? "global"],
-    queryFn: () => loadHealth({ ...(cwd ? { cwd } : {}) }),
+    queryKey: [...HEALTH_QUERY_KEY, ompStoreKey(store), cwd ?? "global"],
+    queryFn: () => loadHealth({ store, ...(cwd ? { cwd } : {}) }),
   });
   const providers = useQuery({
     queryKey: PROVIDERS_QUERY_KEY,
@@ -601,9 +606,16 @@ function ProviderHealthSection({
     mutationFn: async () => {
       const result = await refreshProviderDiagnostics({
         providers: paseo.providers,
-        loadForcedHealth: () => loadHealth({ force: true, ...(cwd ? { cwd } : {}) }),
+        providerIds: [
+          ...selectKnownOmpProviders(providers.data?.entries ?? []).map((provider) => provider.id),
+          ...(store?.profile ? [`omp-plugin-${store.profile}`] : []),
+        ],
+        loadForcedHealth: () => loadHealth({ store, force: true, ...(cwd ? { cwd } : {}) }),
         cacheHealth: (value) =>
-          queryClient.setQueryData([...HEALTH_QUERY_KEY, cwd ?? "global"], value),
+          queryClient.setQueryData(
+            [...HEALTH_QUERY_KEY, ompStoreKey(store), cwd ?? "global"],
+            value,
+          ),
         cacheProviders: (value) => queryClient.setQueryData(PROVIDERS_QUERY_KEY, value),
       });
       if (result.failed) throw new Error("Could not fully refresh OMP provider health.");
@@ -631,8 +643,8 @@ function ProviderHealthSection({
       </View>
       <Text style={styles.muted}>
         Binary probes run from {cwd ? "this workspace" : "the daemon working directory"}.
-        Configuration, storage, MCP, database, and Hub checks remain daemon-global; provider profile
-        overrides are not included.
+        Configuration, storage, MCP, and databases use {storeLabel(store)}. Hub metadata remains
+        shared across profiles.
       </Text>
 
       {health.isLoading ? <Text style={styles.muted}>Checking the omp installation…</Text> : null}
@@ -988,18 +1000,29 @@ function SurfaceTabs({
     </View>
   );
 }
-function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: string }) {
+function OmpConfigContent({
+  theme,
+  layout,
+  cwd,
+  store,
+  onStoreChange,
+}: PluginSurfaceProps & {
+  cwd?: string;
+  store?: OmpStore;
+  onStoreChange(store: OmpStore | undefined): void;
+}) {
   const loadConfig = useRpc(listOmpConfig);
   const loadSettings = useRpc(listOmpSettings);
   const updateSettings = useRpc(updateOmpSettings);
   const queryClient = useQueryClient();
-  const context = cwd ? { cwd } : {};
+  const context = { store, ...(cwd ? { cwd } : {}) };
+  const pendingMutations = useIsMutating({ mutationKey: ["paseo-omp"] });
   const configQuery = useQuery({
-    queryKey: ["paseo-omp", "config", cwd ?? "global"],
+    queryKey: ["paseo-omp", "config", ompStoreKey(store), cwd ?? "global"],
     queryFn: () => loadConfig(context),
     refetchInterval: CONFIG_POLL_MS,
   });
-  const settingsQueryKey = [...SETTINGS_QUERY_KEY, cwd ?? "global"];
+  const settingsQueryKey = [...SETTINGS_QUERY_KEY, ompStoreKey(store), cwd ?? "global"];
   const settingsQuery = useQuery({
     queryKey: settingsQueryKey,
     queryFn: () => loadSettings(context),
@@ -1046,6 +1069,7 @@ function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: s
   }, []);
 
   const save = useMutation({
+    mutationKey: ["paseo-omp", "settings", ompStoreKey(store)],
     mutationFn: async () => {
       const revision = settingsQuery.data?.revision;
       if (!revision) throw new Error("OMP settings cannot be edited without a current revision.");
@@ -1101,6 +1125,15 @@ function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: s
           Project-scoped view · {cwd}
         </Text>
       ) : null}
+      <OmpStorePicker
+        theme={theme}
+        store={store}
+        onChange={onStoreChange}
+        disabled={pendingMutations > 0}
+      />
+      <Text style={styles.muted}>
+        Switching stores clears unapplied edits and pending confirmations.
+      </Text>
       <SurfaceTabs styles={styles} selected={view} onSelect={setView} />
 
       {view === "overview" ? (
@@ -1154,11 +1187,11 @@ function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: s
       {view === "plugin" ? <PluginConfigurationSection styles={styles} /> : null}
 
       {view === "plugins" ? (
-        <OmpPluginManagerSection theme={theme} compact={layout.compact} cwd={cwd} />
+        <OmpPluginManagerSection theme={theme} compact={layout.compact} cwd={cwd} store={store} />
       ) : null}
 
       {view === "diagnostics" ? (
-        <ProviderHealthSection theme={theme} styles={styles} cwd={cwd} />
+        <ProviderHealthSection theme={theme} styles={styles} cwd={cwd} store={store} />
       ) : null}
 
       {view === "configuration" ? (
@@ -1335,8 +1368,22 @@ function OmpConfigContent({ theme, layout, cwd }: PluginSurfaceProps & { cwd?: s
   );
 }
 
+function OmpStoreContent(props: PluginSurfaceProps & { cwd?: string }) {
+  const [store, setStore] = useState<OmpStore>();
+  // Remount every editor when its target changes: drafts, confirmations, and mutation notices
+  // belong to one store/workspace and must never be applied to the next selection.
+  return (
+    <OmpConfigContent
+      key={`${ompStoreKey(store)}:${props.cwd ?? "global"}`}
+      {...props}
+      store={store}
+      onStoreChange={setStore}
+    />
+  );
+}
+
 export function OmpConfigSurface(props: PluginSurfaceProps) {
-  return <OmpConfigContent {...props} />;
+  return <OmpStoreContent {...props} />;
 }
 
 export function OmpWorkspacePanel(props: PluginWorkspacePanelProps) {
@@ -1356,5 +1403,5 @@ export function OmpWorkspacePanel(props: PluginWorkspacePanelProps) {
       </View>
     );
   }
-  return <OmpConfigContent {...props} cwd={cwd} />;
+  return <OmpStoreContent {...props} cwd={cwd} />;
 }

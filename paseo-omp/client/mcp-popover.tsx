@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { buildOmpMcpServerCommand, type OmpMcpServerAction } from "../shared/mcp";
 
+import { isOmpPluginProvider } from "./omp-store-state";
+
 const GENERAL_ACTIONS = [
   { label: "List servers", command: "/mcp list" },
   { label: "Add server", command: "/mcp add" },
@@ -64,7 +66,7 @@ export function McpPopover(props: PluginButtonContentProps) {
     label,
     command: buildOmpMcpServerCommand(action, serverName),
   }));
-  const unavailable = agent?.provider !== "omp-plugin";
+  const unavailable = !isOmpPluginProvider(agent?.provider);
 
   async function send(command: string): Promise<void> {
     setPendingCommand(command);
@@ -139,7 +141,7 @@ export function McpPopover(props: PluginButtonContentProps) {
           </Pressable>
         ))}
       </View>
-      {agent.status === "running" ? (
+      {agent?.status === "running" ? (
         <Text style={styles.muted}>The command may wait until the active turn finishes.</Text>
       ) : null}
       {serverName.trim() && targetCommands.every((action) => !action.command) ? (

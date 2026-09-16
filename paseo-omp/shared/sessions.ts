@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { OmpStoreSchema } from "./omp-store";
 
 const CwdSchema = z.string().min(1).max(4_096);
 
@@ -18,6 +19,6 @@ export type OmpSessionEntry = z.infer<typeof OmpSessionEntrySchema>;
 
 export const listOmpSessions = defineRpc({
   name: "paseo-omp.list-sessions",
-  input: z.object({ cwd: CwdSchema }),
+  input: z.object({ store: OmpStoreSchema.optional(), cwd: CwdSchema }),
   output: z.object({ sessions: z.array(OmpSessionEntrySchema) }),
 });

@@ -1,18 +1,22 @@
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useRpc, useWorkspace } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { listOmpMemory } from "../shared/memory";
+import type { OmpStore } from "../shared/omp-store";
+import { OmpStorePicker } from "./omp-store-picker";
+import { ompStoreKey } from "./omp-store-state";
 
 const MEMORY_POLL_MS = 15_000;
 
 export function OmpMemoryPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
   const directory = useWorkspace(workspaceId, (workspace) => workspace.directory) ?? "";
+  const [store, setStore] = useState<OmpStore>();
   const loadMemory = useRpc(listOmpMemory);
   const memory = useQuery({
-    queryKey: ["paseo-omp", "memory", directory],
-    queryFn: () => loadMemory({ cwd: directory }),
+    queryKey: ["paseo-omp", "memory", ompStoreKey(store), directory],
+    queryFn: () => loadMemory({ cwd: directory, store }),
     enabled: directory.length > 0,
     refetchInterval: MEMORY_POLL_MS,
   });
@@ -53,6 +57,7 @@ export function OmpMemoryPanel({ theme, layout, workspaceId }: PluginWorkspacePa
           {memory.data?.bank ? `Bank: ${memory.data.bank}` : "Retained workspace facts"}
         </Text>
       </View>
+      <OmpStorePicker theme={theme} store={store} onChange={setStore} />
       {memory.isLoading ? <Text style={styles.subtitle}>Loading retained facts…</Text> : null}
       {memory.error ? <Text style={styles.error}>Could not read workspace memory.</Text> : null}
       {!memory.isLoading && !memory.error && (memory.data?.facts.length ?? 0) === 0 ? (

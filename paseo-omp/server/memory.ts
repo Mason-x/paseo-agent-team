@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { RpcInput } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { listOmpMemory, OmpMemoryFact } from "../shared/memory";
-import { ompAgentDir } from "./paths";
+import { ompStateDir } from "./paths";
 
 const FactRowSchema = z.object({
   id: z.string(),
@@ -82,5 +82,5 @@ export async function listOmpMemoryFrom(
 export async function resolveListOmpMemory({
   cwd,
 }: RpcInput<typeof listOmpMemory>): Promise<{ bank: string | null; facts: OmpMemoryFact[] }> {
-  return listOmpMemoryFrom(join(ompAgentDir(), "memories", "mnemopi", "banks"), cwd);
+  return listOmpMemoryFrom(join(ompStateDir(), "memories", "mnemopi", "banks"), cwd);
 }

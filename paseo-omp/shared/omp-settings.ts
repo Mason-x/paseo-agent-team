@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { OmpWorkspaceCwdSchema } from "./hub";
+import { OmpStoreSchema } from "./omp-store";
 
 export const OMP_SETTINGS_CATALOG_VERSION = 1;
 
@@ -169,7 +170,9 @@ export function formatOmpSettingLabel(path: string): string {
 
 export const listOmpSettings = defineRpc({
   name: "paseo-omp.list-settings",
-  input: z.object({ cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
+  input: z
+    .object({ store: OmpStoreSchema.optional(), cwd: OmpWorkspaceCwdSchema.optional() })
+    .strict(),
   output: z.object({
     catalogVersion: z.literal(OMP_SETTINGS_CATALOG_VERSION),
     revision: z.string().optional(),
@@ -189,6 +192,7 @@ const OmpSettingChangeSchema = z.discriminatedUnion("operation", [
 export const updateOmpSettings = defineRpc({
   name: "paseo-omp.update-settings",
   input: z.object({
+    store: OmpStoreSchema.optional(),
     cwd: OmpWorkspaceCwdSchema.optional(),
     revision: z.string(),
     changes: z.array(OmpSettingChangeSchema).min(1).max(100),

@@ -8,6 +8,12 @@ import { McpPopover } from "./client/mcp-popover";
 import { OmpMemoryPanel } from "./client/memory-panel";
 import { MemoryPopover } from "./client/memory-popover";
 import { OmpConfigSurface, OmpWorkspacePanel } from "./client/omp-config-surface";
+import {
+  createStoreQuotaLoader,
+  isOmpPluginProvider,
+  isOmpProvider,
+  ompStoreKey,
+} from "./client/omp-store-state";
 import { quotaProviderIcon } from "./client/provider-icon";
 import { OmpImageTimeline } from "./client/provider-image";
 import { QuotaPopover } from "./client/quota-popover";
@@ -20,6 +26,7 @@ import {
 import { SessionsPopover } from "./client/sessions-popover";
 import { listHubProcesses } from "./shared/hub";
 import { OMP_MCP_AUTH_TIMELINE_KIND, ompMcpAuthorizationTimelineSchema } from "./shared/mcp";
+import { type OmpStore, storeForProvider } from "./shared/omp-store";
 import { ompImageTimelineSchema, transformOmpImageToolItem } from "./shared/provider-image";
 import { listOmpQuotas } from "./shared/quota";
 
@@ -32,6 +39,7 @@ const RECONCILE_DEBOUNCE_MS = 250;
 type AgentEntry = PaseoAgentListResult["entries"][number];
 
 type PillEntry = {
+  store?: OmpStore;
   cwd: string;
   provider: string;
   workspaceId: string;
@@ -133,6 +141,10 @@ export default function contribute(client: PluginClientContext) {
     },
   });
   const pills = new Map<string, PillEntry>();
+  const loadStoreQuotas = createStoreQuotaLoader(
+    (input) => client.rpc(listOmpQuotas, input),
+    QUOTA_POLL_MS,
+  );
   let disposed = false;
   let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -159,22 +171,22 @@ export default function contribute(client: PluginClientContext) {
       current?.quota.remove();
       current?.mcp?.remove();
       pills.set(agent.id, {
+        store: storeForProvider(agent.provider),
         cwd: agent.cwd,
         provider: agent.provider,
-        mcp:
-          agent.provider === "omp-plugin"
-            ? client.addComposerPill({
-                id: "mcp",
-                workspaceId: agent.workspaceId,
-                agentId: agent.id,
-                button: {
-                  title: "Manage OMP MCP servers",
-                  icon: "Plug",
-                  label: "MCP",
-                  behavior: { kind: "popover", Content: McpPopover },
-                },
-              })
-            : undefined,
+        mcp: isOmpPluginProvider(agent.provider)
+          ? client.addComposerPill({
+              id: "mcp",
+              workspaceId: agent.workspaceId,
+              agentId: agent.id,
+              button: {
+                title: "Manage OMP MCP servers",
+                icon: "Plug",
+                label: "MCP",
+                behavior: { kind: "popover", Content: McpPopover },
+              },
+            })
+          : undefined,
         workspaceId: agent.workspaceId,
         quotaProvider,
         quotaSeverity: "unknown",
@@ -261,22 +273,34 @@ export default function contribute(client: PluginClientContext) {
   }
 
   async function refreshQuotaStatus() {
-    try {
-      const result = await client.rpc(listOmpQuotas, {});
-      if (disposed) return;
-      for (const pill of pills.values()) {
-        const severity = quotaSeverityForProvider(result.quotas, pill.quotaProvider);
-        pill.quota.update({
-          ...quotaSummaryForProvider(result.quotas, pill.quotaProvider),
-          ...(severity === pill.quotaSeverity
-            ? {}
-            : { icon: quotaProviderIcon(pill.quotaProvider, severity) }),
-        });
-        pill.quotaSeverity = severity;
-      }
-    } catch {
-      // The quota database is optional and may not exist on a new omp installation.
+    const groups = new Map<string, PillEntry[]>();
+    for (const pill of pills.values()) {
+      if (!isOmpProvider(pill.provider)) continue;
+      const key = ompStoreKey(pill.store);
+      const group = groups.get(key);
+      if (group) group.push(pill);
+      else groups.set(key, [pill]);
     }
+    await Promise.all(
+      [...groups.values()].map(async (storePills) => {
+        try {
+          const result = await loadStoreQuotas(storePills[0].store);
+          if (disposed) return;
+          for (const pill of storePills) {
+            const severity = quotaSeverityForProvider(result.quotas, pill.quotaProvider, true);
+            pill.quota.update({
+              ...quotaSummaryForProvider(result.quotas, pill.quotaProvider, true),
+              ...(severity === pill.quotaSeverity
+                ? {}
+                : { icon: quotaProviderIcon(pill.quotaProvider, severity) }),
+            });
+            pill.quotaSeverity = severity;
+          }
+        } catch {
+          // Retain only this store's last result. Failure never falls back to another profile.
+        }
+      }),
+    );
   }
 
   function scheduleReconcile() {

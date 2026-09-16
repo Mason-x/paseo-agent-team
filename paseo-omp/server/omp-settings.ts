@@ -15,6 +15,7 @@ import {
 } from "../shared/omp-settings";
 import { SerialMutationQueue } from "./mutation-queue";
 import { readOmpConfigFrom } from "./omp-config";
+import { currentOmpEnvironment } from "./paths";
 import {
   type BoundedRun,
   buildStatefulCommandEnv,
@@ -200,12 +201,12 @@ export function parseOmpSettingsList(raw: unknown): ParsedOmpSettings {
 
 async function resolveOmpExecutable(): Promise<string | null> {
   return resolveExecutablePath(
-    process.env.OMP_COMMAND ?? "omp",
-    (process.env.PATH ?? "").split(delimiter),
+    currentOmpEnvironment().OMP_COMMAND ?? "omp",
+    (currentOmpEnvironment().PATH ?? "").split(delimiter),
     {
       cwd: process.cwd(),
       platform: process.platform,
-      pathExt: process.env.PATHEXT ?? WINDOWS_DEFAULT_PATHEXT,
+      pathExt: currentOmpEnvironment().PATHEXT ?? WINDOWS_DEFAULT_PATHEXT,
     },
   );
 }
@@ -215,7 +216,7 @@ async function runOmpConfig(executable: string, args: readonly string[], cwd = p
     defaultSpawn,
     executable,
     ["config", ...args],
-    buildStatefulCommandEnv(process.env),
+    buildStatefulCommandEnv(currentOmpEnvironment()),
     CONFIG_TIMEOUT_MS,
     KILL_GRACE_MS,
     MAX_CONFIG_OUTPUT_BYTES,
@@ -228,7 +229,7 @@ async function validateOmpProjectConfig(executable: string, path: string): Promi
     defaultSpawn,
     executable,
     ["--config", path, "config", "list", "--json"],
-    buildStatefulCommandEnv(process.env),
+    buildStatefulCommandEnv(currentOmpEnvironment()),
     CONFIG_TIMEOUT_MS,
     KILL_GRACE_MS,
     MAX_CONFIG_OUTPUT_BYTES,

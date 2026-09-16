@@ -1,8 +1,9 @@
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RpcInput } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { listOmpQuotas, OmpQuota } from "../shared/quota";
-import { ompAgentDir } from "./paths";
+import { ompDataDir } from "./paths";
 
 const QuotaRowSchema = z.object({
   provider: z.string(),
@@ -50,5 +51,5 @@ export function listOmpQuotasFrom(path: string): OmpQuota[] {
 export function resolveListOmpQuotas(_input: RpcInput<typeof listOmpQuotas>): {
   quotas: OmpQuota[];
 } {
-  return { quotas: listOmpQuotasFrom(`${ompAgentDir()}/agent.db`) };
+  return { quotas: listOmpQuotasFrom(join(ompDataDir(), "agent.db")) };
 }

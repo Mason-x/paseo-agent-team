@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { OmpWorkspaceCwdSchema } from "./hub";
+import { OmpStoreSchema } from "./omp-store";
 
 export const OMP_PLUGIN_LIMIT = 256;
 export const OMP_PLUGIN_ARGUMENT_LIMIT = 512;
@@ -91,7 +92,9 @@ export type OmpPluginState = z.infer<typeof OmpPluginStateSchema>;
 
 export const listOmpPlugins = defineRpc({
   name: "paseo-omp.list-plugins",
-  input: z.object({ cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
+  input: z
+    .object({ store: OmpStoreSchema.optional(), cwd: OmpWorkspaceCwdSchema.optional() })
+    .strict(),
   output: OmpPluginStateSchema,
 });
 
@@ -123,7 +126,13 @@ export type OmpPluginConfigState = z.infer<typeof OmpPluginConfigStateSchema>;
 
 export const inspectOmpPluginConfig = defineRpc({
   name: "paseo-omp.inspect-plugin-config",
-  input: z.object({ plugin: OmpPluginNameSchema, cwd: OmpWorkspaceCwdSchema.optional() }).strict(),
+  input: z
+    .object({
+      store: OmpStoreSchema.optional(),
+      plugin: OmpPluginNameSchema,
+      cwd: OmpWorkspaceCwdSchema.optional(),
+    })
+    .strict(),
   output: OmpPluginConfigStateSchema,
 });
 
@@ -153,6 +162,7 @@ export const OmpPluginConfigMutationSchema = z.discriminatedUnion("action", [
       plugin: OmpPluginNameSchema,
       key: OmpPluginConfigKeySchema,
       value: z.union([OmpPluginConfigStringValueSchema, z.number().finite(), z.boolean()]),
+      store: OmpStoreSchema.optional(),
       cwd: OmpWorkspaceCwdSchema.optional(),
     })
     .strict(),
@@ -161,6 +171,7 @@ export const OmpPluginConfigMutationSchema = z.discriminatedUnion("action", [
       action: z.literal("delete"),
       plugin: OmpPluginNameSchema,
       key: OmpPluginConfigKeySchema,
+      store: OmpStoreSchema.optional(),
       cwd: OmpWorkspaceCwdSchema.optional(),
     })
     .strict(),
@@ -181,6 +192,7 @@ export const mutateOmpPluginConfig = defineRpc({
 
 const ScopedMutationShape = {
   scope: OmpPluginScopeSchema.optional(),
+  store: OmpStoreSchema.optional(),
   cwd: OmpWorkspaceCwdSchema.optional(),
 };
 export const OmpPluginMutationSchema = z

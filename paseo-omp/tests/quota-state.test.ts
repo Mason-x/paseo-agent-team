@@ -142,3 +142,22 @@ describe("OMP quota reader", () => {
     }
   });
 });
+
+describe("profile alias and opaque-model quotas", () => {
+  test("recognizes native and profile plugin model providers without guessing opaque ids", () => {
+    expect(quotaProviderFromSession("omp-plugin", "anthropic/claude-fable-5")).toBe("anthropic");
+    expect(quotaProviderFromSession("omp-plugin-team-beta", "openai-codex/gpt-5.6-sol")).toBe(
+      "openai-codex",
+    );
+    expect(quotaProviderFromSession("omp-plugin-team-beta", "omp:model:opaque-hash")).toBeNull();
+  });
+  test("opaque OMP models retain an explicitly aggregate quota pill", () => {
+    expect(quotaSummaryForProvider(quotas, null, true)).toEqual({
+      visible: true,
+      label: "Quotas · 90%",
+    });
+    expect(quotaSeverityForProvider(quotas, null, true)).toBe("danger");
+    expect(quotaSummaryForProvider([], null, true)).toEqual({ visible: true, label: "Quotas · —" });
+    expect(quotaSummaryForProvider(quotas, null).visible).toBe(false);
+  });
+});

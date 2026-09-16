@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { OmpStoreSchema } from "./omp-store";
 
 // omp's usage_history stores recorded_at/resets_at as epoch milliseconds (confirmed against
 // live rows: 13-digit values), not seconds. Any "time remaining" math must diff against
@@ -17,6 +18,6 @@ export type OmpQuota = z.infer<typeof OmpQuotaSchema>;
 
 export const listOmpQuotas = defineRpc({
   name: "paseo-omp.list-quotas",
-  input: z.object({}),
+  input: z.object({ store: OmpStoreSchema.optional() }),
   output: z.object({ quotas: z.array(OmpQuotaSchema) }),
 });

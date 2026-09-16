@@ -188,10 +188,15 @@ function baseDeps(
   };
 }
 
-async function writeDaemonEntry(hubRunRoot: string, project: string, name: string): Promise<void> {
+async function writeDaemonEntry(
+  hubRunRoot: string,
+  project: string,
+  name: string,
+  metadata: unknown = { daemon: { state: "exited", exitedAt: 100 } },
+): Promise<void> {
   const dir = join(hubRunRoot, project, "daemons", name);
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "meta.json"), "{}");
+  await writeFile(join(dir, "meta.json"), JSON.stringify(metadata));
 }
 
 afterEach(async () => {
@@ -510,7 +515,13 @@ describe("computeOmpProviderHealth", () => {
       serverCount: 2,
       reason: null,
     });
-    expect(health.process).toEqual({ status: "ok", trackedCount: 2 });
+    expect(health.process).toEqual({
+      status: "ok",
+      trackedCount: 2,
+      activeCount: 0,
+      historicalCount: 2,
+      unknownCount: 0,
+    });
     expect(health.roots).toEqual({
       agentRoot: homeRelative(agentDir),
       agentRootState: "available",
@@ -533,6 +544,29 @@ describe("computeOmpProviderHealth", () => {
       expect(env.HOME).toBe(agentDir);
     }
     expect(OmpProviderHealthSchema.safeParse(health).success).toBe(true);
+  });
+
+  test("checks XDG data and session roots independently from profile configuration", async () => {
+    const binaryDir = await tempDir("paseo-omp-bin-");
+    await createFakeBinary(binaryDir);
+    const agentDir = await tempDir("paseo-omp-profile-config-");
+    const dataDir = await tempDir("paseo-omp-profile-data-");
+    const sessionDir = join(dataDir, "sessions");
+    await mkdir(sessionDir);
+    await writeFile(join(agentDir, "config.yml"), "memory:\n  backend: mnemopi\n");
+    await writeFile(join(dataDir, "agent.db"), "");
+    await writeFile(join(dataDir, "history.db"), "");
+
+    const health = await computeOmpProviderHealth(
+      baseDeps(agentDir, binaryDir, { dataDir, sessionDir }),
+    );
+
+    expect(health.roots.agentRootState).toBe("available");
+    expect(health.roots.sessionRootState).toBe("available");
+    expect(health.databases).toEqual({
+      agentDbState: "available",
+      historyDbState: "available",
+    });
   });
 
   test("reports not-found and never spawns when the binary cannot be resolved", async () => {
@@ -772,6 +806,52 @@ describe("computeOmpProviderHealth", () => {
   });
 
   describe("process filtering", () => {
+    test("reports historical Hub entries without implying live processes", async () => {
+      const root = await tempDir("paseo-omp-history-");
+      for (let index = 0; index < 22; index += 1) {
+        await writeDaemonEntry(root, "project", `entry-${index}`, {
+          daemon: { state: index < 20 ? "exited" : "failed", exitedAt: 100 },
+          spec: { args: ["fabricated-secret-argument"] },
+        });
+      }
+      const result = await computeProcessDiagnostics(root);
+      expect(result).toEqual({
+        status: "ok",
+        trackedCount: 22,
+        activeCount: 0,
+        historicalCount: 22,
+        unknownCount: 0,
+      });
+      expect(JSON.stringify(result)).not.toContain("fabricated-secret-argument");
+    });
+
+    test("separates active-state, exited and unknown metadata without following symlinks", async () => {
+      const root = await tempDir("paseo-omp-states-");
+      await writeDaemonEntry(root, "project", "active", { daemon: { state: "running" } });
+      await writeDaemonEntry(root, "project", "old-active", {
+        daemon: { state: "running", exitedAt: 100 },
+      });
+      await writeDaemonEntry(root, "project", "unknown", { daemon: { state: "novel-state" } });
+      await writeDaemonEntry(root, "project", "malformed", {});
+      await writeDaemonEntry(root, "project", "large", {
+        daemon: { state: "running" },
+        extra: "x".repeat(70_000),
+      });
+      const broken = join(root, "project", "daemons", "malformed", "meta.json");
+      await writeFile(broken, "not JSON");
+      await symlink(
+        join(root, "project", "daemons", "active"),
+        join(root, "project", "daemons", "linked"),
+      );
+      expect(await computeProcessDiagnostics(root)).toEqual({
+        status: "partial",
+        trackedCount: 5,
+        activeCount: 1,
+        historicalCount: 1,
+        unknownCount: 3,
+      });
+    });
+
     test("counts regular meta.json files and reports unexpected access failures", async () => {
       const root = "/virtual/hub";
       const projectADaemons = join(root, "project-a", "daemons");
@@ -782,6 +862,12 @@ describe("computeOmpProviderHealth", () => {
       const directoryStats = await lstat(fixture);
       const metaStats = await lstat(metaPath);
       const fs = {
+        async readMetadata() {
+          return {
+            state: "available" as const,
+            text: JSON.stringify({ daemon: { state: "exited" } }),
+          };
+        },
         async readdir(path: string): Promise<string[]> {
           if (path === root) return ["project-a", "project-b"];
           if (path === projectADaemons) return ["real", "missing"];
@@ -796,6 +882,7 @@ describe("computeOmpProviderHealth", () => {
             path === join(root, "project-a") ||
             path === join(root, "project-b") ||
             path === projectADaemons ||
+            path === join(projectADaemons, "real") ||
             path === projectBDaemons
           ) {
             return directoryStats;
@@ -808,7 +895,31 @@ describe("computeOmpProviderHealth", () => {
       expect(await computeProcessDiagnostics(root, fs)).toEqual({
         status: "partial",
         trackedCount: 1,
+        activeCount: 0,
+        historicalCount: 1,
+        unknownCount: 0,
       });
+    });
+
+    test("unreadable metadata is unknown even when a regular file is present", async () => {
+      const root = await tempDir("paseo-omp-unreadable-");
+      await writeDaemonEntry(root, "project", "one", { daemon: { state: "running" } });
+      const result = await computeProcessDiagnostics(root, {
+        readdir: async (path) => (path === root ? ["project"] : ["one"]),
+        lstat,
+        readMetadata: async (_path, maxBytes) => {
+          expect(maxBytes).toBe(64 * 1024);
+          throw Object.assign(new Error("fabricated-secret-error"), { code: "EACCES" });
+        },
+      });
+      expect(result).toEqual({
+        status: "partial",
+        trackedCount: 1,
+        activeCount: 0,
+        historicalCount: 0,
+        unknownCount: 1,
+      });
+      expect(JSON.stringify(result)).not.toContain("fabricated-secret-error");
     });
 
     test("unexpected meta.json stat failures also make the result partial", async () => {
@@ -818,11 +929,23 @@ describe("computeOmpProviderHealth", () => {
       const fixture = await tempDir("paseo-omp-dir-");
       const directoryStats = await lstat(fixture);
       const fs = {
+        async readMetadata() {
+          return {
+            state: "available" as const,
+            text: JSON.stringify({ daemon: { state: "exited" } }),
+          };
+        },
         async readdir(path: string): Promise<string[]> {
           return path === root ? ["project"] : ["blocked"];
         },
         async lstat(path: string) {
-          if (path === root || path === projectDir || path === daemonsDir) return directoryStats;
+          if (
+            path === root ||
+            path === projectDir ||
+            path === daemonsDir ||
+            path === join(daemonsDir, "blocked")
+          )
+            return directoryStats;
           throw Object.assign(new Error("denied"), { code: "EACCES" });
         },
       };
@@ -830,11 +953,20 @@ describe("computeOmpProviderHealth", () => {
       expect(await computeProcessDiagnostics(root, fs)).toEqual({
         status: "partial",
         trackedCount: 0,
+        activeCount: 0,
+        historicalCount: 0,
+        unknownCount: 0,
       });
     });
 
     test("reports unavailable when the hub run root does not exist", async () => {
       const fs = {
+        async readMetadata() {
+          return {
+            state: "available" as const,
+            text: JSON.stringify({ daemon: { state: "exited" } }),
+          };
+        },
         async readdir(): Promise<string[]> {
           throw Object.assign(new Error("missing"), { code: "ENOENT" });
         },
@@ -845,6 +977,9 @@ describe("computeOmpProviderHealth", () => {
       expect(await computeProcessDiagnostics("/missing", fs)).toEqual({
         status: "unavailable",
         trackedCount: null,
+        activeCount: null,
+        historicalCount: null,
+        unknownCount: null,
       });
     });
   });

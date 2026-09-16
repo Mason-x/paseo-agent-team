@@ -18,6 +18,9 @@ import {
   type OmpPluginMutation,
 } from "../shared/omp-plugins";
 
+import type { OmpStore } from "../shared/omp-store";
+import { ompStoreKey } from "./omp-store-state";
+
 const PLUGINS_QUERY_KEY = ["paseo-omp", "plugins"] as const;
 
 type ConfirmationOrigin =
@@ -665,11 +668,14 @@ export function OmpPluginManagerSection({
   theme,
   compact,
   cwd,
+  store,
 }: {
   theme: PluginSurfaceProps["theme"];
   compact: boolean;
   cwd?: string;
+  store?: OmpStore;
 }) {
+  const context = { store, ...(cwd ? { cwd } : {}) };
   const loadPlugins = useRpc(listOmpPlugins);
   const inspectPluginConfig = useRpc(inspectOmpPluginConfig);
   const mutatePlugin = useRpc(mutateOmpPlugin);
@@ -683,15 +689,19 @@ export function OmpPluginManagerSection({
   const [configEditGenerations, setConfigEditGenerations] = useState<Record<string, number>>({});
   const inspectionGeneration = useRef(0);
   const plugins = useQuery({
-    queryKey: [...PLUGINS_QUERY_KEY, cwd ?? "global"],
-    queryFn: () => loadPlugins({ ...(cwd ? { cwd } : {}) }),
+    queryKey: [...PLUGINS_QUERY_KEY, ompStoreKey(store), cwd ?? "global"],
+    queryFn: () => loadPlugins(context),
     staleTime: Number.POSITIVE_INFINITY,
   });
   const mutation = useMutation({
-    mutationFn: (input: OmpPluginMutation) => mutatePlugin(input),
+    mutationKey: ["paseo-omp", "plugins", ompStoreKey(store)],
+    mutationFn: (input: OmpPluginMutation) => mutatePlugin({ ...input, ...context }),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: PLUGINS_QUERY_KEY });
-      queryClient.setQueryData([...PLUGINS_QUERY_KEY, cwd ?? "global"], result.state);
+      queryClient.setQueryData(
+        [...PLUGINS_QUERY_KEY, ompStoreKey(store), cwd ?? "global"],
+        result.state,
+      );
       setNotice({ tone: result.ok ? "success" : "error", text: result.message });
       if (result.ok && confirmation?.kind === "plugin" && confirmation.input.action === "install") {
         setSource("");
@@ -705,7 +715,7 @@ export function OmpPluginManagerSection({
   });
   const configInspection = useMutation({
     mutationFn: ({ plugin }: { plugin: string; generation: number }) =>
-      inspectPluginConfig({ plugin, ...(cwd ? { cwd } : {}) }),
+      inspectPluginConfig({ plugin, ...context }),
     onSuccess: (result, request) => {
       if (inspectionGeneration.current === request.generation) setInspected(result);
     },
@@ -714,8 +724,8 @@ export function OmpPluginManagerSection({
     },
   });
   const configMutation = useMutation({
-    mutationFn: (input: OmpPluginConfigMutation) =>
-      mutatePluginConfig({ ...input, ...(cwd ? { cwd } : {}) }),
+    mutationKey: ["paseo-omp", "plugin-config", ompStoreKey(store)],
+    mutationFn: (input: OmpPluginConfigMutation) => mutatePluginConfig({ ...input, ...context }),
     onSuccess: (result, input) => {
       if (result.config.available) setInspected(result.config);
       if (result.ok) {
@@ -771,7 +781,7 @@ export function OmpPluginManagerSection({
           action: "install",
           source: parsed.data,
           scope: "user",
-          ...(cwd ? { cwd } : {}),
+          ...context,
         },
         { surface: "install" },
       ),
@@ -779,7 +789,7 @@ export function OmpPluginManagerSection({
   };
   const requestMutation = (input: OmpPluginMutation, origin: ConfirmationOrigin) => {
     setNotice(null);
-    setConfirmation(confirmationFor({ ...input, ...(cwd ? { cwd } : {}) }, origin));
+    setConfirmation(confirmationFor({ ...input, ...context }, origin));
   };
   const requestConfigMutation = (
     input: OmpPluginConfigMutation,
@@ -787,7 +797,7 @@ export function OmpPluginManagerSection({
   ) => {
     setNotice(null);
     setConfirmation(
-      configConfirmationFor({ ...input, ...(cwd ? { cwd } : {}) }, setting, {
+      configConfirmationFor({ ...input, ...context }, setting, {
         surface: "config",
         key: `${input.plugin}:${input.key}`,
       }),
