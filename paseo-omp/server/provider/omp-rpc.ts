@@ -2,12 +2,14 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
+import { ompDataDir } from "../paths";
 import { isValidImagePayload } from "./image";
 import { boundedJsonBytes, OmpCleanupFailure, OmpPublicError, utf8Bytes } from "./security";
 import {
   listOmpSessionDescriptors,
   type OmpSessionDescriptor,
   type OmpSessionListOptions,
+  readOmpPersistedSessionTranscript,
   readOmpPersistedSubagentTranscript,
   validateNativeSessionId,
 } from "./session-descriptors";
@@ -54,7 +56,9 @@ const MAX_PENDING_ONE_WAY_WRITES = 256;
 const MAX_PENDING_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_LINE_PARTS = 4_096;
 const MAX_ARRAY_ITEMS = 512;
-const MAX_CONTENT_PARTS = 64;
+// Tool-intensive OMP turns legitimately exceed 64 blocks; transport byte/node budgets remain the
+// primary resource bounds.
+export const OMP_MAX_CONTENT_PARTS = 4_096;
 const MAX_TODOS = 256;
 const MAX_ENV_ENTRIES = 256;
 const MAX_ENV_VALUE_LENGTH = 64 * 1024;
@@ -145,11 +149,11 @@ const OmpContentPartSchema = z
   });
 const OmpDisplayContentSchema = z.union([
   TEXT,
-  z.array(OmpContentPartSchema).max(MAX_CONTENT_PARTS),
+  z.array(OmpContentPartSchema).max(OMP_MAX_CONTENT_PARTS),
 ]);
 const OmpImageArraySchema = z
   .array(OmpContentPartSchema)
-  .max(MAX_CONTENT_PARTS)
+  .max(OMP_MAX_CONTENT_PARTS)
   .superRefine((parts, context) => {
     if (parts.some((part) => part.type !== "image")) {
       context.addIssue({ code: "custom", message: "invalid image collection" });
@@ -262,7 +266,7 @@ const OmpAssistantMessageEventSchema = z
       .number()
       .int()
       .nonnegative()
-      .max(MAX_CONTENT_PARTS - 1)
+      .max(OMP_MAX_CONTENT_PARTS - 1)
       .optional(),
     delta: TEXT.optional(),
     content: z
@@ -949,6 +953,12 @@ export interface OmpPersistedSubagentMessages {
   byteLength: number;
   messages: OmpMessage[];
 }
+export interface OmpPersistedSessionMessages {
+  sessionFile: string;
+  nativeSessionId: string;
+  byteLength: number;
+  messages: OmpMessage[];
+}
 
 export interface OmpStartOptions {
   cwd: string;
@@ -1026,6 +1036,12 @@ export interface OmpRuntime {
   readonly supportsPersistence: boolean;
   startSession(options: OmpStartOptions): Promise<OmpRuntimeSession>;
   listSessions(options: OmpSessionListOptions): Promise<OmpSessionDescriptor[]>;
+  readPersistedSessionTranscript?(options: {
+    sessionFile: string;
+    sessionId: string;
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<OmpPersistedSessionMessages>;
   readPersistedSubagentTranscript(options: {
     parentSessionFile: string;
     childTranscriptId: string;
@@ -2691,6 +2707,24 @@ export class OmpRpcRuntime implements OmpRuntime {
       this.options.listSessions?.(options) ??
         listOmpSessionDescriptors(options, this.options.environment ?? process.env),
     );
+  }
+  async readPersistedSessionTranscript(options: {
+    sessionFile: string;
+    sessionId: string;
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<OmpPersistedSessionMessages> {
+    const transcript = await readOmpPersistedSessionTranscript(
+      options.sessionFile,
+      options.sessionId,
+      options.cwd,
+      options.signal,
+      join(ompDataDir(this.options.environment ?? process.env), "blobs"),
+    );
+    return {
+      ...transcript,
+      messages: z.array(OmpMessageSchema).max(100_000).parse(transcript.messages),
+    };
   }
   async readPersistedSubagentTranscript(options: {
     parentSessionFile: string;

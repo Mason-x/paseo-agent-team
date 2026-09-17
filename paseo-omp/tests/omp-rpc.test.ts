@@ -1523,6 +1523,41 @@ describe("OMP RPC transport", () => {
     expect(await session.getState()).toEqual(expect.objectContaining({ sessionId: "chunked" }));
     await session.close();
   });
+  test("accepts tool-intensive assistant history beyond 64 content parts", async () => {
+    const child = new FakeRpcChild();
+    const content = Array.from({ length: 65 }, (_, index) => ({
+      type: "text",
+      text: `part-${index}`,
+    }));
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+        return;
+      }
+      if (command.type === "get_messages") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: { messages: [{ role: "assistant", content }] },
+        });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+
+    const [assistant] = await session.getMessages();
+    expect(assistant?.role).toBe("assistant");
+    expect(assistant && "content" in assistant ? assistant.content : undefined).toHaveLength(65);
+    await session.close();
+  });
+
   test("reads byte-heavy history through negotiated v2 chunking", async () => {
     const child = new FakeRpcChild();
     const text = "é".repeat(350_000);

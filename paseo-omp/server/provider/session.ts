@@ -901,7 +901,7 @@ export class OmpProviderSession {
     private recoveryOptions: OmpRecoveryOptions,
     private readonly hostTools: OmpHostToolsBridge,
     private nativeSessionId: string,
-    nativeSessionFile: string | undefined,
+    private readonly nativeSessionFile: string | undefined,
     private readonly config: ProviderSessionConfig,
     private configState: ProviderConfigState,
     outputRedactionValues: readonly string[],
@@ -1223,7 +1223,7 @@ export class OmpProviderSession {
       ...(this.config.title ? { title: this.dataFilter.text(this.config.title, 256) } : {}),
     });
     this.emit({ type: "session.config", sessionId: this.id, config: this.configState });
-    if (this.replayHistoryOnOpen) await this.replayHistory();
+    if (this.replayHistoryOnOpen) await this.replayHistory(true);
     this.publishCommands(this.commandCatalog);
     this.emit({ type: "session.ready", requestId, sessionId: this.id });
     this.readyPublished = true;
@@ -1513,7 +1513,7 @@ export class OmpProviderSession {
     });
   }
 
-  private async replayHistory(): Promise<void> {
+  private async replayHistory(preferPersistedTranscript = false): Promise<void> {
     if (!this.runtime.canReplayHistory) {
       throw new OmpPublicError("OMP session history cannot be replayed safely");
     }
@@ -1527,12 +1527,41 @@ export class OmpProviderSession {
       this.replayTimeoutMs,
     );
     try {
-      const messages = await waitForReplay(this.runtime.getMessages(), replay.signal);
-      replay.signal.throwIfAborted();
-      if (messages.length > MAX_REPLAY_MESSAGES) {
-        throw new OmpPublicError("OMP session history exceeds replay limits");
+      let messages: OmpMessage[] | undefined;
+      // OMP's RPC history is model context, which excludes failed/aborted turns. On initial
+      // resume/import prefer the already authorized journal; rewinds still use the runtime's
+      // in-memory branch because an uncommitted leaf move is not represented by file order.
+      if (
+        preferPersistedTranscript &&
+        this.nativeSessionFile &&
+        this.runtimeFactory.readPersistedSessionTranscript
+      ) {
+        try {
+          const transcript = await waitForReplay(
+            this.runtimeFactory.readPersistedSessionTranscript({
+              sessionFile: this.nativeSessionFile,
+              sessionId: this.nativeSessionId,
+              cwd: this.cwd,
+              signal: replay.signal,
+            }),
+            replay.signal,
+          );
+          messages = transcript.messages;
+        } catch (error) {
+          if (replay.signal.aborted) throw error;
+          this.emit({
+            type: "timeline.item",
+            sessionId: this.id,
+            item: {
+              id: "omp:replay-incomplete",
+              type: "error",
+              message:
+                "OMP could not read its complete persisted transcript; displayed history may be incomplete.",
+            },
+          });
+        }
       }
-      // Replay is model context, not necessarily the complete persisted branching history.
+      messages ??= await waitForReplay(this.runtime.getMessages(), replay.signal);
       this.quarantineBranchEntries();
       for (const message of messages) {
         replay.signal.throwIfAborted();

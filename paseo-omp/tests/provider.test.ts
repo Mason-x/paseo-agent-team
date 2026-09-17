@@ -30,6 +30,7 @@ import {
   type OmpImage,
   type OmpMessage,
   type OmpModel,
+  type OmpPersistedSessionMessages,
   type OmpPersistedSubagentMessages,
   type OmpRpcEvent,
   OmpRpcRuntime,
@@ -750,6 +751,13 @@ class FakeOmpRuntime implements OmpRuntime {
   readonly nextSubagentMessages = new Map<string, OmpSubagentMessagesResult>();
   nextSubagentSubscriptionError: Error | null = null;
   readonly persistedSubagentMessages = new Map<string, OmpPersistedSubagentMessages>();
+  persistedSessionMessages: OmpPersistedSessionMessages | null = null;
+  persistedSessionError: Error | null = null;
+  readonly persistedSessionRequests: Array<{
+    sessionFile: string;
+    sessionId: string;
+    cwd: string;
+  }> = [];
   readonly persistedSubagentGates = new Map<string, Promise<void>>();
   persistedSubagentObserved: ((key: string) => void) | null = null;
   readonly persistedSubagentRequests: Array<{
@@ -786,6 +794,29 @@ class FakeOmpRuntime implements OmpRuntime {
     );
   }
   sessionCreated: ((session: FakeOmpSession) => void) | null = null;
+  async readPersistedSessionTranscript(options: {
+    sessionFile: string;
+    sessionId: string;
+    cwd: string;
+    signal?: AbortSignal;
+  }) {
+    this.persistedSessionRequests.push({
+      sessionFile: options.sessionFile,
+      sessionId: options.sessionId,
+      cwd: options.cwd,
+    });
+    options.signal?.throwIfAborted();
+    if (this.persistedSessionError) throw this.persistedSessionError;
+    return (
+      this.persistedSessionMessages ?? {
+        sessionFile: options.sessionFile,
+        nativeSessionId: options.sessionId,
+        byteLength: 0,
+        messages: this.sessions.at(-1)?.historyMessages ?? [],
+      }
+    );
+  }
+
   async readPersistedSubagentTranscript(options: {
     parentSessionFile: string;
     childTranscriptId: string;
@@ -2212,6 +2243,161 @@ describe("OMP direct provider", () => {
     await finishTurn(events, sessionAt(runtime, 2), recoveryTurn);
     await connection.close();
   });
+  test("replays failed assistant turns and completed tools from the persisted transcript", async () => {
+    const runtime = new FakeOmpRuntime();
+    runtime.descriptors.push({
+      id: NATIVE_SESSION_ID,
+      cwd: "/repo",
+      transcriptFile: "/sessions/root.jsonl",
+    });
+    runtime.nextHistoryMessages = [{ role: "user", entryId: "user-1", content: "prompt" }];
+    const toolCalls = Array.from({ length: 79 }, (_, index) => ({
+      type: "toolCall" as const,
+      id: `call-${index}`,
+      name: "read",
+      arguments: { path: `file-${index}.txt` },
+    }));
+    const assistantContent = [
+      ...toolCalls.slice(0, 64),
+      ...Array.from({ length: 6 }, (_, index) => ({
+        type: "text" as const,
+        text: `partial-${index}`,
+      })),
+      ...Array.from({ length: 22 }, (_, index) => ({
+        type: "thinking" as const,
+        thinking: `thought-${index}`,
+      })),
+      ...toolCalls.slice(64),
+    ];
+    runtime.persistedSessionMessages = {
+      sessionFile: "/sessions/root.jsonl",
+      nativeSessionId: NATIVE_SESSION_ID,
+      byteLength: 4_096,
+      messages: [
+        { role: "user", entryId: "user-1", content: "prompt" },
+        {
+          role: "assistant",
+          entryId: "assistant-failed",
+          content: assistantContent,
+          stopReason: "error",
+          errorMessage: "provider failed",
+        },
+        ...toolCalls.map(
+          (call, index): OmpMessage => ({
+            role: "toolResult",
+            entryId: `tool-${index}`,
+            toolCallId: call.id,
+            toolName: call.name,
+            content: { content: [{ type: "text", text: `completed result ${index}` }] },
+          }),
+        ),
+      ],
+    };
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await connection.send({
+      type: "session.open",
+      requestId: "failed-turn-replay",
+      sessionId: "failed-turn-session",
+      config: {
+        cwd: "/repo",
+        env: {},
+        mcpServers: {},
+        mode: "full",
+        settings: {},
+        persist: true,
+      },
+      persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
+      history: "replay",
+    });
+    await events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "failed-turn-replay",
+    );
+
+    expect(runtime.persistedSessionRequests).toEqual([
+      {
+        sessionFile: "/sessions/root.jsonl",
+        sessionId: NATIVE_SESSION_ID,
+        cwd: "/repo",
+      },
+    ]);
+    expect(sessionAt(runtime).historyRequests).toBe(0);
+    const timelineItems = events.flatMap((event) =>
+      event.type === "timeline.item" ? [event.item] : [],
+    );
+    expect(timelineItems).toContainEqual(
+      expect.objectContaining({
+        type: "assistant_message",
+        text: expect.stringContaining("partial-0"),
+      }),
+    );
+    expect(timelineItems).toContainEqual(
+      expect.objectContaining({ type: "reasoning", text: expect.stringContaining("thought-21") }),
+    );
+    const completedTools = timelineItems.filter(
+      (item) => item.type === "tool_call" && item.status === "completed",
+    );
+    expect(completedTools).toHaveLength(79);
+    expect(completedTools).toEqual(
+      toolCalls.map((_, index) =>
+        expect.objectContaining({
+          detail: expect.objectContaining({ type: "read", filePath: `file-${index}.txt` }),
+        }),
+      ),
+    );
+    await connection.close();
+  });
+
+  test("warns before falling back to filtered RPC history", async () => {
+    const runtime = new FakeOmpRuntime();
+    runtime.descriptors.push({
+      id: NATIVE_SESSION_ID,
+      cwd: "/repo",
+      transcriptFile: "/sessions/root.jsonl",
+    });
+    runtime.persistedSessionError = new Error("unreadable transcript");
+    runtime.nextHistoryMessages = [{ role: "user", entryId: "user-1", content: "prompt" }];
+    const { connection, events } = await createHarness(runtime, new ManualScheduler(), [
+      "prompt.message",
+      "session.persistence",
+    ]);
+
+    await connection.send({
+      type: "session.open",
+      requestId: "filtered-history-fallback",
+      sessionId: "filtered-history-session",
+      config: {
+        cwd: "/repo",
+        env: {},
+        mcpServers: {},
+        mode: "full",
+        settings: {},
+        persist: true,
+      },
+      persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
+      history: "replay",
+    });
+    await events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "filtered-history-fallback",
+    );
+
+    expect(sessionAt(runtime).historyRequests).toBe(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "timeline.item",
+        item: expect.objectContaining({
+          type: "error",
+          message:
+            "OMP could not read its complete persisted transcript; displayed history may be incomplete.",
+        }),
+      }),
+    );
+    await connection.close();
+  });
+
   test("rewinds to an earlier native message and replays the active branch once", async () => {
     const firstUser = { role: "user" as const, entryId: "entry-user-1", content: "first" };
     const firstAssistant = {
@@ -6694,6 +6880,13 @@ describe("OMP direct provider", () => {
         message: { role: "assistant", content: [], responseId: "response-bounded" },
       });
     }
+    for (const contentIndex of [4_095, 4_096]) {
+      session.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", contentIndex, delta: `block-${contentIndex}` },
+        message: { role: "assistant", content: [], responseId: "response-bounded" },
+      });
+    }
     await scheduler.flush();
 
     expect(
@@ -6702,14 +6895,20 @@ describe("OMP direct provider", () => {
           ? [event.item]
           : [],
       ),
-    ).toEqual(
-      Array.from({ length: 64 }, (_, contentIndex) => ({
-        type: "assistant_message",
+    ).toEqual([
+      ...Array.from({ length: 65 }, (_, contentIndex) => ({
+        type: "assistant_message" as const,
         id: `omp:assistant:1:B7lAkpW__Trl:content:${contentIndex}:text`,
         messageId: "omp:assistant:1:B7lAkpW__Trl",
         text: `block-${contentIndex}`,
       })),
-    );
+      {
+        type: "assistant_message",
+        id: "omp:assistant:1:B7lAkpW__Trl:content:4095:text",
+        messageId: "omp:assistant:1:B7lAkpW__Trl",
+        text: "block-4095",
+      },
+    ]);
     await finishTurn(events, session, turnId);
     await connection.close();
   });

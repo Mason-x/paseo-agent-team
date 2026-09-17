@@ -6,7 +6,7 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 import { OMP_MCP_AUTH_TIMELINE_KIND } from "../../shared/mcp";
 import { isOmpImageMimeType, isValidImagePayload, type OmpImageMimeType } from "./image";
-import type { OmpMessage, OmpRpcEvent } from "./omp-rpc";
+import { OMP_MAX_CONTENT_PARTS, type OmpMessage, type OmpRpcEvent } from "./omp-rpc";
 import {
   boundedJsonBytes,
   type JsonValue,
@@ -16,7 +16,6 @@ import {
 } from "./security";
 
 const STREAM_FRAME_MS = 32;
-const MAX_STREAM_CONTENT_BLOCKS = 64;
 const MAX_STREAM_TEXT_LENGTH = 4 * 1024 * 1024;
 const MAX_ACTIVE_TOOLS = 64;
 const MAX_TODOS = 256;
@@ -55,6 +54,7 @@ type StreamSnapshot = {
   nativeIdentity?: string;
   published: boolean;
   retainedBytes: number;
+  textBytes: number;
   publishedBytes: number;
   blocks: Map<number, StreamBlockSnapshot>;
   dirtyBlocks: Set<number>;
@@ -252,7 +252,7 @@ function nativeImageResult(
     boundedJsonBytes(
       value,
       MAX_NATIVE_IMAGE_RESULT_BYTES,
-      MAX_STREAM_CONTENT_BLOCKS,
+      OMP_MAX_CONTENT_PARTS,
       8 * 1024 * 1024,
       512,
     ) === Number.POSITIVE_INFINITY
@@ -362,6 +362,7 @@ export class OmpTimelineProjector {
   private readonly replayCandidates = new Map<string, ReplayCandidate>();
   private readonly replayOverflowCandidates = new Map<string, string>();
   private projectingReplay = false;
+  private readonly replayToolCalls = new Map<string, { toolName: string; args: unknown }>();
   private customSequence = 0;
   private compactionSequence = 0;
   private activeCompaction: CompactionSlot | null = null;
@@ -825,6 +826,7 @@ export class OmpTimelineProjector {
     this.replayOverflowCandidates.clear();
     this.projectingReplay = false;
     this.activeToolBytes = 0;
+    this.replayToolCalls.clear();
     this.tools.clear();
     this.commandText = "";
     this.commandPublishedText = "";
@@ -837,6 +839,7 @@ export class OmpTimelineProjector {
     const nativeIdentity = assistantIdentity(message);
     this.replaySequence += 1;
     if (message.role === "user") {
+      this.replayToolCalls.clear();
       if (this.replayTurnId) this.finishTurn(this.replayTurnId);
       this.replayTurnId = `omp:replay-turn:${this.replaySequence}`;
       const text =
@@ -865,15 +868,7 @@ export class OmpTimelineProjector {
           for (const part of message.content) {
             if (part.type !== "toolCall" || !part.id || !part.name || part.arguments === undefined)
               continue;
-            this.project(
-              {
-                type: "tool_execution_start",
-                toolCallId: part.id,
-                toolName: part.name,
-                args: part.arguments,
-              },
-              this.replayTurnId,
-            );
+            this.replayToolCalls.set(part.id, { toolName: part.name, args: part.arguments });
           }
         }
       } finally {
@@ -884,13 +879,15 @@ export class OmpTimelineProjector {
     }
     this.replayTurnId ??= `omp:replay-turn:${this.replaySequence}`;
     if (message.role === "toolResult") {
+      const replayCall = this.replayToolCalls.get(message.toolCallId);
+      this.replayToolCalls.delete(message.toolCallId);
       if (!this.tools.has(message.toolCallId)) {
         this.project(
           {
             type: "tool_execution_start",
             toolCallId: message.toolCallId,
-            toolName: message.toolName,
-            args: null,
+            toolName: replayCall?.toolName ?? message.toolName,
+            args: replayCall?.args ?? null,
           },
           this.replayTurnId,
         );
@@ -922,6 +919,7 @@ export class OmpTimelineProjector {
 
   finishReplay(): void {
     if (this.replayTurnId) this.finishTurn(this.replayTurnId);
+    this.replayToolCalls.clear();
     this.replayTurnId = null;
   }
   acceptLiveTurn(turnId: string): void {
@@ -1073,6 +1071,7 @@ export class OmpTimelineProjector {
     this.clearFlushTimer();
     this.stream = null;
     this.tools.clear();
+    this.replayToolCalls.clear();
     this.activeToolBytes = 0;
     this.replayCandidates.clear();
     this.replayOverflowCandidates.clear();
@@ -1134,6 +1133,7 @@ export class OmpTimelineProjector {
       ...(nativeIdentity ? { nativeIdentity } : {}),
       published: false,
       retainedBytes: 0,
+      textBytes: 0,
       publishedBytes: 0,
       blocks: new Map(),
       dirtyBlocks: new Set(),
@@ -1198,7 +1198,7 @@ export class OmpTimelineProjector {
       return;
     }
     if (!Array.isArray(message.content)) return;
-    const blockCount = Math.min(message.content.length, MAX_STREAM_CONTENT_BLOCKS);
+    const blockCount = Math.min(message.content.length, OMP_MAX_CONTENT_PARTS);
     for (let index = 0; index < blockCount; index += 1) {
       const block = blockText(message, index);
       if (block) this.setBlock(stream, index, block);
@@ -1258,20 +1258,13 @@ export class OmpTimelineProjector {
     if (snapshot.kind === "image" && utf8Bytes(snapshot.text) > MAX_IMAGE_ENCODED_LENGTH + 256)
       return;
     const previous = stream.blocks.get(contentIndex);
-    let retainedBytes = utf8Bytes(snapshot.text);
-    let textBytes = snapshot.kind === "image" ? 0 : retainedBytes;
-    for (const [index, block] of stream.blocks) {
-      if (index === contentIndex) continue;
-      const blockBytes = utf8Bytes(block.text);
-      retainedBytes += blockBytes;
-      if (block.kind !== "image") textBytes += blockBytes;
-      if (
-        retainedBytes + stream.publishedBytes > MAX_STREAM_TOTAL_BYTES ||
-        textBytes > MAX_STREAM_TEXT_LENGTH
-      ) {
-        return;
-      }
-    }
+    const previousBytes = previous ? utf8Bytes(previous.text) : 0;
+    const snapshotBytes = utf8Bytes(snapshot.text);
+    const retainedBytes = stream.retainedBytes - previousBytes + snapshotBytes;
+    const textBytes =
+      stream.textBytes -
+      (previous && previous.kind !== "image" ? previousBytes : 0) +
+      (snapshot.kind === "image" ? 0 : snapshotBytes);
     if (
       retainedBytes + stream.publishedBytes > MAX_STREAM_TOTAL_BYTES ||
       textBytes > MAX_STREAM_TEXT_LENGTH
@@ -1280,6 +1273,7 @@ export class OmpTimelineProjector {
     }
     if (previous?.kind === snapshot.kind && previous.text === snapshot.text) return;
     stream.retainedBytes = retainedBytes;
+    stream.textBytes = textBytes;
     stream.blocks.set(contentIndex, {
       ...snapshot,
       ...(previous?.kind === snapshot.kind ? { publishedText: previous.publishedText } : {}),
@@ -1291,7 +1285,7 @@ export class OmpTimelineProjector {
     return (
       Number.isSafeInteger(contentIndex) &&
       contentIndex >= 0 &&
-      contentIndex < MAX_STREAM_CONTENT_BLOCKS
+      contentIndex < OMP_MAX_CONTENT_PARTS
     );
   }
 

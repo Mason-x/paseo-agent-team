@@ -152,6 +152,7 @@ export function createProfileOmpProvider(profile: string, options: OmpProviderOp
   const environment = fixedEnvironment(profile, options.environment ?? process.env);
   const sessionDir = resolve(ompSessionDir(environment));
   const runtime = options.runtime ?? new OmpRpcRuntime({ environment });
+  const readPersistedSessionTranscript = runtime.readPersistedSessionTranscript?.bind(runtime);
   const assertSessionDir = (requested?: string) => {
     if (requested !== undefined && resolve(requested) !== sessionDir) {
       throw new OmpPublicError("OMP session directory conflicts with the selected profile");
@@ -186,6 +187,13 @@ export function createProfileOmpProvider(profile: string, options: OmpProviderOp
       assertSessionDir(listOptions.sessionDir);
       return runtime.listSessions({ ...listOptions, sessionDir });
     },
+    ...(readPersistedSessionTranscript
+      ? {
+          readPersistedSessionTranscript(input) {
+            return readPersistedSessionTranscript(input);
+          },
+        }
+      : {}),
     readPersistedSubagentTranscript(input) {
       return runtime.readPersistedSubagentTranscript(input);
     },
