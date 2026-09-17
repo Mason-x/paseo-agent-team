@@ -328,6 +328,7 @@ class FakeOmpSession implements OmpRuntimeSession {
   branchMessagesGate: Promise<void> | null = null;
   branchMessagesError: Error | null = null;
   branchMessageLookups = 0;
+  branchMessagesObserved: (() => void) | null = null;
   branchGate: Promise<void> | null = null;
   branchObserved: (() => void) | null = null;
   branchError: Error | null = null;
@@ -555,19 +556,23 @@ class FakeOmpSession implements OmpRuntimeSession {
     if (!result) return Promise.reject(new Error("missing fake subagent transcript"));
     return Promise.resolve(result);
   }
-  async prompt(message: string, images: readonly OmpImage[] = [], onAccepted?: () => void) {
+  async prompt(
+    message: string,
+    images: readonly OmpImage[] = [],
+    onAccepted?: () => void,
+    onRequested?: (requestId: string) => void,
+  ) {
     this.prompts.push(message);
     this.promptImages.push([...images]);
     this.promptCount += 1;
+    const requestId = `rpc-prompt-${this.promptCount}`;
+    onRequested?.(requestId);
     this.promptObserved?.();
     if (this.promptGate) await this.promptGate;
     for (const event of this.promptEvents) this.emit(event);
     if (this.promptError) throw this.promptError;
     onAccepted?.();
-    return {
-      requestId: `rpc-prompt-${this.promptCount}`,
-      agentInvoked: this.promptAgentInvoked,
-    };
+    return { requestId, agentInvoked: this.promptAgentInvoked };
   }
 
   async compact(customInstructions?: string) {
@@ -688,6 +693,7 @@ class FakeOmpSession implements OmpRuntimeSession {
   async getBranchMessages() {
     if (this.branchMessagesError) throw this.branchMessagesError;
     this.branchMessageLookups += 1;
+    this.branchMessagesObserved?.();
     if (this.branchMessagesGate) await this.branchMessagesGate;
     return this.branchMessages;
   }
@@ -7191,6 +7197,54 @@ describe("OMP direct provider", () => {
     await finishTurn(events, session, turnId);
     await connection.close();
   });
+  test("rejects a keyed stale terminal before a later prompt is issued", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    session.branchMessagesError = new Error("branch unavailable");
+    const firstTurn = turnIdFrom(await startPrompt(connection, events, "startup-first", "first"));
+    session.emit({ type: "message_end", message: { role: "user", content: "first" } });
+    await finishTurn(events, session, firstTurn);
+
+    session.branchMessagesError = null;
+    session.promptAgentInvoked = undefined;
+    session.branchMessages = [{ entryId: "startup-second", text: "second" }];
+    const branchGate = Promise.withResolvers<void>();
+    const branchObserved = Promise.withResolvers<void>();
+    session.branchMessagesGate = branchGate.promise;
+    session.branchMessagesObserved = branchObserved.resolve;
+
+    const pendingPrompt = startPrompt(connection, events, "startup-second", "second");
+    await branchObserved.promise;
+    expect(session.promptCount).toBe(1);
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messages: Array.from({ length: 5 }, () => ({
+        role: "assistant" as const,
+        content: "x".repeat(900_000),
+      })),
+      isTerminal: true,
+    });
+    expect(session.closes).toBe(0);
+
+    branchGate.resolve();
+    const turnId = turnIdFrom(await pendingPrompt);
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messages: [],
+      isTerminal: true,
+    });
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(session.closes).toBe(0);
+    await connection.close();
+  });
 
   test("settles queued auto steering before connection shutdown joins active operations", async () => {
     const { connection, events, runtime } = await createHarness();
@@ -8488,6 +8542,34 @@ describe("OMP direct provider", () => {
         item: expect.objectContaining({ id: `omp:command:${turnId}`, text: "first second" }),
       }),
     );
+    await connection.close();
+  });
+
+  test("ignores a mismatched terminal during local-only settlement", async () => {
+    const { connection, events, runtime, scheduler } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const firstTurn = turnIdFrom(await startPrompt(connection, events, "local-stale-a", "work"));
+    await finishTurn(events, session, firstTurn);
+
+    session.promptAgentInvoked = undefined;
+    session.promptEvents = [{ type: "prompt_result", id: "rpc-prompt-2", agentInvoked: false }];
+    const turnId = turnIdFrom(await startPrompt(connection, events, "local-stale-b", "/help"));
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messages: [{ role: "assistant", content: "stale" }],
+      isTerminal: true,
+    });
+
+    await scheduler.flush(5_000);
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(session.closes).toBe(0);
     await connection.close();
   });
 
@@ -11212,6 +11294,97 @@ describe("OMP direct provider", () => {
     );
   });
 
+  test("accepts only a request-matched agent_end on a later turn", async () => {
+    const { connection, events, runtime } = await createHarness();
+    onTestFinished(() => connection.close());
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    await finishTurn(
+      events,
+      session,
+      turnIdFrom(await startPrompt(connection, events, "correlated-a", "first")),
+    );
+    session.promptAgentInvoked = undefined;
+    const turnId = turnIdFrom(await startPrompt(connection, events, "correlated-b", "second"));
+
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messages: [{ role: "assistant", content: "stale", stopReason: "error" }],
+      isTerminal: true,
+    });
+    expect(
+      events.filter((event) => event.type === "session.turn" && event.turnId === turnId),
+    ).toEqual([expect.objectContaining({ state: "started" })]);
+
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messages: [],
+      isTerminal: false,
+    });
+    expect(
+      events.filter((event) => event.type === "session.turn" && event.turnId === turnId),
+    ).toEqual([expect.objectContaining({ state: "started" })]);
+
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messages: [{ role: "assistant", content: "current", stopReason: "stop" }],
+      isTerminal: true,
+    });
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(session.closes).toBe(0);
+
+    const nextTurn = turnIdFrom(await startPrompt(connection, events, "correlated-c", "continue"));
+    expect(runtime.starts).toHaveLength(1);
+    await finishTurn(events, session, nextTurn);
+  });
+
+  test("does not reuse assistant evidence across request-matched native runs", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const firstTurn = turnIdFrom(
+      await startPrompt(connection, events, "scoped-evidence-a", "first"),
+    );
+    await finishTurn(events, session, firstTurn);
+
+    session.promptAgentInvoked = undefined;
+    const turnId = turnIdFrom(await startPrompt(connection, events, "scoped-evidence-b", "second"));
+    session.emit({
+      type: "message_end",
+      message: { role: "assistant", content: "earlier success", stopReason: "stop" },
+    });
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messages: [],
+      isTerminal: false,
+    });
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messageCount: 1,
+      messages: [],
+      isTerminal: true,
+    });
+
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "failed" }));
+    expect(session.closes).toBe(0);
+    await connection.close();
+  });
+
   test.each([
     "unavailable",
     "too many entries",
@@ -11895,6 +12068,39 @@ describe("OMP direct provider", () => {
     );
     expect(sessionAt(runtime, 1).closes).toBe(1);
     await expect(connection.close()).rejects.toThrow("provider connection cleanup failed");
+  });
+
+  test("completes a later turn from a request-matched degraded agent_end", async () => {
+    const { connection, events, runtime } = await createHarness();
+    await openSession(connection, events);
+    const session = sessionAt(runtime);
+    const firstTurn = turnIdFrom(
+      await startPrompt(connection, events, "degraded-keyed-a", "first"),
+    );
+    await finishTurn(events, session, firstTurn);
+
+    session.promptAgentInvoked = undefined;
+    const turnId = turnIdFrom(await startPrompt(connection, events, "degraded-keyed-b", "second"));
+    session.emit({
+      type: "message_end",
+      message: { role: "assistant", content: "done", stopReason: "stop" },
+    });
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-2",
+      messageCount: 1,
+      messages: [],
+      isTerminal: true,
+    });
+
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(session.closes).toBe(0);
+    await connection.close();
   });
 
   test("uses complete streamed evidence when agent_end omits terminal messages", async () => {

@@ -570,6 +570,7 @@ const OmpToolApprovalResponseSchema = z.union([
 ]);
 const OmpAgentEndEnvelopeSchema = z.object({
   type: z.literal("agent_end"),
+  requestId: IDENTIFIER.optional(),
   messageCount: z.number().int().nonnegative().optional(),
   isTerminal: z.boolean().optional(),
 });
@@ -590,6 +591,7 @@ const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agent_start") }),
   z.object({
     type: z.literal("agent_end"),
+    requestId: IDENTIFIER.optional(),
     messages: z.array(OmpMessageSchema).max(MAX_ARRAY_ITEMS).optional(),
     messageCount: z.number().int().nonnegative().optional(),
     isTerminal: z.boolean().optional(),
@@ -1011,6 +1013,7 @@ export interface OmpRuntimeSession {
     message: string,
     images?: readonly OmpImage[],
     onAccepted?: () => void,
+    onRequested?: (requestId: string) => void,
   ): Promise<{ requestId: string; agentInvoked?: boolean }>;
   compact(customInstructions?: string): Promise<OmpCompactionResult>;
   setAutoCompaction(enabled: boolean): Promise<void>;
@@ -2639,6 +2642,7 @@ class OmpRpcSession implements OmpRuntimeSession {
     message: string,
     images: readonly OmpImage[] = [],
     onAccepted?: () => void,
+    onRequested?: (requestId: string) => void,
   ): Promise<{ requestId: string; agentInvoked?: boolean }> {
     const safeMessage = validateBoundedText(message, "prompt", MAX_TEXT_LENGTH);
     let acknowledgement: z.infer<typeof OmpPromptAckSchema> | undefined;
@@ -2650,6 +2654,7 @@ class OmpRpcSession implements OmpRuntimeSession {
         onAccepted?.();
       },
     );
+    onRequested?.(request.id);
     await request.promise;
     return { requestId: request.id, ...acknowledgement };
   }

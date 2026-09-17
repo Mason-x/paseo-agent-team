@@ -1912,9 +1912,16 @@ export class OmpProviderSession {
           return;
         }
       }
-      const acknowledgement = await runtime.prompt(payload.text, payload.images, () => {
-        turn.promptAcceptedEventIndex ??= turn.bufferedEvents.length;
-      });
+      const acknowledgement = await runtime.prompt(
+        payload.text,
+        payload.images,
+        () => {
+          turn.promptAcceptedEventIndex ??= turn.bufferedEvents.length;
+        },
+        (requestId) => {
+          turn.nativeRequestId = requestId;
+        },
+      );
       if (this.closed || turn.terminal) return;
       turn.nativeRequestId = acknowledgement.requestId;
       this.publishPromptResult(turn, { type: "turn", turnId: turn.turnId });
@@ -3109,6 +3116,13 @@ export class OmpProviderSession {
       }
       return;
     }
+    if (
+      event.type === "agent_end" &&
+      event.requestId !== undefined &&
+      event.requestId !== turn.nativeRequestId
+    ) {
+      return;
+    }
     if (turn.starting) {
       if (
         turn.bufferedEvents.length >= MAX_BUFFERED_TURN_EVENTS ||
@@ -3137,6 +3151,13 @@ export class OmpProviderSession {
       turn.terminal ||
       (turn.terminalizing && turn.terminalization !== undefined) ||
       this.activeTurn !== turn
+    ) {
+      return;
+    }
+    if (
+      event.type === "agent_end" &&
+      event.requestId !== undefined &&
+      event.requestId !== turn.nativeRequestId
     ) {
       return;
     }
@@ -3251,7 +3272,15 @@ export class OmpProviderSession {
       turn.awaitingPermissionEvidence = false;
     }
     if (event.type === "agent_end") {
-      if (event.isTerminal === false) return;
+      if (event.isTerminal === false) {
+        turn.completedMessageCount = 0;
+        turn.streamedMessageEntryIds.length = 0;
+        turn.streamedMessageIdentityComplete = true;
+        turn.lastCompletedAssistantOutcome = undefined;
+        turn.lastCompletedAssistantEntryId = undefined;
+        return;
+      }
+      if (event.requestId !== undefined) this.markTerminalOwnershipEvidence(turn);
       if (
         !turn.interrupted &&
         turn.terminalOwnershipRequired &&

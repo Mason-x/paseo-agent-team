@@ -223,6 +223,20 @@ describe("OMP RPC transport", () => {
       agentInvoked: false,
     });
 
+    const correlatedEnd = nextEvent((listener) => session.onEvent(listener));
+    child.write({
+      type: "agent_end",
+      requestId: "prompt-2",
+      messages: [],
+      isTerminal: true,
+    });
+    await expect(correlatedEnd).resolves.toEqual({
+      type: "agent_end",
+      requestId: "prompt-2",
+      messages: [],
+      isTerminal: true,
+    });
+
     await session.steer("focus");
     await session.followUp("verify");
     await session.setAutoCompaction(false);
