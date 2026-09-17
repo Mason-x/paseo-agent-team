@@ -115,7 +115,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-    uses: ./.github/workflows/publish-paseo-omp.yml
+    uses: $/.github/workflows/publish-paseo-omp.yml
     with:
       tag: ${{ needs.metadata.outputs.paseo-omp-tag }}
       sha: ${{ needs.metadata.outputs.paseo-omp-sha }}
