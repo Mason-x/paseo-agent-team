@@ -1,5 +1,10 @@
 import type { PaseoAgentListResult, PaseoApi } from "@getpaseo/client";
-import type { PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
+import { settingsRpc } from "@getpaseo/plugin";
+import type {
+  PluginButtonRegistration,
+  PluginClientContext,
+  PluginSurfaceProps,
+} from "@getpaseo/plugin/client";
 import { OmpIcon } from "./client/hub-icon";
 import { HubPopover } from "./client/hub-popover";
 import { summarizeHubProcesses } from "./client/hub-status";
@@ -24,6 +29,11 @@ import {
   quotaSummaryForProvider,
 } from "./client/quota-state";
 import { SessionsPopover } from "./client/sessions-popover";
+import {
+  type ComposerPillSettings,
+  composerPillSettings,
+  composerPillSettingsSchema,
+} from "./shared/composer-pill-settings";
 import { listHubProcesses } from "./shared/hub";
 import { OMP_MCP_AUTH_TIMELINE_KIND, ompMcpAuthorizationTimelineSchema } from "./shared/mcp";
 import { type OmpStore, storeForProvider } from "./shared/omp-store";
@@ -35,6 +45,8 @@ const MAX_PAGES = 10;
 const STATUS_POLL_MS = 4_000;
 const QUOTA_POLL_MS = 30_000;
 const RECONCILE_DEBOUNCE_MS = 250;
+const SETTINGS_POLL_MS = 15_000;
+const composerPillSettingsRpc = settingsRpc(composerPillSettings.id);
 
 type AgentEntry = PaseoAgentListResult["entries"][number];
 
@@ -45,12 +57,33 @@ type PillEntry = {
   workspaceId: string;
   quotaProvider: string | null;
   quotaSeverity: QuotaSeverity;
-  hub: PluginButtonRegistration;
-  memory: PluginButtonRegistration;
-  sessions: PluginButtonRegistration;
-  quota: PluginButtonRegistration;
+  hub?: PluginButtonRegistration;
+  memory?: PluginButtonRegistration;
+  sessions?: PluginButtonRegistration;
+  quota?: PluginButtonRegistration;
   mcp?: PluginButtonRegistration;
 };
+
+function samePillSettings(
+  left: ComposerPillSettings | undefined,
+  right: ComposerPillSettings,
+): boolean {
+  return (
+    left?.mcp === right.mcp &&
+    left.hub === right.hub &&
+    left.memory === right.memory &&
+    left.sessions === right.sessions &&
+    left.quota === right.quota
+  );
+}
+
+function removePills(entry: PillEntry): void {
+  entry.hub?.remove();
+  entry.memory?.remove();
+  entry.sessions?.remove();
+  entry.quota?.remove();
+  entry.mcp?.remove();
+}
 
 async function loadAgents(paseo: PaseoApi): Promise<AgentEntry[]> {
   const entries: AgentEntry[] = [];
@@ -68,6 +101,28 @@ async function loadAgents(paseo: PaseoApi): Promise<AgentEntry[]> {
 }
 
 export default function contribute(client: PluginClientContext) {
+  const pills = new Map<string, PillEntry>();
+  let preferences: ComposerPillSettings | undefined;
+  let disposed = false;
+  let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconcileRunning = false;
+  let reconcileQueued = false;
+  let hubRefreshRunning = false;
+  let quotaRefreshRunning = false;
+  let settingsReadRunning = false;
+  let settingsGeneration = 0;
+
+  function applyComposerPillSettings(next: ComposerPillSettings): void {
+    if (samePillSettings(preferences, next)) return;
+    preferences = next;
+    settingsGeneration += 1;
+    scheduleReconcile();
+  }
+
+  function ConfigSurface(props: PluginSurfaceProps) {
+    return <OmpConfigSurface {...props} onComposerPillSettingsChange={applyComposerPillSettings} />;
+  }
+
   const removeMemoryPanel = client.addWorkspacePanel({
     id: "memory",
     title: "OMP Memory",
@@ -104,7 +159,7 @@ export default function contribute(client: PluginClientContext) {
       openPanel("workspace", { location: "workspace" });
     },
   });
-  const removeConfigSurface = client.addSurface("config", OmpConfigSurface);
+  const removeConfigSurface = client.addSurface("config", ConfigSurface);
   const removeConfigSidebarItem = client.addSidebarItem({
     id: "config",
     title: "OMP",
@@ -115,7 +170,7 @@ export default function contribute(client: PluginClientContext) {
     id: "open-config",
     title: "Open OMP",
     icon: "Settings",
-    keywords: ["omp", "config", "settings", "models", "providers"],
+    keywords: ["omp", "config", "settings", "models", "providers", "composer", "pills"],
     context: "global",
     onSelect({ openSurface }) {
       openSurface("config");
@@ -140,170 +195,257 @@ export default function contribute(client: PluginClientContext) {
       return transformOmpImageToolItem(item);
     },
   });
-  const pills = new Map<string, PillEntry>();
   const loadStoreQuotas = createStoreQuotaLoader(
     (input) => client.rpc(listOmpQuotas, input),
     QUOTA_POLL_MS,
   );
-  let disposed = false;
-  let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
 
-  async function reconcile() {
+  function syncAgentPills(entry: PillEntry, agent: AgentEntry["agent"]): void {
+    const settings = preferences;
+    if (!settings) return;
+
+    if (settings.mcp && isOmpPluginProvider(agent.provider)) {
+      entry.mcp ??= client.addComposerPill({
+        id: "mcp",
+        workspaceId: entry.workspaceId,
+        agentId: agent.id,
+        button: {
+          title: "Manage OMP MCP servers",
+          icon: "Plug",
+          label: "MCP",
+          behavior: { kind: "popover", Content: McpPopover },
+        },
+      });
+    } else {
+      entry.mcp?.remove();
+      entry.mcp = undefined;
+    }
+
+    if (settings.hub) {
+      entry.hub ??= client.addComposerPill({
+        id: "hub",
+        workspaceId: entry.workspaceId,
+        agentId: agent.id,
+        button: {
+          title: "Hub processes",
+          icon: OmpIcon,
+          label: "Hub",
+          visible: false,
+          behavior: { kind: "popover", Content: HubPopover },
+        },
+      });
+    } else {
+      entry.hub?.remove();
+      entry.hub = undefined;
+    }
+
+    if (settings.memory) {
+      entry.memory ??= client.addComposerPill({
+        id: "memory",
+        workspaceId: entry.workspaceId,
+        agentId: agent.id,
+        button: {
+          title: "OMP workspace memory",
+          icon: "Brain",
+          label: "Memory",
+          behavior: { kind: "popover", Content: MemoryPopover },
+        },
+      });
+    } else {
+      entry.memory?.remove();
+      entry.memory = undefined;
+    }
+
+    if (settings.sessions) {
+      entry.sessions ??= client.addComposerPill({
+        id: "sessions",
+        workspaceId: entry.workspaceId,
+        agentId: agent.id,
+        button: {
+          title: "OMP session history",
+          icon: "History",
+          label: "Sessions",
+          behavior: { kind: "popover", Content: SessionsPopover },
+        },
+      });
+    } else {
+      entry.sessions?.remove();
+      entry.sessions = undefined;
+    }
+
+    if (settings.quota) {
+      entry.quota ??= client.addComposerPill({
+        id: "quota",
+        workspaceId: entry.workspaceId,
+        agentId: agent.id,
+        button: {
+          title: "OMP provider quotas",
+          icon: quotaProviderIcon(entry.quotaProvider, "unknown"),
+          label: "Quota",
+          visible: false,
+          behavior: { kind: "popover", Content: QuotaPopover },
+        },
+      });
+    } else {
+      entry.quota?.remove();
+      entry.quota = undefined;
+      entry.quotaSeverity = "unknown";
+    }
+  }
+
+  async function reconcileOnce(): Promise<void> {
+    if (!preferences) return;
     const agents = await loadAgents(client.paseo);
-    if (disposed) return;
+    if (disposed || !preferences) return;
     const activeIds = new Set<string>();
     for (const { agent } of agents) {
       if (agent.archivedAt || !agent.workspaceId || !agent.cwd) continue;
       activeIds.add(agent.id);
       const quotaProvider = quotaProviderFromSession(agent.provider, agent.model);
-      const current = pills.get(agent.id);
+      const store = storeForProvider(agent.provider);
+      let entry = pills.get(agent.id);
       if (
-        current?.cwd === agent.cwd &&
-        current.provider === agent.provider &&
-        current.workspaceId === agent.workspaceId &&
-        current.quotaProvider === quotaProvider
+        !entry ||
+        entry.cwd !== agent.cwd ||
+        entry.provider !== agent.provider ||
+        entry.workspaceId !== agent.workspaceId ||
+        entry.quotaProvider !== quotaProvider ||
+        ompStoreKey(entry.store) !== ompStoreKey(store)
       ) {
-        continue;
+        if (entry) removePills(entry);
+        entry = {
+          store,
+          cwd: agent.cwd,
+          provider: agent.provider,
+          workspaceId: agent.workspaceId,
+          quotaProvider,
+          quotaSeverity: "unknown",
+        };
+        pills.set(agent.id, entry);
       }
-      current?.hub.remove();
-      current?.memory.remove();
-      current?.sessions.remove();
-      current?.quota.remove();
-      current?.mcp?.remove();
-      pills.set(agent.id, {
-        store: storeForProvider(agent.provider),
-        cwd: agent.cwd,
-        provider: agent.provider,
-        mcp: isOmpPluginProvider(agent.provider)
-          ? client.addComposerPill({
-              id: "mcp",
-              workspaceId: agent.workspaceId,
-              agentId: agent.id,
-              button: {
-                title: "Manage OMP MCP servers",
-                icon: "Plug",
-                label: "MCP",
-                behavior: { kind: "popover", Content: McpPopover },
-              },
-            })
-          : undefined,
-        workspaceId: agent.workspaceId,
-        quotaProvider,
-        quotaSeverity: "unknown",
-        hub: client.addComposerPill({
-          id: "hub",
-          workspaceId: agent.workspaceId,
-          agentId: agent.id,
-          button: {
-            title: "Hub processes",
-            icon: OmpIcon,
-            label: "Hub",
-            visible: false,
-            behavior: { kind: "popover", Content: HubPopover },
-          },
-        }),
-        memory: client.addComposerPill({
-          id: "memory",
-          workspaceId: agent.workspaceId,
-          agentId: agent.id,
-          button: {
-            title: "OMP workspace memory",
-            icon: "Brain",
-            label: "Memory",
-            behavior: { kind: "popover", Content: MemoryPopover },
-          },
-        }),
-        sessions: client.addComposerPill({
-          id: "sessions",
-          workspaceId: agent.workspaceId,
-          agentId: agent.id,
-          button: {
-            title: "omp session history",
-            icon: "History",
-            label: "Sessions",
-            behavior: { kind: "popover", Content: SessionsPopover },
-          },
-        }),
-        quota: client.addComposerPill({
-          id: "quota",
-          workspaceId: agent.workspaceId,
-          agentId: agent.id,
-          button: {
-            title: "OMP provider quotas",
-            icon: quotaProviderIcon(quotaProvider, "unknown"),
-            label: "Quota",
-            visible: false,
-            behavior: { kind: "popover", Content: QuotaPopover },
-          },
-        }),
-      });
+      syncAgentPills(entry, agent);
     }
-    for (const [agentId, pill] of pills) {
+    for (const [agentId, entry] of pills) {
       if (activeIds.has(agentId)) continue;
-      pill.hub.remove();
-      pill.memory.remove();
-      pill.sessions.remove();
-      pill.quota.remove();
-      pill.mcp?.remove();
+      removePills(entry);
       pills.delete(agentId);
     }
     await Promise.all([refreshHubStatus(), refreshQuotaStatus()]);
   }
 
-  async function refreshHubStatus() {
-    const pillsByCwd = new Map<string, PillEntry[]>();
-    for (const pill of pills.values()) {
-      const group = pillsByCwd.get(pill.cwd);
-      if (group) group.push(pill);
-      else pillsByCwd.set(pill.cwd, [pill]);
+  async function reconcile(): Promise<void> {
+    if (reconcileRunning) {
+      reconcileQueued = true;
+      return;
     }
-    await Promise.all(
-      [...pillsByCwd].map(async ([cwd, cwdPills]) => {
-        try {
-          const result = await client.rpc(listHubProcesses, { cwd });
-          if (disposed) return;
-          const summary = summarizeHubProcesses(result.processes);
-          for (const pill of cwdPills) pill.hub.update(summary);
-        } catch {
-          // Keep the last known state. A disconnected host or missing omp directory should not
-          // remove a status the user was already inspecting.
-        }
-      }),
-    );
+    reconcileRunning = true;
+    try {
+      do {
+        reconcileQueued = false;
+        await reconcileOnce();
+      } while (reconcileQueued && !disposed);
+    } finally {
+      reconcileRunning = false;
+    }
   }
 
-  async function refreshQuotaStatus() {
-    const groups = new Map<string, PillEntry[]>();
-    for (const pill of pills.values()) {
-      if (!isOmpProvider(pill.provider)) continue;
-      const key = ompStoreKey(pill.store);
-      const group = groups.get(key);
-      if (group) group.push(pill);
-      else groups.set(key, [pill]);
+  async function refreshHubStatus(): Promise<void> {
+    if (hubRefreshRunning || !preferences?.hub) return;
+    const pillsByCwd = new Map<
+      string,
+      Array<{ agentId: string; entry: PillEntry; handle: PluginButtonRegistration }>
+    >();
+    for (const [agentId, entry] of pills) {
+      if (!entry.hub) continue;
+      const target = { agentId, entry, handle: entry.hub };
+      const group = pillsByCwd.get(entry.cwd);
+      if (group) group.push(target);
+      else pillsByCwd.set(entry.cwd, [target]);
     }
-    await Promise.all(
-      [...groups.values()].map(async (storePills) => {
-        try {
-          const result = await loadStoreQuotas(storePills[0].store);
-          if (disposed) return;
-          for (const pill of storePills) {
-            const severity = quotaSeverityForProvider(result.quotas, pill.quotaProvider, true);
-            pill.quota.update({
-              ...quotaSummaryForProvider(result.quotas, pill.quotaProvider, true),
-              ...(severity === pill.quotaSeverity
-                ? {}
-                : { icon: quotaProviderIcon(pill.quotaProvider, severity) }),
-            });
-            pill.quotaSeverity = severity;
+    if (pillsByCwd.size === 0) return;
+    hubRefreshRunning = true;
+    try {
+      await Promise.all(
+        [...pillsByCwd].map(async ([cwd, targets]) => {
+          try {
+            const result = await client.rpc(listHubProcesses, { cwd });
+            if (disposed || !preferences?.hub) return;
+            const summary = summarizeHubProcesses(result.processes);
+            for (const { agentId, entry, handle } of targets) {
+              const current = pills.get(agentId);
+              if (current === entry && current.hub === handle) handle.update(summary);
+            }
+          } catch {
+            // Preserve the last known state through temporary host and workspace failures.
           }
-        } catch {
-          // Retain only this store's last result. Failure never falls back to another profile.
-        }
-      }),
-    );
+        }),
+      );
+    } finally {
+      hubRefreshRunning = false;
+    }
   }
 
-  function scheduleReconcile() {
+  async function refreshQuotaStatus(): Promise<void> {
+    if (quotaRefreshRunning || !preferences?.quota) return;
+    const groups = new Map<
+      string,
+      Array<{ agentId: string; entry: PillEntry; handle: PluginButtonRegistration }>
+    >();
+    for (const [agentId, entry] of pills) {
+      if (!entry.quota || !isOmpProvider(entry.provider)) continue;
+      const target = { agentId, entry, handle: entry.quota };
+      const key = ompStoreKey(entry.store);
+      const group = groups.get(key);
+      if (group) group.push(target);
+      else groups.set(key, [target]);
+    }
+    if (groups.size === 0) return;
+    quotaRefreshRunning = true;
+    try {
+      await Promise.all(
+        [...groups.values()].map(async (targets) => {
+          try {
+            const result = await loadStoreQuotas(targets[0].entry.store);
+            if (disposed || !preferences?.quota) return;
+            for (const { agentId, entry, handle } of targets) {
+              const current = pills.get(agentId);
+              if (current !== entry || current.quota !== handle) continue;
+              const severity = quotaSeverityForProvider(result.quotas, entry.quotaProvider, true);
+              handle.update({
+                ...quotaSummaryForProvider(result.quotas, entry.quotaProvider, true),
+                ...(severity === entry.quotaSeverity
+                  ? {}
+                  : { icon: quotaProviderIcon(entry.quotaProvider, severity) }),
+              });
+              entry.quotaSeverity = severity;
+            }
+          } catch {
+            // Retain only this store's last result. Failure never falls back to another profile.
+          }
+        }),
+      );
+    } finally {
+      quotaRefreshRunning = false;
+    }
+  }
+
+  async function refreshComposerPillSettings(): Promise<void> {
+    if (settingsReadRunning || disposed) return;
+    settingsReadRunning = true;
+    const generation = settingsGeneration;
+    try {
+      const result = await client.rpc(composerPillSettingsRpc.read, {});
+      if (disposed || generation !== settingsGeneration || result.status !== "ready") return;
+      const parsed = composerPillSettingsSchema.safeParse(result.values);
+      if (parsed.success) applyComposerPillSettings(parsed.data);
+    } catch {
+      // Keep the last known preferences. The sidebar exposes read and validation failures.
+    } finally {
+      settingsReadRunning = false;
+    }
+  }
+
+  function scheduleReconcile(): void {
     clearTimeout(reconcileTimer);
     reconcileTimer = setTimeout(() => {
       void reconcile().catch(() => {});
@@ -312,26 +454,25 @@ export default function contribute(client: PluginClientContext) {
 
   const unsubscribeAgents = client.paseo.agents.subscribe(scheduleReconcile);
   const hubPoll = setInterval(() => {
-    void refreshHubStatus().catch(() => {});
+    void refreshHubStatus();
   }, STATUS_POLL_MS);
   const quotaPoll = setInterval(() => {
-    void refreshQuotaStatus().catch(() => {});
+    void refreshQuotaStatus();
   }, QUOTA_POLL_MS);
-  void reconcile().catch(() => {});
+  const settingsPoll = setInterval(() => {
+    void refreshComposerPillSettings();
+  }, SETTINGS_POLL_MS);
+  void refreshComposerPillSettings();
 
   return () => {
     disposed = true;
+    settingsGeneration += 1;
     unsubscribeAgents();
     clearTimeout(reconcileTimer);
     clearInterval(hubPoll);
     clearInterval(quotaPoll);
-    for (const pill of pills.values()) {
-      pill.hub.remove();
-      pill.memory.remove();
-      pill.sessions.remove();
-      pill.quota.remove();
-      pill.mcp?.remove();
-    }
+    clearInterval(settingsPoll);
+    for (const entry of pills.values()) removePills(entry);
     pills.clear();
     removeImageRenderer();
     removeMcpAuthorizationRenderer();

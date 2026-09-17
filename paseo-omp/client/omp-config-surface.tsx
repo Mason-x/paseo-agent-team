@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
 import type { TextStyle, ViewStyle } from "react-native";
 import { Linking, Pressable, ScrollView, Switch, Text, View } from "react-native";
+import type { ComposerPillSettings } from "../shared/composer-pill-settings";
 import { listOmpConfig, type OmpConfig } from "../shared/omp-config";
 import {
   categorizeOmpSetting,
@@ -24,6 +25,7 @@ import {
 } from "../shared/omp-settings";
 import { type OmpStore, storeLabel } from "../shared/omp-store";
 import { getOmpProviderHealth, type OmpProviderHealth } from "../shared/provider-diagnostics";
+import { ComposerPillSettingsSection } from "./composer-pill-settings";
 import {
   documentationForSettingCategory,
   documentationForSettingPath,
@@ -733,11 +735,12 @@ function fallbackSettingsFromConfig(config: OmpConfig | null | undefined): OmpSe
   return settings;
 }
 
-type SurfaceView = "overview" | "plugin" | "plugins" | "configuration" | "diagnostics";
+type SurfaceView = "overview" | "plugin" | "plugins" | "composer" | "configuration" | "diagnostics";
 const SURFACE_VIEWS: readonly { id: SurfaceView; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "plugin", label: "Plugin" },
   { id: "plugins", label: "OMP plugins" },
+  { id: "composer", label: "Composer" },
   { id: "configuration", label: "Configuration" },
   { id: "diagnostics", label: "Diagnostics" },
 ];
@@ -973,15 +976,17 @@ function ConfigurationCategory({
 function SurfaceTabs({
   styles,
   selected,
+  views,
   onSelect,
 }: {
   styles: OmpConfigStyles;
   selected: SurfaceView;
+  views: readonly { id: SurfaceView; label: string }[];
   onSelect: (view: SurfaceView) => void;
 }) {
   return (
     <View accessibilityRole="tablist" style={styles.topTabs}>
-      {SURFACE_VIEWS.map((view) => {
+      {views.map((view) => {
         const active = selected === view.id;
         return (
           <Pressable
@@ -1006,10 +1011,12 @@ function OmpConfigContent({
   cwd,
   store,
   onStoreChange,
+  onComposerPillSettingsChange,
 }: PluginSurfaceProps & {
   cwd?: string;
   store?: OmpStore;
   onStoreChange(store: OmpStore | undefined): void;
+  onComposerPillSettingsChange?: (settings: ComposerPillSettings) => void;
 }) {
   const loadConfig = useRpc(listOmpConfig);
   const loadSettings = useRpc(listOmpSettings);
@@ -1035,6 +1042,9 @@ function OmpConfigContent({
   const [documentationError, setDocumentationError] = useState<string | null>(null);
   const styles = useConfigStyles(theme, layout.compact);
   const normalizedSearch = search.trim().toLocaleLowerCase();
+  const surfaceViews = cwd
+    ? SURFACE_VIEWS.filter((candidate) => candidate.id !== "composer")
+    : SURFACE_VIEWS;
   const catalog = useMemo(() => {
     const sourceSettings = settingsQuery.data?.available
       ? settingsQuery.data.settings
@@ -1125,16 +1135,20 @@ function OmpConfigContent({
           Project-scoped view · {cwd}
         </Text>
       ) : null}
-      <OmpStorePicker
-        theme={theme}
-        store={store}
-        onChange={onStoreChange}
-        disabled={pendingMutations > 0}
-      />
-      <Text style={styles.muted}>
-        Switching stores clears unapplied edits and pending confirmations.
-      </Text>
-      <SurfaceTabs styles={styles} selected={view} onSelect={setView} />
+      {view !== "composer" ? (
+        <>
+          <OmpStorePicker
+            theme={theme}
+            store={store}
+            onChange={onStoreChange}
+            disabled={pendingMutations > 0}
+          />
+          <Text style={styles.muted}>
+            Switching stores clears unapplied edits and pending confirmations.
+          </Text>
+        </>
+      ) : null}
+      <SurfaceTabs styles={styles} selected={view} views={surfaceViews} onSelect={setView} />
 
       {view === "overview" ? (
         <>
@@ -1188,6 +1202,9 @@ function OmpConfigContent({
 
       {view === "plugins" ? (
         <OmpPluginManagerSection theme={theme} compact={layout.compact} cwd={cwd} store={store} />
+      ) : null}
+      {view === "composer" && !cwd && onComposerPillSettingsChange ? (
+        <ComposerPillSettingsSection theme={theme} onChange={onComposerPillSettingsChange} />
       ) : null}
 
       {view === "diagnostics" ? (
@@ -1368,7 +1385,12 @@ function OmpConfigContent({
   );
 }
 
-function OmpStoreContent(props: PluginSurfaceProps & { cwd?: string }) {
+function OmpStoreContent(
+  props: PluginSurfaceProps & {
+    cwd?: string;
+    onComposerPillSettingsChange?: (settings: ComposerPillSettings) => void;
+  },
+) {
   const [store, setStore] = useState<OmpStore>();
   // Remount every editor when its target changes: drafts, confirmations, and mutation notices
   // belong to one store/workspace and must never be applied to the next selection.
@@ -1382,7 +1404,11 @@ function OmpStoreContent(props: PluginSurfaceProps & { cwd?: string }) {
   );
 }
 
-export function OmpConfigSurface(props: PluginSurfaceProps) {
+export function OmpConfigSurface(
+  props: PluginSurfaceProps & {
+    onComposerPillSettingsChange: (settings: ComposerPillSettings) => void;
+  },
+) {
   return <OmpStoreContent {...props} />;
 }
 

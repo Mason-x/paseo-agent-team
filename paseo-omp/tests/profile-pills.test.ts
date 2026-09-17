@@ -39,6 +39,13 @@ test("profile aliases receive MCP controls and only their own cached quota resul
     remove: ReturnType<typeof vi.fn>;
   }> = [];
   const rpc = vi.fn(async (definition, input) => {
+    if (definition.name === "settings.composer-pills.read") {
+      return {
+        status: "ready",
+        revision: "revision-1",
+        values: { mcp: true, hub: true, memory: true, sessions: true, quota: true },
+      };
+    }
     if (definition !== listOmpQuotas) return { processes: [] };
     const profile = input.store?.profile;
     const fraction = profile === "team-alpha" ? 0.9 : profile === "team-beta" ? 0.2 : 0.5;
@@ -87,7 +94,7 @@ test("profile aliases receive MCP controls and only their own cached quota resul
   } as unknown as PluginClientContext;
   const dispose = contribute(client);
   try {
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(300);
     expect(buttons.filter((button) => button.id === "mcp").map((button) => button.agentId)).toEqual(
       ["alpha", "team-beta"],
     );

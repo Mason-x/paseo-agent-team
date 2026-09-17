@@ -24,6 +24,7 @@ import { createOmpProvider } from "./server/provider/registration";
 import { resolveGetOmpProviderHealth } from "./server/provider-diagnostics";
 import { resolveListOmpQuotas } from "./server/quota";
 import { resolveListOmpSessions } from "./server/sessions";
+import { composerPillSettings } from "./shared/composer-pill-settings";
 import { listHubProcesses, tailHubLog } from "./shared/hub";
 import { openOmpMcpAuthorizationInPaseoBrowser } from "./shared/mcp";
 import { listOmpMemory } from "./shared/memory";
@@ -45,6 +46,7 @@ function scoped<T extends { store?: OmpStore }, R>(handler: (input: T) => R) {
 }
 
 export default function contribute(server: PluginServerContext) {
+  server.registerSettings(composerPillSettings);
   const browserAuthorizationRegistry = new OmpBrowserAuthorizationRegistry();
   const profiles = discoverOmpProfilesSync();
   server.handle(listOmpStores, async () => ({ profiles: await discoverOmpProfiles() }));

@@ -20,6 +20,7 @@ const nodeRequire = createRequire(join(pluginRoot, "index.server.ts"));
 const executeFile = promisify(execFile);
 const sdkStub = {
   defineRpc: (definition: unknown) => definition,
+  defineSettings: (definition: unknown) => definition,
   negotiateProviderCapabilities,
   requireProviderCapabilities,
 };
@@ -94,6 +95,7 @@ describe("plugin server bundle", () => {
       if (typeof module.default !== "function") throw new Error("Missing server contribution");
       const providers: ProviderRegistration[] = [];
       const handlers: unknown[] = [];
+      const settings: unknown[] = [];
       const beforeHooks: unknown[] = [];
       const cleanup = module.default({
         before: (...args: unknown[]) => {
@@ -101,9 +103,13 @@ describe("plugin server bundle", () => {
           return () => {};
         },
         handle: (...args: unknown[]) => handlers.push(args),
+        registerSettings: (definition: unknown) => settings.push(definition),
         registerProvider: (provider: ProviderRegistration) => providers.push(provider),
       });
       expect(handlers).toHaveLength(15);
+      expect(settings).toEqual([
+        expect.objectContaining({ id: "composer-pills", scope: "host", version: 1 }),
+      ]);
       expect(beforeHooks).toHaveLength(1);
       const [hookName, hook] = beforeHooks[0] as [
         string,

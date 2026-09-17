@@ -13,7 +13,7 @@ paseo plugin add omercnet/paseo-plugins:paseo-omp --ref paseo-omp-v<version>
 paseo plugin ls paseo-omp
 ```
 
-Open the **OMP** sidebar to review the provider-profile contract, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and inspect storage and process diagnostics. Then create an agent and select **OMP Plugin**. Its **MCP** composer control runs OMP-native management commands in the current session; setup questions and authorization stay in that chat timeline, where OAuth can open in a workspace-scoped Paseo Browser or on the current device. Normal use requires no plugin-specific settings.
+Open the **OMP** sidebar to review the provider-profile contract, choose which composer pills appear, browse and edit native scalar settings, manage OMP-native plugins, verify runtime health, and inspect storage and process diagnostics. Then create an agent and select **OMP Plugin**. Its optional **MCP** composer control runs OMP-native management commands in the current session; setup questions and authorization stay in that chat timeline, where OAuth can open in a workspace-scoped Paseo Browser or on the current device. Composer pill preferences are shared by clients connected to the same host; normal use requires no other plugin-specific settings.
 
 - [Install, update, rollback, and local development](docs/installation.md)
 - [Configuration and every provider option](docs/configuration.md)
