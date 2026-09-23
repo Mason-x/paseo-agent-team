@@ -2,9 +2,9 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "separate-pull-requests": true,
   "packages": {
-    "agent-crew": {
+    "paseo-agent-team": {
       "release-type": "node",
-      "package-name": "agent-crew",
+      "package-name": "paseo-agent-team",
       "include-component-in-tag": true
     },
     "tell-agent": {

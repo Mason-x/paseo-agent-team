@@ -1,0 +1,65 @@
+{
+  "name": "@mason-x/paseo-agent-team",
+  "version": "0.2.3",
+  "type": "module",
+  "description": "Define reusable Roles, compose Teams, and launch cross-harness agent crews in Paseo.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "author": "Omer Cohen",
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "paseo-agent-team",
+    "agent-crew",
+    "coding-agents",
+    "orchestration"
+  ],
+  "files": [
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "UPSTREAM.md",
+    "client",
+    "docs",
+    "index.client.tsx",
+    "index.server.ts",
+    "paseo-plugin.json",
+    "package.json",
+    "shared",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "check": "biome check .",
+    "check:write": "biome check --write .",
+    "test": "vitest run",
+    "package:release": "node scripts/package-release.ts",
+    "test:coverage": "vitest run --coverage --coverage.reporter=text --coverage.reporter=lcov --coverage.thresholds.lines=90 --coverage.thresholds.functions=85",
+    "import:ruflo": "node scripts/import-ruflo-agents.mjs",
+    "typecheck": "tsc --noEmit",
+    "typecheck:next": "npm i --no-save @getpaseo/plugin@next @getpaseo/client@next @getpaseo/protocol@next && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.10",
+    "@getpaseo/cli": "0.8.0",
+    "@getpaseo/client": "0.8.0",
+    "@getpaseo/plugin": "0.8.0",
+    "@getpaseo/protocol": "0.8.0",
+    "@tanstack/react-query": "^5.102.3",
+    "@types/node": "^24.5.2",
+    "@types/react": "~19.2.0",
+    "fflate": "^0.8.3",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^7.0.0",
+    "@vitest/coverage-v8": "^5.0.0",
+    "vitest": "^5.0.0",
+    "zod": "^4.4.3"
+  }
+}

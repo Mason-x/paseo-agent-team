@@ -1,0 +1,57 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!!node_modules",
+      "!!coverage",
+      "!!paseo-plugin.d.ts",
+      "!!.paseo-dev",
+      "!!.tmp-ruflo-agents",
+      "!!shared/templates/ruflo-catalog.ts"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "@getpaseo/protocol": "Use the public plugin SDK instead of @getpaseo/protocol.",
+              "@getpaseo/server": "Use @getpaseo/plugin/server instead of @getpaseo/server.",
+              "@getpaseo/client": "Only client/paseo/adapter.ts may import @getpaseo/client types.",
+              "@getpaseo/client/internal": "Do not import @getpaseo/client/internal."
+            }
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["client/paseo/adapter.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": "off"
+          }
+        }
+      }
+    }
+  ],
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}
