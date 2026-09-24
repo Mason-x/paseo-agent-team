@@ -1,4 +1,3 @@
 /.github/workflows/release-please.yml @Mason-x
 /release-please-config.json @Mason-x
 /.release-please-manifest.json @Mason-x
-/SECURITY.md @Mason-x
