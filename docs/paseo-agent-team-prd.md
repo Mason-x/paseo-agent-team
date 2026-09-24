@@ -7,7 +7,7 @@
 | 文档状态 | 待实施 |
 | 目标平台 | Paseo **0.8.0**（详见配套开发 Spec 的版本基线） |
 | 配套文档 | `docs/paseo-agent-team-dev-spec.md` |
-| 代码基础 | 本仓库 `agent-crew/`（MIT，omercnet/paseo-plugins） |
+| 代码基础 | 本仓库 `paseo-agent-team/`（MIT，导入自 omercnet/paseo-plugins 的 `agent-crew/`） |
 
 ---
 

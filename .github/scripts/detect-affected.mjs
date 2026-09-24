@@ -3,10 +3,6 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const specializedPlugins = new Map([
-  ["paseo-omp", "omp"],
-  ["paseo-shared-browser", "shared-browser"],
-]);
 const ciPaths = [".github/workflows/ci.yml", ".github/scripts/"];
 const workflowPaths = [".github/workflows/", ".github/actions/"];
 
@@ -30,22 +26,19 @@ export function discoverPlugins(root = process.cwd()) {
       const testUnit = typeof scripts["test:unit"] === "string";
       const descriptor = {
         plugin,
-        kind: specializedPlugins.get(plugin) ?? "npm",
         check: typeof scripts.check === "string",
         lint: typeof scripts.lint === "string",
         format_check: typeof scripts["format:check"] === "string",
         typecheck: typeof scripts.typecheck === "string",
         coverage,
         test_unit: !coverage && testUnit,
-        test:
-          !coverage && !testUnit && typeof scripts.test === "string",
+        test: !coverage && !testUnit && typeof scripts.test === "string",
         verify_package: typeof scripts["verify:package"] === "string",
       };
 
       if (
-        descriptor.kind === "npm" &&
-        (!descriptor.typecheck ||
-          !(descriptor.coverage || descriptor.test_unit || descriptor.test))
+        !descriptor.typecheck ||
+        !(descriptor.coverage || descriptor.test_unit || descriptor.test)
       ) {
         throw new Error(
           `${plugin} must define typecheck and a test, test:unit, or test:coverage script`,
@@ -67,19 +60,13 @@ export function detectAffected(files, plugins = discoverPlugins()) {
     workflowPaths.some((workflowPath) => file.startsWith(workflowPath)),
   );
   const changedPlugins = new Set(files.map((file) => file.split("/", 1)[0]));
-  const isAffected = ({ plugin }) => runAll || changedPlugins.has(plugin);
-  const affectedPlugins = plugins.filter(isAffected);
-  const npmPlugins = affectedPlugins
-    .filter(({ kind }) => kind === "npm")
-    .map(({ kind: _, ...plugin }) => plugin);
+  const affectedPlugins = plugins.filter(
+    ({ plugin }) => runAll || changedPlugins.has(plugin),
+  );
 
   return {
-    npmMatrix: { include: npmPlugins },
-    npmAffected: npmPlugins.length > 0,
-    ompAffected: affectedPlugins.some(({ kind }) => kind === "omp"),
-    sharedBrowserAffected: affectedPlugins.some(
-      ({ kind }) => kind === "shared-browser",
-    ),
+    npmMatrix: { include: affectedPlugins },
+    npmAffected: affectedPlugins.length > 0,
     workflowAffected,
     affected: affectedPlugins.map(({ plugin }) => plugin),
   };
@@ -108,8 +95,6 @@ function writeOutputs(result, outputPath) {
   const outputs = {
     npm_matrix: JSON.stringify(result.npmMatrix),
     npm_affected: String(result.npmAffected),
-    omp_affected: String(result.ompAffected),
-    shared_browser_affected: String(result.sharedBrowserAffected),
     workflow_affected: String(result.workflowAffected),
   };
 

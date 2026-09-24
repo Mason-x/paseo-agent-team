@@ -6,7 +6,7 @@
 | 需求来源 | `docs/paseo-agent-team-prd.md` |
 | 实施方式 | 交给编码 Agent 按 §14 的 Phase 逐个实施，每个 Phase 独立 PR |
 | 目标 Paseo | **0.8.0**（本机 CLI 版本；npm 上唯一的 0.8 stable） |
-| 代码基础 | 本仓库 `agent-crew/` v0.2.3（MIT） |
+| 代码基础 | 本仓库 `paseo-agent-team/`（自 omercnet/paseo-plugins `agent-crew/` v0.2.3 导入，MIT） |
 
 > 实施 Agent 开始前必须先读：本文 §0、§1、§15；根目录 `AGENTS.md`；新插件目录下的 `AGENTS.md`（Phase 0 创建）。
 
@@ -28,7 +28,7 @@
 ### 1.1 版本
 
 - Paseo 仓库 tag：`v0.8.0-beta.1`、`v0.8.0`、`v0.9.0-beta.1`。**0.8 系列只有 0.8.0 一个 stable。**
-- `agent-crew/package.json` 已把 `@getpaseo/cli|client|plugin|protocol` pin 在 `0.8.0`，React 19.1.0，React Native 0.81.5，TypeScript 7，zod 4，vitest 5。新插件沿用。
+- `paseo-agent-team/package.json` 已把 `@getpaseo/cli|client|plugin|protocol` pin 在 `0.8.0`，React 19.1.0，React Native 0.81.5，TypeScript 7，zod 4，vitest 5。
 - manifest 初始值：`{"id":"paseo-agent-team","requirements":{"paseo":"^0.8.0"}}`。manifest schema 是 `.strict()`，仅允许 `id / description / requirements / build`。
 
 ### 1.2 客户端 SDK（`@getpaseo/plugin/client`，v0.8.0）
@@ -77,7 +77,7 @@ paseo.config.get()                          // { config: MutableDaemonConfig }�
 
 `AgentProfile`（`config.agentProfiles[]`）：`{ id, name, icon?, color?, provider, model?, modeId?, thinkingOptionId?, featureValues?, notes? }`，`id` 稳定。
 
-Agent snapshot 中与本插件相关的字段：`id, title, provider, model, status, workspaceId, cwd, labels, parentAgentId?（首字段）, pendingPermissions, requiresAttention, attentionReason ("finished"|"error"|"permission"), lastError, archivedAt, createdAt, updatedAt`。父子关系底层是 label `paseo.parent-agent-id`；`agent-crew/client/crew.ts` 的 `parentAgentId()` 已兼容两种来源，沿用。
+Agent snapshot 中与本插件相关的字段：`id, title, provider, model, status, workspaceId, cwd, labels, parentAgentId?（首字段）, pendingPermissions, requiresAttention, attentionReason ("finished"|"error"|"permission"), lastError, archivedAt, createdAt, updatedAt`。父子关系底层是 label `paseo.parent-agent-id`；`paseo-agent-team/client/crew.ts` 的 `parentAgentId()` 已兼容两种来源，沿用。
 
 ### 1.4 服务端 SDK（`@getpaseo/plugin/server`，v0.8.0）
 
@@ -102,15 +102,9 @@ Settings 的读写 RPC 由 server 进程在 `registerSettings` 时注册（Paseo
 
 ### 2.1 仓库
 
-当前仓库 `F:\tools\paseo-agent-team` 是 omercnet/paseo-plugins monorepo 的 fork（远端 `Mason-x/paseo-agent-team`）。Phase 0 采用**保留 monorepo 形态**的最小改动方案：
+本仓库只包含 `paseo-agent-team`。它从 omercnet/paseo-plugins 的 `agent-crew/` 导入后改名，远端是 `Mason-x/paseo-agent-team`。其他插件目录已删除；Release Please、CI 和安全策略只覆盖这个插件。来源与导入 commit 见 `paseo-agent-team/UPSTREAM.md`。
 
-1. `git mv agent-crew paseo-agent-team`（保留 rename 历史）。
-2. 在 `paseo-agent-team/` 内改 `paseo-plugin.json` 的 `id`、`package.json` 的 `name`/`description`、README 标题。
-3. 更新 `release-please-config.json`、`.release-please-manifest.json`、`.github/scripts/detect-affected.mjs` 相关条目（把 `agent-crew` 改为 `paseo-agent-team`）。
-4. 其他插件目录暂不删除（避免破坏 CI 与 renovate 配置）；是否清理另开 Issue。
-5. 新增 `paseo-agent-team/UPSTREAM.md`：记录原项目、仓库、许可证、导入 commit（`git log -1 --format=%H -- agent-crew` 在 mv 之前取值）、导入日期、主要修改。
-
-安装命令因此为：`paseo plugin add Mason-x/paseo-agent-team:paseo-agent-team`（Git 源）或本地 `paseo plugin install "$PWD" --host <DEV_HOST>`。
+安装命令：`paseo plugin add Mason-x/paseo-agent-team:paseo-agent-team`（Git 源）或在 `paseo-agent-team/` 内本地 `paseo plugin install "$PWD" --host <DEV_HOST>`。
 
 ### 2.2 目录结构（目标态）
 

@@ -134,4 +134,4 @@ the host.
 See `UPSTREAM.md` for the Agent Crew import commit.
 
 Release Please maintains versions, changelog entries, component tags, and GitHub
-releases from Conventional Commits in the monorepo.
+releases from Conventional Commits.

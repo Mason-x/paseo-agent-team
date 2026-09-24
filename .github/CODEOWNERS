@@ -1,6 +1,4 @@
-/paseo-omp/ @omercnet
-/.github/workflows/release-please.yml @omercnet
-/.github/workflows/publish-paseo-omp.yml @omercnet
-/release-please-config.json @omercnet
-/.release-please-manifest.json @omercnet
-/SECURITY.md @omercnet
+/.github/workflows/release-please.yml @Mason-x
+/release-please-config.json @Mason-x
+/.release-please-manifest.json @Mason-x
+/SECURITY.md @Mason-x

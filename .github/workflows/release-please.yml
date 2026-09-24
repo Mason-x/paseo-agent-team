@@ -11,111 +11,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  metadata:
+  release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
-    outputs:
-      paseo-omp-created: ${{ steps.release.outputs['paseo-omp--release_created'] }}
-      paseo-omp-tag: ${{ steps.release.outputs['paseo-omp--tag_name'] }}
-      paseo-omp-sha: ${{ steps.release.outputs['paseo-omp--sha'] }}
-      paseo-beads-created: ${{ steps.release.outputs['paseo-beads--release_created'] }}
-      paseo-beads-tag: ${{ steps.release.outputs['paseo-beads--tag_name'] }}
-      paseo-gas-city-created: ${{ steps.release.outputs['paseo-gas-city--release_created'] }}
-      paseo-gas-city-tag: ${{ steps.release.outputs['paseo-gas-city--tag_name'] }}
     steps:
       - name: Create or update releases
-        id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-  publish-existing-assets:
-    needs: metadata
-    if: ${{ needs.metadata.outputs.paseo-beads-created == 'true' || needs.metadata.outputs.paseo-gas-city-created == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: 24
-      - name: Install paseo-beads dependencies
-        if: needs.metadata.outputs.paseo-beads-created == 'true'
-        working-directory: paseo-beads
-        run: npm ci --include=dev
-      - name: Verify paseo-beads package
-        if: needs.metadata.outputs.paseo-beads-created == 'true'
-        working-directory: paseo-beads
-        run: npm run verify:package
-      - name: Build paseo-beads release package
-        if: needs.metadata.outputs.paseo-beads-created == 'true'
-        working-directory: paseo-beads
-        run: npm run package:release
-      - name: Upload paseo-beads release asset
-        if: needs.metadata.outputs.paseo-beads-created == 'true'
-        working-directory: paseo-beads
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.metadata.outputs.paseo-beads-tag }}
-        run: gh release upload "$RELEASE_TAG" "dist/$RELEASE_TAG.zip" --clobber
-      - name: Install paseo-gas-city dependencies
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm ci --include=dev
-      - name: Check paseo-gas-city
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm run check
-      - name: Typecheck paseo-gas-city
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm run typecheck
-      - name: Test paseo-gas-city with coverage
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm run test:coverage
-      - name: Verify paseo-gas-city package
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm run verify:package
-      - name: Build paseo-gas-city release package
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        run: npm run package:release
-      - name: Checksum paseo-gas-city release package
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        env:
-          RELEASE_TAG: ${{ needs.metadata.outputs.paseo-gas-city-tag }}
-        run: sha256sum "dist/$RELEASE_TAG.zip" > "dist/$RELEASE_TAG.zip.sha256"
-      - name: Upload paseo-gas-city release asset
-        if: needs.metadata.outputs.paseo-gas-city-created == 'true'
-        working-directory: paseo-gas-city
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.metadata.outputs.paseo-gas-city-tag }}
-        run: gh release upload "$RELEASE_TAG" "dist/$RELEASE_TAG.zip" "dist/$RELEASE_TAG.zip.sha256" --clobber
-
-
-  publish-paseo-omp:
-    needs: metadata
-    if: ${{ needs.metadata.outputs.paseo-omp-created == 'true' }}
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
-    uses: $/.github/workflows/publish-paseo-omp.yml
-    with:
-      tag: ${{ needs.metadata.outputs.paseo-omp-tag }}
-      sha: ${{ needs.metadata.outputs.paseo-omp-sha }}

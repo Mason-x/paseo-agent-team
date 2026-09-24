@@ -6,55 +6,6 @@
       "release-type": "node",
       "package-name": "paseo-agent-team",
       "include-component-in-tag": true
-    },
-    "tell-agent": {
-      "release-type": "node",
-      "package-name": "tell-agent",
-      "include-component-in-tag": true
-    },
-    "agent-monitor": {
-      "release-type": "node",
-      "package-name": "agent-monitor",
-      "include-component-in-tag": true
-    },
-    "fresh-worktrees": {
-      "release-type": "node",
-      "package-name": "fresh-worktrees",
-      "include-component-in-tag": true
-    },
-    "paseo-beads": {
-      "release-type": "node",
-      "package-name": "paseo-beads",
-      "include-component-in-tag": true
-    },
-    "paseo-omp": {
-      "release-type": "node",
-      "package-name": "paseo-omp",
-      "component": "paseo-omp",
-      "initial-version": "0.1.0",
-      "prerelease": true,
-      "prerelease-type": "alpha",
-      "include-component-in-tag": true
-    },
-    "paseo-dracula": {
-      "release-type": "node",
-      "package-name": "paseo-dracula",
-      "include-component-in-tag": true
-    },
-    "paseo-shared-browser": {
-      "release-type": "node",
-      "package-name": "shared-browser",
-      "include-component-in-tag": true
-    },
-    "paseo-gas-city": {
-      "release-type": "node",
-      "package-name": "paseo-gas-city",
-      "include-component-in-tag": true
-    },
-    "pr-radar": {
-      "release-type": "node",
-      "package-name": "pr-radar",
-      "include-component-in-tag": true
     }
   }
 }

@@ -1,11 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Private security report
-    url: https://github.com/omercnet/paseo-plugins/security/advisories/new
+    url: https://github.com/Mason-x/paseo-agent-team/security/advisories/new
     about: Report vulnerabilities privately. Do not include secrets in a public issue.
-  - name: OMP upstream issues
-    url: https://github.com/can1357/oh-my-pi/issues
-    about: Report an isolated OMP CLI or rpc-ui implementation defect upstream.
   - name: Paseo upstream issues
     url: https://github.com/getpaseo/paseo/issues
     about: Report an isolated Paseo plugin SDK, loader, or provider-protocol defect upstream.

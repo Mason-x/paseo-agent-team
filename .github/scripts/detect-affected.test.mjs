@@ -28,7 +28,6 @@ test("discovers new plugins and derives their checks from package scripts", (t) 
   assert.deepEqual(discoverPlugins(root), [
     {
       plugin: "new-plugin",
-      kind: "npm",
       check: true,
       lint: false,
       format_check: false,
@@ -41,31 +40,49 @@ test("discovers new plugins and derives their checks from package scripts", (t) 
   ]);
 });
 
-test("selects only changed npm plugins", () => {
-  const result = detectAffected([
-    "agent-monitor/server/index.ts",
-    "paseo-beads/package.json",
-  ]);
+test("discovers only paseo-agent-team in this repository", () => {
+  assert.deepEqual(
+    discoverPlugins().map(({ plugin }) => plugin),
+    ["paseo-agent-team"],
+  );
+});
+
+test("selects only changed plugins", () => {
+  const plugins = [
+    {
+      plugin: "paseo-agent-team",
+      check: true,
+      lint: false,
+      format_check: false,
+      typecheck: true,
+      coverage: true,
+      test_unit: false,
+      test: false,
+      verify_package: false,
+    },
+    {
+      plugin: "other",
+      check: false,
+      lint: false,
+      format_check: false,
+      typecheck: true,
+      coverage: false,
+      test_unit: false,
+      test: true,
+      verify_package: false,
+    },
+  ];
+  const result = detectAffected(
+    ["paseo-agent-team/index.server.ts", "docs/note.md"],
+    plugins,
+  );
 
   assert.deepEqual(
     result.npmMatrix.include.map(({ plugin }) => plugin),
-    ["agent-monitor", "paseo-beads"],
+    ["paseo-agent-team"],
   );
   assert.equal(result.npmAffected, true);
-  assert.equal(result.ompAffected, false);
-  assert.equal(result.sharedBrowserAffected, false);
-});
-
-test("selects platform-specific jobs independently", () => {
-  const omp = detectAffected(["paseo-omp/index.server.ts"]);
-  const sharedBrowser = detectAffected([
-    "paseo-shared-browser/server/index.ts",
-  ]);
-
-  assert.equal(omp.ompAffected, true);
-  assert.equal(omp.npmAffected, false);
-  assert.equal(sharedBrowser.sharedBrowserAffected, true);
-  assert.equal(sharedBrowser.npmAffected, false);
+  assert.deepEqual(result.affected, ["paseo-agent-team"]);
 });
 
 test("ignores changes outside plugin and CI paths", () => {
@@ -92,12 +109,8 @@ test("CI implementation changes select every discovered plugin", () => {
   ]) {
     const result = detectAffected([file], plugins);
 
-    assert.equal(
-      result.npmMatrix.include.length,
-      plugins.filter(({ kind }) => kind === "npm").length,
-    );
-    assert.equal(result.ompAffected, true);
-    assert.equal(result.sharedBrowserAffected, true);
+    assert.equal(result.npmMatrix.include.length, plugins.length);
+    assert.equal(result.npmAffected, plugins.length > 0);
     assert.equal(result.affected.length, plugins.length);
   }
 });
