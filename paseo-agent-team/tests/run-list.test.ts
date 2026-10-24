@@ -7,6 +7,7 @@ import {
   isLive,
   runTask,
   runTimeLabel,
+  taskFromTitle,
 } from "../shared/domain/run-list";
 import type { RunAgentSnapshot, TeamRun } from "../shared/domain/run-progress";
 import { runProgress, visibleCountStates } from "../shared/domain/run-progress";
@@ -150,6 +151,35 @@ describe("runTask", () => {
     expect(runTask({ ...run("old", "done"), task: "From label" }, legacy)).toBe("From label");
     expect(runTask(run("old", "done"), legacy)).toBe("From preferences");
     expect(runTask(run("unknown", "done"), legacy)).toBeUndefined();
+  });
+
+  test("last resort: the start of the task in the coordinator's name", () => {
+    const named = run("unknown", "done");
+    if (named.coordinator)
+      named.coordinator.title = "[Team] 视频制作团队: 执行 test12 视频制作运行。ES 项目 426d927";
+    expect(runTask(named, legacy)).toBe("执行 test12 视频制作运行。ES 项目 426d927");
+    expect(runTask({ ...named, task: "From label" }, legacy)).toBe("From label");
+  });
+});
+
+describe("taskFromTitle", () => {
+  test("reads the task after the team name, with either colon", () => {
+    expect(taskFromTitle("[Team] Coding Team: Add Stripe")).toBe("Add Stripe");
+    expect(taskFromTitle("[Team] 编码团队：添加支付")).toBe("添加支付");
+    expect(taskFromTitle("[Team] Team: keep: later colons")).toBe("keep: later colons");
+  });
+
+  test("ignores titles that are not a launch coordinator's", () => {
+    for (const title of [
+      undefined,
+      null,
+      "",
+      "Architect · Coding Team",
+      "[Team] Team:",
+      "[Team] Team:   ",
+    ]) {
+      expect(taskFromTitle(title)).toBeUndefined();
+    }
   });
 });
 

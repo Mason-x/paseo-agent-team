@@ -57,11 +57,25 @@ export function filterCounts(rows: readonly RunRow[]): Record<RunFilter, number>
 }
 
 /**
- * What the run was asked to do. Runs from versions before the task label only saved it in the
- * plugin's preferences, so those are still described.
+ * The task start of a coordinator named "[Team] <team>: <task…>". Launching has always titled
+ * the coordinator this way, cutting the task to about 30 characters, so it describes runs that
+ * no longer have a label or saved summary.
+ */
+export function taskFromTitle(title: string | null | undefined): string | undefined {
+  const match = /^\[Team\]\s+[^:：]*[:：]\s*(\S.*)$/.exec(title ?? "");
+  return match?.[1]?.trim() || undefined;
+}
+
+/**
+ * What the run was asked to do: the label on the coordinator, else what older versions saved in
+ * the plugin's preferences, else the start of the task in the coordinator's name.
  */
 export function runTask(run: TeamRun, legacyRuns: readonly RunSummary[]): string | undefined {
-  return run.task ?? legacyRuns.find((entry) => entry.runId === run.runId)?.taskExcerpt;
+  return (
+    run.task ??
+    legacyRuns.find((entry) => entry.runId === run.runId)?.taskExcerpt ??
+    taskFromTitle(run.coordinator?.title)
+  );
 }
 
 const MINUTE = 60_000;
