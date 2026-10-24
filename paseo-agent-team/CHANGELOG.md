@@ -15,6 +15,10 @@
 
 ### Bug Fixes
 
+- Runs tab: filter by 需处理 / 进行中 / 已结束, sort runs needing attention first, show earlier
+  runs on demand, compact cards, "finished N days ago" instead of "ran for N days", and the task
+  of runs launched by older versions
+
 - read Agent Profiles from `daemon.agentProfiles` of Paseo 0.13 config, not the old top-level key
 - block a launch when the coordinator's provider cannot call Paseo tools, instead of hanging on
   its first delegation

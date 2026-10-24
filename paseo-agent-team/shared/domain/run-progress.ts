@@ -278,3 +278,20 @@ export function digestTimeline(entries: readonly TimelineEntryLike[]): TimelineD
   if (!digest.assignment && pendingReply) digest.report = pendingReply;
   return digest;
 }
+
+const COUNT_ORDER: readonly MemberState[] = [
+  "needs-input",
+  "failed",
+  "working",
+  "delivered",
+  "not-started",
+  "closed",
+];
+
+/** A finished run's unassigned members are not news, so only a live run lists them as waiting. */
+export function visibleCountStates(progress: RunProgress): MemberState[] {
+  const live = progress.phase !== "done" && progress.phase !== "idle";
+  return COUNT_ORDER.filter(
+    (state) => progress.counts[state] > 0 && (live || state !== "not-started"),
+  );
+}

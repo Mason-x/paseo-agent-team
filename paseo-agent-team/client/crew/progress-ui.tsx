@@ -1,5 +1,10 @@
 import { Text, View } from "react-native";
-import type { MemberState, RunPhase, RunProgress } from "../../shared/domain/run-progress";
+import {
+  type MemberState,
+  type RunPhase,
+  type RunProgress,
+  visibleCountStates,
+} from "../../shared/domain/run-progress";
 import { zh } from "../../shared/zh";
 import type { PluginTheme } from "../shared/theme";
 
@@ -65,16 +70,8 @@ export function PhaseBadge({ theme, phase }: { theme: PluginTheme; phase: RunPha
   );
 }
 
-const COUNT_ORDER: readonly MemberState[] = [
-  "needs-input",
-  "failed",
-  "working",
-  "delivered",
-  "not-started",
-];
-
 export function MemberCounts({ theme, progress }: { theme: PluginTheme; progress: RunProgress }) {
-  const parts = COUNT_ORDER.filter((state) => progress.counts[state] > 0);
+  const parts = visibleCountStates(progress);
   return (
     <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
       {parts.map((state) => (

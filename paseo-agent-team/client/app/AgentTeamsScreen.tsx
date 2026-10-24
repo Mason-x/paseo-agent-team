@@ -380,7 +380,12 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                 }
               />
             ) : (
-              <RunsTab theme={theme} hostId={host.id} navigation={navigation} />
+              <RunsTab
+                theme={theme}
+                hostId={host.id}
+                navigation={navigation}
+                legacyRuns={preferences.values.recentRuns}
+              />
             )}
           </ScrollView>
         </>
