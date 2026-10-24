@@ -1,11 +1,19 @@
+import { type RunProgress, runProgress, type TeamRun } from "../../shared/domain/run-progress";
+import { LABELS } from "../../shared/paseo/labels";
 import type { RunSummary } from "../../shared/schemas/preferences";
 import { zh } from "../../shared/zh";
 import type { CrewNode } from "../crew";
-import { LABELS } from "../paseo/labels";
 
-export type CrewListItem =
-  | { kind: "run"; runId: string; title: string; count: number }
-  | { kind: "agent"; node: CrewNode };
+export type CrewRunHeader = {
+  kind: "run";
+  runId: string;
+  title: string;
+  count: number;
+  run?: TeamRun;
+  progress?: RunProgress;
+};
+
+export type CrewListItem = CrewRunHeader | { kind: "agent"; node: CrewNode };
 
 export function runIdOf(node: CrewNode): string | undefined {
   const value = node.entry.agent.labels?.[LABELS.run];
@@ -21,10 +29,26 @@ export function roleLine(node: CrewNode): string | undefined {
   return `${roleName}${instance ? ` (${instance})` : ""}${teamName ? ` · ${teamName}` : ""}`;
 }
 
+/** Runs label their task on the coordinator; runs from older plugin versions only saved it in preferences. */
+export function runTitle(
+  runId: string,
+  run: TeamRun | undefined,
+  legacyRuns: readonly RunSummary[],
+  fallbackTeamName?: string,
+): string {
+  const legacy = legacyRuns.find((entry) => entry.runId === runId);
+  const teamName = run?.teamName ?? fallbackTeamName ?? legacy?.teamName ?? zh.teamFallback;
+  const task = run?.task ?? legacy?.taskExcerpt;
+  return task ? `${teamName} · ${task}` : teamName;
+}
+
 export function crewListItems(
   nodes: readonly CrewNode[],
   collapsedRunIds: ReadonlySet<string>,
-  recentRuns: readonly RunSummary[],
+  context: {
+    runs?: ReadonlyMap<string, TeamRun>;
+    legacyRuns?: readonly RunSummary[];
+  } = {},
 ): CrewListItem[] {
   const counts = new Map<string, number>();
   for (const node of nodes) {
@@ -37,15 +61,20 @@ export function crewListItems(
     const runId = runIdOf(node);
     if (runId && !seen.has(runId)) {
       seen.add(runId);
-      const summary = recentRuns.find((run) => run.runId === runId);
-      const teamName =
-        node.entry.agent.labels?.[LABELS.teamName] ?? summary?.teamName ?? zh.teamFallback;
-      const excerpt = summary?.taskExcerpt ?? "";
-      const count = counts.get(runId) ?? 0;
-      const title = excerpt
-        ? `${teamName} · ${excerpt} · ${count} ${zh.agentsSuffix}`
-        : `${teamName} · ${count} ${zh.agentsSuffix}`;
-      items.push({ kind: "run", runId, title, count });
+      const run = context.runs?.get(runId);
+      items.push({
+        kind: "run",
+        runId,
+        title: runTitle(
+          runId,
+          run,
+          context.legacyRuns ?? [],
+          node.entry.agent.labels?.[LABELS.teamName],
+        ),
+        count: counts.get(runId) ?? 0,
+        run,
+        progress: run ? runProgress(run) : undefined,
+      });
     }
     if (runId && collapsedRunIds.has(runId)) continue;
     items.push({ kind: "agent", node });

@@ -1,7 +1,7 @@
-import type { ProfileRef } from "../../shared/schemas/profile-ref";
-import type { Role } from "../../shared/schemas/role";
-import { zh } from "../../shared/zh";
 import type { PaseoProfile, ProviderAvailability } from "../paseo/adapter";
+import type { ProfileRef } from "../schemas/profile-ref";
+import type { Role } from "../schemas/role";
+import { zh } from "../zh";
 
 export type ProfileSource = "role-preferred" | "role-fallback";
 

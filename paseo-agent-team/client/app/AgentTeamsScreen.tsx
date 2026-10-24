@@ -1,31 +1,33 @@
-import { type PluginSurfaceProps, usePaseo, useSettings } from "@getpaseo/plugin/client";
+import { type PluginScreenProps, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { uniqueCopyId } from "../../shared/ids";
 import { toJsonValue } from "../../shared/json";
-import type { Preferences } from "../../shared/schemas/preferences";
+import { createPaseoAdapter } from "../../shared/paseo/adapter";
+import { exampleCatalogRpc } from "../../shared/rpc";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../../shared/settings";
-import { exampleCatalog } from "../../shared/templates";
 import { zh } from "../../shared/zh";
 import { LaunchDialog } from "../launch/LaunchDialog";
-import {
-  createPaseoAdapter,
-  type ProjectSummary,
-  type ProviderAvailability,
-} from "../paseo/adapter";
 import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
 import { RoleList } from "../roles/RoleList";
+import { RunsTab } from "../runs/RunsTab";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
 import { TeamList } from "../teams/TeamList";
-import type { AgentTeamTab } from "./tabs";
+import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab } from "./tabs";
+
+const TAB_LABELS: Record<AgentTeamTab, string> = {
+  roles: zh.roles,
+  teams: zh.teams,
+  runs: zh.runs,
+};
 
 function upsert<T extends { id: string }>(items: T[], item: T): T[] {
   const index = items.findIndex((entry) => entry.id === item.id);
@@ -39,16 +41,19 @@ function isConflict(message: string | null): boolean {
   return (message ?? "").toLowerCase().includes("conflict");
 }
 
-export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
+export function AgentTeamsScreen({ theme, layout, host, navigation, params }: PluginScreenProps) {
   const toast = useToast();
   const paseo = usePaseo();
   const adapter = useMemo(() => createPaseoAdapter(paseo), [paseo]);
+  const loadExamples = useRpc(exampleCatalogRpc);
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
   const hostProfiles = useHostProfiles(adapter);
-  const [tab, setTab] = useState<AgentTeamTab>("roles");
+  const requestedTab = parseTab(params.tab);
+  const [tab, setTab] = useState<AgentTeamTab>(requestedTab ?? "roles");
   const [query, setQuery] = useState("");
+  const [importing, setImporting] = useState(false);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
     role: Role | null;
@@ -59,25 +64,10 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
   } | null>(null);
   const [launch, setLaunch] = useState<{ teamId?: string } | null>(null);
   const [resetTarget, setResetTarget] = useState<"roles" | "teams" | "preferences" | null>(null);
-  const [availability, setAvailability] = useState<ProviderAvailability[]>([]);
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
 
   useEffect(() => {
-    if (!launch) return;
-    let cancelled = false;
-    void Promise.all([adapter.listProviderAvailability(), adapter.listProjects()])
-      .then(([nextAvailability, nextProjects]) => {
-        if (cancelled) return;
-        setAvailability(nextAvailability);
-        setProjects(nextProjects);
-      })
-      .catch((error) => {
-        if (!cancelled) toast.error(error instanceof Error ? error.message : zh.launchContextFail);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [adapter, launch, toast]);
+    if (requestedTab) setTab(requestedTab);
+  }, [requestedTab]);
 
   const styles = useMemo(
     () => ({
@@ -196,18 +186,23 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
   const importExamples = useCallback(async () => {
     if (roles.status !== "ready" || teams.status !== "ready" || preferences.status !== "ready")
       return;
-    const now = new Date().toISOString();
-    const profiles = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
-    const catalog = exampleCatalog(profiles, now);
-    const rolesOk = await roles.save(toJsonValue({ roles: catalog.roles }), roles.revision);
-    const teamsOk = await teams.save(toJsonValue({ teams: catalog.teams }), teams.revision);
-    await preferences.save(
-      toJsonValue({ ...preferences.values, templatesImportedAt: now }),
-      preferences.revision,
-    );
-    if (rolesOk && teamsOk) toast.show(zh.importOk, { variant: "success" });
-    else toast.error(zh.importFail);
-  }, [hostProfiles, preferences, roles, teams, toast]);
+    setImporting(true);
+    try {
+      const catalog = await loadExamples({});
+      const rolesOk = await roles.save(toJsonValue({ roles: catalog.roles }), roles.revision);
+      const teamsOk = await teams.save(toJsonValue({ teams: catalog.teams }), teams.revision);
+      await preferences.save(
+        toJsonValue({ ...preferences.values, templatesImportedAt: new Date().toISOString() }),
+        preferences.revision,
+      );
+      if (rolesOk && teamsOk) toast.show(zh.importOk, { variant: "success" });
+      else toast.error(roles.saveError ?? teams.saveError ?? zh.importFail);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : zh.importFail);
+    } finally {
+      setImporting(false);
+    }
+  }, [loadExamples, preferences, roles, teams, toast]);
 
   const catalogEmpty =
     roles.status === "ready" &&
@@ -262,63 +257,66 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
   const ready =
     roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
+  const newLabel = tab === "roles" ? zh.newRole : tab === "teams" ? zh.newTeam : zh.launchTeam;
 
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
         <View style={styles.tabs}>
-          {(["roles", "teams"] as const).map((item) => (
+          {AGENT_TEAM_TABS.map((item) => (
             <Pressable
               key={item}
               accessibilityRole="button"
               accessibilityState={{ selected: tab === item }}
-              accessibilityLabel={item === "roles" ? zh.roles : zh.teams}
+              accessibilityLabel={TAB_LABELS[item]}
               onPress={() => setTab(item)}
               style={[styles.tab, tab === item && styles.tabSelected]}
             >
               <Text style={[styles.tabLabel, tab === item && styles.tabLabelSelected]}>
-                {item === "roles" ? zh.roles : zh.teams}
+                {TAB_LABELS[item]}
               </Text>
             </Pressable>
           ))}
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={tab === "roles" ? zh.newRole : zh.newTeam}
-          onPress={() =>
-            tab === "roles"
-              ? setRoleEditor({ mode: "create", role: null })
-              : setTeamEditor({ mode: "create", team: null })
-          }
+          accessibilityLabel={newLabel}
+          onPress={() => {
+            if (tab === "roles") setRoleEditor({ mode: "create", role: null });
+            else if (tab === "teams") setTeamEditor({ mode: "create", team: null });
+            else setLaunch({});
+          }}
           style={({ pressed }) => [styles.newButton, pressed && { opacity: 0.72 }]}
         >
-          <Icon name="Plus" size={14} color={theme.colors.accent} />
-          <Text style={styles.action}>{tab === "roles" ? zh.newRole : zh.newTeam}</Text>
+          <Icon name={tab === "runs" ? "Play" : "Plus"} size={14} color={theme.colors.accent} />
+          <Text style={styles.action}>{newLabel}</Text>
         </Pressable>
       </View>
       {blocked}
       {ready ? (
         <>
-          <View style={styles.toolbar}>
-            <View style={styles.searchWrap}>
-              <Icon name="Search" size={15} color={theme.colors.foregroundMuted} />
-              <ImeTextInput
-                initialValue=""
-                onChangeText={setQuery}
-                placeholder={tab === "roles" ? zh.searchRoles : zh.searchTeams}
-                placeholderTextColor={theme.colors.foregroundMuted}
-                style={styles.search}
-              />
+          {tab !== "runs" ? (
+            <View style={styles.toolbar}>
+              <View style={styles.searchWrap}>
+                <Icon name="Search" size={15} color={theme.colors.foregroundMuted} />
+                <ImeTextInput
+                  initialValue=""
+                  onChangeText={setQuery}
+                  placeholder={tab === "roles" ? zh.searchRoles : zh.searchTeams}
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={styles.search}
+                />
+              </View>
             </View>
-          </View>
-          <ScrollView>
-            {catalogEmpty ? (
+          ) : null}
+          <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+            {catalogEmpty && tab !== "runs" ? (
               <EmptyState
                 theme={theme}
                 title={zh.emptyTitle}
                 body={zh.emptyBody}
-                actionLabel={zh.importRuflo}
-                onAction={() => void importExamples()}
+                actionLabel={importing ? zh.workingEllipsis : zh.importRuflo}
+                onAction={importing ? undefined : () => void importExamples()}
               />
             ) : null}
             {tab === "roles" ? (
@@ -344,10 +342,12 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
                   void saveRoles(
                     roles.values.roles.filter((entry) => entry.id !== role.id),
                     roles.revision,
-                  )
+                  ).then((ok) => {
+                    if (!ok) toast.error(roles.saveError ?? zh.saveFail);
+                  })
                 }
               />
-            ) : (
+            ) : tab === "teams" ? (
               <TeamList
                 theme={theme}
                 teams={teams.values.teams}
@@ -367,12 +367,20 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
                   void persistTeam(copy, false);
                 }}
                 onDelete={(team) =>
-                  void teams.save(
-                    { teams: teams.values.teams.filter((entry) => entry.id !== team.id) },
-                    teams.revision,
-                  )
+                  void teams
+                    .save(
+                      toJsonValue({
+                        teams: teams.values.teams.filter((entry) => entry.id !== team.id),
+                      }),
+                      teams.revision,
+                    )
+                    .then((ok) => {
+                      if (!ok) toast.error(teams.saveError ?? zh.saveFail);
+                    })
                 }
               />
+            ) : (
+              <RunsTab theme={theme} hostId={host.id} navigation={navigation} />
             )}
           </ScrollView>
         </>
@@ -410,17 +418,17 @@ export function AgentTeamsSurface({ theme, layout }: PluginSurfaceProps) {
           layout={layout}
           open
           adapter={adapter}
+          hostId={host.id}
           teams={teams.values.teams}
           roles={roles.values.roles}
           profiles={profileList}
-          availability={availability}
-          projects={projects}
-          preferences={preferences.values}
+          maxMembers={preferences.values.maxMembers}
           initialTeamId={launch.teamId}
+          lockTeam={launch.teamId !== undefined}
           onClose={() => setLaunch(null)}
-          onLaunched={() => setLaunch(null)}
-          onSavePreferences={async (next: Preferences) => {
-            await preferences.save(next, preferences.revision);
+          onLaunched={() => {
+            setLaunch(null);
+            setTab("runs");
           }}
         />
       ) : null}

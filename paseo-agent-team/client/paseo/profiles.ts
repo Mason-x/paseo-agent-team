@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { PaseoAdapter, PaseoProfile } from "./adapter";
+import type { PaseoAdapter, PaseoProfile } from "../../shared/paseo/adapter";
 
 const CACHE_MS = 60_000;
 

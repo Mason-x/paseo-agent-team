@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { buildLaunchPlan } from "../client/domain/launch-plan";
-import { LABELS } from "../client/paseo/labels";
+import { buildLaunchPlan } from "../shared/domain/launch-plan";
+import { LABELS } from "../shared/paseo/labels";
 import {
   allAvailable,
   architect,
@@ -97,5 +97,56 @@ describe("buildLaunchPlan", () => {
 
   test("empty task is a blocker", () => {
     expect(buildLaunchPlan({ ...base, task: "   " }).blockers).toContain("必须填写任务描述。");
+  });
+
+  test("only the coordinator carries the task, as a bounded single line", () => {
+    const plan = buildLaunchPlan({ ...base, task: `Ship\n  billing ${"x".repeat(400)}` });
+    const task = plan.coordinator.labels[LABELS.task] ?? "";
+    expect(task.startsWith("Ship billing xxx")).toBe(true);
+    expect(task.length).toBeLessThanOrEqual(160);
+    expect(task).not.toContain("\n");
+    expect(plan.members.every((member) => member.labels[LABELS.task] === undefined)).toBe(true);
+  });
+
+  test("blocks when the daemon will not give the coordinator Paseo tools", () => {
+    const plan = buildLaunchPlan({
+      ...base,
+      daemonConfig: { mcp: { enabled: true, injectIntoAgents: false } },
+    });
+    expect(plan.blockers.some((item) => item.includes("注入 Paseo tools"))).toBe(true);
+  });
+
+  test("checks the provider the coordinator actually resolves to", () => {
+    // The tech lead prefers Claude. Disabling Codex tools must not block it...
+    const codexOff = { providers: { codex: { paseoTools: { enabled: false } } } };
+    expect(buildLaunchPlan({ ...base, daemonConfig: codexOff }).blockers).toEqual([]);
+    // ...and disabling Claude's must, naming the provider.
+    const claudeOff = { providers: { claude: { paseoTools: { enabled: false } } } };
+    const blocked = buildLaunchPlan({ ...base, daemonConfig: claudeOff });
+    expect(blocked.blockers.some((item) => item.includes("claude"))).toBe(true);
+  });
+
+  test("falls back to the next Profile's provider for the tools check", () => {
+    const plan = buildLaunchPlan({
+      ...base,
+      roles: [
+        { ...techLead, fallbackProfiles: [{ profileId: codexXhigh.id }] },
+        architect,
+        developer,
+      ],
+      availability: [
+        { provider: "claude", available: false, reason: "not logged in" },
+        { provider: "codex", available: true },
+      ],
+      daemonConfig: { providers: { codex: { paseoTools: { enabled: false } } } },
+    });
+    expect(plan.coordinator.profile.id).toBe(codexXhigh.id);
+    expect(plan.blockers.some((item) => item.includes("codex"))).toBe(true);
+  });
+
+  test("an unreadable or unfamiliar daemon config never blocks a launch", () => {
+    for (const daemonConfig of [undefined, null, "oops", [], { mcp: "later-format" }]) {
+      expect(buildLaunchPlan({ ...base, daemonConfig }).blockers).toEqual([]);
+    }
   });
 });

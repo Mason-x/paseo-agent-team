@@ -2,6 +2,7 @@ import { Modal } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { createAutoSlug, slugify } from "../../shared/ids";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import {
   type McpServers,
@@ -10,7 +11,6 @@ import {
   RoleSchema,
 } from "../../shared/schemas/role";
 import { zh } from "../../shared/zh";
-import type { PaseoProfile } from "../paseo/adapter";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
 import { ModalActions } from "../shared/buttons";

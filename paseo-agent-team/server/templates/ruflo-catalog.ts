@@ -1,9 +1,9 @@
 /* Generated from ruvnet/ruflo .claude/agents. Do not edit by hand.
  * Refresh: node scripts/import-ruflo-agents.mjs
  */
-import type { Role } from "../schemas/role";
-import type { Team } from "../schemas/team";
-import { zhRoleName, zhTeamDescription, zhTeamName } from "../zh";
+import type { Role } from "../../shared/schemas/role";
+import type { Team } from "../../shared/schemas/team";
+import { zhRoleName, zhTeamDescription, zhTeamName } from "../../shared/zh";
 import { bindPreferredProfile, type HostProfile } from "./types";
 
 export type RufloRoleSpec = {

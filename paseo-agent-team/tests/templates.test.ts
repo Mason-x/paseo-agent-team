@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
+import { exampleCatalog } from "../server/templates";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
-import { exampleCatalog } from "../shared/templates";
 import { ROLE_ZH_NAMES, TEAM_ZH_NAMES } from "../shared/zh";
 import { claudeOpus, codexXhigh, NOW } from "./fixtures";
 

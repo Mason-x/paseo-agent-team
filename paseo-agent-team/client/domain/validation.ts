@@ -1,7 +1,7 @@
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
-import type { PaseoProfile } from "../paseo/adapter";
 
 export type MissingProfileWarning = {
   roleId: string;

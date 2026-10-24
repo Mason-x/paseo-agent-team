@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { resolveProfile } from "../client/domain/profile-resolver";
+import { resolveProfile } from "../shared/domain/profile-resolver";
 import { allAvailable, architect, claudeOpus, codexXhigh } from "./fixtures";
 
 describe("resolveProfile", () => {

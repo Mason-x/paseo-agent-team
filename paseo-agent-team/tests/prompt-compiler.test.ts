@@ -3,7 +3,7 @@ import {
   compileCoordinatorSystemPrompt,
   compileKickoffMessage,
   compileMemberSystemPrompt,
-} from "../client/domain/prompt-compiler";
+} from "../shared/domain/prompt-compiler";
 import { architect, claudeOpus, codingTeam, techLead } from "./fixtures";
 
 describe("prompt compiler", () => {

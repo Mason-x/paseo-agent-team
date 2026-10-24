@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { workspaceCreateSource } from "../client/paseo/adapter";
+import { workspaceCreateSource } from "../shared/paseo/adapter";
 
 describe("workspaceCreateSource", () => {
   test("cuts a worktree from a git project", () => {

@@ -1,6 +1,6 @@
 import { Text, View } from "react-native";
+import type { LaunchPlan } from "../../shared/domain/launch-plan";
 import { zh } from "../../shared/zh";
-import type { LaunchPlan } from "../domain/launch-plan";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginTheme } from "../shared/theme";
 

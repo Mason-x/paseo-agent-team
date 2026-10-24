@@ -1,9 +1,9 @@
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import { zh } from "../../shared/zh";
-import type { PaseoProfile } from "../paseo/adapter";
 import type { PluginTheme } from "../shared/theme";
 
 function profileLine(profile: PaseoProfile): string {

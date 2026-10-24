@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Features
+
+- run progress: Agent Teams **运行** tab and per-run phase, member state, plan, assignment, and
+  latest report in the Crew panel
+- **追加任务** sends follow-up work to a run's coordinator
+- launch runs on the daemon host as a background job (`agent-team.launch.*` RPCs), survives a
+  closed dialog, and is available from the `/team` slash command and `npm run launch:team`
+- launch into an existing workspace or a new worktree from the Agent Teams screen
+- Crew panel: allow a permission for the rest of the session
+- the launch task is stored on the coordinator as a label, so runs describe themselves
+
+### Bug Fixes
+
+- read Agent Profiles from `daemon.agentProfiles` of Paseo 0.13 config, not the old top-level key
+- block a launch when the coordinator's provider cannot call Paseo tools, instead of hanging on
+  its first delegation
+- live Crew refresh: agent updates need an explicit host subscription, which the panel never
+  opened, so the list only changed on its 30s poll
+- example catalog is served by an RPC instead of bundled into the client (1.1 MB to 0.26 MB)
+
+### Migration
+
+- require Paseo `>=0.12.0`; use `addScreen` and `addSidebarHeaderItem`
+- pin `@getpaseo/*` to `0.13.0-beta.1`; add `verify:package` and `typecheck:beta`
+- move launch logic and the Paseo adapter to `shared/` behind `PaseoPort`
+
 ### Bug Fixes
 
 - remove Role and Team enable switches; both are always available to launch

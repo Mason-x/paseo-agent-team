@@ -1,5 +1,5 @@
-import type { usePaseo } from "@getpaseo/plugin/client";
-import type { McpServers } from "../../shared/schemas/role";
+import type { McpServers } from "../schemas/role";
+import type { PaseoPort, PortMcpServer, PortWorkspace, PortWorkspaceSource } from "./port";
 
 export type PaseoProfile = {
   id: string;
@@ -40,23 +40,35 @@ export type CreateWorkspaceInput = {
   project: ProjectSummary;
 };
 
-export function workspaceCreateSource(project: ProjectSummary) {
+export function workspaceCreateSource(project: ProjectSummary): PortWorkspaceSource {
   if (!project.directory.trim()) {
     throw new Error("无法新建 Workspace：项目没有目录路径");
   }
   if (project.kind === "git") {
     return {
-      kind: "worktree" as const,
+      kind: "worktree",
       projectId: project.id,
       cwd: project.directory,
-      action: "branch-off" as const,
+      action: "branch-off",
     };
   }
   return {
-    kind: "directory" as const,
+    kind: "directory",
     path: project.directory,
     projectId: project.id,
   };
+}
+
+/** Roles accept Claude-style stdio entries without `type`; Paseo's create schema requires it. */
+export function toPaseoMcpServers(
+  servers: McpServers | undefined,
+): Record<string, PortMcpServer> | undefined {
+  if (!servers || Object.keys(servers).length === 0) return undefined;
+  const normalized: Record<string, PortMcpServer> = {};
+  for (const [name, server] of Object.entries(servers)) {
+    normalized[name] = "command" in server ? { ...server, type: "stdio" } : server;
+  }
+  return normalized;
 }
 
 export type CreateMemberInput = {
@@ -79,64 +91,91 @@ export function profilesUnavailable(message: string): ProfilesUnavailableError {
 }
 
 export interface PaseoAdapter {
+  /** Raw daemon config. Callers read it defensively: its shape is daemon-owned. */
+  readConfig(): Promise<unknown>;
   listProfiles(): Promise<PaseoProfile[]>;
   listProviderAvailability(): Promise<ProviderAvailability[]>;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
+  getWorkspace(workspaceId: string): Promise<WorkspaceSummary | null>;
   listProjects(): Promise<ProjectSummary[]>;
   createWorkspace(input: CreateWorkspaceInput): Promise<WorkspaceSummary>;
-  coordinatorToolsHint(provider: string): Promise<string | null>;
   createAgent(input: CreateMemberInput): Promise<{ agentId: string }>;
   sendMessage(agentId: string, text: string): Promise<void>;
   archiveAgent(agentId: string): Promise<void>;
 }
 
-type PaseoClient = ReturnType<typeof usePaseo>;
+const WORKSPACE_PAGE_LIMIT = 200;
+const WORKSPACE_MAX_PAGES = 10;
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
 function mapProfile(value: unknown): PaseoProfile | null {
   const record = asRecord(value);
   if (!record) return null;
-  const id = typeof record.id === "string" ? record.id : "";
-  const name = typeof record.name === "string" ? record.name : "";
-  const provider = typeof record.provider === "string" ? record.provider : "";
+  const id = optionalString(record.id) ?? "";
+  const name = optionalString(record.name) ?? "";
+  const provider = optionalString(record.provider) ?? "";
   if (!id || !name || !provider) return null;
   return {
     id,
     name,
     provider,
-    model: typeof record.model === "string" ? record.model : undefined,
-    modeId: typeof record.modeId === "string" ? record.modeId : undefined,
-    thinkingOptionId:
-      typeof record.thinkingOptionId === "string" ? record.thinkingOptionId : undefined,
+    model: optionalString(record.model),
+    modeId: optionalString(record.modeId),
+    thinkingOptionId: optionalString(record.thinkingOptionId),
     featureValues: asRecord(record.featureValues) ?? undefined,
-    notes: typeof record.notes === "string" ? record.notes : undefined,
-    icon: typeof record.icon === "string" ? record.icon : undefined,
-    color: typeof record.color === "string" ? record.color : undefined,
+    notes: optionalString(record.notes),
+    icon: optionalString(record.icon),
+    color: optionalString(record.color),
   };
 }
 
-export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
+/** Agent Profiles from the daemon config, skipping malformed entries. */
+export function profilesFromConfig(config: unknown): PaseoProfile[] {
+  const raw = asRecord(config)?.agentProfiles;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const profile = mapProfile(entry);
+    return profile ? [profile] : [];
+  });
+}
+
+export function profileProvider(profile: Pick<PaseoProfile, "provider" | "model">): string {
+  return profile.model ? `${profile.provider}/${profile.model}` : profile.provider;
+}
+
+function workspaceSummary(workspace: PortWorkspace): WorkspaceSummary {
+  return {
+    id: workspace.id,
+    name: workspace.title?.trim() || workspace.name,
+    projectId: workspace.projectId,
+    projectName: workspace.projectDisplayName,
+    directory: workspace.workspaceDirectory ?? workspace.projectRootPath,
+  };
+}
+
+export function createPaseoAdapter(paseo: PaseoPort): PaseoAdapter {
+  async function readConfig() {
+    const result = await paseo.config.get();
+    return result.config;
+  }
+
   async function listWorkspaces() {
     const workspaces: WorkspaceSummary[] = [];
     let cursor: string | undefined;
-    for (let page = 0; page < 10; page += 1) {
+    for (let page = 0; page < WORKSPACE_MAX_PAGES; page += 1) {
       const result = await paseo.workspaces.list({
-        page: { limit: 200, ...(cursor ? { cursor } : {}) },
+        page: { limit: WORKSPACE_PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
       });
-      for (const workspace of result.entries) {
-        workspaces.push({
-          id: workspace.id,
-          name: workspace.name,
-          projectId: workspace.projectId,
-          projectName: workspace.projectDisplayName,
-          directory: workspace.workspaceDirectory ?? workspace.projectRootPath,
-        });
-      }
+      workspaces.push(...result.entries.map(workspaceSummary));
       cursor = result.pageInfo.hasMore ? (result.pageInfo.nextCursor ?? undefined) : undefined;
       if (!cursor) break;
     }
@@ -144,16 +183,11 @@ export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
   }
 
   return {
+    readConfig,
+
     async listProfiles() {
       try {
-        const result = await paseo.config.get();
-        const config = asRecord(result.config) ?? asRecord(result) ?? {};
-        const raw = config.agentProfiles;
-        if (!Array.isArray(raw)) return [];
-        return raw.flatMap((entry) => {
-          const profile = mapProfile(entry);
-          return profile ? [profile] : [];
-        });
+        return profilesFromConfig(await readConfig());
       } catch (error) {
         throw profilesUnavailable(
           error instanceof Error ? error.message : "无法读取 Paseo Profile",
@@ -163,8 +197,7 @@ export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
 
     async listProviderAvailability() {
       const result = await paseo.providers.listAvailable();
-      const providers = Array.isArray(result.providers) ? result.providers : [];
-      return providers.map((entry) => ({
+      return result.providers.map((entry) => ({
         provider: entry.provider,
         available: entry.available,
         reason: entry.error ?? undefined,
@@ -173,12 +206,20 @@ export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
 
     listWorkspaces,
 
+    async getWorkspace(workspaceId: string) {
+      try {
+        const workspace = await paseo.workspaces.ref(workspaceId).refresh();
+        return workspace ? workspaceSummary(workspace) : null;
+      } catch {
+        return null;
+      }
+    },
+
     async listProjects() {
       try {
         const result = await paseo.projects.list();
-        const projects = Array.isArray(result.projects) ? result.projects : [];
-        if (projects.length > 0) {
-          return projects.map((project) => ({
+        if (result.projects.length > 0) {
+          return result.projects.map((project) => ({
             id: project.projectId,
             name: project.projectDisplayName,
             directory: project.projectRootPath,
@@ -207,32 +248,14 @@ export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
         source: workspaceCreateSource(project),
       });
       const snapshot = handle.current() ?? (await handle.refresh());
+      if (snapshot) return workspaceSummary(snapshot);
       return {
         id: handle.id,
-        name: snapshot?.name ?? handle.name ?? input.title,
-        projectId: snapshot?.projectId ?? handle.projectId ?? project.id,
-        projectName: snapshot?.projectDisplayName ?? project.name,
-        directory: snapshot?.workspaceDirectory ?? handle.directory ?? project.directory,
+        name: handle.name ?? input.title,
+        projectId: handle.projectId ?? project.id,
+        projectName: project.name,
+        directory: handle.directory ?? project.directory,
       };
-    },
-
-    async coordinatorToolsHint(provider: string) {
-      try {
-        const result = await paseo.config.get();
-        const config = asRecord(result.config) ?? asRecord(result) ?? {};
-        const providers = asRecord(config.providers);
-        const entry = providers ? asRecord(providers[provider]) : null;
-        const tools = entry ? asRecord(entry.paseoTools) : null;
-        if (tools && tools.enabled === false) {
-          return `Provider ${provider} has Paseo tools disabled; the coordinator cannot delegate.`;
-        }
-        if (!tools || typeof tools.enabled !== "boolean") {
-          return `Confirm that provider ${provider} has Paseo tools enabled so the coordinator can delegate.`;
-        }
-        return null;
-      } catch {
-        return `Confirm that provider ${provider} has Paseo tools enabled so the coordinator can delegate.`;
-      }
     },
 
     async createAgent(input: CreateMemberInput) {
@@ -242,14 +265,12 @@ export function createPaseoAdapter(paseo: PaseoClient): PaseoAdapter {
         labels: input.labels,
         prompt: input.prompt,
         config: {
-          provider: input.profile.model
-            ? `${input.profile.provider}/${input.profile.model}`
-            : input.profile.provider,
+          provider: profileProvider(input.profile),
           modeId: input.profile.modeId,
           thinkingOptionId: input.profile.thinkingOptionId,
           featureValues: input.profile.featureValues,
           systemPrompt: input.systemPrompt,
-          mcpServers: input.mcpServers as never,
+          mcpServers: toPaseoMcpServers(input.mcpServers),
         },
       });
       return { agentId: created.id };

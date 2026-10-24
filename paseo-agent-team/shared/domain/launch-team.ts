@@ -1,8 +1,7 @@
-import type { RunSummary } from "../../shared/schemas/preferences";
-import { zh } from "../../shared/zh";
-import type { LaunchPlan } from "../domain/launch-plan";
-import { compileKickoffMessage } from "../domain/prompt-compiler";
 import type { PaseoAdapter } from "../paseo/adapter";
+import { zh } from "../zh";
+import type { LaunchPlan } from "./launch-plan";
+import { compileKickoffMessage } from "./prompt-compiler";
 
 export type LaunchProgress =
   | { step: "coordinator" }
@@ -16,8 +15,10 @@ export type LaunchResult = {
   kickoffMessage: string;
 };
 
+export type LaunchStep = LaunchProgress["step"];
+
 export type LaunchError = Error & {
-  step: "coordinator" | "member" | "kickoff";
+  step: LaunchStep;
   agentIdsKept: string[];
   archived: boolean;
   cause: unknown;
@@ -30,7 +31,7 @@ export function isLaunchError(error: unknown): error is LaunchError {
 
 function launchError(
   message: string,
-  step: LaunchError["step"],
+  step: LaunchStep,
   agentIdsKept: string[],
   archived: boolean,
   cause: unknown,
@@ -55,6 +56,7 @@ async function archiveCreated(adapter: PaseoAdapter, ids: readonly string[]): Pr
   }
 }
 
+/** Creates the coordinator, then each member as its child, then sends the kickoff roster. */
 export async function launchTeam(
   plan: LaunchPlan,
   adapter: PaseoAdapter,
@@ -104,23 +106,12 @@ export async function launchTeam(
       created.push(createdMember.agentId);
     }
   } catch (cause) {
+    const message = zh.createMemberFail(memberIds.length + 1, plan.members.length);
     if (options.archiveOnLaunchFailure) {
       await archiveCreated(adapter, created);
-      throw launchError(
-        zh.createMemberFail(memberIds.length + 1, plan.members.length),
-        "member",
-        [],
-        true,
-        cause,
-      );
+      throw launchError(message, "member", [], true, cause);
     }
-    throw launchError(
-      zh.createMemberFail(memberIds.length + 1, plan.members.length),
-      "member",
-      created,
-      false,
-      cause,
-    );
+    throw launchError(message, "member", created, false, cause);
   }
 
   const kickoffMessage = compileKickoffMessage({
@@ -149,25 +140,4 @@ export async function launchTeam(
   }
 
   return { runId: plan.runId, coordinatorId, memberIds, kickoffMessage };
-}
-
-export function toRunSummary(
-  plan: LaunchPlan,
-  result: LaunchResult,
-  createdAt: string,
-): RunSummary {
-  return {
-    runId: result.runId,
-    teamId: plan.team.id,
-    teamName: plan.team.name,
-    workspaceId: plan.workspaceId,
-    coordinatorAgentId: result.coordinatorId,
-    memberAgentIds: result.memberIds,
-    taskExcerpt: plan.task.slice(0, 120),
-    createdAt,
-  };
-}
-
-export function prependRun(recentRuns: readonly RunSummary[], run: RunSummary): RunSummary[] {
-  return [run, ...recentRuns.filter((entry) => entry.runId !== run.runId)].slice(0, 20);
 }

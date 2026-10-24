@@ -1,14 +1,15 @@
-import type { Role } from "../../shared/schemas/role";
-import type { Team, TeamMember } from "../../shared/schemas/team";
-import { zh } from "../../shared/zh";
 import type { PaseoProfile, ProviderAvailability } from "../paseo/adapter";
 import { teamLabels } from "../paseo/labels";
+import type { Role } from "../schemas/role";
+import type { Team, TeamMember } from "../schemas/team";
+import { zh } from "../zh";
 import { type ProfileSource, resolveProfile } from "./profile-resolver";
 import {
   compileCoordinatorSystemPrompt,
   compileKickoffMessage,
   compileMemberSystemPrompt,
 } from "./prompt-compiler";
+import { coordinatorToolsBlocker } from "./tools-readiness";
 
 export type PlannedAgent = {
   kind: "coordinator" | "member";
@@ -60,7 +61,8 @@ export function buildLaunchPlan(input: {
   task: string;
   runId: string;
   maxMembers: number;
-  coordinatorToolsHint?: string | null;
+  /** Raw daemon config, used to confirm the coordinator can reach Paseo's delegation tools. */
+  daemonConfig?: unknown;
 }): LaunchPlan {
   const warnings: string[] = [];
   const blockers: string[] = [];
@@ -161,10 +163,12 @@ export function buildLaunchPlan(input: {
           roleId: coordinatorRole.id,
           roleName: coordinatorRole.name,
           kind: "coordinator",
+          task,
         }),
         systemPrompt: compileCoordinatorSystemPrompt({ role: coordinatorRole, team }),
       };
-      if (input.coordinatorToolsHint) warnings.push(input.coordinatorToolsHint);
+      const toolsBlocker = coordinatorToolsBlocker(input.daemonConfig, resolved.profile.provider);
+      if (toolsBlocker) blockers.push(toolsBlocker);
     }
   }
 
@@ -229,6 +233,6 @@ export function buildLaunchPlan(input: {
     members,
     kickoffMessage,
     warnings: [...new Set(warnings)],
-    blockers,
+    blockers: [...new Set(blockers)],
   };
 }

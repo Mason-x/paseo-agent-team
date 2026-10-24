@@ -1,6 +1,6 @@
-import type { Role } from "../../shared/schemas/role";
-import type { Team } from "../../shared/schemas/team";
 import type { PaseoProfile } from "../paseo/adapter";
+import type { Role } from "../schemas/role";
+import type { Team } from "../schemas/team";
 
 export type PromptRole = Pick<
   Role,
@@ -72,10 +72,18 @@ export function compileMemberSystemPrompt(input: {
     "",
     `## Role instructions\n${input.role.systemPrompt}`,
     "",
+    `## Working with the team\n${bulletList(MEMBER_TEAMWORK)}`,
+    "",
     "## When you finish a task, reply with",
     finishBlock,
   ].join("\n");
 }
+
+const MEMBER_TEAMWORK = [
+  "Paseo forwards your final reply to the coordinator. Do not message the coordinator with send_agent_prompt unless it asks you to.",
+  "For multi-step work, keep a short todo list so the team's progress view shows where you are.",
+  "If you are blocked or the task is ambiguous, stop and state exactly what you need.",
+];
 
 export function compileCoordinatorSystemPrompt(input: {
   role: PromptRole;
@@ -86,8 +94,11 @@ export function compileCoordinatorSystemPrompt(input: {
     roleSections(input.role),
     `## How this team works
 - Your team members are already running as your subagents. Their IDs and roles arrive in the first user message.
-- Delegate with send_agent_prompt(agentId, prompt). Leave background/notifyOnFinish at their defaults and wait for finish notifications; do not poll.
-- Prefer existing members. Only use create_agent for a role the roster lacks, and then call list_profiles first and copy the profile fields exactly.
+- Delegate with send_agent_prompt(agentId, prompt). Keep notifyOnFinish at its default: Paseo notifies you with the member's final reply when it finishes, fails, or needs permission. Do not poll get_agent_status, get_agent_activity, or list_agents in a loop.
+- Give each member one self-contained task at a time: goal, relevant files, constraints, and expected output. Run independent tasks in parallel.
+- A prompt sent to a member that is still working is steered into its current turn, or interrupts it when the provider cannot steer. Wait for its report unless you mean to redirect it.
+- Keep your plan as a todo list with one item per delegated task, naming the member that owns it, and update it as reports arrive. The team's progress view reads this list.
+- Prefer existing members. Only use create_agent for a role the roster lacks, and then call list_profiles first and copy the profile's provider/model and settings exactly.
 - Never call respond_to_permission or kill_agent. Use cancel_agent only to stop a member you have redirected.
 - Implementation and independent review must be done by different members when both roles exist.
 - When two members would edit the same files at the same time, sequence them or ask one to work in a separate worktree via create_workspace.
@@ -130,6 +141,7 @@ export function compileKickoffMessage(input: {
     ...rows,
     "",
     "# Rules",
+    "- Start by writing the plan as a todo list (one item per member task), then delegate.",
     "- Send each member only work that matches its role. Include the concrete files, constraints, and expected output in every prompt.",
     "- Members are idle until you prompt them.",
     "- Report back to the human when the task is complete or blocked.",

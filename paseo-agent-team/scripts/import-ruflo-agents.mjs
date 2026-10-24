@@ -1,6 +1,6 @@
 /**
  * Reads ruvnet/ruflo `.claude/agents` markdown files and writes
- * `shared/templates/ruflo-catalog.ts`.
+ * `server/templates/ruflo-catalog.ts`.
  *
  * Usage:
  *   git clone --depth 1 --filter=blob:none --sparse https://github.com/ruvnet/ruflo.git .tmp-ruflo-agents
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const sourceRoot = join(root, ".tmp-ruflo-agents", ".claude", "agents");
-const outFile = join(root, "shared", "templates", "ruflo-catalog.ts");
+const outFile = join(root, "server", "templates", "ruflo-catalog.ts");
 
 const SKIP_NAMES = new Set(["MIGRATION_SUMMARY.md", "README.md"]);
 const PREAMBLE =
@@ -402,8 +402,9 @@ mkdirSync(dirname(outFile), { recursive: true });
 const header = `/* Generated from ruvnet/ruflo .claude/agents. Do not edit by hand.
  * Refresh: node scripts/import-ruflo-agents.mjs
  */
-import type { Role } from "../schemas/role";
-import type { Team } from "../schemas/team";
+import type { Role } from "../../shared/schemas/role";
+import type { Team } from "../../shared/schemas/team";
+import { zhRoleName, zhTeamDescription, zhTeamName } from "../../shared/zh";
 import { bindPreferredProfile, type HostProfile } from "./types";
 
 export type RufloRoleSpec = {
@@ -437,7 +438,7 @@ export const RUFLO_TEAM_SPECS: readonly RufloTeamSpec[] = ${JSON.stringify([...t
 export function rufloRoles(profiles: readonly HostProfile[], now: string): Role[] {
   return RUFLO_ROLE_SPECS.map((spec) => ({
     id: spec.id,
-    name: spec.name,
+    name: zhRoleName(spec.id, spec.name),
     description: spec.description,
     mission: spec.mission,
     responsibilities: spec.responsibilities,
@@ -457,8 +458,8 @@ export function rufloRoles(profiles: readonly HostProfile[], now: string): Role[
 export function rufloTeams(now: string): Team[] {
   return RUFLO_TEAM_SPECS.map((spec) => ({
     id: spec.id,
-    name: spec.name,
-    description: spec.description,
+    name: zhTeamName(spec.id, spec.name),
+    description: zhTeamDescription(spec.id, spec.description),
     coordinatorRoleId: spec.coordinatorRoleId,
     members: spec.memberRoleIds.map((roleId) => ({ roleId, enabled: true })),
     operatingRules: spec.operatingRules,

@@ -1,6 +1,6 @@
-import type { ProfileRef } from "../schemas/profile-ref";
-import type { Role } from "../schemas/role";
-import type { Team } from "../schemas/team";
+import type { ProfileRef } from "../../shared/schemas/profile-ref";
+import type { Role } from "../../shared/schemas/role";
+import type { Team } from "../../shared/schemas/team";
 
 export type HostProfile = {
   id: string;

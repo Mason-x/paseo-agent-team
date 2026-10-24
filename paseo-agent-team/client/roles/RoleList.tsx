@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { Text, View } from "react-native";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
 import { preferredProfileLabel, teamsUsingRole } from "../domain/validation";
-import type { PaseoProfile } from "../paseo/adapter";
 import { GhostIconButton } from "../shared/buttons";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { RoleGlyph } from "../shared/RoleGlyph";

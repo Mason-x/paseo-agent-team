@@ -1,6 +1,8 @@
 {
   "id": "paseo-agent-team",
+  "name": "Agent Team",
+  "description": "Define reusable Roles, compose Teams across providers, launch them on a task, and follow each member's progress.",
   "requirements": {
-    "paseo": ">=0.8.0"
+    "paseo": ">=0.12.0"
   }
 }
