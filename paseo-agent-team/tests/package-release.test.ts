@@ -55,3 +55,11 @@ test("every relative import in the archive resolves to a shipped file", () => {
   }
   expect(unresolved).toEqual([]);
 });
+
+test("release runtime files contain no host Profile IDs or test fixtures", () => {
+  for (const [name, bytes] of Object.entries(archive)) {
+    expect(name).not.toMatch(/\/tests\/|\/scripts\/|ruflo-catalog/);
+    if (SOURCE.test(name)) expect(strFromU8(bytes), name).not.toContain("agent_profile_");
+  }
+  expect(Object.keys(archive)).toContain("paseo-agent-team/server/templates/default-catalog.ts");
+});

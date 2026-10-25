@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  defaultCatalogPreviewRpc,
   exampleCatalogRpc,
   LaunchStartInputSchema,
   launchStartRpc,
@@ -11,6 +12,7 @@ describe("plugin RPC contracts", () => {
     expect(launchStartRpc.name).toBe("agent-team.launch.start");
     expect(launchStatusRpc.name).toBe("agent-team.launch.status");
     expect(exampleCatalogRpc.name).toBe("agent-team.templates.examples");
+    expect(defaultCatalogPreviewRpc.name).toBe("agent-team.templates.defaults.preview");
   });
 
   test("a launch needs a Team, a task, and a target", () => {
@@ -54,5 +56,26 @@ describe("plugin RPC contracts", () => {
   test("status may report that the run is no longer known", () => {
     expect(launchStatusRpc.output.parse({ job: null })).toEqual({ job: null });
     expect(() => launchStatusRpc.input.parse({ runId: "" })).toThrow();
+  });
+
+  test("preset preview is strict, defaults to blocking Profile errors, and requires a discriminated response", () => {
+    expect(defaultCatalogPreviewRpc.input.parse({})).toEqual({ allowUnboundOnProfileError: false });
+    expect(defaultCatalogPreviewRpc.input.parse({ allowUnboundOnProfileError: true })).toEqual({
+      allowUnboundOnProfileError: true,
+    });
+    expect(() => defaultCatalogPreviewRpc.input.parse({ autoImport: true })).toThrow();
+    expect(
+      defaultCatalogPreviewRpc.output.parse({
+        ok: false,
+        blockers: [{ code: "profiles-unavailable", message: "读取失败" }],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(() => defaultCatalogPreviewRpc.output.parse({ ok: false, blockers: [] })).toThrow();
+    expect(() => defaultCatalogPreviewRpc.output.parse({ ok: true, roles: [] })).toThrow();
+    expect(exampleCatalogRpc.input.parse({})).toEqual({});
+    expect(exampleCatalogRpc.output.parse({ roles: [], teams: [] })).toEqual({
+      roles: [],
+      teams: [],
+    });
   });
 });

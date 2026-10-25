@@ -1,5 +1,9 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import {
+  DefaultCatalogPreviewInputSchema,
+  DefaultCatalogPreviewResultSchema,
+} from "./schemas/default-catalog";
 import { RoleSchema } from "./schemas/role";
 import { TeamSchema } from "./schemas/team";
 
@@ -79,4 +83,11 @@ export const exampleCatalogRpc = defineRpc({
   name: "agent-team.templates.examples",
   input: z.object({}),
   output: z.object({ roles: z.array(RoleSchema), teams: z.array(TeamSchema) }),
+});
+
+/** Read-only, revision-scoped default Role synchronization preview. */
+export const defaultCatalogPreviewRpc = defineRpc({
+  name: "agent-team.templates.defaults.preview",
+  input: DefaultCatalogPreviewInputSchema,
+  output: DefaultCatalogPreviewResultSchema,
 });

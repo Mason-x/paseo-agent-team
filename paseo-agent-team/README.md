@@ -48,13 +48,28 @@ and **Launch agent team** Command Center actions open the panel directly.
 ## Configure
 
 1. Create at least one Paseo Agent Profile per provider you want on a team
-   (**Settings → Agents / Profiles**). This plugin only stores Profile ids.
-2. Open **Agent Teams → Roles**. Create a Role or import the example Coding and
-   Research teams when the catalog is empty.
+   (**Settings → Agents / Profiles**). Roles store Profile ids and optional binding hints.
+2. Open **Agent Teams → Roles**. Create a Role or import the 22 default Role presets
+   when the catalog is empty. The presets do not include Teams.
 3. Bind each Role to a preferred Profile (and optional fallbacks). Missing
    Profiles are marked; they are never silently replaced.
 4. Open **Teams**. Choose a coordinator Role and at least one member Role.
    Duplicate Roles need an `instanceLabel` (for example Backend / Frontend).
+
+The first import into a new, empty catalog uses the default Role presets. **同步默认预设**
+previews additions and field differences: missing presets are selected by default; changed
+Roles and previously deleted presets are kept unless you explicitly select them. Adopting a
+preset preserves its creation time and rebinds its Profiles using the current host.
+
+Binding requires a normalized name and identical provider/model/mode/thinking settings, or a
+unique runtime match when there is no same-name Profile. Ambiguous, changed, or missing
+Profiles stay unbound; preferred and fallback order is preserved. A Profile read failure blocks
+automatic import; manual import can explicitly leave all references unbound. Bind those in the
+Role editor before launch. Presets contain no host Profile ids or Profile notes.
+
+The bundled Ruflo catalog has been removed; previously imported Roles and Teams remain in your
+host settings. Downgrading to an older plugin can discard binding hints and preset deletion
+history on subsequent saves, but existing Profile ids still work.
 
 ## Launch
 

@@ -1,27 +1,13 @@
-import type { ProfileRef } from "../../shared/schemas/profile-ref";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
+import type { BindingReport } from "../../shared/schemas/default-catalog";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 
-export type HostProfile = {
-  id: string;
-  name: string;
-  provider: string;
-};
+export type HostProfile = PaseoProfile;
 
 export type ExampleCatalog = {
   roles: Role[];
   teams: Team[];
 };
 
-export function bindPreferredProfile(
-  profiles: readonly HostProfile[],
-  preferredProviders: readonly string[],
-): ProfileRef {
-  for (const provider of preferredProviders) {
-    const match = profiles.find((profile) => profile.provider === provider);
-    if (match) return { profileId: match.id, nameSnapshot: match.name };
-  }
-  const first = profiles[0];
-  if (first) return { profileId: first.id, nameSnapshot: first.name };
-  return { profileId: "unbound", nameSnapshot: "Bind a profile" };
-}
+export type MaterializedDefaultCatalog = ExampleCatalog & { bindingReport: BindingReport };

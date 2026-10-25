@@ -30,6 +30,10 @@ const { clientBundle, serverBundle } = await compilePlugin({
   server: path.join(root, "index.server.ts"),
 });
 if (!clientBundle || !serverBundle) throw new Error("Expected both a client and a server bundle");
+for (const [name, bundle] of Object.entries({ client: clientBundle, server: serverBundle })) {
+  if (bundle.includes("agent_profile_"))
+    throw new Error(`${name} bundle contains a host Profile ID`);
+}
 
 const server = recordServerContributions(evaluateBundle(serverBundle));
 const client = recordClientContributions(clientBundle);

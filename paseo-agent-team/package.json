@@ -42,7 +42,7 @@
     "test": "vitest run",
     "package:release": "node scripts/package-release.ts",
     "test:coverage": "vitest run --coverage --coverage.reporter=text --coverage.reporter=lcov --coverage.thresholds.lines=90 --coverage.thresholds.functions=85",
-    "import:ruflo": "node scripts/import-ruflo-agents.mjs",
+    "generate:defaults": "node scripts/generate-default-catalog.mjs",
     "launch:team": "node scripts/launch-team.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:beta": "npm i --no-save @getpaseo/plugin@beta @getpaseo/client@beta @getpaseo/protocol@beta && tsc --noEmit",
