@@ -4,6 +4,11 @@
 
 ### Features
 
+- Agent Teams opens on the Team page, with tabs ordered Team / Role / 运行; Role and Team
+  searches keep independent queries
+- Team page: the Team designer card (request, target workspace, design Profile; “开始设计”
+  stays disabled until the design backend lands) above the search box and list; compact
+  layouts fold the designer and show an icon-only “新建”
 - run progress: Agent Teams **运行** tab and per-run phase, member state, plan, assignment, and
   latest report in the Crew panel
 - **追加任务** sends follow-up work to a run's coordinator

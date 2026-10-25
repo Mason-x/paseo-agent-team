@@ -298,4 +298,29 @@ export const zh = {
   truncatedAgents: (count: number) =>
     `只显示守护进程中的前 ${count} 个智能体，此工作区或其班组的部分智能体可能未显示。`,
   openAgent: (title: string) => `打开 ${title}`,
+
+  // Team 页 / 设计师
+  designerTitle: "Team 设计师",
+  designerTagline: "描述项目需求，设计师会组建一个可直接启动的 Team。",
+  designerCollapsedHint: "设计新 Team…",
+  designerRequestLabel: "项目需求",
+  designerRequestPlaceholder:
+    "例如：给现有的电商后台做一次改版，需要前端、后端和测试协同，由技术负责人统筹……",
+  designerRequestEmpty: "请先描述项目需求。",
+  designerRequestTooLong: (excess: number) => `需求过长，请删减至少 ${excess} 个字符。`,
+  designerRequestCount: (count: number, max: number) => `${count} / ${max}`,
+  designerWorkspaceLabel: "目标工作区（可选）",
+  designerWorkspaceNone: "不指定",
+  designerWorkspaceMissing: "所选工作区已不存在，请重新选择。",
+  designerWorkspacesFail: (reason: string) => `无法读取工作区：${reason}`,
+  designerWorkspacesUnknownError: "未知错误",
+  designerProfileLabel: "设计 Agent 的 Profile（可选）",
+  designerProfileAuto: "自动选择",
+  designerProfileMissing: "所选 Profile 已不存在，请重新选择。",
+  designerSearchProfiles: "搜索 Profile",
+  designerNoMatchingProfiles: "没有匹配的 Profile",
+  designerStart: "开始设计",
+  designerStarting: "提交中…",
+  designerUnavailable: "设计功能即将可用。",
+  designerStartFail: "无法开始设计",
 } as const;

@@ -20,8 +20,8 @@ import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
-import { TeamList } from "../teams/TeamList";
-import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab } from "./tabs";
+import { TeamsTab } from "../teams/TeamsTab";
+import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from "./tabs";
 
 const TAB_LABELS: Record<AgentTeamTab, string> = {
   roles: zh.roles,
@@ -50,9 +50,11 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
   const hostProfiles = useHostProfiles(adapter);
+  const ready =
+    roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const requestedTab = parseTab(params.tab);
-  const [tab, setTab] = useState<AgentTeamTab>(requestedTab ?? "roles");
-  const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<AgentTeamTab>(resolveInitialTab(params.tab));
+  const [roleQuery, setRoleQuery] = useState("");
   const [importing, setImporting] = useState(false);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
@@ -79,10 +81,20 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       },
       header: {
         flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
         alignItems: "center" as const,
         justifyContent: "space-between" as const,
-        gap: 8,
+        columnGap: 8,
+        rowGap: 6,
       },
+      // The right side of the header; the version entry (item 4) joins the "new" button here.
+      headerActions: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        gap: 8,
+        flexShrink: 0,
+      },
+      hidden: { display: "none" as const },
       tabs: {
         flexDirection: "row" as const,
         flexShrink: 0,
@@ -130,11 +142,15 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       newButton: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
+        justifyContent: "center" as const,
         gap: 4,
         minHeight: 28,
+        minWidth: 28,
         paddingHorizontal: 8,
         flexShrink: 0,
       },
+      // Narrow headers keep the tabs in view: the action is a 36px icon target with its label for a11y only.
+      newButtonIcon: { paddingHorizontal: 0, minWidth: 36, minHeight: 36 },
       action: { color: theme.colors.accent, fontWeight: "600" as const, fontSize: 13 },
     }),
     [layout.compact, theme],
@@ -204,6 +220,37 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     }
   }, [loadExamples, preferences, roles, teams, toast]);
 
+  const copyTeam = useCallback(
+    (team: Team) => {
+      if (teams.status !== "ready") return;
+      const now = new Date().toISOString();
+      const copy: Team = {
+        ...team,
+        id: uniqueCopyId(team.id, new Set(teams.values.teams.map((entry) => entry.id))),
+        name: `${team.name} ${zh.copySuffix}`.slice(0, 40),
+        createdAt: now,
+        updatedAt: now,
+      };
+      void persistTeam(copy, false);
+    },
+    [persistTeam, teams],
+  );
+
+  const deleteTeam = useCallback(
+    (team: Team) => {
+      if (teams.status !== "ready") return;
+      void teams
+        .save(
+          toJsonValue({ teams: teams.values.teams.filter((entry) => entry.id !== team.id) }),
+          teams.revision,
+        )
+        .then((ok) => {
+          if (!ok) toast.error(teams.saveError ?? zh.saveFail);
+        });
+    },
+    [teams, toast],
+  );
+
   const catalogEmpty =
     roles.status === "ready" &&
     teams.status === "ready" &&
@@ -254,10 +301,17 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     renderSettingsState(roles, "roles") ??
     renderSettingsState(teams, "teams") ??
     renderSettingsState(preferences, "preferences");
-  const ready =
-    roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
   const newLabel = tab === "roles" ? zh.newRole : tab === "teams" ? zh.newTeam : zh.launchTeam;
+  const emptyState = catalogEmpty ? (
+    <EmptyState
+      theme={theme}
+      title={zh.emptyTitle}
+      body={zh.emptyBody}
+      actionLabel={importing ? zh.workingEllipsis : zh.importRuflo}
+      onAction={importing ? undefined : () => void importExamples()}
+    />
+  ) : null;
 
   return (
     <View style={styles.screen}>
@@ -278,54 +332,78 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             </Pressable>
           ))}
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={newLabel}
-          onPress={() => {
-            if (tab === "roles") setRoleEditor({ mode: "create", role: null });
-            else if (tab === "teams") setTeamEditor({ mode: "create", team: null });
-            else setLaunch({});
-          }}
-          style={({ pressed }) => [styles.newButton, pressed && { opacity: 0.72 }]}
-        >
-          <Icon name={tab === "runs" ? "Play" : "Plus"} size={14} color={theme.colors.accent} />
-          <Text style={styles.action}>{newLabel}</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={newLabel}
+            onPress={() => {
+              if (tab === "roles") setRoleEditor({ mode: "create", role: null });
+              else if (tab === "teams") setTeamEditor({ mode: "create", team: null });
+              else setLaunch({});
+            }}
+            style={({ pressed }) => [
+              styles.newButton,
+              layout.compact && styles.newButtonIcon,
+              pressed && { opacity: 0.72 },
+            ]}
+          >
+            <Icon name={tab === "runs" ? "Play" : "Plus"} size={14} color={theme.colors.accent} />
+            {layout.compact ? null : <Text style={styles.action}>{newLabel}</Text>}
+          </Pressable>
+        </View>
       </View>
       {blocked}
       {ready ? (
         <>
-          {tab !== "runs" ? (
+          {tab === "roles" ? (
             <View style={styles.toolbar}>
               <View style={styles.searchWrap}>
                 <Icon name="Search" size={15} color={theme.colors.foregroundMuted} />
                 <ImeTextInput
-                  initialValue=""
-                  onChangeText={setQuery}
-                  placeholder={tab === "roles" ? zh.searchRoles : zh.searchTeams}
+                  accessibilityLabel={zh.searchRoles}
+                  initialValue={roleQuery}
+                  onChangeText={setRoleQuery}
+                  placeholder={zh.searchRoles}
                   placeholderTextColor={theme.colors.foregroundMuted}
                   style={styles.search}
                 />
               </View>
             </View>
           ) : null}
-          <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
-            {catalogEmpty && tab !== "runs" ? (
-              <EmptyState
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={{ paddingBottom: 24 }}
+          >
+            {/* Kept mounted while another tab shows, so a half-written request survives a tab switch. */}
+            <View style={tab === "teams" ? undefined : styles.hidden}>
+              <TeamsTab
                 theme={theme}
-                title={zh.emptyTitle}
-                body={zh.emptyBody}
-                actionLabel={importing ? zh.workingEllipsis : zh.importRuflo}
-                onAction={importing ? undefined : () => void importExamples()}
+                layout={layout}
+                teams={teams.values.teams}
+                roles={roles.values.roles}
+                designer={{
+                  adapter,
+                  hostId: host.id,
+                  profiles: profileList,
+                  profilesLoading: hostProfiles.status === "loading",
+                  profilesError: hostProfiles.status === "error" ? hostProfiles.error : undefined,
+                  onRefreshProfiles: hostProfiles.reload,
+                }}
+                empty={emptyState}
+                onLaunch={(team) => setLaunch({ teamId: team.id })}
+                onEdit={(team) => setTeamEditor({ mode: "edit", team })}
+                onCopy={copyTeam}
+                onDelete={deleteTeam}
               />
-            ) : null}
+            </View>
+            {tab === "roles" ? emptyState : null}
             {tab === "roles" ? (
               <RoleList
                 theme={theme}
                 roles={roles.values.roles}
                 teams={teams.values.teams}
                 profiles={profileList}
-                query={query}
+                query={roleQuery}
                 onEdit={(role) => setRoleEditor({ mode: "edit", role })}
                 onCopy={(role) => {
                   const now = new Date().toISOString();
@@ -347,46 +425,14 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   })
                 }
               />
-            ) : tab === "teams" ? (
-              <TeamList
-                theme={theme}
-                teams={teams.values.teams}
-                roles={roles.values.roles}
-                query={query}
-                onLaunch={(team) => setLaunch({ teamId: team.id })}
-                onEdit={(team) => setTeamEditor({ mode: "edit", team })}
-                onCopy={(team) => {
-                  const now = new Date().toISOString();
-                  const copy: Team = {
-                    ...team,
-                    id: uniqueCopyId(team.id, new Set(teams.values.teams.map((entry) => entry.id))),
-                    name: `${team.name} ${zh.copySuffix}`.slice(0, 40),
-                    createdAt: now,
-                    updatedAt: now,
-                  };
-                  void persistTeam(copy, false);
-                }}
-                onDelete={(team) =>
-                  void teams
-                    .save(
-                      toJsonValue({
-                        teams: teams.values.teams.filter((entry) => entry.id !== team.id),
-                      }),
-                      teams.revision,
-                    )
-                    .then((ok) => {
-                      if (!ok) toast.error(teams.saveError ?? zh.saveFail);
-                    })
-                }
-              />
-            ) : (
+            ) : tab === "runs" ? (
               <RunsTab
                 theme={theme}
                 hostId={host.id}
                 navigation={navigation}
                 legacyRuns={preferences.values.recentRuns}
               />
-            )}
+            ) : null}
           </ScrollView>
         </>
       ) : null}
