@@ -24,6 +24,13 @@
   Roles with the exact settings revisions a merge must be saved against
 - the first empty catalog imports the default Roles automatically; “同步默认预设” groups and
   previews every change before writing; editing or copying keeps or strips preset origin metadata
+- version management (`agent-team.version.*` RPCs): report the installed version, source and latest
+  stable release (or the default branch head); fast-forward a clean directory checkout on its default
+  branch, run `npm ci` and reload through a detached runner that survives the reload, and roll a
+  failed update back with `git reset --keep`; managed git installs update with `paseo plugin update`,
+  npm and registry installs are only reported
+- the reloaded plugin confirms its own commit and version, npm is resolved from a real `npm-cli.js`
+  before any git write, and remote credentials never reach RPC results or job files
 
 ### Bug Fixes
 

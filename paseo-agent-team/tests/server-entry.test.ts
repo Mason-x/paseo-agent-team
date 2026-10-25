@@ -66,9 +66,58 @@ describe("server entry", () => {
       "agent-team.launch.status",
       "agent-team.templates.defaults.preview",
       "agent-team.templates.examples",
+      "agent-team.version.check",
+      "agent-team.version.get",
+      "agent-team.version.runtime",
+      "agent-team.version.update.start",
+      "agent-team.version.update.status",
     ]);
     expect(typeof cleanup).toBe("function");
     expect(() => cleanup()).not.toThrow();
+  });
+
+  test("version RPCs stay local when PASEO_HOME is absent", async () => {
+    const previous = process.env.PASEO_HOME;
+    delete process.env.PASEO_HOME;
+    try {
+      const { server, handlers } = fakeServer();
+      contribute(server);
+      const { port } = fakePort();
+      const info = (await handler(handlers, "agent-team.version.get")({}, { paseo: port })) as {
+        info: { blockers: Array<{ code: string }> };
+      };
+      expect(info.info.blockers.some((item) => item.code === "home_unavailable")).toBe(true);
+      const checked = (await handler(handlers, "agent-team.version.check")(
+        { requestId: "11111111-1111-4111-8111-111111111111" },
+        { paseo: port },
+      )) as { ok: boolean };
+      expect(checked.ok).toBe(true);
+      const started = (await handler(handlers, "agent-team.version.update.start")(
+        {
+          requestId: "22222222-2222-4222-8222-222222222222",
+          checkId: "33333333-3333-4333-8333-333333333333",
+        },
+        { paseo: port },
+      )) as { ok: boolean };
+      expect(started.ok).toBe(false);
+      const status = (await handler(handlers, "agent-team.version.update.status")(
+        {},
+        { paseo: port },
+      )) as {
+        job: { kind: string } | null;
+      };
+      expect(status.job?.kind).toBe("check");
+      const runtime = (await handler(handlers, "agent-team.version.runtime")(
+        {},
+        { paseo: port },
+      )) as {
+        pluginId: string;
+      };
+      expect(runtime.pluginId).toBe("paseo-agent-team");
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_HOME;
+      else process.env.PASEO_HOME = previous;
+    }
   });
 
   test("starts a launch through the settings and Paseo it is given, then reports on it", async () => {

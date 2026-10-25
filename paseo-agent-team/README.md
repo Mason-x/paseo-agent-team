@@ -168,6 +168,35 @@ The Explorer panel is the original Agent Crew UI:
 
 Ordinary Paseo agents that this plugin did not create are unchanged.
 
+
+## Version management
+
+The server exposes `agent-team.version.get`, `check`, `update.start`, `update.status`, and
+`runtime`. Check selects the highest stable `paseo-agent-team-v<semver>` tag, or the remote
+default branch when none exists, and reads `paseo-agent-team/package.json` at that commit.
+A directory checkout updates only when it is clean, on a tracking branch, and a strict ancestor
+of that commit. The detached `server/version/runner.mjs` then fast-forwards, runs `npm ci`, and
+reloads through the bundled CLI with an explicit `--home`. Failure returns to the previous commit
+with `git reset --keep` and another `npm ci`; it never resets hard, stashes, or force-fetches.
+Managed git installs use `paseo plugin update --ref <sha> --home <home>`. npm and registry
+installs are shown but not applied. A missing `PASEO_HOME` disables updates instead of using
+`~/.paseo`.
+
+A managed install has no plugin `node_modules`, so its one-click update returns `cli_missing`
+and a manual command. Boot confirmation also reads the pre-update checkout path; a future managed
+one-click update would need the reloaded process to report its new directory before runtime
+verification can succeed. A `concurrent_update` blocker names
+
+`<PASEO_HOME>/agent-team-runtime/v1/<hash>/updates/active.lock`; delete it only after the recorded
+process is gone and its job is not running.
+
+Drill the flow only against the dedicated development daemon:
+
+```bash
+node scripts/version-drill.mjs --home "$PWD/.paseo-dev" --host "$DEV_HOST" check
+node scripts/version-drill.mjs --home "$PWD/.paseo-dev" --host "$DEV_HOST" update
+```
+
 ## Develop
 
 Follow `AGENTS.md`. Never point plugin lifecycle commands at the default Paseo home.
