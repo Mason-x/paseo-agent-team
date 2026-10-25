@@ -86,6 +86,7 @@ export const BlockerCodeSchema = z.enum([
   "cli_missing",
   "not_git",
   "no_remote",
+  "unsupported_remote",
   "no_upstream",
   "dirty",
   "local_ahead",

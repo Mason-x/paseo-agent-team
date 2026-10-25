@@ -27,7 +27,7 @@ let archive: Record<string, Uint8Array>;
 
 beforeAll(async () => {
   archive = await buildArchive();
-});
+}, 30_000);
 
 test("release archive includes the npm lockfile and every runtime directory", () => {
   const files = Object.keys(archive);

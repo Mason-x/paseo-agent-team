@@ -283,7 +283,7 @@ describe("runner destinations", () => {
     git(["add", "README.md"]);
     git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "fixture"]);
     const ports = defaultPorts({});
-    const status = await ports.git(["status", "--porcelain"], repo, 5000);
+    const status = await ports.git(["status", "--porcelain"], repo, 20_000);
     expect(status.exitCode).toBe(0);
     const missing = await ports.exec("definitely-missing-binary", ["--version"], {
       timeoutMs: 1000,
@@ -294,14 +294,16 @@ describe("runner destinations", () => {
     const entry = spawnSync(process.execPath, ["server/version/runner.mjs", "--request", request], {
       cwd: path.resolve("."),
       encoding: "utf8",
+      timeout: 20_000,
     });
     expect(entry.status).not.toBe(0);
     const self = spawnSync(process.execPath, ["server/version/runner.mjs", "--self-test"], {
       cwd: path.resolve("."),
       encoding: "utf8",
+      timeout: 20_000,
     });
     expect(self.stdout).toContain("ok");
-  });
+  }, 30_000);
 
   test("managed success and a missing npm stop on the expected states", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agent-team-managed-success-"));

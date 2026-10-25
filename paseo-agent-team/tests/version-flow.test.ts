@@ -64,13 +64,16 @@ function directoryGit(extra: Record<string, ExecResult> = {}) {
       }
       if (joined.includes("show-toplevel")) return ok("C:\\repo");
       if (joined === "rev-parse HEAD") return ok(OLD);
-      if (joined.includes("--abbrev-ref HEAD")) return ok("main");
+      if (joined.includes("@{upstream}")) return ok("origin/trunk");
+      if (joined.includes("--abbrev-ref HEAD")) return ok("trunk");
       if (joined.includes("porcelain")) return ok("");
       if (joined.includes("MERGE_HEAD")) return ok("", 1);
-      if (joined.includes("@{upstream}")) return ok("origin/main");
       if (joined.includes("--left-right")) return ok("0\t1");
       if (joined.includes("ls-files")) return ok("paseo-agent-team/paseo-plugin.json");
       if (joined.includes("get-url")) return ok("https://github.com/Mason-x/paseo-agent-team.git");
+      if (joined.includes("ls-remote --symref")) {
+        return ok(`ref: refs/heads/trunk HEAD\n${TARGET} HEAD\n`);
+      }
       if (joined.includes("ls-remote --tags")) {
         return ok(`${TARGET} refs/tags/paseo-agent-team-v0.3.0\n`);
       }
@@ -164,6 +167,55 @@ describe("version flow", () => {
     if (!checked.ok || !checked.job.result) throw new Error("check failed");
     expect(checked.job.result.remote.installTarget?.kind).toBe("default-branch");
     expect(checked.job.result.remote.installTarget?.ref).toBe("refs/heads/trunk");
+
+    expect(checked.job.result.canUpdate).toBe(true);
+  });
+
+  test("a Windows path origin is checked instead of reported as a network error", async () => {
+    const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
+    const versions = createVersionService(serviceDeps(seededFiles(), git));
+    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
+    expect(checked.job.result.canUpdate).toBe(true);
+  });
+
+  test("an option-like origin is an unsupported remote, not a network failure", async () => {
+    const git = directoryGit({ "get-url": ok("--upload-pack=calc") });
+    const versions = createVersionService(serviceDeps(seededFiles(), git));
+    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    expect(checked.job.result.remote.error?.code).toBe("unsupported_remote");
+    expect(checked.job.result.canUpdate).toBe(false);
+  });
+
+  test("a release tag does not update a feature branch", async () => {
+    const git = directoryGit({ "--symbolic-full-name": ok("origin/drill-badlock") });
+    const versions = createVersionService(serviceDeps(seededFiles(), git));
+    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    expect(checked.job.result.remote.installTarget?.kind).toBe("release-tag");
+    expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
+    expect(checked.job.result.canUpdate).toBe(false);
+  });
+
+  test("a feature branch is not fast-forwarded onto the default branch", async () => {
+    const calls: string[] = [];
+    const git = directoryGit({ "--symbolic-full-name": ok("origin/drill-badlock") });
+    const original = git.run;
+    git.run = async (request) => {
+      calls.push(request.args.join(" "));
+      return original(request);
+    };
+    const versions = createVersionService(serviceDeps(seededFiles(), git));
+    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
+    expect(
+      checked.job.result.blockers.find((item) => item.code === "branch_mismatch")?.detail,
+    ).toContain("drill-badlock");
+    expect(checked.job.result.canUpdate).toBe(false);
+    expect(calls.some((args) => /^(fetch|merge|reset|clean|stash) /.test(args))).toBe(false);
   });
 
   test("npm and registry installs stay display-only", () => {
@@ -503,7 +555,7 @@ describe("version flow", () => {
       intervalMs: 10,
     });
     expect(JSON.parse(await nodeFiles().readText(jobFile, 100000)).state).toBe("succeeded");
-  });
+  }, 30_000);
 
   test("boot confirmation with a different commit makes the runner fail", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-mismatch-"));

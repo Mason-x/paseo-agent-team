@@ -268,17 +268,16 @@ export async function readDefaultBranch(
 }
 
 export function allowedRemote(remote: string): boolean {
-  const text = stripCredentials(remote);
+  const text = stripCredentials(remote).trim();
+  if (!text || text.startsWith("-") || text.toLowerCase().startsWith("ext::")) return false;
+  if (text.includes("\0") || /[\r\n]/.test(text)) return false;
   if (text.startsWith("git@github.com:")) return true;
   if (/^git@[^:]+:[^ ]+$/.test(text)) return true;
+  if (text.startsWith("file://")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(text) || text.startsWith("\\\\") || text.startsWith("/")) return true;
   try {
     const url = new URL(text);
-    return (
-      url.protocol === "https:" ||
-      url.protocol === "ssh:" ||
-      url.protocol === "git:" ||
-      url.protocol === "file:"
-    );
+    return url.protocol === "https:" || url.protocol === "ssh:" || url.protocol === "git:";
   } catch {
     return false;
   }

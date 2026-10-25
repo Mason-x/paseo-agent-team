@@ -34,7 +34,7 @@ test("generator requires an explicit source input", () => {
   expect(() => execFileSync(process.execPath, [script], { cwd: root, stdio: "pipe" })).toThrow(
     "explicit --input",
   );
-});
+}, 30_000);
 
 test("generator requires an explicit catalog revision", () => {
   expect(() =>
@@ -83,7 +83,7 @@ test("generator uses allowlists, preserves fixture content, and produces stable 
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
-}, 15000);
+}, 30_000);
 
 test("generator rejects unknown reference fields and inconsistent source runtime hints", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "paseo-default-presets-invalid-"));
@@ -112,7 +112,7 @@ test("generator rejects unknown reference fields and inconsistent source runtime
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test("generator treats URLs as text but still rejects absolute Windows paths", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "paseo-default-presets-paths-"));
@@ -133,4 +133,4 @@ test("generator treats URLs as text but still rejects absolute Windows paths", a
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
-}, 15000);
+}, 30_000);

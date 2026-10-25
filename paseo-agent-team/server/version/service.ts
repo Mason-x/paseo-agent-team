@@ -39,6 +39,7 @@ import { resolveNpmCli } from "./npm";
 import type { Clock, ExecPort, FilesPort, Ids } from "./process";
 import { nodeExec, nodeFiles, systemClock, systemIds } from "./process";
 import {
+  allowedRemote,
   ancestry,
   branchTarget,
   type FetchLike,
@@ -539,6 +540,18 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
     });
   }
   const cwd = local.current.repositoryPath ?? local.current.pluginPath;
+
+  if (!allowedRemote(local.remoteUrl)) {
+    return remoteError(
+      local.info,
+      blocker(
+        "unsupported_remote",
+        "manual_update",
+        "origin must be an https, ssh, git, file, or local path; update this checkout manually",
+      ),
+      deps.clock.iso(),
+    );
+  }
   const tags = await listTags(deps.git, local.remoteUrl, cwd, CHECK_STEP_TIMEOUT_MS);
   if (tags === null)
     return remoteError(
@@ -584,18 +597,22 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
     if ("blocker" in version) return remoteError(local.info, version.blocker, deps.clock.iso());
     target = branchTarget(branch, version.version, local.remoteUrl);
   }
+  const tracked = await trackingMismatch(deps, local, cwd);
+  const blockers = tracked ? [...local.info.blockers, tracked] : local.info.blockers;
   const relation = await relate(deps, local, target.commit);
   const decision = decideUpdate({
     source: local.installSource.kind,
     registry: false,
     relation,
     sameCommit: local.current.commit === target.commit,
-    blockers: local.info.blockers,
+    blockers,
     cliAvailable: local.info.cliAvailable,
   });
   return VersionInfoSchema.parse({
     ...local.info,
     ...decision,
+    blockers,
+    canUpdate: decision.canUpdate && !tracked,
     relation,
     checkId: deps.ids.uuid(),
     remote: {
@@ -607,6 +624,27 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
       error: null,
     },
   });
+}
+
+async function trackingMismatch(
+  deps: VersionDeps,
+  local: Discovery,
+  cwd: string,
+): Promise<Blocker | null> {
+  if (local.installSource.kind !== "directory" || !local.checkout?.branch || !local.remoteUrl) {
+    return null;
+  }
+  const head = await readDefaultBranch(deps.git, local.remoteUrl, cwd, CHECK_STEP_TIMEOUT_MS);
+  const branch = head ? parseSymrefHead(head) : null;
+  const expected = branch?.ref.replace(/^refs\/heads\//, "") ?? null;
+  const remoteName = local.checkout.upstream?.slice(0, local.checkout.upstream.indexOf("/"));
+  if (expected && remoteName && local.checkout.upstream === `${remoteName}/${expected}`)
+    return null;
+  return blocker(
+    "branch_mismatch",
+    "switch_tracking_branch",
+    `local branch ${local.checkout.branch} tracks ${local.checkout.upstream ?? "nothing"}; remote default branch is ${expected ?? "unknown"}. Check out the default branch and retry, or update manually.`,
+  );
 }
 
 async function packageVersionAt(
