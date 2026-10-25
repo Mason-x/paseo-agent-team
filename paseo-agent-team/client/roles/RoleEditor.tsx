@@ -11,6 +11,7 @@ import {
   RoleSchema,
 } from "../../shared/schemas/role";
 import { zh } from "../../shared/zh";
+import { keepRoleMetadata } from "../catalog/preset-metadata";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
 import { ModalActions } from "../shared/buttons";
@@ -198,7 +199,7 @@ export function RoleEditor({
       return;
     }
     setErrors({});
-    const result = await onSave(parsed.data, overwrite);
+    const result = await onSave(keepRoleMetadata(role, parsed.data), overwrite);
     if (result === "conflict") {
       setConflict(true);
       return;

@@ -22,6 +22,8 @@
   config-changed reporting
 - `agent-team.templates.defaults.preview` previews missing, updated, deleted, and colliding preset
   Roles with the exact settings revisions a merge must be saved against
+- the first empty catalog imports the default Roles automatically; “同步默认预设” groups and
+  previews every change before writing; editing or copying keeps or strips preset origin metadata
 
 ### Bug Fixes
 

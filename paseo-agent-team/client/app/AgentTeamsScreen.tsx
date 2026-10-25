@@ -1,15 +1,32 @@
+import { settingsRpc } from "@getpaseo/plugin";
 import { type PluginScreenProps, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { JSONType } from "zod";
 import { uniqueCopyId } from "../../shared/ids";
 import { toJsonValue } from "../../shared/json";
 import { createPaseoAdapter } from "../../shared/paseo/adapter";
-import { exampleCatalogRpc } from "../../shared/rpc";
+import { defaultCatalogPreviewRpc } from "../../shared/rpc";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import { PresetSyncDialog } from "../catalog/PresetSyncDialog";
+import { createPresetGateway } from "../catalog/preset-gateway";
+import { copyRole as copyRoleRecord, copyTeam as copyTeamRecord } from "../catalog/preset-metadata";
+import {
+  importDefaultPresets,
+  type PresetImportResult,
+  type PreviewSuccess,
+  previewFailureMessage,
+  retryPresetPreferences,
+} from "../catalog/preset-service";
+import {
+  autoImportAttemptKey,
+  countBindingReport,
+  resolveEmptyCatalogMode,
+} from "../catalog/preset-state";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
@@ -22,6 +39,29 @@ import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
 import { TeamsTab } from "../teams/TeamsTab";
 import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from "./tabs";
+
+const rolesReadRpc = settingsRpc(rolesSettings.id).read;
+const rolesWriteRpc = settingsRpc(rolesSettings.id).write;
+const preferencesReadRpc = settingsRpc(preferencesSettings.id).read;
+const preferencesWriteRpc = settingsRpc(preferencesSettings.id).write;
+
+type PresetImportPhase =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "needs-confirmation"; message: string }
+  | { kind: "failed"; message: string }
+  | { kind: "done" };
+
+type PresetNotice =
+  | { kind: "imported"; unbound: number; runtime: number }
+  | {
+      kind: "partial";
+      preview: PreviewSuccess;
+      roles: Role[];
+      unbound: number;
+      runtime: number;
+      message: string;
+    };
 
 const TAB_LABELS: Record<AgentTeamTab, string> = {
   roles: zh.roles,
@@ -45,7 +85,11 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const toast = useToast();
   const paseo = usePaseo();
   const adapter = useMemo(() => createPaseoAdapter(paseo), [paseo]);
-  const loadExamples = useRpc(exampleCatalogRpc);
+  const previewPresets = useRpc(defaultCatalogPreviewRpc);
+  const readRolesDoc = useRpc(rolesReadRpc);
+  const readPreferencesDoc = useRpc(preferencesReadRpc);
+  const writeRolesDoc = useRpc(rolesWriteRpc);
+  const writePreferencesDoc = useRpc(preferencesWriteRpc);
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
@@ -55,7 +99,10 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const requestedTab = parseTab(params.tab);
   const [tab, setTab] = useState<AgentTeamTab>(resolveInitialTab(params.tab));
   const [roleQuery, setRoleQuery] = useState("");
-  const [importing, setImporting] = useState(false);
+  const [presetImport, setPresetImport] = useState<PresetImportPhase>({ kind: "idle" });
+  const [presetNotice, setPresetNotice] = useState<PresetNotice | null>(null);
+  const [presetForceOpen, setPresetForceOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
     role: Role | null;
@@ -70,6 +117,159 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   useEffect(() => {
     if (requestedTab) setTab(requestedTab);
   }, [requestedTab]);
+
+  const presetGateway = useMemo(
+    () =>
+      createPresetGateway({
+        preview: (values) => previewPresets(values),
+        readRoles: (values) => readRolesDoc(values),
+        readPreferences: (values) => readPreferencesDoc(values),
+        roles: {
+          write: async (values, revision) => {
+            try {
+              const result = await writeRolesDoc({
+                revision,
+                values: toJsonValue(values) as JSONType,
+              });
+              return result.status;
+            } catch {
+              return "failed";
+            }
+          },
+          reload: () => roles.reload(),
+        },
+        preferences: {
+          write: async (values, revision) => {
+            try {
+              const result = await writePreferencesDoc({
+                revision,
+                values: toJsonValue(values) as JSONType,
+              });
+              return result.status;
+            } catch {
+              return "failed";
+            }
+          },
+          reload: () => preferences.reload(),
+        },
+      }),
+    [
+      previewPresets,
+      readRolesDoc,
+      readPreferencesDoc,
+      writeRolesDoc,
+      writePreferencesDoc,
+      roles.reload,
+      preferences.reload,
+    ],
+  );
+
+  const attemptedAuto = useRef(new Set<string>());
+  const autoGeneration = useRef(0);
+  const previousHost = useRef(host.id);
+
+  useEffect(() => {
+    if (previousHost.current === host.id) return;
+    previousHost.current = host.id;
+    autoGeneration.current += 1;
+    attemptedAuto.current.clear();
+    setPresetImport({ kind: "idle" });
+    setPresetNotice(null);
+    setPresetForceOpen(false);
+    setSyncOpen(false);
+  }, [host.id]);
+
+  const templatesImportedAt =
+    preferences.status === "ready" ? preferences.values.templatesImportedAt : undefined;
+  const emptyMode = ready
+    ? resolveEmptyCatalogMode({
+        rolesCount: roles.values.roles.length,
+        teamsCount: teams.values.teams.length,
+        templatesImportedAt,
+      })
+    : "none";
+  const roleRevision = roles.status === "ready" ? roles.revision : "";
+  const teamRevision = teams.status === "ready" ? teams.revision : "";
+  const teamCount = teams.status === "ready" ? teams.values.teams.length : 0;
+  const preferencesRevision = preferences.status === "ready" ? preferences.revision : "";
+
+  const applyPresetResult = useCallback(
+    (result: PresetImportResult, manual: boolean) => {
+      if (result.kind === "imported") {
+        const counts = countBindingReport(result.preview.bindingReport);
+        setPresetImport({ kind: "done" });
+        setPresetNotice({ kind: "imported", ...counts });
+        const parts: string[] = [zh.defaultPresetsImported(counts.unbound)];
+        if (counts.runtime > 0) parts.push(zh.defaultPresetsRuntimeCount(counts.runtime));
+        toast.show(parts.join(" "), { variant: "success" });
+        return;
+      }
+      if (result.kind === "already-present") {
+        setPresetImport({ kind: "done" });
+        return;
+      }
+      if (result.kind === "blocked") {
+        const message = previewFailureMessage(result.blockers);
+        if (result.canForce) {
+          setPresetImport({ kind: "needs-confirmation", message });
+          if (manual) setPresetForceOpen(true);
+        } else {
+          setPresetImport({ kind: "failed", message });
+        }
+        return;
+      }
+      if (result.kind === "preferences-failed") {
+        const counts = countBindingReport(result.preview.bindingReport);
+        setPresetImport({ kind: "done" });
+        setPresetNotice({
+          kind: "partial",
+          preview: result.preview,
+          roles: result.roles,
+          ...counts,
+          message: result.message,
+        });
+        toast.error(result.message);
+        return;
+      }
+      setPresetImport({ kind: "failed", message: result.message });
+    },
+    [toast],
+  );
+
+  useEffect(() => {
+    if (emptyMode !== "auto-import" || presetImport.kind !== "idle") return;
+    const key = autoImportAttemptKey(host.id, {
+      roles: roleRevision,
+      teams: teamRevision,
+      preferences: preferencesRevision,
+    });
+    if (attemptedAuto.current.has(key)) return;
+    attemptedAuto.current.add(key);
+    const generation = autoGeneration.current;
+    setPresetImport({ kind: "running" });
+    void importDefaultPresets(presetGateway, {
+      allowUnbound: false,
+      onlyWhenUnimported: true,
+      now: new Date().toISOString(),
+    })
+      .then((result) => {
+        if (generation !== autoGeneration.current) return;
+        applyPresetResult(result, false);
+      })
+      .catch(() => {
+        if (generation !== autoGeneration.current) return;
+        setPresetImport({ kind: "failed", message: zh.defaultPresetsSettingsUnavailable });
+      });
+  }, [
+    emptyMode,
+    presetImport.kind,
+    host.id,
+    roleRevision,
+    teamRevision,
+    preferencesRevision,
+    presetGateway,
+    applyPresetResult,
+  ]);
 
   const styles = useMemo(
     () => ({
@@ -139,6 +339,45 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         fontSize: 14,
       },
       toolbar: { flexDirection: "row" as const, gap: 8, alignItems: "center" as const },
+      syncButton: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        justifyContent: "center" as const,
+        gap: 4,
+        minHeight: 36,
+        minWidth: 36,
+        paddingHorizontal: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface2,
+        flexShrink: 0,
+      },
+      syncButtonIcon: { paddingHorizontal: 0 },
+      notice: {
+        gap: 6,
+        padding: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface1,
+      },
+      noticeClose: {
+        alignSelf: "flex-end" as const,
+        width: 24,
+        height: 24,
+        alignItems: "center" as const,
+        justifyContent: "center" as const,
+      },
+      noticeText: { color: theme.colors.foreground, fontSize: 12 },
+      noticeDanger: { color: theme.colors.statusDanger, fontSize: 12 },
+      link: { color: theme.colors.accent, fontSize: 12, fontWeight: "600" as const },
+      teamEmpty: { padding: 18, gap: 6, alignItems: "center" as const },
+      teamEmptyText: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 13,
+        textAlign: "center" as const,
+      },
       newButton: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -199,38 +438,62 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     [teams, toast],
   );
 
-  const importExamples = useCallback(async () => {
-    if (roles.status !== "ready" || teams.status !== "ready" || preferences.status !== "ready")
-      return;
-    setImporting(true);
+  async function runManualImport(allowUnbound: boolean) {
+    setPresetImport({ kind: "running" });
     try {
-      const catalog = await loadExamples({});
-      const rolesOk = await roles.save(toJsonValue({ roles: catalog.roles }), roles.revision);
-      const teamsOk = await teams.save(toJsonValue({ teams: catalog.teams }), teams.revision);
-      await preferences.save(
-        toJsonValue({ ...preferences.values, templatesImportedAt: new Date().toISOString() }),
-        preferences.revision,
-      );
-      if (rolesOk && teamsOk) toast.show(zh.importOk, { variant: "success" });
-      else toast.error(roles.saveError ?? teams.saveError ?? zh.importFail);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : zh.importFail);
-    } finally {
-      setImporting(false);
+      const result = await importDefaultPresets(presetGateway, {
+        allowUnbound,
+        onlyWhenUnimported: false,
+        now: new Date().toISOString(),
+      });
+      applyPresetResult(result, true);
+    } catch {
+      setPresetImport({ kind: "failed", message: zh.defaultPresetsSettingsUnavailable });
     }
-  }, [loadExamples, preferences, roles, teams, toast]);
+  }
+
+  function requestManualImport() {
+    if (presetImport.kind === "needs-confirmation") {
+      setPresetForceOpen(true);
+      return;
+    }
+    void runManualImport(false);
+  }
+
+  async function retryImportPreferences() {
+    if (presetNotice?.kind !== "partial") return;
+    const result = await retryPresetPreferences(
+      presetGateway,
+      presetNotice.preview,
+      presetNotice.roles,
+      new Date().toISOString(),
+    );
+    if (result !== "saved") {
+      toast.error(
+        result === "invalid"
+          ? zh.defaultPresetsPreferencesInvalid
+          : zh.defaultPresetsPreferencesFailed,
+      );
+      return;
+    }
+    setPresetNotice({
+      kind: "imported",
+      unbound: presetNotice.unbound,
+      runtime: presetNotice.runtime,
+    });
+    toast.show(zh.defaultPresetsImported(presetNotice.unbound), { variant: "success" });
+  }
 
   const copyTeam = useCallback(
     (team: Team) => {
       if (teams.status !== "ready") return;
       const now = new Date().toISOString();
-      const copy: Team = {
-        ...team,
-        id: uniqueCopyId(team.id, new Set(teams.values.teams.map((entry) => entry.id))),
-        name: `${team.name} ${zh.copySuffix}`.slice(0, 40),
-        createdAt: now,
-        updatedAt: now,
-      };
+      const copy = copyTeamRecord(
+        team,
+        uniqueCopyId(team.id, new Set(teams.values.teams.map((entry) => entry.id))),
+        `${team.name} ${zh.copySuffix}`.slice(0, 40),
+        now,
+      );
       void persistTeam(copy, false);
     },
     [persistTeam, teams],
@@ -250,12 +513,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     },
     [teams, toast],
   );
-
-  const catalogEmpty =
-    roles.status === "ready" &&
-    teams.status === "ready" &&
-    roles.values.roles.length === 0 &&
-    teams.values.teams.length === 0;
 
   function renderSettingsState(
     document: typeof roles | typeof teams | typeof preferences,
@@ -303,15 +560,39 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     renderSettingsState(preferences, "preferences");
   const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
   const newLabel = tab === "roles" ? zh.newRole : tab === "teams" ? zh.newTeam : zh.launchTeam;
-  const emptyState = catalogEmpty ? (
-    <EmptyState
-      theme={theme}
-      title={zh.emptyTitle}
-      body={zh.emptyBody}
-      actionLabel={importing ? zh.workingEllipsis : zh.importRuflo}
-      onAction={importing ? undefined : () => void importExamples()}
-    />
-  ) : null;
+  const presetBusy =
+    presetImport.kind === "running" ||
+    (emptyMode === "auto-import" && presetImport.kind === "idle");
+  const importMessage =
+    presetImport.kind === "failed" || presetImport.kind === "needs-confirmation"
+      ? presetImport.message
+      : emptyMode === "manual-import" && templatesImportedAt
+        ? zh.importDefaultsPreviously
+        : zh.emptyBody;
+  const importView =
+    emptyMode === "auto-import" || emptyMode === "manual-import" ? (
+      presetBusy ? (
+        <View style={styles.teamEmpty}>
+          <Text style={styles.teamEmptyText}>{zh.importDefaultsProgress}</Text>
+        </View>
+      ) : (
+        <EmptyState
+          theme={theme}
+          title={teamCount > 0 ? zh.importMissingRolesTitle : zh.emptyTitle}
+          body={importMessage}
+          actionLabel={zh.importDefaults}
+          onAction={requestManualImport}
+        />
+      )
+    ) : null;
+  const teamEmptyView =
+    emptyMode === "team-guidance" ? (
+      <View style={styles.teamEmpty}>
+        <Text style={styles.teamEmptyText}>{zh.teamListEmpty}</Text>
+      </View>
+    ) : teamCount === 0 ? (
+      importView
+    ) : null;
 
   return (
     <View style={styles.screen}>
@@ -353,6 +634,50 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         </View>
       </View>
       {blocked}
+      {presetNotice ? (
+        <View style={styles.notice}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={zh.dismissDefaultPresetsNotice}
+            onPress={() => setPresetNotice(null)}
+            style={styles.noticeClose}
+          >
+            <Icon name="X" size={14} color={theme.colors.foregroundMuted} />
+          </Pressable>
+          {presetNotice.kind === "partial" ? (
+            <>
+              <Text style={styles.noticeDanger}>{presetNotice.message}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={zh.defaultPresetsRetryPreferences}
+                onPress={() => void retryImportPreferences()}
+              >
+                <Text style={styles.link}>{zh.defaultPresetsRetryPreferences}</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.noticeText}>
+                {[
+                  zh.defaultPresetsImported(presetNotice.unbound),
+                  presetNotice.runtime > 0
+                    ? zh.defaultPresetsRuntimeCount(presetNotice.runtime)
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={zh.syncDefaultPresets}
+                onPress={() => setSyncOpen(true)}
+              >
+                <Text style={styles.link}>{zh.syncDefaultPresets}</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      ) : null}
       {ready ? (
         <>
           {tab === "roles" ? (
@@ -368,6 +693,19 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   style={styles.search}
                 />
               </View>
+              {roles.values.roles.length > 0 ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={zh.syncDefaultPresets}
+                  onPress={() => setSyncOpen(true)}
+                  style={[styles.syncButton, layout.compact && styles.syncButtonIcon]}
+                >
+                  <Icon name="RefreshCw" size={14} color={theme.colors.accent} />
+                  {layout.compact ? null : (
+                    <Text style={styles.action}>{zh.syncDefaultPresets}</Text>
+                  )}
+                </Pressable>
+              ) : null}
             </View>
           ) : null}
           <ScrollView
@@ -389,14 +727,14 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   profilesError: hostProfiles.status === "error" ? hostProfiles.error : undefined,
                   onRefreshProfiles: hostProfiles.reload,
                 }}
-                empty={emptyState}
+                empty={teamEmptyView}
                 onLaunch={(team) => setLaunch({ teamId: team.id })}
                 onEdit={(team) => setTeamEditor({ mode: "edit", team })}
                 onCopy={copyTeam}
                 onDelete={deleteTeam}
               />
             </View>
-            {tab === "roles" ? emptyState : null}
+            {tab === "roles" ? importView : null}
             {tab === "roles" ? (
               <RoleList
                 theme={theme}
@@ -407,13 +745,12 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                 onEdit={(role) => setRoleEditor({ mode: "edit", role })}
                 onCopy={(role) => {
                   const now = new Date().toISOString();
-                  const copy: Role = {
-                    ...role,
-                    id: uniqueCopyId(role.id, new Set(roles.values.roles.map((entry) => entry.id))),
-                    name: `${role.name} ${zh.copySuffix}`.slice(0, 40),
-                    createdAt: now,
-                    updatedAt: now,
-                  };
+                  const copy = copyRoleRecord(
+                    role,
+                    uniqueCopyId(role.id, new Set(roles.values.roles.map((entry) => entry.id))),
+                    `${role.name} ${zh.copySuffix}`.slice(0, 40),
+                    now,
+                  );
                   void persistRole(copy, false);
                 }}
                 onDelete={(role) =>
@@ -436,6 +773,27 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           </ScrollView>
         </>
       ) : null}
+      <PresetSyncDialog
+        theme={theme}
+        layout={layout}
+        open={syncOpen}
+        gateway={presetGateway}
+        onClose={() => setSyncOpen(false)}
+        onSynced={() => toast.show(zh.defaultPresetsSynced, { variant: "success" })}
+      />
+      <ConfirmDialog
+        theme={theme}
+        open={presetForceOpen}
+        title={zh.importDefaultsForceTitle}
+        body={zh.importDefaultsForceBody}
+        confirmLabel={zh.importDefaults}
+        danger
+        onCancel={() => setPresetForceOpen(false)}
+        onConfirm={() => {
+          setPresetForceOpen(false);
+          void runManualImport(true);
+        }}
+      />
       <RoleEditor
         theme={theme}
         layout={layout}

@@ -17,7 +17,6 @@ export const zh = {
   chooseTeam: "选择 Team",
   chooseRole: "选择 Role",
   noMatchingRoles: "没有匹配的 Role",
-  importRuflo: "导入默认 Role 预设",
   importOk: "已导入默认 Role 预设，请确认每个 Role 的 Profile。",
   importFail: "无法导入默认 Role 预设。",
   syncDefaultPresets: "同步默认预设",
@@ -323,4 +322,32 @@ export const zh = {
   designerStarting: "提交中…",
   designerUnavailable: "设计功能即将可用。",
   designerStartFail: "无法开始设计",
+
+  // 默认预设（客户端）
+  importDefaults: "导入默认 Role 预设",
+  importMissingRolesTitle: "还没有 Role",
+  defaultPresetsImported: (unbound: number) => `已导入默认 Role 预设，${unbound} 个引用未绑定。`,
+  importDefaultsProgress: "正在导入默认 Role 预设…",
+  importDefaultsPreviously:
+    "默认预设曾导入过，当前目录已清空。再次导入只会新增缺失的 Role，不会改动已有数据。",
+  importDefaultsForceTitle: "无法读取 Profile",
+  importDefaultsForceBody:
+    "无法读取 Profile，全部 Profile 引用将被标为未绑定。仍要导入默认 Role 预设吗？",
+  defaultPresetsLoading: "正在读取默认预设差异…",
+  defaultPresetsLoadFail: "无法读取默认预设差异。",
+  defaultPresetsApply: "应用并保存",
+  defaultPresetsShowPrompt: "查看 systemPrompt 前后",
+  defaultPresetsHidePrompt: "收起 systemPrompt",
+  defaultPresetsBefore: "当前",
+  defaultPresetsAfter: "预设",
+  defaultPresetsSummary: (add: number, adopt: number) =>
+    `将新增 ${add} 个 Role${adopt > 0 ? `，采用 ${adopt} 个预设更新` : ""}。`,
+  defaultPresetsPreferencesFailed: "Role 已导入，导入记录未保存。",
+  defaultPresetsPreferencesInvalid: "Role 已导入，但偏好数据无效，导入记录未保存。",
+  defaultPresetsInvalidData: "目录数据无效，无法保存。请先在设置中修复。",
+  defaultPresetsWriteFailed: "保存失败，请重试。",
+  defaultPresetsRetryPreferences: "重试保存记录",
+  defaultPresetsSynced: "已同步默认预设。",
+  dismissDefaultPresetsNotice: "关闭默认预设提示",
+  teamListEmpty: "还没有 Team。用上方的 Team 设计师描述需求，或点「新建 Team」手动创建。",
 } as const;

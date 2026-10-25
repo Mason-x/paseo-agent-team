@@ -6,6 +6,7 @@ import type { Role } from "../../shared/schemas/role";
 import type { Team, TeamMember } from "../../shared/schemas/team";
 import { TeamSchema } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
+import { keepTeamMetadata } from "../catalog/preset-metadata";
 import { ModalActions } from "../shared/buttons";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { TextField } from "../shared/Field";
@@ -104,7 +105,7 @@ export function TeamEditor({
       setErrors(next);
       return;
     }
-    const result = await onSave(parsed.data, overwrite);
+    const result = await onSave(keepTeamMetadata(team, parsed.data), overwrite);
     if (result === "conflict") {
       setConflict(true);
       return;
