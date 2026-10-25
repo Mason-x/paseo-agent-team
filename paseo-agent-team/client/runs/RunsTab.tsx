@@ -13,6 +13,7 @@ import {
   type RunRow,
   runTask,
   runTimeLabel,
+  showsFollowUp,
 } from "../../shared/domain/run-list";
 import type { TeamRun } from "../../shared/domain/run-progress";
 import type { RunSummary } from "../../shared/schemas/preferences";
@@ -140,12 +141,12 @@ function RunCard({
               accessibilityLabel={zh.progress}
               onPress={onToggle}
             />
-            {coordinator && live ? (
+            {showsFollowUp(run, progress.phase) ? (
               <GhostIconButton
                 theme={theme}
                 icon="MessageSquarePlus"
                 accessibilityLabel={zh.followUp}
-                onPress={() => onFollowUp({ coordinatorId: coordinator.id, teamName })}
+                onPress={() => onFollowUp({ coordinatorId: run.coordinator.id, teamName })}
               />
             ) : null}
             {navigation && run.workspaceId ? (

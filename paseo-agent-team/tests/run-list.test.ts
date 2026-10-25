@@ -90,6 +90,23 @@ describe("buildRunRows", () => {
     ]);
   });
 
+  test("an idle coordinator with a failed member needs attention and sorts first", () => {
+    const memberFailed: TeamRun = {
+      runId: "member-failed",
+      teamName: "Team",
+      coordinator: agent("c", { status: "idle", ...finished }),
+      members: [agent("m", { status: "error", ...finished })],
+      startedAt: iso(HOUR),
+      lastActivityAt: iso(HOUR),
+    };
+    const rows = buildRunRows([run("done", "done", 2 * HOUR), memberFailed]);
+    expect(rows.map((row) => row.run.runId)).toEqual(["member-failed", "done"]);
+    expect(rows[0]?.progress.phase).toBe("needs-you");
+    expect(filterCounts(rows)).toEqual({ all: 2, attention: 1, active: 0, ended: 1 });
+    expect(filterRows(rows, "attention").map((row) => row.run.runId)).toEqual(["member-failed"]);
+    expect(filterRows(rows, "ended").map((row) => row.run.runId)).toEqual(["done"]);
+  });
+
   test("filters and counts by bucket", () => {
     const rows = buildRunRows(runs);
     expect(filterCounts(rows)).toEqual({ all: 5, attention: 1, active: 1, ended: 3 });

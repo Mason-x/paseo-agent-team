@@ -25,6 +25,9 @@
 
 ### Bug Fixes
 
+- an idle coordinator with a member error shows as 需处理 and keeps 追加任务; the Crew panel
+  and the runs page agree on the failed state
+
 - Runs tab: filter by 需处理 / 进行中 / 已结束, sort runs needing attention first, show earlier
   runs on demand, compact cards, "finished N days ago" instead of "ran for N days", and the task
   of runs launched by older versions

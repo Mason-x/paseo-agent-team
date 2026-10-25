@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { buildRunRows, filterRows, showsFollowUp } from "../shared/domain/run-list";
 import {
   digestCacheKey,
   digestTimeline,
@@ -43,6 +44,11 @@ describe("memberState", () => {
       "needs-input",
     );
     expect(memberState(agent("a", { attentionReason: "permission" }))).toBe("needs-input");
+    expect(
+      memberState(
+        agent("a", { status: "idle", attentionReason: "error", pendingPermissions: [{}] }),
+      ),
+    ).toBe("needs-input");
   });
 
   test("maps lifecycle states", () => {
@@ -185,8 +191,17 @@ describe("runProgress", () => {
   });
 
   test("running: the coordinator or any member is working", () => {
+    const running = { coordinator: coordinator({ status: "running" }), members: [] };
+    expect(runProgress(running).phase).toBe("running");
+    expect(showsFollowUp(running, runProgress(running).phase)).toBe(true);
     expect(
-      runProgress({ coordinator: coordinator({ status: "running" }), members: [] }).phase,
+      runProgress({
+        coordinator: coordinator({ status: "idle" }),
+        members: [
+          agent("busy", { status: "running", lastUserMessageAt: T1 }),
+          agent("stuck", { status: "error", lastUserMessageAt: T1 }),
+        ],
+      }).phase,
     ).toBe("running");
     expect(
       runProgress({
@@ -203,9 +218,9 @@ describe("runProgress", () => {
   });
 
   test("needs-you: the coordinator or a member waits on a permission", () => {
-    expect(
-      runProgress({ coordinator: coordinator({ pendingPermissions: [{}] }), members: [] }).phase,
-    ).toBe("needs-you");
+    const waiting = { coordinator: coordinator({ pendingPermissions: [{}] }), members: [] };
+    expect(runProgress(waiting).phase).toBe("needs-you");
+    expect(showsFollowUp(waiting, runProgress(waiting).phase)).toBe(true);
     expect(
       runProgress({
         coordinator: coordinator({ status: "running" }),
@@ -214,26 +229,111 @@ describe("runProgress", () => {
     ).toBe("needs-you");
   });
 
+  test("needs-you: an idle coordinator with a member error is not finished", () => {
+    const run = {
+      runId: "run-1",
+      coordinator: coordinator({ status: "idle" }),
+      members: [agent("m", { status: "error", lastUserMessageAt: T1, lastError: "usage limit" })],
+      startedAt: T0,
+      lastActivityAt: T1,
+    };
+    const progress = runProgress(run);
+    expect(progress.phase).toBe("needs-you");
+    expect(progress.counts.failed).toBe(1);
+    expect(showsFollowUp(run, progress.phase)).toBe(true);
+    const rows = buildRunRows([run]);
+    expect(filterRows(rows, "attention").map((row) => row.run.runId)).toEqual(["run-1"]);
+    expect(filterRows(rows, "ended")).toEqual([]);
+    expect(
+      runProgress({
+        coordinator: coordinator({ status: "idle" }),
+        members: [
+          agent("stuck", { status: "error", lastUserMessageAt: T1 }),
+          agent("ok", { lastUserMessageAt: T1 }),
+        ],
+      }).phase,
+    ).toBe("needs-you");
+  });
+
+  test("needs-you: an idle member flagged with an error attention is not finished", () => {
+    const member = agent("m", { status: "idle", attentionReason: "error", lastUserMessageAt: T1 });
+    expect(memberState(member)).toBe("failed");
+    const run = { coordinator: coordinator({ status: "idle" }), members: [member] };
+    const progress = runProgress(run);
+    expect(progress.phase).toBe("needs-you");
+    expect(showsFollowUp(run, progress.phase)).toBe(true);
+  });
+
+  test("a member flagged with an error while still running stays working", () => {
+    const retrying = agent("m", {
+      status: "running",
+      attentionReason: "error",
+      lastUserMessageAt: T1,
+    });
+    expect(memberState(retrying)).toBe("working");
+    expect(
+      memberState(
+        agent("m", { status: "initializing", attentionReason: "error", lastUserMessageAt: T1 }),
+      ),
+    ).toBe("working");
+    expect(
+      runProgress({ coordinator: coordinator({ status: "idle" }), members: [retrying] }).phase,
+    ).toBe("running");
+  });
+
   test("failed: the coordinator errored", () => {
-    expect(runProgress({ coordinator: coordinator({ status: "error" }), members: [] }).phase).toBe(
-      "failed",
-    );
+    const run = { coordinator: coordinator({ status: "error" }), members: [] };
+    expect(runProgress(run).phase).toBe("failed");
+    expect(showsFollowUp(run, runProgress(run).phase)).toBe(true);
+    expect(
+      runProgress({
+        coordinator: coordinator({ status: "error" }),
+        members: [agent("m", { status: "error", lastUserMessageAt: T1 })],
+      }).phase,
+    ).toBe("failed");
+  });
+
+  test("failed: an idle coordinator with an unread error attention is not done", () => {
+    const run = {
+      coordinator: coordinator({ status: "idle", attentionReason: "error" }),
+      members: [agent("m", { lastUserMessageAt: T1 })],
+    };
+    expect(runProgress(run).phase).toBe("failed");
+    expect(showsFollowUp(run, runProgress(run).phase)).toBe(true);
+    expect(
+      runProgress({
+        coordinator: coordinator({
+          status: "idle",
+          attentionReason: "error",
+          pendingPermissions: [{}],
+        }),
+        members: [],
+      }).phase,
+    ).toBe("needs-you");
+    expect(
+      runProgress({
+        coordinator: coordinator({ status: "running", attentionReason: "error" }),
+        members: [],
+      }).phase,
+    ).toBe("running");
   });
 
   test("done: the coordinator went idle and nobody is working", () => {
-    expect(
-      runProgress({
-        coordinator: coordinator(),
-        members: [agent("m", { lastUserMessageAt: T1 })],
-      }).phase,
-    ).toBe("done");
+    const run = {
+      coordinator: coordinator(),
+      members: [agent("m", { lastUserMessageAt: T1 })],
+    };
+    const progress = runProgress(run);
+    expect(progress.phase).toBe("done");
+    expect(showsFollowUp(run, progress.phase)).toBe(false);
   });
 
   test("idle: the coordinator is closed, or there is none", () => {
-    expect(runProgress({ coordinator: coordinator({ status: "closed" }), members: [] }).phase).toBe(
-      "idle",
-    );
+    const closed = { coordinator: coordinator({ status: "closed" }), members: [] };
+    expect(runProgress(closed).phase).toBe("idle");
+    expect(showsFollowUp(closed, "idle")).toBe(false);
     expect(runProgress({ members: [agent("m")] }).phase).toBe("idle");
+    expect(showsFollowUp({ coordinator: undefined }, "needs-you")).toBe(false);
   });
 });
 

@@ -59,6 +59,9 @@ export function memberState(agent: RunAgentSnapshot): MemberState {
   if (agent.status === "running") return "working";
   if (agent.status === "initializing") return hasRun(agent) ? "working" : "not-started";
   if (agent.status === "closed") return "closed";
+  // Status can return to idle while an unread error attention remains.
+  // A Claude quota hit is a finished event, not an error; item 5 (额度感知) recognizes it.
+  if (agent.attentionReason === "error") return "failed";
   return hasRun(agent) ? "delivered" : "not-started";
 }
 
@@ -147,7 +150,11 @@ export function runProgress(run: Pick<TeamRun, "coordinator" | "members">): RunP
   let phase: RunPhase;
   if ((coordinator && needsInput(coordinator)) || counts["needs-input"] > 0) {
     phase = "needs-you";
-  } else if (coordinator?.status === "error") {
+  } else if (
+    // Idle keeps an unread error attention after status leaves "error".
+    coordinator?.status === "error" ||
+    (coordinator?.status === "idle" && coordinator.attentionReason === "error")
+  ) {
     phase = "failed";
   } else if (
     coordinator?.status === "running" ||
@@ -158,7 +165,8 @@ export function runProgress(run: Pick<TeamRun, "coordinator" | "members">): RunP
   } else if (coordinator && !hasRun(coordinator) && coordinator.status !== "closed") {
     phase = "starting";
   } else if (coordinator?.status === "idle") {
-    phase = "done";
+    // The coordinator already stopped, but a member error still needs a person.
+    phase = counts.failed > 0 ? "needs-you" : "done";
   } else {
     phase = "idle";
   }

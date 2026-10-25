@@ -1,6 +1,12 @@
 import type { RunSummary } from "../schemas/preferences";
 import { zh } from "../zh";
-import { type RunPhase, type RunProgress, runProgress, type TeamRun } from "./run-progress";
+import {
+  type RunAgentSnapshot,
+  type RunPhase,
+  type RunProgress,
+  runProgress,
+  type TeamRun,
+} from "./run-progress";
 
 export type RunFilter = "all" | "active" | "attention" | "ended";
 
@@ -31,6 +37,14 @@ export function bucketOf(phase: RunPhase): Bucket {
 /** A run still has something to watch or answer while it is active or needs attention. */
 export function isLive(phase: RunPhase): boolean {
   return bucketOf(phase) !== "ended";
+}
+
+/** Follow-up stays available for every live phase, using the same ended check as the filters. */
+export function showsFollowUp(
+  run: Pick<TeamRun, "coordinator">,
+  phase: RunPhase,
+): run is { coordinator: RunAgentSnapshot } {
+  return run.coordinator !== undefined && isLive(phase);
 }
 
 /** Runs that need a person first, then ones in flight, then finished ones; newest first within each. */

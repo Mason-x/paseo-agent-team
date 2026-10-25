@@ -63,6 +63,7 @@ export function crewState(agent: AgentSnapshot): CrewState {
     return "needs-input";
   }
   if (agent.status === "running" || agent.status === "initializing") return "working";
+  if (agent.attentionReason === "error") return "failed";
   if (agent.requiresAttention || agent.attentionReason === "finished") return "ready";
   if (agent.status === "closed") return "closed";
   return "idle";
