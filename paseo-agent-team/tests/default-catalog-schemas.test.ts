@@ -12,7 +12,7 @@ describe("optional default preset persistence", () => {
     expect(ProfileRefSchema.parse(ref)).toEqual(ref);
     expect(RoleSchema.parse(architect)).toEqual(architect);
     expect(PreferencesSchema.parse({})).toEqual({
-      maxMembers: 8,
+      maxMembers: 24,
       archiveOnLaunchFailure: true,
       recentRuns: [],
     });

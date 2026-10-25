@@ -168,18 +168,26 @@ describe("TeamSchema", () => {
     expect(TeamSchema.safeParse({ ...base, members: [] }).success).toBe(false);
   });
 
-  test("strips a leftover member profileOverride", () => {
+  test("preserves newer member fields, including seatId, instead of stripping them", () => {
     const parsed = TeamSchema.parse({
       ...base,
       members: [
         {
           roleId: "architect",
+          seatId: "seat-architect-1",
           enabled: true,
           profileOverride: { profileId: "claude-opus-high", nameSnapshot: "Claude" },
         },
       ],
     });
-    expect(parsed.members[0]).toEqual({ roleId: "architect", enabled: true });
+    // A leftover profileOverride no longer selects a Profile, but a save must not drop it or any
+    // other field a newer writer stored on the member.
+    expect(parsed.members[0]).toEqual({
+      roleId: "architect",
+      seatId: "seat-architect-1",
+      enabled: true,
+      profileOverride: { profileId: "claude-opus-high", nameSnapshot: "Claude" },
+    });
   });
 });
 
@@ -214,7 +222,7 @@ describe("settings documents", () => {
 
   test("preferences fill defaults", () => {
     const parsed = PreferencesSchema.parse({});
-    expect(parsed.maxMembers).toBe(8);
+    expect(parsed.maxMembers).toBe(24);
     expect(parsed.archiveOnLaunchFailure).toBe(true);
     expect(parsed.recentRuns).toEqual([]);
   });

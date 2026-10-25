@@ -74,6 +74,36 @@ describe("buildLaunchPlan", () => {
     ).toBe(true);
   });
 
+  test("clamps the runtime member limit to 64 regardless of the saved preference", () => {
+    const teamWith = (count: number) => ({
+      ...codingTeam,
+      members: Array.from({ length: count }, (_, index) => ({
+        roleId: "developer",
+        instanceLabel: `Seat ${index + 1}`,
+        enabled: true,
+      })),
+    });
+    const atLimit = buildLaunchPlan({
+      ...base,
+      team: teamWith(64),
+      maxMembers: 200,
+    });
+    expect(atLimit.blockers).toEqual([]);
+    expect(atLimit.members).toHaveLength(64);
+
+    const over = buildLaunchPlan({
+      ...base,
+      team: teamWith(65),
+      maxMembers: 200,
+    });
+    expect(over.blockers).toContain("已启用成员（65）超过上限 64。");
+
+    // A saved lower limit is still enforced unchanged.
+    expect(buildLaunchPlan({ ...base, team: teamWith(9), maxMembers: 8 }).blockers).toContain(
+      "已启用成员（9）超过上限 8。",
+    );
+  });
+
   test("member profile failure is a blocker, disabled members are warnings", () => {
     const blocked = buildLaunchPlan({
       ...base,

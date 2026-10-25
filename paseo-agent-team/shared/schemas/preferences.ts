@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { StoredEconomyPolicySchema, StoredQuotaRecoverySchema } from "./team-mode";
 
 export const MAX_SEEN_PRESET_ROLE_IDS = 1000;
 
@@ -29,14 +30,23 @@ export const RunSummarySchema = z.object({
   createdAt: z.string(),
 });
 
-export const PreferencesSchema = z.object({
-  maxMembers: z.number().int().min(1).max(16).default(8),
-  archiveOnLaunchFailure: z.boolean().default(true),
-  recentRuns: z.array(RunSummarySchema).max(20).default([]),
-  templatesImportedAt: z.string().optional(),
-  // A damaged block drops only preset history; launch preferences remain usable.
-  defaultPresets: DefaultPresetsPreferencesSchema.optional().catch(undefined),
-});
+export const PreferencesSchema = z
+  .object({
+    // Storage has no upper bound: existing Teams may exceed what this version runs, and the
+    // settings screen must still open them. The host economy policy owns the runtime cap.
+    maxMembers: z.number().int().min(1).default(24),
+    archiveOnLaunchFailure: z.boolean().default(true),
+    recentRuns: z.array(RunSummarySchema).max(20).default([]),
+    templatesImportedAt: z.string().optional(),
+    // Host-level economy pool. User data: the block stays exactly as written, including entries
+    // this version cannot interpret, so no later preferences write deletes it. normalizeEconomyPolicy
+    // reports per-entry problems before a launch.
+    economy: StoredEconomyPolicySchema.optional(),
+    quotaRecovery: StoredQuotaRecoverySchema.optional(),
+    // A damaged block drops only preset history; launch preferences remain usable.
+    defaultPresets: DefaultPresetsPreferencesSchema.optional().catch(undefined),
+  })
+  .passthrough();
 
 export type RunSummary = z.infer<typeof RunSummarySchema>;
 export type Preferences = z.infer<typeof PreferencesSchema>;

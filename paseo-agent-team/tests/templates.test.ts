@@ -5,6 +5,7 @@ import { exampleCatalog, materializeDefaultCatalog } from "../server/templates";
 import { defaultCatalogRevision, defaultRoleTemplates } from "../server/templates/default-catalog";
 import { hashCatalogContent } from "../server/templates/hash";
 import { resolveProfile } from "../shared/domain/profile-resolver";
+import { DEFAULT_ROLE_EXECUTION } from "../shared/domain/role-execution";
 import { DefaultRoleTemplateSchema } from "../shared/schemas/default-catalog";
 import { RoleSchema } from "../shared/schemas/role";
 import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
@@ -15,7 +16,7 @@ describe("default Role templates", () => {
 
   test("ships exactly the 22 source Roles and no Teams; raw and materialized schemas pass", () => {
     expect(sourceProfiles).toHaveLength(16);
-    expect(defaultCatalogRevision).toBe("defaults-2026-10-25.1");
+    expect(defaultCatalogRevision).toBe("defaults-2026-10-25.2");
     expect(defaultRoleTemplates).toHaveLength(22);
     expect(catalog.roles.map((role) => role.id)).toEqual(
       expectedRoleContent.map((role) => role.id),
@@ -29,7 +30,12 @@ describe("default Role templates", () => {
   });
 
   test("preserves every source content field and every ordered hint", () => {
-    expect(defaultRoleTemplates).toEqual(expectedRoleContent);
+    // executionPolicy is added by the generator from DEFAULT_ROLE_EXECUTION; the source-content
+    // fixture stays free of it so a binding/content change cannot hide behind tier edits.
+    expect(expectedRoleContent.every((role) => !("executionPolicy" in role))).toBe(true);
+    expect(
+      defaultRoleTemplates.map(({ executionPolicy: _executionPolicy, ...content }) => content),
+    ).toEqual(expectedRoleContent);
     for (const [index, role] of catalog.roles.entries()) {
       const {
         preferredProfiles,
@@ -38,10 +44,12 @@ describe("default Role templates", () => {
         updatedAt,
         source,
         preset,
+        executionPolicy,
         ...content
       } = role;
       const { preferredHints, fallbackHints, ...expectedContent } = expectedRoleContent[index];
       expect(content, role.id).toEqual(expectedContent);
+      expect(executionPolicy, role.id).toEqual(DEFAULT_ROLE_EXECUTION[role.id]);
       expect(
         preferredProfiles.map((ref) => ref.hint),
         role.id,
@@ -64,6 +72,24 @@ describe("default Role templates", () => {
         importedAt: NOW,
       });
     }
+  });
+
+  test("the generator writes the explicit tier for all 22 presets", () => {
+    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(22);
+    expect(defaultRoleTemplates.map((role) => role.id).sort()).toEqual(
+      Object.keys(DEFAULT_ROLE_EXECUTION).sort(),
+    );
+    for (const template of defaultRoleTemplates) {
+      expect(template.executionPolicy, template.id).toEqual(DEFAULT_ROLE_EXECUTION[template.id]);
+    }
+    // Only tier/taskKind: no Profile ID, no host metadata leaks into the raw module.
+    expect(
+      defaultRoleTemplates.every(
+        (template) =>
+          JSON.stringify(Object.keys(template.executionPolicy ?? {}).sort()) ===
+          '["taskKind","tier"]',
+      ),
+    ).toBe(true);
   });
 
   test("binds all preferred and fallback IDs in the exact source order, including both Opus Highs", () => {

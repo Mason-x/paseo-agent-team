@@ -2,6 +2,7 @@ import { DEFAULT_CATALOG_ID, type PresetRolePreview } from "../schemas/default-c
 import { type Preferences, PreferencesSchema } from "../schemas/preferences";
 import { type Role, RoleSchema } from "../schemas/role";
 import { zh } from "../zh";
+import { DEFAULT_ROLE_EXECUTION } from "./role-execution";
 
 const MANAGEMENT_FIELDS = new Set(["createdAt", "updatedAt", "source", "preset", "designer"]);
 const REFERENCE_FIELDS = ["preferredProfiles", "fallbackProfiles"] as const;
@@ -40,10 +41,26 @@ export function canonicalize(value: Record<string, unknown>): string {
  * updatedAt, source, preset, designer. preferredProfiles/fallbackProfiles compare only their
  * profileId sequence, ignoring nameSnapshot and hint, so renaming a Profile cannot make every
  * preset look changed. Every other top-level field, including extensions, compares canonically.
+ * A missing executionPolicy compares as the known-id default: that is the tier planning actually
+ * applies, so an unmarked pre-tier Role is not reported as a user collision on first sync.
  */
 function comparableContent(value: Role): Record<string, unknown> {
   const parsed = RoleSchema.parse(value);
   const content = contentOf(parsed);
+  const fallback = DEFAULT_ROLE_EXECUTION[parsed.id];
+  const policy = content.executionPolicy;
+  if (policy === undefined) {
+    if (fallback) content.executionPolicy = fallback;
+  } else if (fallback && typeof policy === "object" && policy !== null && !Array.isArray(policy)) {
+    // Compare the tier planning actually applies: a present block with only one explicit field
+    // still inherits the other from the known-id default. Invalid values remain visible.
+    const explicit = policy as Record<string, unknown>;
+    content.executionPolicy = {
+      ...explicit,
+      ...(explicit.tier === undefined ? { tier: fallback.tier } : {}),
+      ...(explicit.taskKind === undefined ? { taskKind: fallback.taskKind } : {}),
+    };
+  }
   for (const key of REFERENCE_FIELDS) content[key] = parsed[key].map((ref) => ref.profileId);
   return content;
 }

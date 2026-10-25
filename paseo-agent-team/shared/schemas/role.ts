@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DescriptionSchema, ShortTextSchema, SlugSchema, StringListSchema } from "./common";
 import { ProfileRefSchema } from "./profile-ref";
+import { StoredRoleExecutionPolicySchema } from "./team-mode";
 
 const controlFree = (max: number) =>
   z
@@ -85,6 +86,9 @@ export const RoleSchema = z
     enabled: z.boolean().default(true),
     createdAt: z.string(),
     updatedAt: z.string(),
+    // Tier and task kind for mode planning. Values are preserved as stored, even when a newer
+    // writer used an unknown value or the wrong type; resolveRoleExecution reports them.
+    executionPolicy: StoredRoleExecutionPolicySchema.optional(),
     // Other origins (including a future team-designer) remain valid extension values.
     source: z.string().optional(),
     // A damaged origin drops only the origin; the Role keeps its content and stays editable.

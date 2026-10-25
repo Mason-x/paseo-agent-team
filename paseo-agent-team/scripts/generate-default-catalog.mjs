@@ -3,6 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+// Node 24 strips the types, so the tier table has exactly one definition shared with runtime code.
+import { DEFAULT_ROLE_EXECUTION } from "../shared/domain/role-execution.ts";
 
 // Never read a host's config implicitly. The input is an explicitly exported, read-only file.
 const root = path.resolve(import.meta.dirname, "..");
@@ -94,11 +96,18 @@ function hints(refs) {
     return pick(ref, hintFields);
   });
 }
-const roles = sourceRoles.map((role) => ({
-  ...pick(role, contentFields),
-  preferredHints: hints(role.preferredProfiles),
-  fallbackHints: hints(role.fallbackProfiles),
-}));
+const roles = sourceRoles.map((role) => {
+  const executionPolicy = DEFAULT_ROLE_EXECUTION[role.id];
+  if (!executionPolicy) {
+    throw new Error(`Missing default execution policy for Role ${role.id}`);
+  }
+  return {
+    ...pick(role, contentFields),
+    executionPolicy,
+    preferredHints: hints(role.preferredProfiles),
+    fallbackHints: hints(role.fallbackProfiles),
+  };
+});
 function assertPortable(value) {
   if (!value || typeof value !== "object") return;
   for (const [key, child] of Object.entries(value)) {

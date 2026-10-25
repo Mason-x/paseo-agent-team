@@ -3,11 +3,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
+import { DEFAULT_ROLE_EXECUTION } from "../shared/domain/role-execution";
 import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
 
 const root = join(import.meta.dirname, "..");
 const script = join(root, "scripts/generate-default-catalog.mjs");
-const revision = "defaults-2026-10-25.1";
+const revision = "defaults-2026-10-25.2";
 
 function sourceFixture() {
   return {
@@ -69,9 +70,15 @@ test("generator uses allowlists, preserves fixture content, and produces stable 
     const first = await readFile(output, "utf8");
     expect(first).toBe(await readFile(join(root, "server/templates/default-catalog.ts"), "utf8"));
     expect(first).not.toMatch(/agent_profile_|profileId|notes|privateHostMetadata|do not ship/);
-    expect(
-      JSON.parse(await readFile(join(fixtures, "expected-role-content.json"), "utf8")),
-    ).toEqual(expectedRoleContent);
+    const generated = JSON.parse(
+      await readFile(join(fixtures, "expected-role-content.json"), "utf8"),
+    ) as Array<Record<string, unknown>>;
+    expect(generated.map(({ executionPolicy: _executionPolicy, ...content }) => content)).toEqual(
+      expectedRoleContent,
+    );
+    for (const role of generated) {
+      expect(role.executionPolicy).toEqual(DEFAULT_ROLE_EXECUTION[role.id as string]);
+    }
     expect(JSON.parse(await readFile(join(fixtures, "expected-bindings.json"), "utf8"))).toEqual(
       expectedBindings,
     );

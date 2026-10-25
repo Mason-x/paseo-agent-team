@@ -135,11 +135,34 @@ describe("default preset diff and selected merge", () => {
       };
     });
     expect(unmarked).toHaveLength(22);
+    expect(unmarked.every((entry) => entry.executionPolicy === undefined)).toBe(true);
     const rows = diff(unmarked);
     expect(rows).toHaveLength(22);
     expect(rows.every((row) => row.kind === "same")).toBe(true);
     expect(rows.every((row) => row.defaultAction === "keep")).toBe(true);
     expect(rows.every((row) => row.changedFields.length === 0 && !row.locallyChanged)).toBe(true);
+
+    // A tier the user explicitly changed is still a real content difference.
+    const retiered = unmarked.map((entry, index) =>
+      index === 0 ? { ...entry, executionPolicy: { tier: "retain", taskKind: "general" } } : entry,
+    );
+    expect(diff(retiered, [retiered[0].id])[0]).toMatchObject({
+      kind: "changed",
+      changedFields: ["executionPolicy"],
+      defaultAction: "keep",
+      locallyChanged: true,
+    });
+    expect(
+      diff(retiered, [retiered[0].id])
+        .slice(1)
+        .every((row) => row.kind === "same"),
+    ).toBe(true);
+
+    // A partial block inherits the missing field from the known-id default before comparing.
+    const partial = unmarked.map((entry, index) =>
+      index === 0 ? { ...entry, executionPolicy: { tier: "decision" } } : entry,
+    );
+    expect(diff(partial).every((row) => row.kind === "same")).toBe(true);
 
     const edited = unmarked.map((entry, index) =>
       index === 0 ? { ...entry, systemPrompt: "User rewrite" } : entry,

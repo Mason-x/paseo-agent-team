@@ -11,6 +11,8 @@ import {
 } from "./prompt-compiler";
 import { coordinatorToolsBlocker } from "./tools-readiness";
 
+export const MAX_RUNTIME_MEMBERS = 64;
+
 export type PlannedAgent = {
   kind: "coordinator" | "member";
   role: Role;
@@ -138,8 +140,13 @@ export function buildLaunchPlan(input: {
 
   if (enabledMembers.length === 0) {
     blockers.push(zh.noEnabledMembers);
-  } else if (enabledMembers.length > input.maxMembers) {
-    blockers.push(zh.exceedMax(enabledMembers.length, input.maxMembers));
+  } else {
+    // Storage keeps whatever the host saved (including old 8s and accidental 200s); this version
+    // never creates more than 64 physical member agents in one launch.
+    const memberLimit = Math.min(input.maxMembers, MAX_RUNTIME_MEMBERS);
+    if (enabledMembers.length > memberLimit) {
+      blockers.push(zh.exceedMax(enabledMembers.length, memberLimit));
+    }
   }
 
   let coordinator: PlannedAgent = emptyCoordinator;
