@@ -6,20 +6,41 @@ import {
   canonicalize,
   changedCatalogFields,
   diffPresetRoles,
+  type PresetSelection,
   recordPresetSync,
 } from "../shared/domain/catalog-content";
-import { PreferencesSchema } from "../shared/schemas/preferences";
+import type { PresetRolePreview } from "../shared/schemas/default-catalog";
+import {
+  MAX_SEEN_PRESET_ROLE_IDS,
+  type Preferences,
+  PreferencesSchema,
+} from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
-import { sourceProfiles } from "./default-presets.fixtures";
+import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
 import { architect, NOW, role } from "./fixtures";
 
 const LATER = "2026-10-25T12:00:00.000Z";
+const REVISIONS = { roles: "roles-rev-1", preferences: "preferences-rev-1" };
 const candidates = exampleCatalog(sourceProfiles, LATER).roles;
 const originals = exampleCatalog(sourceProfiles, NOW).roles;
 const hashes = (roles: readonly Role[]) =>
   Object.fromEntries(roles.map((role) => [role.id, hashCatalogContent(role)]));
 const diff = (roles: Role[], seen: string[] = []) =>
   diffPresetRoles(roles, candidates, seen, hashes(roles));
+const snapshot = (rows: readonly PresetRolePreview[]) => ({ roles: rows, revisions: REVISIONS });
+const apply = (
+  roles: readonly Role[],
+  rows: readonly PresetRolePreview[],
+  selection: PresetSelection = {},
+  now = LATER,
+) => applyPresetSelection({ roles, revision: REVISIONS.roles }, snapshot(rows), selection, now);
+const sync = (
+  values: Preferences,
+  roles: readonly Role[],
+  rows: readonly PresetRolePreview[] = [],
+  now = LATER,
+) =>
+  recordPresetSync({ values, revision: REVISIONS.preferences }, snapshot(rows), roles, "new", now);
 
 function presetOf(role: Role): NonNullable<Role["preset"]> {
   if (!role.preset) throw new Error("Expected a materialized preset");
@@ -91,12 +112,112 @@ describe("default preset diff and selected merge", () => {
     });
     expect(rows[4]).toMatchObject({ kind: "deleted", defaultAction: "skip", changedFields: [] });
     expect(rows[5]).toMatchObject({ kind: "missing", defaultAction: "add" });
-    // A user-owned ID is a conflict even when its content happens to equal the preset.
-    const { source: _source, preset: _preset, ...userRole } = originals[0];
-    expect(diff([userRole])[0]).toMatchObject({
+  });
+
+  test("a pre-preset catalog with no markers reports identical content as same", () => {
+    // Build the host catalog recorded before preset metadata existed: fixture content plus the
+    // fixture's expected profile-ID sequences, no source/preset markers, no hints.
+    const unmarked: Role[] = expectedRoleContent.map((template) => {
+      const { preferredHints: _preferred, fallbackHints: _fallback, ...content } = template;
+      const binding = expectedBindings.find((entry) => entry.id === template.id);
+      if (!binding) throw new Error(`Missing fixture binding for ${template.id}`);
+      const refs = (ids: readonly string[]) =>
+        ids.map((profileId) => {
+          const profile = sourceProfiles.find((entry) => entry.id === profileId);
+          return profile ? { profileId, nameSnapshot: profile.name } : { profileId };
+        });
+      return {
+        ...content,
+        preferredProfiles: refs(binding.preferred),
+        fallbackProfiles: refs(binding.fallback),
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+    });
+    expect(unmarked).toHaveLength(22);
+    const rows = diff(unmarked);
+    expect(rows).toHaveLength(22);
+    expect(rows.every((row) => row.kind === "same")).toBe(true);
+    expect(rows.every((row) => row.defaultAction === "keep")).toBe(true);
+    expect(rows.every((row) => row.changedFields.length === 0 && !row.locallyChanged)).toBe(true);
+
+    const edited = unmarked.map((entry, index) =>
+      index === 0 ? { ...entry, systemPrompt: "User rewrite" } : entry,
+    );
+    expect(diff(edited)[0]).toMatchObject({
       kind: "id-collision",
-      changedFields: [],
+      changedFields: ["systemPrompt"],
       defaultAction: "keep",
+      locallyChanged: true,
+    });
+    expect(
+      diff(edited)
+        .slice(1)
+        .every((row) => row.kind === "same"),
+    ).toBe(true);
+
+    // Renaming a Profile changes nameSnapshot only; the ProfileRef identity is unchanged.
+    const renamed = unmarked.map((entry, index) =>
+      index === 0
+        ? {
+            ...entry,
+            preferredProfiles: entry.preferredProfiles.map((ref, position) =>
+              position === 0 ? { ...ref, nameSnapshot: "Renamed Profile" } : ref,
+            ),
+          }
+        : entry,
+    );
+    expect(diff(renamed)[0]).toMatchObject({ kind: "same", changedFields: [] });
+
+    const rebound = unmarked.map((entry, index) =>
+      index === 0
+        ? {
+            ...entry,
+            preferredProfiles: [
+              { ...entry.preferredProfiles[0], profileId: "another-profile" },
+              ...entry.preferredProfiles.slice(1),
+            ],
+          }
+        : entry,
+    );
+    expect(diff(rebound)[0]).toMatchObject({
+      kind: "id-collision",
+      changedFields: ["preferredProfiles"],
+    });
+    // Missing content fields are filled by RoleSchema defaults before comparison.
+    const defaulted = role({ id: "schema-defaults", name: "Defaults" });
+    const {
+      enabled: _enabled,
+      outputContract: _output,
+      restrictions: _restrictions,
+      fallbackProfiles: _fallback,
+      ...minimal
+    } = defaulted;
+    expect(changedCatalogFields(minimal as Role, defaulted)).toEqual([]);
+  });
+
+  test("seen unmarked Roles report preset updates instead of ID collisions", () => {
+    const unmarked = originals.map(({ source: _source, preset: _preset, ...entry }) => entry);
+    const edited = unmarked.map((entry, index) =>
+      index === 0 ? { ...entry, systemPrompt: "Text from the previous catalog" } : entry,
+    );
+    // Without history the same id is a user-owned conflict.
+    expect(diff(edited)[0]).toMatchObject({
+      kind: "id-collision",
+      changedFields: ["systemPrompt"],
+    });
+    // Once the history attributes the id to the preset, it is an update, never a collision.
+    expect(diff(edited, [unmarked[0].id])[0]).toMatchObject({
+      kind: "changed",
+      defaultAction: "keep",
+      changedFields: ["systemPrompt"],
+      templateChanged: false,
+      locallyChanged: true,
+    });
+    expect(diff(unmarked, [unmarked[0].id])[0]).toMatchObject({
+      kind: "same",
+      defaultAction: "keep",
+      changedFields: [],
     });
   });
 
@@ -135,7 +256,7 @@ describe("default preset diff and selected merge", () => {
       role({ id: "custom-two", name: "Two" }),
     ];
     const snapshots = current.map((entry) => JSON.stringify(entry));
-    const result = applyPresetSelection(current, diff(current), {}, LATER);
+    const result = apply(current, diff(current));
     expect(result).toHaveLength(25);
     expect(result.slice(0, current.length).map((entry) => JSON.stringify(entry))).toEqual(
       snapshots,
@@ -160,7 +281,7 @@ describe("default preset diff and selected merge", () => {
     const selection = Object.fromEntries(
       rows.map((row) => [row.id, row.id === old.id ? ("adopt" as const) : ("skip" as const)]),
     );
-    const result = applyPresetSelection(current, rows, selection, LATER);
+    const result = apply(current, rows, selection);
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual({ ...candidates[0], createdAt: NOW, updatedAt: LATER });
     expect(result[0].preset?.appliedHash).toBe(hashCatalogContent(result[0]));
@@ -171,6 +292,51 @@ describe("default preset diff and selected merge", () => {
     expect(current[0].systemPrompt).toBe("Modified");
   });
 
+  test("a matching revision changes only the selected rows", () => {
+    const current = [originals[0], originals[1], architect];
+    const before = current.map((entry) => JSON.stringify(entry));
+    const result = apply(current, diff(current), { [originals[0].id]: "adopt" });
+    expect(JSON.stringify(result[1])).toBe(before[1]);
+    expect(JSON.stringify(result[2])).toBe(before[2]);
+    expect(result[1]).toBe(current[1]);
+    expect(result[2]).toBe(current[2]);
+    expect(result[0].preset?.importedAt).toBe(LATER);
+    expect(result[0].updatedAt).toBe(LATER);
+  });
+
+  test("merge and sync require the revisions the preview was read at", () => {
+    const rows = diff([originals[0]]);
+    expect(() =>
+      applyPresetSelection(
+        { roles: [originals[0]], revision: "stale-roles" },
+        snapshot(rows),
+        { [originals[0].id]: "adopt" },
+        LATER,
+      ),
+    ).toThrow("目录已被更新");
+    expect(() =>
+      recordPresetSync(
+        { values: PreferencesSchema.parse({}), revision: "stale-preferences" },
+        snapshot(rows),
+        [originals[0]],
+        "new",
+        LATER,
+      ),
+    ).toThrow("目录已被更新");
+    const selection = Object.fromEntries(
+      rows.map((row) => [
+        row.id,
+        row.id === originals[0].id ? ("adopt" as const) : ("skip" as const),
+      ]),
+    );
+    const result = apply([originals[0]], rows, selection);
+    expect(result).toHaveLength(1);
+    expect(result[0].preset?.importedAt).toBe(LATER);
+    expect(sync(PreferencesSchema.parse({}), [originals[0]], rows)).toMatchObject({
+      templatesImportedAt: LATER,
+    });
+  });
+
   test("deleted presets are opt-in; skipped missing rows are not added; order stays stable", () => {
     const rows = diff([], [candidates[0].id]);
     const selected = Object.fromEntries(
@@ -179,48 +345,30 @@ describe("default preset diff and selected merge", () => {
         row.id === candidates[0].id ? ("add" as const) : ("skip" as const),
       ]),
     );
-    const result = applyPresetSelection([], rows, selected, LATER);
+    const result = apply([], rows, selected);
     expect(result).toEqual([candidates[0]]);
-    expect(applyPresetSelection([], rows, {}, LATER).map((entry) => entry.id)).not.toContain(
-      candidates[0].id,
-    );
+    expect(apply([], rows).map((entry) => entry.id)).not.toContain(candidates[0].id);
   });
 
   test("explicit adoption of a reviewed ID collision is possible, default still keeps it", () => {
     const collision = role({ id: candidates[0].id, name: "Local" });
-    const result = applyPresetSelection(
-      [collision],
-      diff([collision]),
-      { [collision.id]: "adopt" },
-      LATER,
-    );
+    const result = apply([collision], diff([collision]), { [collision.id]: "adopt" });
     expect(result[0]).toEqual({ ...candidates[0], createdAt: NOW });
   });
 
   test("merge rejects selected stale rows, unexpected occupied IDs, and mismatched candidates", () => {
     const rows = diff([originals[0]]);
     expect(() =>
-      applyPresetSelection(
-        [{ ...originals[0], updatedAt: "another writer" }],
-        rows,
-        { [originals[0].id]: "adopt" },
-        LATER,
-      ),
+      apply([{ ...originals[0], updatedAt: "another writer" }], rows, {
+        [originals[0].id]: "adopt",
+      }),
     ).toThrow("目录已被更新");
-    expect(() => applyPresetSelection([originals[0]], diff([]), {}, LATER)).toThrow("目录已被更新");
+    expect(() => apply([originals[0]], diff([]))).toThrow("目录已被更新");
     const missing = diff([])[0];
-    expect(() =>
-      applyPresetSelection([], [{ ...missing, candidate: candidates[1] }], {}, LATER),
-    ).toThrow("目录已被更新");
-    expect(() =>
-      applyPresetSelection([], [{ ...missing, candidate: architect }], {}, LATER),
-    ).toThrow("目录已被更新");
-    expect(() => applyPresetSelection([], [missing], { [missing.id]: "adopt" }, LATER)).toThrow(
-      "选择无效",
-    );
-    expect(() =>
-      applyPresetSelection([originals[0]], [rows[0]], { [rows[0].id]: "add" }, LATER),
-    ).toThrow("选择无效");
+    expect(() => apply([], [{ ...missing, candidate: candidates[1] }])).toThrow("目录已被更新");
+    expect(() => apply([], [{ ...missing, candidate: architect }])).toThrow("目录已被更新");
+    expect(() => apply([], [missing], { [missing.id]: "adopt" })).toThrow("选择无效");
+    expect(() => apply([originals[0]], [rows[0]], { [rows[0].id]: "add" })).toThrow("选择无效");
   });
 
   test("sync preferences deduplicate history, recover origins, and retain unrelated preferences", () => {
@@ -229,11 +377,10 @@ describe("default preset diff and selected merge", () => {
       archiveOnLaunchFailure: false,
       defaultPresets: { catalogRevision: "old", seenRoleIds: ["deleted-role", originals[0].id] },
     });
-    const next = recordPresetSync(
+    const next = sync(
       preferences,
       [originals[0], originals[1], architect],
-      "new",
-      LATER,
+      diff([originals[0], originals[1], architect]),
     );
     expect(next).toEqual({
       ...preferences,
@@ -244,20 +391,45 @@ describe("default preset diff and selected merge", () => {
         lastSyncedAt: LATER,
       },
     });
-    expect(recordPresetSync(next, [originals[1]], "new", NOW).templatesImportedAt).toBe(LATER);
-    const recovered = recordPresetSync(PreferencesSchema.parse({}), [originals[0]], "new", NOW);
+    expect(sync(next, [originals[1]], diff([originals[1]]), NOW).templatesImportedAt).toBe(LATER);
+    const recovered = sync(PreferencesSchema.parse({}), [originals[0]], diff([originals[0]]), NOW);
     expect(recovered.defaultPresets?.seenRoleIds).toEqual([originals[0].id]);
     const changedId = { ...originals[0], id: "renamed-role" };
     expect(
-      recordPresetSync(PreferencesSchema.parse({}), [changedId], "new", NOW).defaultPresets
+      sync(PreferencesSchema.parse({}), [changedId], diff([changedId]), NOW).defaultPresets
         ?.seenRoleIds,
     ).toEqual([]);
     const tooMany = PreferencesSchema.parse({
       defaultPresets: {
         catalogRevision: "old",
-        seenRoleIds: Array.from({ length: 1000 }, (_, index) => `role-${index}`),
+        seenRoleIds: Array.from(
+          { length: MAX_SEEN_PRESET_ROLE_IDS },
+          (_, index) => `role-${index}`,
+        ),
       },
     });
-    expect(() => recordPresetSync(tooMany, [originals[0]], "new", NOW)).toThrow();
+    const truncated = sync(tooMany, [originals[0]], diff([originals[0]]), NOW);
+    expect(truncated.defaultPresets?.seenRoleIds).toHaveLength(MAX_SEEN_PRESET_ROLE_IDS);
+    expect(truncated.defaultPresets?.seenRoleIds[0]).toBe("role-1");
+    expect(truncated.defaultPresets?.seenRoleIds.at(-1)).toBe(originals[0].id);
+  });
+
+  test("sync records only marked origins and present same rows", () => {
+    const unmarked = originals.map(({ source: _source, preset: _preset, ...entry }) => entry);
+    const empty = PreferencesSchema.parse({});
+    const rows = diff(unmarked);
+    expect(rows.every((row) => row.kind === "same")).toBe(true);
+    expect(sync(empty, [unmarked[0], unmarked[1]], rows).defaultPresets?.seenRoleIds).toEqual([
+      unmarked[0].id,
+      unmarked[1].id,
+    ]);
+    // Without the preview rows an unmarked Role is not evidence of a preset origin.
+    expect(sync(empty, [unmarked[0]]).defaultPresets?.seenRoleIds).toEqual([]);
+    // A user-built Role that reuses a preset id stays a conflict and is never marked seen.
+    const collision = role({ id: candidates[0].id, name: "Local" });
+    expect(diff([collision])[0].kind).toBe("id-collision");
+    expect(sync(empty, [collision], diff([collision])).defaultPresets?.seenRoleIds).toEqual([]);
+    // A same row whose Role was removed before the write is not recorded either.
+    expect(sync(empty, [], rows).defaultPresets?.seenRoleIds).toEqual([]);
   });
 });

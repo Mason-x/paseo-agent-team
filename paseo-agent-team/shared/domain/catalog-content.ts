@@ -1,9 +1,10 @@
 import { DEFAULT_CATALOG_ID, type PresetRolePreview } from "../schemas/default-catalog";
 import { type Preferences, PreferencesSchema } from "../schemas/preferences";
-import type { Role } from "../schemas/role";
+import { type Role, RoleSchema } from "../schemas/role";
 import { zh } from "../zh";
 
 const MANAGEMENT_FIELDS = new Set(["createdAt", "updatedAt", "source", "preset", "designer"]);
+const REFERENCE_FIELDS = ["preferredProfiles", "fallbackProfiles"] as const;
 
 function contentOf(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([key]) => !MANAGEMENT_FIELDS.has(key)));
@@ -32,9 +33,24 @@ export function canonicalize(value: Record<string, unknown>): string {
   return JSON.stringify(canonicalValue(contentOf(value)));
 }
 
+/**
+ * The single definition of "same content" used by the preset preview and sync history.
+ * Both sides pass through RoleSchema first so schema defaults (empty restrictions/outputContract,
+ * enabled=true, and so on) are present. Management metadata never participates: createdAt,
+ * updatedAt, source, preset, designer. preferredProfiles/fallbackProfiles compare only their
+ * profileId sequence, ignoring nameSnapshot and hint, so renaming a Profile cannot make every
+ * preset look changed. Every other top-level field, including extensions, compares canonically.
+ */
+function comparableContent(value: Role): Record<string, unknown> {
+  const parsed = RoleSchema.parse(value);
+  const content = contentOf(parsed);
+  for (const key of REFERENCE_FIELDS) content[key] = parsed[key].map((ref) => ref.profileId);
+  return content;
+}
+
 export function changedCatalogFields(before: Role, candidate: Role): string[] {
-  const left = contentOf(before);
-  const right = contentOf(candidate);
+  const left = comparableContent(before);
+  const right = comparableContent(candidate);
   return [...new Set([...Object.keys(left), ...Object.keys(right)])]
     .filter(
       (key) =>
@@ -83,6 +99,24 @@ export function diffPresetRoles(
     }
     const changedFields = changedCatalogFields(before, candidate);
     if (!isDefaultPresetRole(before)) {
+      // The real catalog installed before preset metadata existed has no source/preset markers.
+      // Same content is the same Role: a first sync must not show a phantom ID conflict.
+      if (changedFields.length === 0) {
+        return { ...common, before, kind: "same", defaultAction: "keep", changedFields };
+      }
+      // A different Role whose id the history already attributes to this preset is an older
+      // import without origin metadata. Report a preset update, not a user ID collision. With no
+      // applied-hash baseline the difference cannot be attributed, so it is flagged as local.
+      if (seen.has(before.id)) {
+        return {
+          ...common,
+          before,
+          kind: "changed",
+          locallyChanged: true,
+          defaultAction: "keep",
+          changedFields,
+        };
+      }
       return {
         ...common,
         before,
@@ -107,30 +141,42 @@ export function diffPresetRoles(
 export type PresetAction = "add" | "adopt" | "keep" | "skip";
 export type PresetSelection = Readonly<Record<string, PresetAction | undefined>>;
 
+/** The preview fields every merge must be paired with: rows plus the revisions they were read at. */
+export type PresetPreviewSnapshot = {
+  roles: readonly PresetRolePreview[];
+  revisions: { roles: string; preferences: string };
+};
+
 /**
- * Use the preview's revisions with settings.save. This pure merge additionally rejects stale
- * selected rows, never overwrites an unseen Role, and preserves all unselected objects verbatim.
- * candidate already contains the server's fresh binding and both hashes.
+ * Merge only into the Roles array whose revision equals preview.revisions.roles. A mismatch means
+ * another writer changed the document after the preview; re-read, recompute, and reconfirm rather
+ * than saving a stale base (which would silently drop concurrent additions). Save the result with
+ * current.revision as the compare-and-set revision. Rows are revalidated against current.roles, and
+ * every unselected Role is kept verbatim. candidate already contains the server's fresh binding
+ * and both hashes.
  */
 export function applyPresetSelection(
-  currentRoles: readonly Role[],
-  preview: readonly PresetRolePreview[],
+  current: { roles: readonly Role[]; revision: string },
+  preview: PresetPreviewSnapshot,
   selection: PresetSelection,
   now: string,
 ): Role[] {
-  const roles = [...currentRoles];
-  for (const row of preview) {
+  if (current.revision !== preview.revisions.roles) {
+    throw new Error(zh.defaultPresetsCatalogChanged);
+  }
+  const roles = [...current.roles];
+  for (const row of preview.roles) {
     const action = selection[row.id] ?? row.defaultAction;
     if (action === "keep" || action === "skip") continue;
     const index = roles.findIndex((role) => role.id === row.id);
-    const current = roles[index];
+    const existing = roles[index];
     if (
       row.candidate.id !== row.id ||
       !isDefaultPresetRole(row.candidate) ||
       (row.before
-        ? !current ||
-          JSON.stringify(canonicalValue(current)) !== JSON.stringify(canonicalValue(row.before))
-        : !!current)
+        ? !existing ||
+          JSON.stringify(canonicalValue(existing)) !== JSON.stringify(canonicalValue(row.before))
+        : !!existing)
     ) {
       throw new Error(zh.defaultPresetsCatalogChanged);
     }
@@ -139,32 +185,47 @@ export function applyPresetSelection(
     }
     const role: Role = {
       ...row.candidate,
-      createdAt: current?.createdAt ?? now,
+      createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       preset: { ...row.candidate.preset, importedAt: now },
     };
-    if (current) roles[index] = role;
+    if (existing) roles[index] = role;
     else roles.push(role);
   }
   return roles;
 }
 
-/** Call only after the Role write succeeds; retry a preference conflict with fresh preferences. */
+/**
+ * Call only after the Role write succeeds. Pass the same preview result the Roles write was based
+ * on: current.revision must equal preview.revisions.preferences, otherwise another writer changed
+ * preferences after the preview; re-read, recompute, and retry with fresh values instead of
+ * overwriting their changes. Record only Roles that carry a preset origin plus preview rows that
+ * are classified "same" and still present, so a user-built Role that merely reuses a preset id is
+ * never marked as seen. Frontend: pass the `agent-team.templates.defaults.preview` result as
+ * `preview` (it is structurally compatible) and settings.save(result, current.revision).
+ */
 export function recordPresetSync(
-  preferences: Preferences,
+  current: { values: Preferences; revision: string },
+  preview: PresetPreviewSnapshot,
   roles: readonly Role[],
   catalogRevision: string,
   now: string,
 ): Preferences {
+  if (current.revision !== preview.revisions.preferences) {
+    throw new Error(zh.defaultPresetsCatalogChanged);
+  }
+  const seen = new Set<string>();
+  for (const role of roles) if (isDefaultPresetRole(role)) seen.add(role.id);
+  const present = new Set(roles.map((role) => role.id));
+  for (const row of preview.roles) {
+    if (row.kind === "same" && present.has(row.id)) seen.add(row.id);
+  }
   return PreferencesSchema.parse({
-    ...preferences,
-    templatesImportedAt: preferences.templatesImportedAt ?? now,
+    ...current.values,
+    templatesImportedAt: current.values.templatesImportedAt ?? now,
     defaultPresets: {
       catalogRevision,
-      seenRoleIds: [
-        ...(preferences.defaultPresets?.seenRoleIds ?? []),
-        ...roles.filter(isDefaultPresetRole).map((role) => role.id),
-      ],
+      seenRoleIds: [...(current.values.defaultPresets?.seenRoleIds ?? []), ...seen],
       lastSyncedAt: now,
     },
   });

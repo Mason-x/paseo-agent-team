@@ -6,21 +6,27 @@ import { z } from "zod";
 
 // Never read a host's config implicitly. The input is an explicitly exported, read-only file.
 const root = path.resolve(import.meta.dirname, "..");
-const catalogRevision = "defaults-2026-10-25.1";
 const args = process.argv.slice(2);
 const options = {};
 for (let index = 0; index < args.length; index += 2) {
   const key = args[index];
   const value = args[index + 1];
-  if (!["--input", "--output", "--fixtures"].includes(key) || !value || value.startsWith("--")) {
+  if (
+    !["--input", "--output", "--fixtures", "--revision"].includes(key) ||
+    !value ||
+    value.startsWith("--")
+  ) {
     throw new Error(
-      "Usage: --input <preset-source.json> [--output <catalog.ts>] [--fixtures <dir>]",
+      "Usage: --input <preset-source.json> --revision <catalog revision> [--output <catalog.ts>] [--fixtures <dir>]",
     );
   }
   if (options[key]) throw new Error(`Duplicate option: ${key}`);
   options[key] = value;
 }
 if (!options["--input"]) throw new Error("An explicit --input <preset-source.json> is required");
+if (!options["--revision"])
+  throw new Error("An explicit --revision <catalog revision> is required");
+const catalogRevision = options["--revision"];
 
 const hintSchema = z.strictObject({
   name: z.string().min(1).max(200),
@@ -102,7 +108,7 @@ function assertPortable(value) {
 }
 assertPortable(roles);
 const serialized = JSON.stringify(roles, null, 2);
-if (/agent_profile_|[a-z]:[\\/]/i.test(serialized)) {
+if (/agent_profile_|(^|[\s"'(])[a-z]:[\\/]/i.test(serialized)) {
   throw new Error("Catalog contains a host Profile ID or absolute Windows path");
 }
 

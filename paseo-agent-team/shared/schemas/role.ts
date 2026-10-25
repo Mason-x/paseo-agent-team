@@ -53,14 +53,19 @@ export const McpServersSchema = z
 
 export type McpServers = z.infer<typeof McpServersSchema>;
 
-export const PresetOriginSchema = z.strictObject({
-  catalogId: z.literal("agent-team-default"),
-  templateId: SlugSchema,
-  catalogRevision: z.string().min(1).max(100),
-  templateHash: z.string().regex(/^[a-f0-9]{64}$/),
-  appliedHash: z.string().regex(/^[a-f0-9]{64}$/),
-  importedAt: z.string().max(100),
-});
+// Persisted inside Roles. Deliberately tolerant: a newer or damaged origin must never invalidate
+// the whole Roles document (the settings screen would only offer a full reset). Unknown keys are
+// preserved so a newer writer's metadata survives a round-trip through this version.
+export const PresetOriginSchema = z
+  .object({
+    catalogId: z.string().min(1),
+    templateId: z.string().min(1),
+    catalogRevision: z.string(),
+    templateHash: z.string(),
+    appliedHash: z.string(),
+    importedAt: z.string(),
+  })
+  .passthrough();
 
 export const RoleSchema = z
   .object({
@@ -82,7 +87,8 @@ export const RoleSchema = z
     updatedAt: z.string(),
     // Other origins (including a future team-designer) remain valid extension values.
     source: z.string().optional(),
-    preset: PresetOriginSchema.optional(),
+    // A damaged origin drops only the origin; the Role keeps its content and stays editable.
+    preset: PresetOriginSchema.optional().catch(undefined),
   })
   .passthrough();
 

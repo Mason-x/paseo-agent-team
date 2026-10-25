@@ -17,6 +17,11 @@
 - launch into an existing workspace or a new worktree from the Agent Teams screen
 - Crew panel: allow a permission for the rest of the session
 - the launch task is stored on the coordinator as a label, so runs describe themselves
+- default Role presets: import 22 built-in Roles that bind to local Profiles by normalized name and
+  identical provider/model/mode/thinking settings, with strict unbound, ambiguous, and
+  config-changed reporting
+- `agent-team.templates.defaults.preview` previews missing, updated, deleted, and colliding preset
+  Roles with the exact settings revisions a merge must be saved against
 
 ### Bug Fixes
 
@@ -36,6 +41,9 @@
 - require Paseo `>=0.12.0`; use `addScreen` and `addSidebarHeaderItem`
 - pin `@getpaseo/*` to `0.13.0-beta.1`; add `verify:package` and `typecheck:beta`
 - move launch logic and the Paseo adapter to `shared/` behind `PaseoPort`
+- the bundled Ruflo catalog is removed; previously imported Roles and Teams remain in host settings
+- downgrading can discard Profile binding hints, preset origins, or preset sync history on the
+  next save; damaged hints, origins, or history are ignored, never fatal to the catalog
 
 ### Bug Fixes
 

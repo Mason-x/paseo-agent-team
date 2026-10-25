@@ -7,9 +7,7 @@
       "!!coverage",
       "!!paseo-plugin.d.ts",
       "!!.paseo-dev",
-      "!!.es-launch",
-      "!!.tmp-ruflo-agents",
-      "!!server/templates/ruflo-catalog.ts"
+      "!!.es-launch"
     ]
   },
   "formatter": {

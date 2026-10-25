@@ -68,8 +68,9 @@ automatic import; manual import can explicitly leave all references unbound. Bin
 Role editor before launch. Presets contain no host Profile ids or Profile notes.
 
 The bundled Ruflo catalog has been removed; previously imported Roles and Teams remain in your
-host settings. Downgrading to an older plugin can discard binding hints and preset deletion
-history on subsequent saves, but existing Profile ids still work.
+host settings. Downgrading to an older plugin can discard binding hints, preset origins, and sync
+history on subsequent saves, but existing Profile ids still work. Damaged preset origins, Profile
+hints, or sync history are ignored rather than invalidating the catalog.
 
 ## Launch
 

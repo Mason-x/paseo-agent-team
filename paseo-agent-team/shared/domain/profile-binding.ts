@@ -6,12 +6,17 @@ export function normalizeProfileName(name: string): string {
   return name.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
 }
 
+function runtimeValue(value: string | undefined): string | undefined {
+  // The contract treats an absent identifier and an empty one as the same absence, never a wildcard.
+  return value === "" ? undefined : value;
+}
+
 function sameRuntime(hint: ProfileHint, profile: PaseoProfile): boolean {
   return (
     hint.provider === profile.provider &&
-    hint.model === profile.model &&
-    hint.modeId === profile.modeId &&
-    hint.thinkingOptionId === profile.thinkingOptionId
+    runtimeValue(hint.model) === runtimeValue(profile.model) &&
+    runtimeValue(hint.modeId) === runtimeValue(profile.modeId) &&
+    runtimeValue(hint.thinkingOptionId) === runtimeValue(profile.thinkingOptionId)
   );
 }
 
@@ -38,6 +43,12 @@ function matchHint(
     };
   }
   if (exact.length > 1) {
+    // Several Profiles share the normalized name and runtime. A single verbatim name breaks the
+    // tie; anything else is genuinely ambiguous.
+    const verbatim = exact.filter((candidate) => candidate.name === hint.name);
+    if (verbatim.length === 1) {
+      return { profile: verbatim[0], method: "exact", reason: null, candidates: exact };
+    }
     return { method: "unbound", reason: "ambiguous", candidates: exact };
   }
   // A changed same-name Profile is never silently replaced by another Profile.

@@ -50,9 +50,26 @@ describe("strict Profile hint binding", () => {
     });
   });
 
-  test("multiple same-name runtime matches are ambiguous, even if one name is exact", () => {
-    const result = bind([profile, { ...profile, id: "two", name: " MODEL-High|创意写作 " }]);
-    expect(result.bindingReport[0]).toMatchObject({ method: "unbound", reason: "ambiguous" });
+  test("a single verbatim name breaks a normalized runtime tie; otherwise it stays ambiguous", () => {
+    const chosen = bind([profile, { ...profile, id: "two", name: " MODEL-High|创意写作 " }]);
+    expect(chosen.preferredProfiles[0].profileId).toBe(profile.id);
+    expect(chosen.bindingReport[0]).toMatchObject({
+      method: "exact",
+      reason: null,
+      profileId: profile.id,
+      candidateNames: [profile.name, " MODEL-High|创意写作 "],
+    });
+    expect(
+      bind([
+        { ...profile, name: " Model-High｜创意写作 " },
+        { ...profile, id: "two", name: "MODEL-High｜创意写作" },
+      ]).bindingReport[0],
+    ).toMatchObject({ method: "unbound", reason: "ambiguous" });
+    // Two verbatim matches are still ambiguous; the rule only accepts exactly one.
+    expect(bind([profile, { ...profile, id: "two" }]).bindingReport[0]).toMatchObject({
+      method: "unbound",
+      reason: "ambiguous",
+    });
   });
 
   test.each(["provider", "model", "modeId", "thinkingOptionId"] as const)(
@@ -69,7 +86,7 @@ describe("strict Profile hint binding", () => {
     },
   );
 
-  test("absent runtime fields match absence, not wildcards or empty identifiers", () => {
+  test("absent runtime fields match absence, not wildcards; empty strings normalize to absence", () => {
     const minimal = { name: "Minimal", provider: "codex" };
     expect(bind([{ id: "minimal", ...minimal }], [minimal]).preferredProfiles[0].profileId).toBe(
       "minimal",
@@ -78,9 +95,14 @@ describe("strict Profile hint binding", () => {
       bind([{ id: "minimal", ...minimal, model: "host-default" }], [minimal]).bindingReport[0]
         .reason,
     ).toBe("config-changed");
-    expect(
-      bind([{ id: "minimal", ...minimal, model: "" }], [minimal]).bindingReport[0].reason,
-    ).toBe("config-changed");
+    for (const field of ["model", "modeId", "thinkingOptionId"] as const) {
+      expect(
+        bind([{ id: "minimal", ...minimal, [field]: "" }], [minimal]).bindingReport[0],
+      ).toMatchObject({ method: "exact", reason: null });
+      expect(
+        bind([{ id: "minimal", ...minimal }], [{ ...minimal, [field]: "" }]).bindingReport[0],
+      ).toMatchObject({ method: "exact", reason: null });
+    }
   });
 
   test("same normalized name disambiguates runtime twins regardless of host ordering", () => {
