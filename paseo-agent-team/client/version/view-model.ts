@@ -4,6 +4,7 @@ import type {
   InstallSource,
   Job,
   JobState,
+  PendingCommits,
   Phase,
   Relation,
   RemedyCode,
@@ -401,12 +402,34 @@ export function blockersFor(info: VersionInfo, job: Job | null): BlockerView[] {
   return blockerViews(job?.error ? [...info.blockers, job.error] : info.blockers);
 }
 
+export type PendingCommitsView = {
+  summary: string;
+  subjects: string[];
+  more: string | null;
+};
+
+/** Display-only commit list. A missing list is neutral and never blocks the update. */
+export function pendingCommitsView(pending: PendingCommits | null): PendingCommitsView {
+  if (!pending) {
+    return { summary: zh.versionPendingCommitsUnavailable, subjects: [], more: null };
+  }
+  if (pending.count === 0) {
+    return { summary: zh.versionPendingCommitsNone, subjects: [], more: null };
+  }
+  const subjects = pending.subjects.slice(0, 10);
+  const remaining = pending.count - subjects.length;
+  return {
+    summary: zh.versionPendingCommitsCount(pending.count),
+    subjects,
+    more: pending.truncated && remaining > 0 ? zh.versionPendingCommitsMore(remaining) : null,
+  };
+}
+
 export type UpdateConfirmation = {
   source: string;
   current: string;
   target: string;
-  /** Reserved for the backend's pending-commit list; one placeholder line until that field lands. */
-  commits: string[];
+  commits: PendingCommitsView;
   npmCi: string;
   restart: string;
 };
@@ -425,7 +448,7 @@ export function updateConfirmation(info: VersionInfo): UpdateConfirmation | null
         ? `${targetLabel(target)} · ${shortCommit(target.commit)}`
         : targetLabel(target),
     ),
-    commits: [zh.versionConfirmCommitsPending],
+    commits: pendingCommitsView(info.pendingCommits),
     npmCi: zh.versionConfirmNpmCi,
     restart: zh.versionConfirmRestart,
   };
@@ -438,7 +461,9 @@ export function updateConfirmationLines(info: VersionInfo): string[] {
     confirmation.source,
     confirmation.current,
     confirmation.target,
-    ...confirmation.commits,
+    confirmation.commits.summary,
+    ...confirmation.commits.subjects.map((subject) => zh.versionPendingCommitLine(subject)),
+    ...(confirmation.commits.more ? [confirmation.commits.more] : []),
     confirmation.npmCi,
     confirmation.restart,
   ];

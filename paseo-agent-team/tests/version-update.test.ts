@@ -177,6 +177,28 @@ describe("update start", () => {
     expect(joined).not.toMatch(/reset --hard|stash|checkout -f|--force/);
   });
 
+  test("an expired persisted check is still refused", async () => {
+    const root = storeRoot(HOME, "server-1");
+    const files = memoryFiles({
+      [path.join(HOME, "server-id")]: "server-1",
+      [path.join(root, "checks", `${CHECK}.json`)]: JSON.stringify({
+        id: CHECK,
+        savedAt: "2026-10-24T23:00:00.000Z",
+        info: info(true),
+        remoteUrl: "https://github.com/Mason-x/paseo-agent-team.git",
+        targetRef: "refs/tags/paseo-agent-team-v0.3.0",
+        pluginSubpath: "paseo-agent-team",
+        serverId: "server-1",
+      }),
+    });
+    const { deps, spawned } = baseDeps(files);
+    const versions = createVersionService(deps);
+    const started = await versions.startUpdate(paseo, REQUEST, CHECK);
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.blockers[0]?.code).toBe("check_expired");
+    expect(spawned).toHaveLength(0);
+  });
+
   test("a managed git install without the bundled CLI returns a manual command", async () => {
     const managed = path.join(
       HOME,

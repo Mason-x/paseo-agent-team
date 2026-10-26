@@ -8,6 +8,7 @@ import {
   headerVersionView,
   isCheckFresh,
   jobStateText,
+  pendingCommitsView,
   phaseText,
   relationText,
   remedyText,
@@ -39,6 +40,7 @@ import {
   RelationSchema,
   RemedyCodeSchema,
   type RemoteTarget,
+  VersionGetOutputSchema,
   type VersionInfo,
   VersionInfoSchema,
 } from "../shared/version";
@@ -124,6 +126,65 @@ test("VersionInfo tolerates a missing pendingCommits field", () => {
   const complete = info();
   const { pendingCommits: _pending, ...legacy } = complete;
   expect(VersionInfoSchema.parse(legacy).pendingCommits).toBeNull();
+});
+
+test("response DTOs strip unknown keys from jobs, blockers, and every install source", () => {
+  const complete = info();
+  const sources = [
+    { kind: "directory", path: "/work/paseo-agent-team", isGit: true },
+    {
+      kind: "git",
+      remote: "https://github.com/example/repo",
+      pluginPath: "paseo-agent-team",
+      installedCommit: SHA,
+      ref: null,
+      registry: null,
+    },
+    {
+      kind: "npm",
+      packageName: "@mason-x/paseo-agent-team",
+      pluginPath: "/work/paseo-agent-team",
+      installedVersion: "0.2.3",
+      registry: null,
+    },
+    { kind: "unknown" },
+  ] as const;
+  for (const source of sources) {
+    const parsed = VersionInfoSchema.parse({
+      ...complete,
+      installSource: { ...source, futureSourceField: true },
+    });
+    expect(parsed.installSource).not.toHaveProperty("futureSourceField");
+  }
+  const parsed = VersionGetOutputSchema.parse({
+    info: {
+      ...complete,
+      blockers: [{ ...blocker("check_expired", "retry_check"), futureBlockerField: true }],
+    },
+    job: { ...job("running", "fetching"), futureJobField: true },
+  });
+  expect(parsed.info.blockers[0]).not.toHaveProperty("futureBlockerField");
+  expect(parsed.job).not.toHaveProperty("futureJobField");
+});
+
+test("VersionInfo ignores unknown response fields from a newer daemon", () => {
+  const complete = info();
+  const parsed = VersionInfoSchema.parse({
+    ...complete,
+    futureTopLevel: true,
+    current: { ...complete.current, futureNested: "ignored" },
+  });
+  expect(parsed).not.toHaveProperty("futureTopLevel");
+  expect(parsed.current).not.toHaveProperty("futureNested");
+  expect(() =>
+    VersionInfoSchema.parse({
+      ...complete,
+      remote: {
+        ...complete.remote,
+        installTarget: { ...complete.remote.installTarget, commit: "not-a-sha" },
+      },
+    }),
+  ).toThrow();
 });
 
 describe("header entry", () => {
@@ -456,17 +517,69 @@ describe("six-hour auto check", () => {
 });
 
 describe("confirmation", () => {
-  test("lists source, current, target, and the restart warning", () => {
+  test("lists source, current, target, commits, npm ci, and the restart warning", () => {
     const lines = updateConfirmationLines(info());
     expect(lines[0]).toBe(zh.versionConfirmSource(zh.versionSourceDirectoryGit));
     expect(lines[1]).toContain("0.2.3");
     expect(lines[2]).toContain("paseo-agent-team-v0.2.4");
     expect(lines[2]).toContain("bbbbbbb");
+    expect(lines).toContain(zh.versionPendingCommitsUnavailable);
     expect(lines).toContain(zh.versionConfirmNpmCi);
     expect(lines.at(-1)).toBe(zh.versionConfirmRestart);
     const confirmation = updateConfirmation(info());
-    expect(confirmation?.commits).toHaveLength(1);
+    expect(confirmation?.commits.summary).toBe(zh.versionPendingCommitsUnavailable);
     expect(confirmation?.npmCi).toBe(zh.versionConfirmNpmCi);
+  });
+
+  test("renders a pending commit list inside the confirmation", () => {
+    const lines = updateConfirmationLines(
+      info({ pendingCommits: { count: 2, subjects: ["First", "Second"], truncated: false } }),
+    );
+    expect(lines).toContain(zh.versionPendingCommitsCount(2));
+    expect(lines).toContain(zh.versionPendingCommitLine("First"));
+    expect(lines).toContain(zh.versionPendingCommitLine("Second"));
+    expect(lines).not.toContain(zh.versionPendingCommitsMore(0));
+  });
+});
+
+describe("pending commits view", () => {
+  test("null is a neutral explanation", () => {
+    expect(pendingCommitsView(null)).toEqual({
+      summary: zh.versionPendingCommitsUnavailable,
+      subjects: [],
+      more: null,
+    });
+  });
+
+  test("zero commits says there is nothing to update", () => {
+    expect(pendingCommitsView({ count: 0, subjects: [], truncated: false })).toEqual({
+      summary: zh.versionPendingCommitsNone,
+      subjects: [],
+      more: null,
+    });
+  });
+
+  test("fewer than ten subjects are listed without a truncation note", () => {
+    expect(
+      pendingCommitsView({
+        count: 3,
+        subjects: ["one", "two", "three"],
+        truncated: false,
+      }),
+    ).toEqual({
+      summary: zh.versionPendingCommitsCount(3),
+      subjects: ["one", "two", "three"],
+      more: null,
+    });
+  });
+
+  test("ten subjects with more commits get the truncated note", () => {
+    const subjects = Array.from({ length: 10 }, (_, index) => `commit-${index}`);
+    expect(pendingCommitsView({ count: 12, subjects, truncated: true })).toEqual({
+      summary: zh.versionPendingCommitsCount(12),
+      subjects,
+      more: zh.versionPendingCommitsMore(2),
+    });
   });
 });
 

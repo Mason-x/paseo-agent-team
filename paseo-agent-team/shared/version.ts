@@ -15,47 +15,41 @@ export const ShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 export const IdSchema = z.uuid();
 export const TimeSchema = z.iso.datetime();
 
-export const CurrentSchema = z
-  .object({
-    packageVersion: z.string().nullable(),
-    commit: ShaSchema.nullable(),
-    branch: z.string().nullable(),
-    dirty: z.boolean().nullable(),
-    pluginPath: z.string().nullable(),
-    repositoryPath: z.string().nullable(),
-    observedAt: TimeSchema,
-  })
-  .strict();
+// Response DTOs default-strip unknown keys, but a newer daemon may only add fields: new enum values
+// or a schemaVersion bump require a client that understands them to be released first.
+export const CurrentSchema = z.object({
+  packageVersion: z.string().nullable(),
+  commit: ShaSchema.nullable(),
+  branch: z.string().nullable(),
+  dirty: z.boolean().nullable(),
+  pluginPath: z.string().nullable(),
+  repositoryPath: z.string().nullable(),
+  observedAt: TimeSchema,
+});
 
-export const RegistrySchema = z
-  .object({
-    url: z.string(),
-    id: z.string(),
-  })
-  .strict();
+export const RegistrySchema = z.object({
+  url: z.string(),
+  id: z.string(),
+});
 
 export const InstallSourceSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("directory"), path: z.string(), isGit: z.boolean() }).strict(),
-  z
-    .object({
-      kind: z.literal("git"),
-      remote: z.string(),
-      pluginPath: z.string(),
-      installedCommit: ShaSchema.nullable(),
-      ref: z.string().nullable(),
-      registry: RegistrySchema.nullable(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("npm"),
-      packageName: z.string(),
-      pluginPath: z.string(),
-      installedVersion: z.string().nullable(),
-      registry: RegistrySchema.nullable(),
-    })
-    .strict(),
-  z.object({ kind: z.literal("unknown") }).strict(),
+  z.object({ kind: z.literal("directory"), path: z.string(), isGit: z.boolean() }),
+  z.object({
+    kind: z.literal("git"),
+    remote: z.string(),
+    pluginPath: z.string(),
+    installedCommit: ShaSchema.nullable(),
+    ref: z.string().nullable(),
+    registry: RegistrySchema.nullable(),
+  }),
+  z.object({
+    kind: z.literal("npm"),
+    packageName: z.string(),
+    pluginPath: z.string(),
+    installedVersion: z.string().nullable(),
+    registry: RegistrySchema.nullable(),
+  }),
+  z.object({ kind: z.literal("unknown") }),
 ]);
 
 export const RemoteKindSchema = z.enum([
@@ -65,15 +59,13 @@ export const RemoteKindSchema = z.enum([
   "registry-pin",
 ]);
 
-export const RemoteTargetSchema = z
-  .object({
-    kind: RemoteKindSchema,
-    version: z.string().nullable(),
-    commit: ShaSchema.nullable(),
-    ref: z.string().nullable(),
-    sourceUrl: z.string().nullable(),
-  })
-  .strict();
+export const RemoteTargetSchema = z.object({
+  kind: RemoteKindSchema,
+  version: z.string().nullable(),
+  commit: ShaSchema.nullable(),
+  ref: z.string().nullable(),
+  sourceUrl: z.string().nullable(),
+});
 
 export const BlockerCodeSchema = z.enum([
   "home_unavailable",
@@ -129,13 +121,11 @@ export const RemedyCodeSchema = z.enum([
   "inspect_recovery",
 ]);
 
-export const BlockerSchema = z
-  .object({
-    code: BlockerCodeSchema,
-    detail: z.string().max(2000).nullable(),
-    remedy: RemedyCodeSchema,
-  })
-  .strict();
+export const BlockerSchema = z.object({
+  code: BlockerCodeSchema,
+  detail: z.string().max(2000).nullable(),
+  remedy: RemedyCodeSchema,
+});
 
 export const RelationSchema = z.enum([
   "equal",
@@ -146,47 +136,39 @@ export const RelationSchema = z.enum([
   "unknown",
 ]);
 
-export const PendingCommitsSchema = z
-  .object({
-    count: z.number().int().nonnegative(),
-    subjects: z.array(z.string().max(200)).max(10),
-    truncated: z.boolean(),
-  })
-  .strict();
+export const PendingCommitsSchema = z.object({
+  count: z.number().int().nonnegative(),
+  subjects: z.array(z.string().max(200)).max(10),
+  truncated: z.boolean(),
+});
 
-export const PendingCommitsDiagnosticsSchema = z
-  .object({
-    staleRefs: z.array(z.string().max(200)).max(10),
-  })
-  .strict();
+export const PendingCommitsDiagnosticsSchema = z.object({
+  staleRefs: z.array(z.string().max(200)).max(10),
+});
 
-export const VersionInfoSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    current: CurrentSchema,
-    installSource: InstallSourceSchema,
-    remote: z
-      .object({
-        state: z.enum(["unchecked", "checking", "ready", "error"]),
-        repositoryLatest: RemoteTargetSchema.nullable(),
-        installTarget: RemoteTargetSchema.nullable(),
-        checkedAt: TimeSchema.nullable(),
-        stale: z.boolean(),
-        error: BlockerSchema.nullable(),
-      })
-      .strict(),
-    relation: RelationSchema,
-    // Older peers may omit this optional display DTO during a plugin update. Normalize to null.
-    pendingCommits: PendingCommitsSchema.nullable().default(null),
-    pendingCommitsDiagnostics: PendingCommitsDiagnosticsSchema.optional(),
-    updateAvailable: z.boolean().nullable(),
-    canUpdate: z.boolean(),
-    /** False when this install has no usable `@getpaseo/cli` entry. Display and check still work. */
-    cliAvailable: z.boolean(),
-    checkId: IdSchema.nullable(),
-    blockers: z.array(BlockerSchema),
-  })
-  .strict();
+export const VersionInfoSchema = z.object({
+  schemaVersion: z.literal(1),
+  current: CurrentSchema,
+  installSource: InstallSourceSchema,
+  remote: z.object({
+    state: z.enum(["unchecked", "checking", "ready", "error"]),
+    repositoryLatest: RemoteTargetSchema.nullable(),
+    installTarget: RemoteTargetSchema.nullable(),
+    checkedAt: TimeSchema.nullable(),
+    stale: z.boolean(),
+    error: BlockerSchema.nullable(),
+  }),
+  relation: RelationSchema,
+  // Older peers may omit this optional display DTO during a plugin update. Normalize to null.
+  pendingCommits: PendingCommitsSchema.nullable().default(null),
+  pendingCommitsDiagnostics: PendingCommitsDiagnosticsSchema.optional(),
+  updateAvailable: z.boolean().nullable(),
+  canUpdate: z.boolean(),
+  /** False when this install has no usable `@getpaseo/cli` entry. Display and check still work. */
+  cliAvailable: z.boolean(),
+  checkId: IdSchema.nullable(),
+  blockers: z.array(BlockerSchema),
+});
 
 export const PhaseSchema = z.enum([
   "queued",
@@ -216,43 +198,37 @@ export const JobStateSchema = z.enum([
   "recovery_required",
 ]);
 
-export const JobSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    id: IdSchema,
-    requestId: IdSchema,
-    kind: z.enum(["check", "update"]),
-    state: JobStateSchema,
-    phase: PhaseSchema,
-    seq: z.number().int().nonnegative(),
-    startedAt: TimeSchema,
-    updatedAt: TimeSchema,
-    finishedAt: TimeSchema.nullable(),
-    from: CurrentSchema.nullable(),
-    target: RemoteTargetSchema.nullable(),
-    result: VersionInfoSchema.nullable(),
-    error: BlockerSchema.nullable(),
-    rollback: z.enum(["not-needed", "pending", "restored", "failed", "unsafe"]),
-  })
-  .strict();
+export const JobSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: IdSchema,
+  requestId: IdSchema,
+  kind: z.enum(["check", "update"]),
+  state: JobStateSchema,
+  phase: PhaseSchema,
+  seq: z.number().int().nonnegative(),
+  startedAt: TimeSchema,
+  updatedAt: TimeSchema,
+  finishedAt: TimeSchema.nullable(),
+  from: CurrentSchema.nullable(),
+  target: RemoteTargetSchema.nullable(),
+  result: VersionInfoSchema.nullable(),
+  error: BlockerSchema.nullable(),
+  rollback: z.enum(["not-needed", "pending", "restored", "failed", "unsafe"]),
+});
 
 export const StartResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), job: JobSchema }).strict(),
-  z
-    .object({
-      ok: z.literal(false),
-      blockers: z.array(BlockerSchema),
-      job: JobSchema.nullable(),
-    })
-    .strict(),
+  z.object({ ok: z.literal(true), job: JobSchema }),
+  z.object({
+    ok: z.literal(false),
+    blockers: z.array(BlockerSchema),
+    job: JobSchema.nullable(),
+  }),
 ]);
 
-export const VersionGetOutputSchema = z
-  .object({
-    info: VersionInfoSchema,
-    job: JobSchema.nullable(),
-  })
-  .strict();
+export const VersionGetOutputSchema = z.object({
+  info: VersionInfoSchema,
+  job: JobSchema.nullable(),
+});
 
 export const VersionCheckInputSchema = z.object({ requestId: IdSchema }).strict();
 
@@ -269,15 +245,13 @@ export const VersionUpdateStatusInputSchema = z
   })
   .strict();
 
-export const VersionRuntimeOutputSchema = z
-  .object({
-    protocol: z.literal(1),
-    pluginId: z.literal(PLUGIN_ID),
-    bootId: IdSchema,
-    packageVersion: z.string().nullable(),
-    commit: ShaSchema.nullable(),
-  })
-  .strict();
+export const VersionRuntimeOutputSchema = z.object({
+  protocol: z.literal(1),
+  pluginId: z.literal(PLUGIN_ID),
+  bootId: IdSchema,
+  packageVersion: z.string().nullable(),
+  commit: ShaSchema.nullable(),
+});
 
 export const versionGetRpc = defineRpc({
   name: "agent-team.version.get",
@@ -300,7 +274,7 @@ export const versionUpdateStartRpc = defineRpc({
 export const versionUpdateStatusRpc = defineRpc({
   name: "agent-team.version.update.status",
   input: VersionUpdateStatusInputSchema,
-  output: z.object({ job: JobSchema.nullable() }).strict(),
+  output: z.object({ job: JobSchema.nullable() }),
 });
 
 export const versionRuntimeRpc = defineRpc({

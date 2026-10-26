@@ -51,14 +51,26 @@ export function isPrivateRef(ref: string): boolean {
   return ref.startsWith(PRIVATE_PREFIX) && ref.length > PRIVATE_PREFIX.length && safeRef(ref);
 }
 
-function isControl(char: string): boolean {
+function isInvisibleControl(char: string): boolean {
   const code = char.codePointAt(0) ?? 0;
-  return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+  return (
+    code <= 0x1f ||
+    (code >= 0x7f && code <= 0x9f) ||
+    code === 0x00ad ||
+    code === 0x061c ||
+    code === 0x180e ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2060 && code <= 0x2064) ||
+    (code >= 0x2066 && code <= 0x2069) ||
+    code === 0xfeff ||
+    (code >= 0xe0000 && code <= 0xe007f)
+  );
 }
 
-/** Strip control characters and cap the result at the schema's UTF-16 limit. */
+/** Strip invisible controls (including bidi overrides) and cap the UTF-16 limit. */
 export function sanitizeCommitSubject(raw: string): string {
-  const clean = [...raw].filter((char) => !isControl(char)).join("");
+  const clean = [...raw].filter((char) => !isInvisibleControl(char)).join("");
   let subject = "";
   for (const char of clean) {
     if (subject.length + char.length > MAX_SUBJECT_LENGTH) break;

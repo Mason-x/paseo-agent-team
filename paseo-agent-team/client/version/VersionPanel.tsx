@@ -21,7 +21,7 @@ import {
   sourceLabel,
   statusView,
   updateButtonView,
-  updateConfirmation,
+  updateConfirmationLines,
 } from "./view-model";
 
 function toneColor(theme: PluginTheme, tone: StatusTone): string {
@@ -206,7 +206,7 @@ export function VersionPanel({
     }
   }
 
-  const confirmation = info ? updateConfirmation(info) : null;
+  const confirmationBody = info ? updateConfirmationLines(info).join("\n") : "";
 
   return (
     <>
@@ -407,18 +407,7 @@ export function VersionPanel({
           theme={theme}
           open={confirmOpen}
           title={zh.versionConfirmTitle}
-          body={
-            confirmation
-              ? [
-                  confirmation.source,
-                  confirmation.current,
-                  confirmation.target,
-                  ...confirmation.commits,
-                  confirmation.npmCi,
-                  confirmation.restart,
-                ].join("\n")
-              : ""
-          }
+          body={confirmationBody}
           confirmLabel={zh.versionConfirm}
           onCancel={() => setConfirmOpen(false)}
           onConfirm={() => {

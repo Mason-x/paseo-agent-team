@@ -344,6 +344,12 @@ describe("pending commits", () => {
     expect(sanitizeCommitSubject("😀".repeat(150))).toHaveLength(200);
   });
 
+  test("bidi and other invisible controls are removed from subjects", () => {
+    expect(sanitizeCommitSubject("a\u202Eb\u202Cc\u2066d\u2069e\u200Bf\u202Ag")).toBe("abcdefg");
+    expect(sanitizeCommitSubject("x\u0000\u001b\u007f\u009Fy")).toBe("xy");
+    expect(sanitizeCommitSubject("safe\u00AD\u061C\u180E\uFEFFtext")).toBe("safetext");
+  });
+
   test("a failed fetch leaves the check result intact", async () => {
     const git = gitHarness({ targetLocal: false, fetch: "fail" });
     const { info, state } = await checkWith(git);
