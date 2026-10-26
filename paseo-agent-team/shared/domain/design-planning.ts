@@ -1,4 +1,4 @@
-import type { ModeLaunchPreview } from "../schemas/design";
+import type { ModeLaunchPreview } from "../schemas/launch-preview";
 import type { Preferences } from "../schemas/preferences";
 import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
@@ -15,9 +15,8 @@ import type { ModeIssue } from "./role-execution";
  * healthy host; the adapter returns `{status:"unavailable"}` and the planner reports
  * MODE_CONTEXT_UNAVAILABLE, which G2 maps to DESIGN_CONFIG_UNAVAILABLE.
  *
- * TODO(5A): T3's seat expansion and T4's ModeLaunchPreview/toModeLaunchPreview are not merged yet.
- * The preview type is the documented stand-in in shared/schemas/design.ts; replace it when T4
- * lands. No selection algorithm may be duplicated in this file.
+ * The production adapter calls T3's buildSeatPlan and T4's toModeLaunchPreview directly; no
+ * selection algorithm is duplicated in this file.
  */
 export type DesignPlanningCapabilities = {
   onDemand: boolean;
@@ -26,6 +25,7 @@ export type DesignPlanningCapabilities = {
 };
 
 export type DesignPlanningInput = {
+  jobId: string;
   team: Team;
   roles: readonly Role[];
   host: HostSnapshot;
@@ -34,7 +34,6 @@ export type DesignPlanningInput = {
   mode: TeamMode;
   workspaceId: string;
   request: string;
-  capabilities: DesignPlanningCapabilities;
 };
 
 /**

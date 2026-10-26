@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { checkDesignRequest } from "../domain/design-request";
 import { DescriptionSchema, ShortTextSchema, SlugSchema, StringListSchema } from "./common";
+import { type ModeLaunchPreview, ModeLaunchPreviewSchema } from "./launch-preview";
 import { RoleSchema } from "./role";
 import { TeamSchema } from "./team";
 import { RoleTierSchema, TaskKindSchema, TeamModeSchema } from "./team-mode";
@@ -219,33 +220,8 @@ export const ProfileSummarySchema = z.object({
 
 export type ProfileSummary = z.infer<typeof ProfileSummarySchema>;
 
-/**
- * TODO(5A): stand-in for 5A T4's shared ModeLaunchPreviewSchema. T2's HostSnapshot/ProfileSelection
- * are already imported by design-planning; T3's seat expansion and T4's per-physical-seat
- * projection (Profile/source/family/budget/reason) are still pending. Replace this schema and its
- * type with T4's exact exports when T4 merges; do not extend this stub in G2.
- */
-export const ModeLaunchPreviewSeatSchema = z
-  .object({
-    seatId: z.string().optional(),
-    logicalSeatId: z.string().optional(),
-    roleId: z.string().optional(),
-    profileId: z.string().nullable().optional(),
-    source: z.string().optional(),
-    family: z.string().optional(),
-    budget: z.unknown().optional(),
-    reason: z.string().optional(),
-  })
-  .passthrough();
-
-export const ModeLaunchPreviewSchema = z
-  .object({
-    mode: TeamModeSchema.optional(),
-    seats: z.array(ModeLaunchPreviewSeatSchema),
-  })
-  .passthrough();
-
-export type ModeLaunchPreview = z.infer<typeof ModeLaunchPreviewSchema>;
+export type { ModeLaunchPreview };
+export { ModeLaunchPreviewSchema };
 
 export const DesignJobSchema = z.object({
   jobId: DesignUuidSchema,

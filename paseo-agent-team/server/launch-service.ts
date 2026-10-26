@@ -7,7 +7,6 @@ import {
   normalizeEconomyPolicy,
 } from "../shared/domain/mode-resolver";
 import type { ModeIssue } from "../shared/domain/role-execution";
-import type { RuntimeCapabilities } from "../shared/domain/seat-plan";
 import { createRunId } from "../shared/ids";
 import {
   createPaseoAdapter,
@@ -34,12 +33,9 @@ export type LaunchStartResult =
   | { ok: true; job: LaunchJob }
   | { ok: false; blockers: string[]; warnings: string[] };
 
-/** 5A runtime: planning and eager creation only. T7 turns the deferred capabilities on. */
-export const LAUNCH_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
-  onDemand: false,
-  expansion: false,
-  collaboration: false,
-};
+import { LAUNCH_RUNTIME_CAPABILITIES } from "../shared/domain/launch-runtime";
+
+export { LAUNCH_RUNTIME_CAPABILITIES };
 
 const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 

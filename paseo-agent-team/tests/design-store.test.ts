@@ -22,6 +22,7 @@ import {
   type DesignStoreFs,
   type StoredDesignJob,
 } from "../server/designer/store";
+import { DesignResultSchema } from "../shared/schemas/design";
 import { DESIGN_HASH, DESIGN_JOB_ID, designJob, designResult } from "./design-fixtures";
 
 const homes: string[] = [];
@@ -159,6 +160,32 @@ describe("design job ledger", () => {
     );
     expect((await store.list()).map((item) => item.job.jobId)).toEqual([DESIGN_JOB_ID]);
     await expect(store.create(first)).rejects.toMatchObject({ issue: "exists" });
+  }, 10000);
+
+  test("accepts future preview fields and strips them to the current DTO", async () => {
+    const directory = await home();
+    const store = createDesignJobStore({
+      home: directory,
+      clock,
+      ids,
+      pid: 10,
+      processes: { isAlive: () => false },
+    });
+    await store.initialize();
+    const current = record();
+    const base = designResult();
+    const preview = {
+      ...base.preview,
+      futureTop: true,
+      seats: base.preview.seats.map((seat) => ({ ...seat, futureSeat: true })),
+    };
+    current.result = { ...base, preview };
+    await store.create(current);
+    const loaded = await store.get(DESIGN_JOB_ID);
+    expect(loaded).not.toBeNull();
+    expect(JSON.stringify(loaded)).not.toContain('"futureTop"');
+    expect(JSON.stringify(loaded)).not.toContain('"futureSeat"');
+    expect(() => DesignResultSchema.parse(loaded?.result)).not.toThrow();
   }, 10000);
 
   test("removes the temporary file when rename keeps failing", async () => {

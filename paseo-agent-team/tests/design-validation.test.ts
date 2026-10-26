@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
+import { StoredDesignResultSchema } from "../server/designer/store";
 import {
   canonicalDesignContent,
   designResultContent,
   roleBehaviorContent,
 } from "../shared/domain/design-content";
-import type { DesignPlanningPort } from "../shared/domain/design-planning";
+import type { DesignPlanningInput, DesignPlanningPort } from "../shared/domain/design-planning";
 import type {
   DesignValidationContext,
   MaterializationIdentity,
@@ -27,6 +28,7 @@ import type {
   NewDesignRole,
 } from "../shared/schemas/design";
 import { DesignResultSchema } from "../shared/schemas/design";
+import { type ModeLaunchPreview, ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import { RoleSchema } from "../shared/schemas/role";
 import {
@@ -48,6 +50,70 @@ import {
 } from "./fixtures";
 
 const hasher = (content: string) => createHash("sha256").update(content).digest("hex");
+
+type PreviewSeatSpec = {
+  seatId?: string;
+  logicalSeatId?: string;
+  roleId: string;
+  purpose?: "member" | "candidate" | "judge" | "escalation";
+  activation?: "eager" | "on-demand" | "escalation-only";
+  profileId?: string | null;
+  source?: "role-preferred" | "role-fallback" | "economy-pool" | "unavailable";
+  family?: string;
+};
+
+function previewFor(
+  input: DesignPlanningInput,
+  coordinatorProfileId: string | null,
+  specs: readonly PreviewSeatSpec[],
+  issues: readonly ModeIssue[] = [],
+): ModeLaunchPreview {
+  const seats = specs.map((spec) => {
+    const profileId = spec.profileId ?? null;
+    return {
+      seatId: spec.seatId ?? spec.logicalSeatId ?? spec.roleId,
+      logicalSeatId: spec.logicalSeatId ?? spec.seatId ?? spec.roleId,
+      roleId: spec.roleId,
+      roleName: spec.roleId,
+      purpose: spec.purpose ?? "member",
+      activation: spec.activation ?? "eager",
+      profile: profileId ? { id: profileId, name: profileId, provider: "unknown" } : null,
+      source: spec.source ?? (profileId ? "role-preferred" : "unavailable"),
+      ...(spec.family === undefined ? {} : { family: spec.family }),
+      alternates: [],
+      budget: "unknown" as const,
+      budgetBasis: "conservative-default" as const,
+      standby: spec.activation === "escalation-only",
+      unavailable: profileId === null,
+      issues: [],
+    };
+  });
+  return ModeLaunchPreviewSchema.parse({
+    requestedMode: input.mode,
+    coordinator: {
+      roleId: input.team.coordinatorRoleId,
+      roleName: input.team.coordinatorRoleId,
+      profile: coordinatorProfileId
+        ? { id: coordinatorProfileId, name: coordinatorProfileId, provider: "unknown" }
+        : null,
+      source: "role-preferred",
+      issues: [],
+    },
+    seats,
+    counts: {
+      logical: input.team.members.length,
+      physical: seats.length,
+      eager: seats.filter((seat) => seat.activation === "eager").length,
+      deferred: seats.filter((seat) => seat.activation === "on-demand").length,
+      escalation: seats.filter((seat) => seat.activation === "escalation-only").length,
+      sotaPotential: seats.length,
+    },
+    budget: { economy: 0, sota: 0, unknown: seats.length, deferredSota: 0 },
+    issues,
+    warnings: [],
+    planHash: "a".repeat(64),
+  });
+}
 
 const opusMax = { ...claudeOpus, id: "opus-max", name: "Opus", model: "opus-max" };
 const opusHigh = { ...claudeOpus, id: "opus-high", name: "Opus", model: "opus-high" };
@@ -101,7 +167,7 @@ function fakePlanner(
     candidateCounts?: Record<string, number>;
     candidateProfileIds?: Record<string, string[]>;
     purposes?: Record<string, "member" | "candidate" | "escalation">;
-    extraSeats?: Array<Record<string, unknown>>;
+    extraSeats?: PreviewSeatSpec[];
     omitCoordinator?: boolean;
     omitSeats?: string[];
   } = {},
@@ -110,15 +176,7 @@ function fakePlanner(
   return {
     plan(input) {
       const coordinatorProfileId = ids.coordinator ?? null;
-      const coordinator = {
-        logicalSeatId: "coordinator",
-        seatId: "seat-coordinator",
-        roleId: input.team.coordinatorRoleId,
-        purpose: "coordinator",
-        profile: coordinatorProfileId ? { id: coordinatorProfileId } : null,
-        source: "role-preferred",
-      };
-      const seats = input.team.members.flatMap((member, index) => {
+      const seats: PreviewSeatSpec[] = input.team.members.flatMap((member, index) => {
         const key = `m${index + 1}`;
         if (options.omitSeats?.includes(key)) return [];
         const count = options.candidateCounts?.[key] ?? 1;
@@ -131,11 +189,12 @@ function fakePlanner(
             seatId: `${member.seatId ?? `seat-m${index + 1}`}-p${candidateIndex + 1}`,
             roleId: member.roleId,
             purpose,
-            profile: profileId ? { id: profileId } : null,
-            source: profileId ? "role-preferred" : "unavailable",
+            profileId,
+            source: profileId ? ("role-preferred" as const) : ("unavailable" as const),
           };
         });
       });
+      seats.push(...(options.extraSeats ?? []));
       if (options.ok === false || (options.launchBlockers?.length ?? 0) > 0) {
         return {
           ok: false,
@@ -146,13 +205,12 @@ function fakePlanner(
       }
       return {
         ok: true,
-        preview: options.omitCoordinator
-          ? { mode: input.mode, seats: [...seats, ...(options.extraSeats ?? [])] }
-          : {
-              mode: input.mode,
-              coordinator,
-              seats: [...seats, ...(options.extraSeats ?? [])],
-            },
+        preview: previewFor(
+          input,
+          options.omitCoordinator ? null : coordinatorProfileId,
+          seats,
+          options.issues ?? [],
+        ),
         issues: options.issues ?? [],
         launchWarnings: options.launchWarnings ?? [],
       };
@@ -792,17 +850,15 @@ describe("validateDesign", () => {
       plan(input) {
         return {
           ok: true,
-          preview: {
-            mode: input.mode,
-            seats: [
-              { roleId: input.team.coordinatorRoleId, profileId: "claude-opus-high" },
-              ...input.team.members.map((member, index) => ({
-                seatId: member.seatId,
-                roleId: member.roleId,
-                profileId: index === 0 ? "codex-xhigh" : "claude-opus-high",
-              })),
-            ],
-          },
+          preview: previewFor(
+            input,
+            "claude-opus-high",
+            input.team.members.map((member, index) => ({
+              seatId: member.seatId,
+              roleId: member.roleId,
+              profileId: index === 0 ? "codex-xhigh" : "claude-opus-high",
+            })),
+          ),
           issues: [],
           launchWarnings: [],
         };
@@ -852,6 +908,20 @@ describe("validateDesign", () => {
     });
     expect(duplicateSeat.ok).toBe(false);
     if (!duplicateSeat.ok) expect(codes(duplicateSeat.issues)).toContain("DESIGN_TEAM_INVALID");
+
+    const reservedSeat = run(designProposal(), {
+      identity: { logicalSeatIds: { m1: "coordinator", m2: "seat-m2" } },
+    });
+    expect(reservedSeat.ok).toBe(false);
+    if (!reservedSeat.ok) {
+      expect(reservedSeat.issues).toContainEqual(
+        expect.objectContaining({
+          code: "DESIGN_TEAM_INVALID",
+          path: ["identity", "logicalSeatIds", "m1"],
+          params: { key: "m1", reason: "reserved-seat" },
+        }),
+      );
+    }
 
     const renamed = run(designProposal(), {
       identity: { teamId: "rework-team-2" },
@@ -927,12 +997,34 @@ test("maps model mN keys through logicalSeatIds and supports ordered candidates"
           logicalSeatId: "seat-m1",
           roleId: "architect",
           purpose: "judge",
-          profile: { id: "claude-opus-high" },
+          profileId: "claude-opus-high",
         },
       ],
     }),
   });
-  expect(standby.ok).toBe(true);
+  expect(standby.ok, JSON.stringify(standby.issues)).toBe(true);
+
+  const sameRoleStandby = run(designProposal(), {
+    planner: fakePlanner({
+      extraSeats: [
+        {
+          logicalSeatId: "seat-m1",
+          roleId: "architect",
+          purpose: "escalation",
+          activation: "escalation-only",
+          profileId: "claude-opus-high",
+          source: "role-preferred",
+        },
+      ],
+    }),
+  });
+  expect(sameRoleStandby.ok).toBe(true);
+  if (sameRoleStandby.ok) {
+    expect(
+      sameRoleStandby.value.memberReasons.find((reason) => reason.target === "m1")
+        ?.expectedProfileIds,
+    ).toEqual(["codex-xhigh"]);
+  }
 
   const emptyChoice = designProposal({
     profileChoices: [
@@ -1107,6 +1199,21 @@ test("save-time revalidation catches missing new-Role bindings, reuse loss, and 
   const context = makeContext();
   const identity = makeIdentity({ logicalSeatIds: seats });
   const full = materialized(validated, context, identity);
+
+  const futurePreview = {
+    ...full.result.preview,
+    futureTop: true,
+    seats: full.result.preview.seats.map((seat) => ({ ...seat, futureSeat: true })),
+  };
+  const ledgerResult = StoredDesignResultSchema.parse({
+    ...full.result,
+    preview: futurePreview,
+  });
+  const revalidated = validateMaterializedDesign(ledgerResult, context, built.planner);
+  expect(revalidated.ok).toBe(true);
+  const rpcResult = DesignResultSchema.parse(ledgerResult);
+  expect(JSON.stringify(rpcResult)).not.toContain("futureTop");
+  expect(JSON.stringify(rpcResult)).not.toContain("futureSeat");
 
   const withoutProfile = makeContext({
     host: {

@@ -369,6 +369,14 @@ function coordinatorSeat(plan: DesignPlanSuccess, team: Team): PreviewSeatView |
     );
 }
 
+const COORDINATOR_LOGICAL_SEAT_ID = "coordinator";
+
+/** T4 has no coordinator logical-seat field; the launch contract uses this synthetic id. */
+function coordinatorLogicalSeatId(plan: DesignPlanSuccess): string {
+  const seat = "coordinator" in plan.preview ? asPreviewSeat(plan.preview.coordinator) : undefined;
+  return seat?.logicalSeatId ?? COORDINATOR_LOGICAL_SEAT_ID;
+}
+
 function targetRoleId(team: Team, target: DesignChoiceTarget): string | undefined {
   if (target === "coordinator") return team.coordinatorRoleId;
   const index = Number(target.slice(1)) - 1;
@@ -405,7 +413,7 @@ function expectedProfileIdsForTarget(
   const logicalSeatId = logicalSeatIds[target];
   if (!logicalSeatId) return { kind: "missing", reason: "missing-seat" };
   const roleId = targetRoleId(team, target);
-  const matching = plan.preview.seats
+  const candidates = plan.preview.seats
     .map(asPreviewSeat)
     .filter((seat): seat is PreviewSeatView => seat !== undefined)
     .filter((seat) => {
@@ -413,14 +421,20 @@ function expectedProfileIdsForTarget(
         seat.logicalSeatId !== undefined
           ? seat.logicalSeatId === logicalSeatId
           : seat.seatId === logicalSeatId;
-      if (!sameLogicalSeat) return false;
-      if (seat.purpose === "judge") return false;
-      // TODO(G4): validate same-Role standby arbitration seats against real T3/T4; a standby
-      // seat may share this logicalSeatId and the member Role. If so, exclude by
-      // activation==="escalation-only" unless it is this member's own escalation channel.
-      if (seat.purpose === "escalation" && seat.roleId !== roleId) return false;
-      return true;
+      return sameLogicalSeat;
     });
+  // A same-Role standby escalation channel may share the member's logical seat. Use it only
+  // when there is no primary member/candidate seat to choose from.
+  const primary = candidates.filter(
+    (seat) => seat.activation !== "escalation-only" && seat.purpose !== "judge",
+  );
+  const matching =
+    primary.length > 0
+      ? primary
+      : candidates.filter(
+          (seat) =>
+            (seat.purpose === "judge" || seat.purpose === "escalation") && seat.roleId === roleId,
+        );
   if (matching.length === 0) return { kind: "missing", reason: "missing-seat" };
   if (
     matching.every((seat) => seat.purpose === "escalation") &&
@@ -810,6 +824,13 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
   for (const key of Object.keys(input.logicalSeatIds)) {
     if (!/^m[1-9][0-9]?$/.test(key) || Number(key.slice(1)) > input.team.members.length) {
       issues.push(error("DESIGN_TEAM_INVALID", ["identity", "logicalSeatIds", key], { key }));
+    } else if (input.logicalSeatIds[key] === COORDINATOR_LOGICAL_SEAT_ID) {
+      issues.push(
+        error("DESIGN_TEAM_INVALID", ["identity", "logicalSeatIds", key], {
+          key,
+          reason: "reserved-seat",
+        }),
+      );
     }
   }
   const membersByRole = new Map<string, number[]>();
@@ -883,9 +904,8 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
         issues.push(error("DESIGN_PROFILE_CHOICE", ["memberReasons"], { target }));
         continue;
       }
-      // TODO(G4): prefer preview.coordinator.logicalSeatId from T4; the constant is the stand-in.
       const expectedLogicalSeatId =
-        target === "coordinator" ? "coordinator" : input.logicalSeatIds[target];
+        target === "coordinator" ? COORDINATOR_LOGICAL_SEAT_ID : input.logicalSeatIds[target];
       if (!expectedLogicalSeatId || reason.logicalSeatId !== expectedLogicalSeatId) {
         issues.push(error("DESIGN_PROFILE_CHOICE", ["memberReasons"], { target }));
       }
@@ -897,6 +917,7 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
 
 function planningInput(team: Team, roles: readonly Role[], context: DesignValidationContext) {
   return {
+    jobId: context.jobId,
     team,
     roles,
     host: context.host,
@@ -905,7 +926,6 @@ function planningInput(team: Team, roles: readonly Role[], context: DesignValida
     mode: context.mode,
     workspaceId: context.targetWorkspaceId ?? context.carrierWorkspaceId,
     request: context.request,
-    capabilities: context.capabilities,
   };
 }
 
@@ -1365,9 +1385,8 @@ export function validateDesign(
         error("DESIGN_PROFILE_CHOICE", ["profileChoices", choice.index, "profileIds"], params),
       );
     }
-    // TODO(G4): prefer preview.coordinator.logicalSeatId from T4; the constant is the stand-in.
     const logicalSeatId =
-      target === "coordinator" ? "coordinator" : identity.logicalSeatIds[target];
+      target === "coordinator" ? coordinatorLogicalSeatId(plan) : identity.logicalSeatIds[target];
     if (!logicalSeatId) {
       issues.push(error("DESIGN_TEAM_INVALID", ["identity", "logicalSeatIds"], { target }));
       continue;

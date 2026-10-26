@@ -14,6 +14,15 @@ import {
   DesignTimeSchema,
   DesignUuidSchema,
 } from "../../shared/schemas/design";
+import {
+  CoordinatorPreviewSchema,
+  ModeIssueSchema,
+  ModeLaunchPreviewSchema,
+  SeatBudgetSchema,
+  SeatCountsSchema,
+  SeatPreviewSchema,
+  SeatProfileSchema,
+} from "../../shared/schemas/launch-preview";
 import { TeamModeSchema } from "../../shared/schemas/team-mode";
 import { designZh } from "../../shared/zh/design";
 import {
@@ -91,6 +100,27 @@ const AttemptRecordSchema = z.object({
   turnId: z.string().nullable().optional(),
   lastError: z.string().nullable().optional(),
 });
+const LedgerModeIssueSchema = ModeIssueSchema.strip();
+const LedgerSeatProfileSchema = SeatProfileSchema.strip();
+const LedgerSeatPreviewSchema = SeatPreviewSchema.strip().extend({
+  profile: LedgerSeatProfileSchema.nullable(),
+  issues: z.array(LedgerModeIssueSchema),
+});
+const LedgerCoordinatorPreviewSchema = CoordinatorPreviewSchema.strip().extend({
+  profile: LedgerSeatProfileSchema.nullable(),
+  issues: z.array(LedgerModeIssueSchema),
+});
+const LedgerModeLaunchPreviewSchema = ModeLaunchPreviewSchema.strip().extend({
+  coordinator: LedgerCoordinatorPreviewSchema,
+  seats: z.array(LedgerSeatPreviewSchema),
+  counts: SeatCountsSchema.strip(),
+  budget: SeatBudgetSchema.strip(),
+  issues: z.array(LedgerModeIssueSchema),
+});
+/** Future preview fields are accepted for reading and stripped to the current DTO. */
+export const StoredDesignResultSchema = DesignResultSchema.extend({
+  preview: LedgerModeLaunchPreviewSchema,
+});
 export const StoredDesignJobSchema = z.object({
   schemaVersion: z.number().int().positive(),
   job: DesignJobSchema,
@@ -101,7 +131,7 @@ export const StoredDesignJobSchema = z.object({
   creation: z.object({ intentHash: DesignHashSchema, idempotencyKey: z.string() }).nullable(),
   attempts: z.array(AttemptRecordSchema).max(3),
   proposal: z.unknown().nullable(),
-  result: DesignResultSchema.nullable(),
+  result: StoredDesignResultSchema.nullable(),
   reuseFingerprints: z.record(z.string(), DesignHashSchema),
   leaseOwner: z.string().nullable(),
   receipts: z.record(z.string(), z.string()),

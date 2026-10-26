@@ -368,7 +368,7 @@ describe("result seats", () => {
   });
 
   test("an invalid preview fails closed instead of inventing seats", () => {
-    const view = resolveDesignResultView(designResult(), null);
+    const view = resolveDesignResultView(designResult({ preview: undefined as never }), null);
     expect(view.seats).toEqual([]);
     expect(view.coordinator).toBeNull();
     expect(view.warnings).toContain(designZh.resultPreviewUnavailable);
