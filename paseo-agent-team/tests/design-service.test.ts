@@ -1692,7 +1692,7 @@ describe("design service", () => {
               params: { reason: "all-missing" },
             },
           ],
-          launchBlockers: ["无法解析 Architect 的 Profile（all-missing）。"],
+          launchBlockers: ["宿主无法解析所选成员的绑定（可被文案改写）。"],
           launchWarnings: [],
         };
       },
@@ -1719,6 +1719,59 @@ describe("design service", () => {
     await service.dispose();
   });
 
+  test("bounds the available profile list in the correction reason", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const generated: PaseoProfile[] = Array.from({ length: 20 }, (_, index) => ({
+      id: `agent_profile_generated_${String(index).padStart(2, "0")}_long_identifier`,
+      name: `Generated Profile ${String(index).padStart(2, "0")} with a deliberately long display name`,
+      provider: "claude",
+      model: "claude-haiku-4-5",
+    }));
+    adapter.profilesValue = [DESIGNER, ...generated];
+    const blockedPlanner: DesignPlanningPort = {
+      ...planner,
+      plan() {
+        return {
+          ok: false,
+          issues: [
+            {
+              code: "MODE_PROFILE_UNRESOLVED",
+              severity: "blocker",
+              roleId: "architect",
+              params: { reason: "all-missing" },
+            },
+          ],
+          launchBlockers: [],
+          launchWarnings: [],
+        };
+      },
+    };
+    const service = createDesignService(serviceDeps(store, adapter, { planner: blockedPlanner }));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.entries = answerFor(stored, proposalFor(stored));
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => store.records.get(started.job.jobId)?.job.attempt === 2);
+    const reason = store.records
+      .get(started.job.jobId)
+      ?.job.issues.map((issue) => issue.params.reason)
+      .find(
+        (value): value is string => typeof value === "string" && value.includes("可用 Profile"),
+      );
+    if (!reason) throw new Error("missing profile guidance");
+    expect(reason.length).toBeLessThanOrEqual(1000);
+    expect(reason).toContain("另有");
+    expect(adapter.sent).toHaveLength(1);
+    await service.dispose();
+  });
+
   test("fails immediately with actionable guidance when no profile is available", async () => {
     const store = new FakeStore();
     const adapter = new FakeAdapter();
@@ -1735,7 +1788,7 @@ describe("design service", () => {
               params: { reason: "all-missing" },
             },
           ],
-          launchBlockers: ["无法解析 Architect 的 Profile（all-missing）。"],
+          launchBlockers: ["宿主无法解析所选成员的绑定（可被文案改写）。"],
           launchWarnings: [],
         };
       },
