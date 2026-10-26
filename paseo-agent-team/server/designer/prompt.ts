@@ -41,6 +41,10 @@ export type DesignPromptRoleSummary = {
   /** Strict binding order already resolved against live Profiles. */
   preferredProfileIds: readonly string[];
   fallbackProfileIds: readonly string[];
+  /** At least one usable Profile in the current mode (execution seats may use the economy pool). */
+  launchable: boolean;
+  /** Bound Profile ids that are missing or provider-unavailable; bounded for the required index. */
+  unavailableProfileIds: readonly string[];
   tier?: string;
   taskKind?: string;
 };
@@ -480,8 +484,11 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
         tier: role.tier ?? null,
         preferredProfileIds: stringIds(role.preferredProfileIds),
         fallbackProfileIds: stringIds(role.fallbackProfileIds),
+        launchable: role.launchable,
+        unavailableProfileIds: stringIds(role.unavailableProfileIds),
       })),
     ),
+    "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。",
     jsonBlock(
       "Role 摘要",
       detailedRoles(context, detail).map((role) => rolePayload(role, detail)),

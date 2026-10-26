@@ -1,4 +1,13 @@
 import { finalizeDesignIssues } from "../../shared/domain/design-validation";
+import {
+  type EconomyPolicy,
+  type HostSnapshot,
+  normalizeEconomyPolicy,
+  resolveModeProfile,
+  selectCollaborationProfiles,
+} from "../../shared/domain/mode-resolver";
+import { resolveProfile } from "../../shared/domain/profile-resolver";
+import { resolveRoleExecution } from "../../shared/domain/role-execution";
 import type { ProviderAvailability } from "../../shared/paseo/adapter";
 import { asRecord, type PaseoProfile, profilesFromConfig } from "../../shared/paseo/adapter";
 import type { DesignAdapter, DesignWorkspaceSummary } from "../../shared/paseo/design-port";
@@ -8,6 +17,75 @@ import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import type { TeamMode } from "../../shared/schemas/team-mode";
 import type { RolesDocument, TeamsDocument } from "../../shared/settings";
+
+const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
+const MAX_UNAVAILABLE_PROFILE_IDS = 5;
+
+export type RoleLaunchability = {
+  launchable: boolean;
+  unavailableProfileIds: readonly string[];
+};
+
+/**
+ * Per-Role host capability for the kickoff. It reuses T2's seat resolution for the launchable
+ * flag (including the economy pool for execution seats) and T2's Profile resolver for the exact
+ * unusable bindings. The list is bounded because the Role index is required at every compression
+ * level.
+ */
+export function computeRoleLaunchability(input: {
+  mode: TeamMode;
+  roles: readonly Role[];
+  profiles: readonly PaseoProfile[];
+  availability: readonly ProviderAvailability[];
+  economy: EconomyPolicy;
+}): Record<string, RoleLaunchability> {
+  const host: HostSnapshot = {
+    status: "ready",
+    profiles: input.profiles,
+    availability: input.availability,
+  };
+  const result: Record<string, RoleLaunchability> = {};
+  for (const role of input.roles) {
+    // Match the planner: old SOTA teams keep launching disabled Roles with a warning and ignore
+    // an explicit tier. Collaborative execution seats use the same cohort/fallback path.
+    const roleForPlan = input.mode === "sota" && !role.enabled ? { ...role, enabled: true } : role;
+    const roleForResolution =
+      input.mode === "sota" ? { ...roleForPlan, executionPolicy: undefined } : roleForPlan;
+    const execution = resolveRoleExecution(roleForResolution, "member");
+    let launchable = false;
+    if (input.mode === "collaborative" && execution.ok && execution.value.tier === "execution") {
+      const cohort = selectCollaborationProfiles({
+        role: roleForPlan,
+        host,
+        economy: input.economy,
+        requestedReplicas: 2,
+      });
+      launchable = cohort.ok && cohort.value.selections.length > 0;
+    } else {
+      const resolved = resolveModeProfile({
+        mode: input.mode,
+        role: roleForResolution,
+        kind: "member",
+        host,
+        economy: input.economy,
+      });
+      launchable = resolved.ok && !resolved.value.unavailable;
+    }
+    const unavailableProfileIds = new Set<string>();
+    for (const ref of [...role.preferredProfiles, ...role.fallbackProfiles]) {
+      if (unavailableProfileIds.size >= MAX_UNAVAILABLE_PROFILE_IDS) break;
+      const single: Role = { ...role, preferredProfiles: [ref], fallbackProfiles: [] };
+      if (!resolveProfile(single, input.profiles, input.availability).ok) {
+        unavailableProfileIds.add(ref.profileId);
+      }
+    }
+    result[role.id] = {
+      launchable,
+      unavailableProfileIds: [...unavailableProfileIds],
+    };
+  }
+  return result;
+}
 
 export type DesignContextCapabilities = {
   onDemand: boolean;
@@ -43,6 +121,8 @@ export type DesignContextSnapshot = {
   revisions: DesignBaseRevisions;
   profiles: readonly PaseoProfile[];
   availability: readonly ProviderAvailability[];
+  /** Per-Role launchability computed with the same T2 resolution used by seat planning. */
+  roleLaunch: Readonly<Record<string, RoleLaunchability>>;
   daemonConfig: unknown;
   carrierWorkspace: DesignWorkspaceSummary;
   targetWorkspace: DesignWorkspaceSummary | null;
@@ -313,6 +393,9 @@ export async function readDesignContext(
     };
   }
 
+  const preferences = preferencesResult.value.values;
+  const normalizedEconomy = normalizeEconomyPolicy(preferences.economy, profiles);
+  const economy = normalizedEconomy.ok ? normalizedEconomy.value : EMPTY_ECONOMY;
   return {
     ok: true,
     context: {
@@ -320,7 +403,7 @@ export async function readDesignContext(
       mode: job.mode,
       roles: rolesResult.value.values.roles,
       teams: teamsResult.value.values.teams,
-      preferences: preferencesResult.value.values,
+      preferences,
       revisions: {
         roles: rolesResult.value.revision,
         teams: teamsResult.value.revision,
@@ -328,6 +411,13 @@ export async function readDesignContext(
       },
       profiles,
       availability: availabilityResult.value,
+      roleLaunch: computeRoleLaunchability({
+        mode: job.mode,
+        roles: rolesResult.value.values.roles,
+        profiles,
+        availability: availabilityResult.value,
+        economy,
+      }),
       daemonConfig: configResult.value,
       carrierWorkspace: carrierResult.workspace,
       targetWorkspace: targetResult.kind === "ok" ? targetResult.workspace : null,

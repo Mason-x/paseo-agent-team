@@ -128,6 +128,8 @@ function role(
     responsibilities: [`职责${index}`],
     preferredProfileIds: ["profile-1"],
     fallbackProfileIds: [],
+    launchable: true,
+    unavailableProfileIds: [],
     tier: "execution",
     taskKind: "coding",
     ...overrides,
@@ -291,6 +293,52 @@ describe("designer prompt budgets", () => {
     expect(text).toContain('"carrierAccess":"forbidden"');
   });
 
+  test("marks Roles that cannot launch and explains the required index", () => {
+    const blocked = role(2, {
+      launchable: false,
+      unavailableProfileIds: ["profile-9", "profile-10"],
+    });
+    const text = textOf(
+      kickoff({
+        roles: [role(1), blocked],
+        occupiedRoleIds: ["role-1", "role-2"],
+        occupiedRoleNames: ["角色1", "角色2"],
+      }),
+    );
+    expect(text).toContain('"launchable":true');
+    expect(text).toContain('"launchable":false');
+    expect(text).toContain('"unavailableProfileIds":["profile-9","profile-10"]');
+    expect(text).toContain("优先复用 launchable=true 的 Role");
+    expect(text).toContain("只使用 Profile 白名单中 available=true 的 Profile");
+  });
+
+  test("keeps launchability in a real-sized kickoff after compression", () => {
+    const roles = expectedRoleContent.map((item, index) =>
+      role(index, {
+        id: item.id,
+        name: item.name,
+        mission: item.mission,
+        responsibilities: item.responsibilities,
+        launchable: index !== 0,
+        unavailableProfileIds: index === 0 ? ["profile-missing"] : [],
+      }),
+    );
+    const result = kickoff({
+      request: "设计一个功能开发团队",
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+    expect(result.omissions.length).toBeGreaterThan(0);
+    expect(result.text).toContain('"launchable":false');
+    expect(result.text).toContain('"unavailableProfileIds":["profile-missing"]');
+    expect(result.text).toContain('"id":"lead-orchestrator"');
+  });
+
   test("compresses notes, role text, recipe notes, then unrelated role prose", () => {
     const notes = "说明".repeat(3000);
     const notesOnly = kickoff({
@@ -334,7 +382,7 @@ describe("designer prompt budgets", () => {
       ),
     ];
     const focused = kickoff({
-      request: "填充".repeat(8500),
+      request: "填充".repeat(8000),
       roles,
       profiles: [profile(1, notes)],
       occupiedRoleIds: roles.map((item) => item.id),

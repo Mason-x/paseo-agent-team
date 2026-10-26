@@ -306,19 +306,27 @@ function promptContext(
   expectedChoices: readonly ExpectedDesignChoice[] = [],
 ): DesignPromptContext {
   const economy = economyOf(context);
-  const roles = context.roles.map((role) => ({
-    id: role.id,
-    name: role.name,
-    enabled: role.enabled,
-    mission: role.mission,
-    responsibilities: role.responsibilities,
-    preferredProfileIds: role.preferredProfiles.map((ref) => ref.profileId),
-    fallbackProfileIds: role.fallbackProfiles.map((ref) => ref.profileId),
-    ...(typeof role.executionPolicy?.tier === "string" &&
-    typeof role.executionPolicy.taskKind === "string"
-      ? { tier: role.executionPolicy.tier, taskKind: role.executionPolicy.taskKind }
-      : {}),
-  }));
+  const roles = context.roles.map((role) => {
+    const launch = context.roleLaunch[role.id] ?? {
+      launchable: false,
+      unavailableProfileIds: [],
+    };
+    return {
+      id: role.id,
+      name: role.name,
+      enabled: role.enabled,
+      mission: role.mission,
+      responsibilities: role.responsibilities,
+      preferredProfileIds: role.preferredProfiles.map((ref) => ref.profileId),
+      fallbackProfileIds: role.fallbackProfiles.map((ref) => ref.profileId),
+      launchable: launch.launchable,
+      unavailableProfileIds: launch.unavailableProfileIds,
+      ...(typeof role.executionPolicy?.tier === "string" &&
+      typeof role.executionPolicy.taskKind === "string"
+        ? { tier: role.executionPolicy.tier, taskKind: role.executionPolicy.taskKind }
+        : {}),
+    };
+  });
   return {
     request: record.request,
     requestedMode: record.mode,
