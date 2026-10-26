@@ -1,6 +1,6 @@
 import { Modal } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
-import { View } from "react-native";
+import { Text, View } from "react-native";
 import { createAutoSlug, slugify } from "../../shared/ids";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
@@ -11,14 +11,20 @@ import {
   RoleSchema,
 } from "../../shared/schemas/role";
 import { zh } from "../../shared/zh";
-import { keepRoleMetadata } from "../catalog/preset-metadata";
+import { keepRoleMetadata, mergeRoleExecutionPolicy } from "../catalog/preset-metadata";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
 import { ModalActions } from "../shared/buttons";
+import { CompactPicker } from "../shared/CompactPicker";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { Field, TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import { SlugInput } from "../shared/SlugInput";
+import {
+  applyRolePolicyChoice,
+  ROLE_TIER_OPTIONS,
+  TASK_KIND_OPTIONS,
+} from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { ListEditor } from "./ListEditor";
 import { ProfilePicker } from "./ProfilePicker";
@@ -38,6 +44,10 @@ export type RoleDraft = {
   color: string;
   icon: string;
   enabled: boolean;
+  executionTier: string;
+  executionTaskKind: string;
+  executionTierTouched: boolean;
+  executionTaskKindTouched: boolean;
 };
 
 function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
@@ -57,6 +67,10 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
       color: "",
       icon: "",
       enabled: true,
+      executionTier: "",
+      executionTaskKind: "",
+      executionTierTouched: false,
+      executionTaskKindTouched: false,
     };
   }
   return {
@@ -74,6 +88,11 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
     color: role.color ?? "",
     icon: role.icon ?? "",
     enabled: role.enabled,
+    executionTier: typeof role.executionPolicy?.tier === "string" ? role.executionPolicy.tier : "",
+    executionTaskKind:
+      typeof role.executionPolicy?.taskKind === "string" ? role.executionPolicy.taskKind : "",
+    executionTierTouched: false,
+    executionTaskKindTouched: false,
   };
 }
 
@@ -189,6 +208,12 @@ export function RoleEditor({
       ...(mcp ? { mcpServers: mcp } : {}),
       ...(color ? { color } : {}),
       ...(icon ? { icon } : {}),
+      executionPolicy: mergeRoleExecutionPolicy(role?.executionPolicy, {
+        tier: draft.executionTier,
+        taskKind: draft.executionTaskKind,
+        tierTouched: draft.executionTierTouched,
+        taskKindTouched: draft.executionTaskKindTouched,
+      }),
       enabled: true,
       createdAt: createdAt ?? now,
       updatedAt: now,
@@ -309,6 +334,59 @@ export function RoleEditor({
               revision={formSeed}
               onChange={(outputContract) => setDraft((current) => ({ ...current, outputContract }))}
             />
+            <CompactPicker
+              theme={theme}
+              label={zh.roleExecutionTier}
+              items={[
+                { id: "", name: zh.rolePolicyKeep },
+                ...ROLE_TIER_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
+              ]}
+              selectedId={draft.executionTier}
+              placeholder={zh.rolePolicyKeep}
+              searchPlaceholder={zh.searchOptions}
+              emptyLabel={zh.noMatches}
+              onChange={(executionTier) =>
+                setDraft((current) => applyRolePolicyChoice(current, "tier", executionTier))
+              }
+            />
+            <CompactPicker
+              theme={theme}
+              label={zh.roleExecutionTaskKind}
+              items={[
+                { id: "", name: zh.rolePolicyKeep },
+                ...TASK_KIND_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
+              ]}
+              selectedId={draft.executionTaskKind}
+              placeholder={zh.rolePolicyKeep}
+              searchPlaceholder={zh.searchOptions}
+              emptyLabel={zh.noMatches}
+              onChange={(executionTaskKind) =>
+                setDraft((current) => applyRolePolicyChoice(current, "taskKind", executionTaskKind))
+              }
+            />
+            {draft.executionTier === "" || draft.executionTaskKind === "" ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                {zh.rolePolicyKeepHint}
+              </Text>
+            ) : null}
+            {!draft.executionTierTouched &&
+            role?.executionPolicy?.tier !== undefined &&
+            (typeof role.executionPolicy.tier !== "string" ||
+              !ROLE_TIER_OPTIONS.some((option) => option.value === role.executionPolicy?.tier)) ? (
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                {zh.rolePolicyUnknown(String(role.executionPolicy.tier))}
+              </Text>
+            ) : null}
+            {!draft.executionTaskKindTouched &&
+            role?.executionPolicy?.taskKind !== undefined &&
+            (typeof role.executionPolicy.taskKind !== "string" ||
+              !TASK_KIND_OPTIONS.some(
+                (option) => option.value === role.executionPolicy?.taskKind,
+              )) ? (
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                {zh.rolePolicyUnknown(String(role.executionPolicy.taskKind))}
+              </Text>
+            ) : null}
             <ProfilePicker
               theme={theme}
               label={zh.preferredProfiles}

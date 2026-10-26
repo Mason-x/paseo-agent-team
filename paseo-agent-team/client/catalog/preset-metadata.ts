@@ -13,6 +13,7 @@ const ROLE_FORM_FIELDS: Record<string, true> = {
   restrictions: true,
   systemPrompt: true,
   outputContract: true,
+  executionPolicy: true,
   preferredProfiles: true,
   fallbackProfiles: true,
   mcpServers: true,
@@ -28,6 +29,9 @@ const TEAM_FORM_FIELDS: Record<string, true> = {
   id: true,
   name: true,
   description: true,
+  mode: true,
+  memberCreation: true,
+  collaboration: true,
   coordinatorRoleId: true,
   members: true,
   operatingRules: true,
@@ -43,6 +47,32 @@ export function keepRoleMetadata(original: Role | null, next: Role): Role {
     Object.entries(original).filter(([key]) => !ROLE_FORM_FIELDS[key]),
   );
   return RoleSchema.parse({ ...extensions, ...next });
+}
+
+/** Keep unknown policy fields while applying only the two fields this editor exposes. */
+export type RolePolicyEdit = {
+  tier: string;
+  taskKind: string;
+  tierTouched: boolean;
+  taskKindTouched: boolean;
+};
+
+/** Keep unknown policy fields while writing only the two fields the user actually edited. */
+export function mergeRoleExecutionPolicy(
+  original: Role["executionPolicy"] | undefined,
+  edit: RolePolicyEdit,
+): Role["executionPolicy"] | undefined {
+  const next: Record<string, unknown> =
+    original && typeof original === "object" ? { ...original } : {};
+  if (edit.tierTouched) {
+    if (edit.tier) next.tier = edit.tier;
+    else delete next.tier;
+  }
+  if (edit.taskKindTouched) {
+    if (edit.taskKind) next.taskKind = edit.taskKind;
+    else delete next.taskKind;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 export function keepTeamMetadata(original: Team | null, next: Team): Team {

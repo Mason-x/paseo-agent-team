@@ -5,6 +5,7 @@ import {
   copyTeam,
   keepRoleMetadata,
   keepTeamMetadata,
+  mergeRoleExecutionPolicy,
   moveProfileRef,
   newProfileRef,
   removeProfileRef,
@@ -59,6 +60,40 @@ describe("editor metadata", () => {
     expect(keepRoleMetadata(null, fresh)).toBe(fresh);
   });
 
+  test("merges role execution policy without dropping unknown policy fields", () => {
+    expect(
+      mergeRoleExecutionPolicy(
+        { tier: "retain", taskKind: "general", custom: true },
+        {
+          tier: "execution",
+          taskKind: "coding",
+          tierTouched: true,
+          taskKindTouched: true,
+        },
+      ),
+    ).toEqual({ tier: "execution", taskKind: "coding", custom: true });
+    expect(
+      mergeRoleExecutionPolicy(
+        { tier: 5, taskKind: { future: true }, custom: true },
+        { tier: "", taskKind: "", tierTouched: false, taskKindTouched: false },
+      ),
+    ).toEqual({ tier: 5, taskKind: { future: true }, custom: true });
+    expect(
+      mergeRoleExecutionPolicy(
+        { tier: "retain", custom: true },
+        { tier: "", taskKind: "", tierTouched: true, taskKindTouched: true },
+      ),
+    ).toEqual({ custom: true });
+    expect(
+      mergeRoleExecutionPolicy(undefined, {
+        tier: "",
+        taskKind: "",
+        tierTouched: false,
+        taskKindTouched: false,
+      }),
+    ).toBeUndefined();
+  });
+
   test("keeps Team designer and unknown extensions", () => {
     const withDesigner = {
       ...codingTeam,
@@ -76,6 +111,26 @@ describe("editor metadata", () => {
       custom: { keep: true },
     });
     expect(edited.operatingRules).toBeUndefined();
+  });
+
+  test("the Team form owns mode fields while metadata and extensions survive", () => {
+    const withMode = {
+      ...codingTeam,
+      mode: "collaborative",
+      collaboration: { replicas: 3, judgeRoleId: "qa-review" },
+      designer: { jobId: "job-4" },
+      custom: { keep: true },
+    };
+    const edited = keepTeamMetadata(withMode, {
+      ...withMode,
+      mode: "sota",
+      collaboration: undefined,
+      name: "Mode changed",
+    });
+    expect(edited.mode).toBe("sota");
+    expect(edited.collaboration).toBeUndefined();
+    expect(edited.designer).toEqual({ jobId: "job-4" });
+    expect(edited.custom).toEqual({ keep: true });
   });
 });
 

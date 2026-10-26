@@ -15,6 +15,7 @@ export function MemberEditor({
   coordinatorRoleId,
   onChange,
   onMove,
+  onDuplicate,
   onRemove,
   revision,
 }: {
@@ -24,6 +25,7 @@ export function MemberEditor({
   coordinatorRoleId: string;
   onChange: (member: TeamMember) => void;
   onMove: (direction: -1 | 1) => void;
+  onDuplicate: () => void;
   onRemove: () => void;
   revision?: string | number;
 }) {
@@ -52,6 +54,12 @@ export function MemberEditor({
           />
         </View>
         <View style={{ flexDirection: "row", gap: 4, marginTop: 22 }}>
+          <GhostIconButton
+            theme={theme}
+            icon="Copy"
+            accessibilityLabel={zh.duplicateMember}
+            onPress={onDuplicate}
+          />
           <GhostIconButton
             theme={theme}
             icon="ChevronUp"

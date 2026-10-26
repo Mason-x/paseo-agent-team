@@ -32,6 +32,7 @@ import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
 import { RoleList } from "../roles/RoleList";
 import { RunsTab } from "../runs/RunsTab";
+import { EconomyPoolEditor } from "../settings/EconomyPoolEditor";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
@@ -104,6 +105,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const [presetNotice, setPresetNotice] = useState<PresetNotice | null>(null);
   const [presetForceOpen, setPresetForceOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [economyOpen, setEconomyOpen] = useState(false);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
     role: Role | null;
@@ -118,6 +120,13 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   useEffect(() => {
     if (requestedTab) setTab(requestedTab);
   }, [requestedTab]);
+
+  const economyHostRef = useRef(host.id);
+  useEffect(() => {
+    if (economyHostRef.current === host.id) return;
+    economyHostRef.current = host.id;
+    setEconomyOpen(false);
+  }, [host.id]);
 
   const presetGateway = useMemo(
     () =>
@@ -615,6 +624,19 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           ))}
         </View>
         <View style={styles.headerActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={zh.economyPool}
+            onPress={() => setEconomyOpen(true)}
+            style={({ pressed }) => [
+              styles.newButton,
+              layout.compact && styles.newButtonIcon,
+              pressed && { opacity: 0.72 },
+            ]}
+          >
+            <Icon name="Boxes" size={14} color={theme.colors.foregroundMuted} />
+            {layout.compact ? null : <Text style={styles.action}>{zh.economyPool}</Text>}
+          </Pressable>
           <VersionEntry key={host.id} theme={theme} layout={layout} hostId={host.id} />
           <Pressable
             accessibilityRole="button"
@@ -775,6 +797,22 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           </ScrollView>
         </>
       ) : null}
+      <EconomyPoolEditor
+        key={host.id}
+        theme={theme}
+        layout={layout}
+        open={economyOpen}
+        hostId={host.id}
+        adapter={adapter}
+        profiles={profileList}
+        profilesLoading={hostProfiles.status === "loading"}
+        profilesError={hostProfiles.status === "error" ? hostProfiles.error : undefined}
+        onSaved={() => {
+          void preferences.reload();
+          toast.show(zh.economyPoolSaved, { variant: "success" });
+        }}
+        onClose={() => setEconomyOpen(false)}
+      />
       <PresetSyncDialog
         theme={theme}
         layout={layout}

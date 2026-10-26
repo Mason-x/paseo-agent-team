@@ -26,6 +26,8 @@
   previews every change before writing; editing or copying keeps or strips preset origin metadata
 - version entry in the Agent Teams header and an update panel: source, current/remote revisions,
   check throttling, blockers and remedies, update confirmation, and reconnect/recovery after reload
+- edit Team modes, Role execution tiers, and the host economy pool; new member seats get stable
+  ids and duplication labels, and preference writes merge the latest host settings
 - version management (`agent-team.version.*` RPCs): report the installed version, source and latest
   stable release (or the default branch head); fast-forward a clean directory checkout on its default
   branch, run `npm ci` and reload through a detached runner that survives the reload, and roll a
