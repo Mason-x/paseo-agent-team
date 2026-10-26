@@ -69,8 +69,26 @@ export type DesignAttemptRecord = {
   endCursor: string | null;
   summary: string | null;
   ack: "pending" | "acked" | "unknown";
+  sentAt?: string | null;
   turnId?: string | null;
   lastError?: string | null;
+};
+export type StoredCreateRequest = {
+  agentId: string;
+  idempotencyKey: string;
+  workspaceId: string;
+  title: string;
+  labels: Record<string, string>;
+  profile: {
+    provider: string;
+    model?: string;
+    modeId?: string;
+    thinkingOptionId?: string;
+    featureValues?: Record<string, unknown>;
+  };
+  systemPrompt: string;
+  prompt: string;
+  clientMessageId: string;
 };
 export type StoredDesignJob = {
   schemaVersion: number;
@@ -79,7 +97,11 @@ export type StoredDesignJob = {
   requestHash: string;
   mode: z.infer<typeof TeamModeSchema>;
   selectionIntent: string | null;
-  creation: { intentHash: string; idempotencyKey: string } | null;
+  creation: {
+    intentHash: string;
+    idempotencyKey: string;
+    request?: StoredCreateRequest | null;
+  } | null;
   attempts: DesignAttemptRecord[];
   proposal: unknown;
   result: DesignResult | null;
@@ -97,6 +119,7 @@ const AttemptRecordSchema = z.object({
   endCursor: z.string().nullable(),
   summary: z.string().nullable(),
   ack: z.enum(["pending", "acked", "unknown"]),
+  sentAt: z.string().nullable().optional(),
   turnId: z.string().nullable().optional(),
   lastError: z.string().nullable().optional(),
 });
@@ -128,7 +151,35 @@ export const StoredDesignJobSchema = z.object({
   requestHash: DesignHashSchema,
   mode: TeamModeSchema,
   selectionIntent: z.string().nullable(),
-  creation: z.object({ intentHash: DesignHashSchema, idempotencyKey: z.string() }).nullable(),
+  creation: z
+    .object({
+      intentHash: DesignHashSchema,
+      idempotencyKey: z.string(),
+      request: z
+        .object({
+          agentId: z.string(),
+          idempotencyKey: z.string(),
+          workspaceId: z.string(),
+          title: z.string(),
+          labels: z.record(z.string(), z.string()),
+          profile: z
+            .object({
+              provider: z.string(),
+              model: z.string().optional(),
+              modeId: z.string().optional(),
+              thinkingOptionId: z.string().optional(),
+              featureValues: z.record(z.string(), z.unknown()).optional(),
+            })
+            .passthrough(),
+          systemPrompt: z.string(),
+          prompt: z.string(),
+          clientMessageId: z.string(),
+        })
+        .passthrough()
+        .nullable()
+        .optional(),
+    })
+    .nullable(),
   attempts: z.array(AttemptRecordSchema).max(3),
   proposal: z.unknown().nullable(),
   result: StoredDesignResultSchema.nullable(),
