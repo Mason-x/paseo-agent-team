@@ -1,23 +1,42 @@
 import { z } from "zod";
 import { DescriptionSchema, ShortTextSchema, SlugSchema } from "./common";
+import { StoredDesignerOriginSchema } from "./design-origin";
+import { StoredCollaborationSchema } from "./team-mode";
 
-export const TeamMemberSchema = z.object({
-  roleId: SlugSchema,
-  instanceLabel: ShortTextSchema.optional(),
-  enabled: z.boolean().default(true),
-});
+// Persisted inside Teams. passthrough keeps fields a newer writer added (mode/seat metadata,
+// designer annotations) alive through a round-trip in this version.
+export const TeamMemberSchema = z
+  .object({
+    roleId: SlugSchema,
+    instanceLabel: ShortTextSchema.optional(),
+    // Generated for new and duplicated seats. Legacy members may omit it; planning derives a
+    // run-local stable key instead of rewriting the Team.
+    seatId: z.string().optional(),
+    enabled: z.boolean().default(true),
+  })
+  .passthrough();
 
 export const TeamSchema = z
   .object({
     id: SlugSchema,
     name: ShortTextSchema,
     description: DescriptionSchema.optional(),
+    // Mode selection stays a plain string on storage; normalizeMode rejects what this version
+    // cannot run. SEAT LIMIT: physical seats are bounded by preferences at launch, not by the
+    // stored array, so large historical Teams stay readable and editable.
+    memberCreation: z.string().optional(),
+    mode: z.string().optional(),
+    collaboration: StoredCollaborationSchema.optional(),
     coordinatorRoleId: SlugSchema,
-    members: z.array(TeamMemberSchema).min(1).max(16),
+    members: z.array(TeamMemberSchema).min(1),
     operatingRules: z.string().trim().max(4000).optional(),
     enabled: z.boolean().default(true),
     createdAt: z.string(),
     updatedAt: z.string(),
+    // Team-designer provenance and the generic origin marker. Both stay tolerant here; the
+    // settings store parses the whole catalog document, so bad provenance must not invalidate it.
+    source: z.string().optional(),
+    designer: StoredDesignerOriginSchema.optional().catch(undefined),
   })
   .passthrough()
   .refine((team) => !team.members.some((member) => member.roleId === team.coordinatorRoleId), {

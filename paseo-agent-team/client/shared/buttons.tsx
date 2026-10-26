@@ -51,6 +51,7 @@ export function ModalActions({
   cancelLabel = "取消",
   confirmLabel,
   confirmDisabled,
+  confirmHidden,
   danger,
   onCancel,
   onConfirm,
@@ -59,6 +60,7 @@ export function ModalActions({
   cancelLabel?: string;
   confirmLabel: string;
   confirmDisabled?: boolean;
+  confirmHidden?: boolean;
   danger?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -66,13 +68,15 @@ export function ModalActions({
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 }}>
       <FilledButton theme={theme} label={cancelLabel} variant="secondary" onPress={onCancel} />
-      <FilledButton
-        theme={theme}
-        label={confirmLabel}
-        variant={danger ? "danger" : "primary"}
-        disabled={confirmDisabled}
-        onPress={onConfirm}
-      />
+      {confirmHidden ? null : (
+        <FilledButton
+          theme={theme}
+          label={confirmLabel}
+          variant={danger ? "danger" : "primary"}
+          disabled={confirmDisabled}
+          onPress={onConfirm}
+        />
+      )}
     </View>
   );
 }

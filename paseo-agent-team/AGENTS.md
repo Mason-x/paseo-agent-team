@@ -16,7 +16,12 @@
    - present with source `directory` and path == `$PWD` → `npx --no-install paseo plugin reload paseo-agent-team --host "$DEV_HOST"`
    - anything else → remove it on DEV_HOST, install `$PWD`, inspect again. Require `status: "running"` and no error.
 4. Configure at least two Agent Profiles (different providers) on DEV_HOST before exercising Launch. Never copy profiles or credentials from `~/.paseo`.
-5. Verify at `http://$DEV_HOST/`: sidebar "Agent Teams", explorer panel "Agent Crew", Command Center items. Create test agents only on DEV_HOST. Check error paths (missing profile, unavailable provider, save conflict) as well as the happy path.
-6. `npx --no-install paseo daemon stop --home "$PWD/.paseo-dev"` when finished.
+5. Run `npm run verify:package`. After UI or RPC changes, reload the plugin on DEV_HOST and
+   exercise the Runs tab and Launch: a team run needs `mcp.injectIntoAgents` true on DEV_HOST and a
+   coordinator provider that may call `send_agent_prompt`. Scratch workspaces go outside the repo.
+6. Verify at `http://$DEV_HOST/`: sidebar "Agent Teams", explorer panel "Agent Crew", Command Center items. Create test agents only on DEV_HOST. Check error paths (missing profile, unavailable provider, save conflict) as well as the happy path.
+7. `npx --no-install paseo daemon stop --home "$PWD/.paseo-dev"` when finished.
 
 Before every daemon or plugin lifecycle command, re-read it and confirm `--home`/`--host` still points at `.paseo-dev`.
+
+Use `PASEO_HOME` as well as `--home`: a shell may already export it for the real daemon.

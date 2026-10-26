@@ -58,12 +58,14 @@ export function TextField({
   placeholder,
   revision,
   accessibilityLabel,
+  onCompositionChange,
 }: {
   theme: PluginTheme;
   label: string;
   value: string;
   onChange: (value: string) => void;
   onBlur?: TextInputProps["onBlur"];
+  onCompositionChange?: (composing: boolean) => void;
   error?: string;
   multiline?: boolean;
   mono?: boolean;
@@ -79,6 +81,7 @@ export function TextField({
         revision={revision}
         onChangeText={onChange}
         onBlur={onBlur}
+        onCompositionChange={onCompositionChange}
         placeholder={placeholder}
         placeholderTextColor={theme.colors.foregroundMuted}
         multiline={multiline}

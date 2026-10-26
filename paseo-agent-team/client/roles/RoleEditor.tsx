@@ -1,7 +1,12 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Modal } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
-import { View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Text, View } from "react-native";
+import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
+import { toJsonValue } from "../../shared/json";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import {
   type McpServers,
@@ -9,18 +14,44 @@ import {
   type Role,
   RoleSchema,
 } from "../../shared/schemas/role";
+import { RolesDocumentSchema, rolesSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
-import type { PaseoProfile } from "../paseo/adapter";
+import {
+  type EditorDocumentSnapshot,
+  type EditorParsed,
+  type EditorSaveResult,
+  loadEditorSnapshot,
+  saveEditorRow,
+} from "../catalog/editor-save";
+import { keepRoleMetadata, mergeRoleExecutionPolicy } from "../catalog/preset-metadata";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
 import { ModalActions } from "../shared/buttons";
+import { CompactPicker } from "../shared/CompactPicker";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { Field, TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import { SlugInput } from "../shared/SlugInput";
+import {
+  applyRolePolicyChoice,
+  ROLE_TIER_OPTIONS,
+  TASK_KIND_OPTIONS,
+} from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { ListEditor } from "./ListEditor";
 import { ProfilePicker } from "./ProfilePicker";
+
+const rolesRead = settingsRpc(rolesSettings.id).read;
+const rolesWrite = settingsRpc(rolesSettings.id).write;
+
+type ConflictKind = Extract<EditorSaveResult, "modified" | "deleted" | "id-taken">;
+
+function parseRolesDocument(values: unknown): EditorParsed<Role> {
+  const parsed = RolesDocumentSchema.safeParse(values);
+  return parsed.success
+    ? { ok: true, rows: parsed.data.roles }
+    : { ok: false, error: parsed.error.issues.map((entry) => entry.message).join("\n") };
+}
 
 export type RoleDraft = {
   id: string;
@@ -37,6 +68,10 @@ export type RoleDraft = {
   color: string;
   icon: string;
   enabled: boolean;
+  executionTier: string;
+  executionTaskKind: string;
+  executionTierTouched: boolean;
+  executionTaskKindTouched: boolean;
 };
 
 function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
@@ -56,6 +91,10 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
       color: "",
       icon: "",
       enabled: true,
+      executionTier: "",
+      executionTaskKind: "",
+      executionTierTouched: false,
+      executionTaskKindTouched: false,
     };
   }
   return {
@@ -73,6 +112,11 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
     color: role.color ?? "",
     icon: role.icon ?? "",
     enabled: role.enabled,
+    executionTier: typeof role.executionPolicy?.tier === "string" ? role.executionPolicy.tier : "",
+    executionTaskKind:
+      typeof role.executionPolicy?.taskKind === "string" ? role.executionPolicy.taskKind : "",
+    executionTierTouched: false,
+    executionTaskKindTouched: false,
   };
 }
 
@@ -100,7 +144,6 @@ export function RoleEditor({
   saving,
   onRefreshProfiles,
   onClose,
-  onSave,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -114,34 +157,83 @@ export function RoleEditor({
   saving: boolean;
   onRefreshProfiles: () => void;
   onClose: () => void;
-  onSave: (role: Role, overwrite: boolean) => Promise<boolean | "conflict">;
 }) {
+  const readRolesDoc = useRpc(rolesRead);
+  const writeRolesDoc = useRpc(rolesWrite);
+  const roleState = useSettings(rolesSettings);
   const [draft, setDraft] = useState<RoleDraft>(() => toDraft(role));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<ConflictKind | null>(null);
   const [mcpError, setMcpError] = useState<string | undefined>();
   const [formSeed, setFormSeed] = useState(0);
   const [idSeed, setIdSeed] = useState(0);
+  const [snapshotReady, setSnapshotReady] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savingHere, setSavingHere] = useState(false);
+  const opened = useRef<EditorDocumentSnapshot<Role> | null>(null);
+  const baseline = useRef<Role | null>(role);
   const idLocked = mode === "edit";
   const overwriteRef = useRef(false);
   const autoSlug = useRef(createAutoSlug("role")).current;
   const nameRef = useRef(draft.name);
-  const createdAt = role?.createdAt;
 
-  useEffect(() => {
-    if (open) {
-      const next = toDraft(role);
+  const seedRole = useCallback(
+    (nextRole: Role | null) => {
+      const next = toDraft(nextRole);
       autoSlug.reset(mode === "edit", next.id, next.name);
       nameRef.current = next.name;
+      baseline.current = nextRole;
       setDraft(next);
       setErrors({});
-      setConflict(false);
+      setConflict(null);
       setMcpError(undefined);
       overwriteRef.current = false;
       setFormSeed((seed) => seed + 1);
       setIdSeed((seed) => seed + 1);
+    },
+    [autoSlug, mode],
+  );
+
+  useEffect(() => {
+    if (open) seedRole(role);
+  }, [open, role, seedRole]);
+
+  useEffect(() => {
+    opened.current = null;
+    setSnapshotReady(false);
+    setSaveError(null);
+    if (!open) return;
+    let live = true;
+    void loadEditorSnapshot(() => readRolesDoc({}), parseRolesDocument).then((result) => {
+      if (!live) return;
+      if (!result.ok) {
+        setSaveError(result.error || zh.saveFail);
+        return;
+      }
+      opened.current = result.snapshot;
+      setSnapshotReady(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open, readRolesDoc]);
+
+  async function reloadDraft() {
+    setConflict(null);
+    const result = await loadEditorSnapshot(() => readRolesDoc({}), parseRolesDocument);
+    if (!result.ok) {
+      setSaveError(result.error || zh.saveFail);
+      return;
     }
-  }, [autoSlug, mode, open, role]);
+    opened.current = result.snapshot;
+    const id = baseline.current?.id;
+    const latest = id ? result.snapshot.rows.find((row) => row.id === id) : undefined;
+    if (!latest) {
+      onClose();
+      return;
+    }
+    seedRole(latest);
+  }
 
   function parseMcp(): McpServers | undefined | "invalid" {
     const text = draft.mcpServersText.trim();
@@ -188,8 +280,14 @@ export function RoleEditor({
       ...(mcp ? { mcpServers: mcp } : {}),
       ...(color ? { color } : {}),
       ...(icon ? { icon } : {}),
+      executionPolicy: mergeRoleExecutionPolicy(baseline.current?.executionPolicy, {
+        tier: draft.executionTier,
+        taskKind: draft.executionTaskKind,
+        tierTouched: draft.executionTierTouched,
+        taskKindTouched: draft.executionTaskKindTouched,
+      }),
       enabled: true,
-      createdAt: createdAt ?? now,
+      createdAt: baseline.current?.createdAt ?? now,
       updatedAt: now,
     };
     const parsed = RoleSchema.safeParse(candidate);
@@ -198,12 +296,43 @@ export function RoleEditor({
       return;
     }
     setErrors({});
-    const result = await onSave(parsed.data, overwrite);
-    if (result === "conflict") {
-      setConflict(true);
+    const snapshot = opened.current;
+    if (!snapshot) {
+      setSaveError(zh.saveFail);
       return;
     }
-    if (result) onClose();
+    setSaveError(null);
+    setSavingHere(true);
+    try {
+      const result = await saveEditorRow({
+        mode,
+        key: "roles",
+        row: keepRoleMetadata(baseline.current, parsed.data),
+        baseline: baseline.current,
+        opened: snapshot,
+        forceOverwrite: overwrite,
+        read: () => readRolesDoc({}),
+        write: (document, revision) =>
+          writeRolesDoc({ revision, values: toJsonValue(document) as JSONType }),
+        parse: parseRolesDocument,
+      });
+      if (result === "saved") {
+        try {
+          await roleState.reload();
+        } catch {
+          // The host event refreshes the list; the save itself succeeded.
+        }
+        onClose();
+        return;
+      }
+      if (result === "modified" || result === "deleted" || result === "id-taken") {
+        setConflict(result);
+        return;
+      }
+      setSaveError(result === "busy" ? zh.saveConflictRetry : zh.saveFail);
+    } finally {
+      setSavingHere(false);
+    }
   }
 
   return (
@@ -308,6 +437,59 @@ export function RoleEditor({
               revision={formSeed}
               onChange={(outputContract) => setDraft((current) => ({ ...current, outputContract }))}
             />
+            <CompactPicker
+              theme={theme}
+              label={zh.roleExecutionTier}
+              items={[
+                { id: "", name: zh.rolePolicyKeep },
+                ...ROLE_TIER_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
+              ]}
+              selectedId={draft.executionTier}
+              placeholder={zh.rolePolicyKeep}
+              searchPlaceholder={zh.searchOptions}
+              emptyLabel={zh.noMatches}
+              onChange={(executionTier) =>
+                setDraft((current) => applyRolePolicyChoice(current, "tier", executionTier))
+              }
+            />
+            <CompactPicker
+              theme={theme}
+              label={zh.roleExecutionTaskKind}
+              items={[
+                { id: "", name: zh.rolePolicyKeep },
+                ...TASK_KIND_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
+              ]}
+              selectedId={draft.executionTaskKind}
+              placeholder={zh.rolePolicyKeep}
+              searchPlaceholder={zh.searchOptions}
+              emptyLabel={zh.noMatches}
+              onChange={(executionTaskKind) =>
+                setDraft((current) => applyRolePolicyChoice(current, "taskKind", executionTaskKind))
+              }
+            />
+            {draft.executionTier === "" || draft.executionTaskKind === "" ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                {zh.rolePolicyKeepHint}
+              </Text>
+            ) : null}
+            {!draft.executionTierTouched &&
+            role?.executionPolicy?.tier !== undefined &&
+            (typeof role.executionPolicy.tier !== "string" ||
+              !ROLE_TIER_OPTIONS.some((option) => option.value === role.executionPolicy?.tier)) ? (
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                {zh.rolePolicyUnknown(String(role.executionPolicy.tier))}
+              </Text>
+            ) : null}
+            {!draft.executionTaskKindTouched &&
+            role?.executionPolicy?.taskKind !== undefined &&
+            (typeof role.executionPolicy.taskKind !== "string" ||
+              !TASK_KIND_OPTIONS.some(
+                (option) => option.value === role.executionPolicy?.taskKind,
+              )) ? (
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                {zh.rolePolicyUnknown(String(role.executionPolicy.taskKind))}
+              </Text>
+            ) : null}
             <ProfilePicker
               theme={theme}
               label={zh.preferredProfiles}
@@ -346,10 +528,13 @@ export function RoleEditor({
                 }}
               />
             </Field>
+            {saveError ? (
+              <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{saveError}</Text>
+            ) : null}
             <ModalActions
               theme={theme}
-              confirmLabel={saving ? zh.saving : zh.save}
-              confirmDisabled={saving}
+              confirmLabel={saving || savingHere ? zh.saving : zh.save}
+              confirmDisabled={saving || savingHere || !snapshotReady}
               onCancel={onClose}
               onConfirm={() => void submit(false)}
             />
@@ -358,17 +543,28 @@ export function RoleEditor({
       </Modal>
       <ConfirmDialog
         theme={theme}
-        open={conflict}
+        open={conflict !== null}
         title={zh.conflictTitle}
-        body={zh.conflictRole}
+        body={
+          conflict === "id-taken"
+            ? zh.conflictRoleIdTaken
+            : conflict === "deleted"
+              ? zh.conflictRoleDeleted
+              : zh.conflictRoleModified
+        }
         confirmLabel={zh.overwrite}
+        cancelLabel={conflict === "id-taken" ? zh.editAgain : zh.reload}
+        confirmHidden={conflict === "id-taken"}
         danger
         onCancel={() => {
-          setConflict(false);
-          onClose();
+          if (conflict === "id-taken") {
+            setConflict(null);
+            return;
+          }
+          void reloadDraft();
         }}
         onConfirm={() => {
-          setConflict(false);
+          setConflict(null);
           void submit(true);
         }}
       />

@@ -2,6 +2,86 @@
 
 ## Unreleased
 
+### Features
+
+- Team 页新增设计师——描述需求后生成可启动的 Team，结果可预览并一键保存、启动。
+- Agent Teams opens on the Team page, with tabs ordered Team / Role / 运行; Role and Team
+  searches keep independent queries
+- Team page: the Team designer card (request, mode, target workspace, design Profile) above the
+  search box and list; it starts a design job, shows every physical seat, and saves the result;
+  compact layouts fold the designer and show an icon-only “新建”
+- run progress: Agent Teams **运行** tab and per-run phase, member state, plan, assignment, and
+  latest report in the Crew panel
+- **追加任务** sends follow-up work to a run's coordinator
+- launch runs on the daemon host as a background job (`agent-team.launch.*` RPCs), survives a
+  closed dialog, and is available from the `/team` slash command and `npm run launch:team`
+- launch into an existing workspace or a new worktree from the Agent Teams screen
+- 启动对话框可临时切换本次运行的模式，并按物理席位预览成员、Profile 与预算。
+- Crew panel: allow a permission for the rest of the session
+- the launch task is stored on the coordinator as a label, so runs describe themselves
+- default Role presets: import 22 built-in Roles that bind to local Profiles by normalized name and
+  identical provider/model/mode/thinking settings, with strict unbound, ambiguous, and
+  config-changed reporting
+- `agent-team.templates.defaults.preview` previews missing, updated, deleted, and colliding preset
+  Roles with the exact settings revisions a merge must be saved against
+- the first empty catalog imports the default Roles automatically; “同步默认预设” groups and
+  previews every change before writing; editing or copying keeps or strips preset origin metadata
+- version entry in the Agent Teams header and an update panel: source, current/remote revisions,
+  check throttling, blockers and remedies, update confirmation, and reconnect/recovery after reload
+- edit Team modes, Role execution tiers, and the host economy pool; new member seats get stable
+  ids and duplication labels, and preference writes merge the latest host settings
+- version management (`agent-team.version.*` RPCs): report the installed version, source and latest
+  stable release (or the default branch head); fast-forward a clean directory checkout on its default
+  branch, run `npm ci` and reload through a detached runner that survives the reload, and roll a
+  failed update back with `git reset --keep`; managed git installs update with `paseo plugin update`,
+  npm and registry installs are only reported
+- the reloaded plugin confirms its own commit and version, npm is resolved from a real `npm-cli.js`
+  before any git write, and remote credentials never reach RPC results or job files
+- 版本管理：检查更新时列出待更新的提交数和标题
+- Team mode data model: Teams store `mode`, `memberCreation`, and `collaboration`; Roles store an
+  explicit `executionPolicy` tier/task kind (defaults written for the 22 presets); host Preferences
+  store the economy pool and quota recovery policy; the default seat cap is now 24 with no storage
+  upper bound, a launch never creates more than 64 members, and stored documents keep unknown
+  values and fields instead of invalidating
+- 启动前按 Team 模式规划席位：SOTA 模式与未设模式的旧 Team 保持原有的成员与 Profile；经济模式
+  的执行席位在当前版本启动时全部创建并给出提示，升级席位待命、不创建；协作模式暂不可启动，
+  需要后续版本
+- 启动前先预览席位与预算并冻结 `planHash`；配置或可用性变化后旧预览会被拒绝，避免按旧额度启动
+### Bug Fixes
+
+- 写入 Roles / Teams 时保留 Profile 引用、hint、文档顶层以及 Team 成员与协作对象的未知字段；
+  “采用预设”保留原行的扩展字段与 designer 元数据
+
+- Team / Role 编辑器保存时检测目录冲突，提示覆盖保存或重新加载，不再静默覆盖其他客户端刚保存的修改
+
+- default preset sync compares the effective Role tier, so an existing pre-tier Role with the
+  preset's content is not reported as a user ID collision on the first sync
+
+- an idle coordinator with a member error shows as 需处理 and keeps 追加任务; the Crew panel
+  and the runs page agree on the failed state
+
+- Runs tab: filter by 需处理 / 进行中 / 已结束, sort runs needing attention first, show earlier
+  runs on demand, compact cards, "finished N days ago" instead of "ran for N days", and the task
+  of runs launched by older versions
+
+- read Agent Profiles from `daemon.agentProfiles` of Paseo 0.13 config, not the old top-level key
+- block a launch when the coordinator's provider cannot call Paseo tools, instead of hanging on
+  its first delegation
+- live Crew refresh: agent updates need an explicit host subscription, which the panel never
+  opened, so the list only changed on its 30s poll
+- example catalog is served by an RPC instead of bundled into the client (1.1 MB to 0.26 MB)
+
+### Migration
+
+- require Paseo `>=0.12.0`; use `addScreen` and `addSidebarHeaderItem`
+- pin `@getpaseo/*` to `0.13.0-beta.1`; add `verify:package` and `typecheck:beta`
+- move launch logic and the Paseo adapter to `shared/` behind `PaseoPort`
+- the bundled Ruflo catalog is removed; previously imported Roles and Teams remain in host settings
+- downgrading can discard Profile binding hints, preset origins, or preset sync history on the
+  next save; damaged hints, origins, or history are ignored, never fatal to the catalog
+- `scripts/launch-team.mjs` now calls `agent-team.launch.preview` before start; use the same
+  plugin version on the host
+
 ### Bug Fixes
 
 - remove Role and Team enable switches; both are always available to launch

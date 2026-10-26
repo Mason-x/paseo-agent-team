@@ -1,4 +1,4 @@
-import type { PaseoProfile, ProviderAvailability } from "../client/paseo/adapter";
+import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
 

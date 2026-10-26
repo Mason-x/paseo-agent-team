@@ -6,8 +6,12 @@ import {
 } from "@getpaseo/plugin/client";
 import { FlatList, Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { type ListRenderItemInfo, Pressable, StyleSheet, Text, View } from "react-native";
+import { sessionAllowUpdates } from "../shared/domain/permissions";
+import { groupTeamRuns, type TeamRun } from "../shared/domain/run-progress";
+import { createPaseoAdapter } from "../shared/paseo/adapter";
+import { subscribeToAgentUpdates } from "../shared/paseo/agent-updates";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
 import { zh } from "../shared/zh";
 import {
@@ -28,17 +32,19 @@ import {
   type PaseoWorkspace,
   parentAgentId,
 } from "./crew";
+import { FollowUpDialog, type FollowUpTarget } from "./crew/FollowUpDialog";
+import { RunDetail } from "./crew/RunDetail";
 import { RunHeader } from "./crew/RunHeader";
 import { type CrewListItem, crewListItems, roleLine, runIdOf } from "./crew/run-rows";
-import { subscribeLaunchRequests } from "./launch/events";
+import { type LaunchRequest, subscribeLaunchRequests } from "./launch/events";
 import { LaunchDialog } from "./launch/LaunchDialog";
-import { createPaseoAdapter, type ProviderAvailability } from "./paseo/adapter";
-import { useHostProfiles } from "./paseo/profiles";
+import { resolveLaunchPrefill } from "./launch/launch-args";
 import { ImeTextInput } from "./shared/ImeTextInput";
 
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 10;
-const REFRESH_DEBOUNCE_MS = 500;
+// A refresh reloads the whole agent directory, so changes are batched for a second.
+const REFRESH_DEBOUNCE_MS = 1_000;
 const BACKSTOP_REFRESH_MS = 30_000;
 const CLOCK_INTERVAL_MS = 15_000;
 
@@ -59,6 +65,8 @@ type PermissionActionInput = {
   agentId: string;
   request: PermissionRequest;
   behavior: "allow" | "deny";
+  /** "session" also stops this agent asking for the same tool again for the rest of its session. */
+  scope?: "once" | "session";
 };
 
 type PermissionDialogState = { node: CrewNode; request: PermissionRequest } | null;
@@ -195,7 +203,6 @@ export function AgentCrew({
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
-  const hostProfiles = useHostProfiles(adapter);
   const workspaceTitle = useWorkspace(workspaceId, ({ name, title }) => title?.trim() || name);
   const queryKey = useMemo(() => ["agent-crew", "directory", host.id], [host.id]);
   const { data, error, isPending, isFetching, refetch } = useQuery({
@@ -213,9 +220,15 @@ export function AgentCrew({
   const [messageSeed, setMessageSeed] = useState(0);
   const [collapsedAgentIds, setCollapsedAgentIds] = useState<ReadonlySet<string>>(() => new Set());
   const [collapsedRunIds, setCollapsedRunIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [launchOpen, setLaunchOpen] = useState(false);
+  const [openRunDetails, setOpenRunDetails] = useState<ReadonlySet<string>>(() => new Set());
+  const [launch, setLaunch] = useState<{ key: number; request: LaunchRequest } | null>(null);
+  const [followUp, setFollowUp] = useState<FollowUpTarget | null>(null);
   const [highlightRunId, setHighlightRunId] = useState<string | null>(null);
-  const [availability, setAvailability] = useState<ProviderAvailability[]>([]);
+
+  const openLaunch = useCallback(
+    (request: LaunchRequest) => setLaunch((current) => ({ key: (current?.key ?? 0) + 1, request })),
+    [],
+  );
 
   useEffect(() => {
     const clock = setInterval(() => setNow(Date.now()), CLOCK_INTERVAL_MS);
@@ -225,22 +238,19 @@ export function AgentCrew({
   useEffect(
     () =>
       subscribeLaunchRequests((request) => {
-        if (request.workspaceId && request.workspaceId !== workspaceId) return;
-        setLaunchOpen(true);
+        if (request.workspaceId && request.workspaceId !== workspaceId) return false;
+        openLaunch(request);
+        return true;
       }),
-    [workspaceId],
+    [openLaunch, workspaceId],
   );
 
-  useEffect(() => {
-    if (!launchOpen) return;
-    let cancelled = false;
-    void adapter.listProviderAvailability().then((nextAvailability) => {
-      if (!cancelled) setAvailability(nextAvailability);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [adapter, launchOpen]);
+  const closeLaunch = useCallback(() => setLaunch(null), []);
+  const onLaunched = useCallback((runId: string) => {
+    setHighlightRunId(runId);
+    setOpenRunDetails((current) => new Set(current).add(runId));
+    setLaunch(null);
+  }, []);
 
   useEffect(() => {
     let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -251,7 +261,7 @@ export function AgentCrew({
         void queryClient.invalidateQueries({ queryKey });
       }, REFRESH_DEBOUNCE_MS);
     };
-    const unsubscribeAgents = paseo.agents.subscribe(invalidate);
+    const unsubscribeAgents = subscribeToAgentUpdates(paseo, invalidate);
     const unsubscribeWorkspaces = paseo.workspaces.subscribe(invalidate);
     return () => {
       clearTimeout(debounce);
@@ -283,9 +293,19 @@ export function AgentCrew({
     [collapsedAgentIds, nodes],
   );
   const recentRuns = preferences.status === "ready" ? preferences.values.recentRuns : [];
+  const teamRuns = useMemo(
+    () =>
+      new Map<string, TeamRun>(
+        groupTeamRuns((data?.entries ?? []).map((entry) => entry.agent)).map((run) => [
+          run.runId,
+          run,
+        ]),
+      ),
+    [data],
+  );
   const listItems = useMemo(
-    () => crewListItems(visibleNodes, collapsedRunIds, recentRuns),
-    [collapsedRunIds, recentRuns, visibleNodes],
+    () => crewListItems(visibleNodes, collapsedRunIds, { runs: teamRuns, legacyRuns: recentRuns }),
+    [collapsedRunIds, recentRuns, teamRuns, visibleNodes],
   );
   const counts = useMemo(() => crewCounts(allNodes), [allNodes]);
   const memberNodes = useMemo(() => allNodes.filter(({ member }) => member), [allNodes]);
@@ -339,14 +359,23 @@ export function AgentCrew({
         requestId: input.request.id,
         response:
           input.behavior === "allow"
-            ? { behavior: "allow" }
+            ? input.scope === "session"
+              ? {
+                  behavior: "allow",
+                  updatedPermissions: sessionAllowUpdates(input.request.suggestions),
+                }
+              : { behavior: "allow" }
             : { behavior: "deny", message: zh.deniedFromCrew },
       });
     },
     onSuccess: (_result, input) => {
-      toast.show(input.behavior === "allow" ? zh.permissionAllowed : zh.permissionDenied, {
-        variant: "success",
-      });
+      const message =
+        input.behavior === "deny"
+          ? zh.permissionDenied
+          : input.scope === "session"
+            ? zh.permissionAllowedForSession
+            : zh.permissionAllowed;
+      toast.show(message, { variant: "success" });
       setPermissionDialog(null);
     },
     onError: (mutationError) => {
@@ -547,7 +576,12 @@ export function AgentCrew({
           borderRadius: 8,
           padding: 10,
         },
-        permissionActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 },
+        permissionActions: {
+          flexDirection: "row",
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+          gap: 8,
+        },
         permissionButton: {
           minHeight: 36,
           justifyContent: "center",
@@ -600,9 +634,10 @@ export function AgentCrew({
     setPermissionDialog({ node, request });
   }
 
-  function submitPermissionAction(behavior: "allow" | "deny") {
+  function submitPermissionAction(behavior: "allow" | "deny", scope: "once" | "session" = "once") {
     if (!permissionDialog || permissionAction.isPending) return;
     permissionAction.mutate({
+      scope,
       agentId: permissionDialog.node.entry.agent.id,
       request: permissionDialog.request,
       behavior,
@@ -639,7 +674,7 @@ export function AgentCrew({
           <Text style={panelStyles.rowTitle} numberOfLines={1}>
             {agentTitle(item.entry)}
           </Text>
-          {!item.member ? <Text style={panelStyles.contextBadge}>Context</Text> : null}
+          {!item.member ? <Text style={panelStyles.contextBadge}>{zh.context}</Text> : null}
           {expandable ? (
             <Text style={panelStyles.childCount} numberOfLines={1}>
               {item.descendantCount} {zh.descendant}
@@ -686,7 +721,7 @@ export function AgentCrew({
         {navigation ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Open ${agentTitle(item.entry)}`}
+            accessibilityLabel={zh.openAgent(agentTitle(item.entry))}
             onPress={() => navigation.openAgent({ agentId: agent.id })}
             style={({ pressed }) => [panelStyles.rowBody, pressed && styles.pressed]}
           >
@@ -706,7 +741,7 @@ export function AgentCrew({
           </Text>
           {pendingPermissionCount > 0 ? (
             <Text style={panelStyles.permissionCount} numberOfLines={1}>
-              {pendingPermissionCount} pending
+              {zh.pendingCount(pendingPermissionCount)}
             </Text>
           ) : null}
           {age ? <Text style={panelStyles.age}>{age}</Text> : null}
@@ -714,7 +749,7 @@ export function AgentCrew({
             <View style={panelStyles.rowActions}>
               {pendingPermission ? (
                 <ActionButton
-                  accessibilityLabel={`Review ${pendingPermissionCount} pending permission ${pendingPermissionCount === 1 ? "request" : "requests"} for ${agentTitle(item.entry)}`}
+                  accessibilityLabel={`${zh.permissionRequest} · ${zh.pendingCount(pendingPermissionCount)} · ${agentTitle(item.entry)}`}
                   color={theme.colors.statusWarning}
                   disabled={permissionAction.isPending}
                   icon="Lock"
@@ -734,7 +769,7 @@ export function AgentCrew({
               ) : null}
               {parentAgentId(agent) ? (
                 <ActionButton
-                  accessibilityLabel={`Detach ${agentTitle(item.entry)}`}
+                  accessibilityLabel={`${zh.detach} ${agentTitle(item.entry)}`}
                   color={theme.colors.foregroundMuted}
                   disabled={action.isPending}
                   icon="Unlink"
@@ -742,7 +777,7 @@ export function AgentCrew({
                 />
               ) : null}
               <ActionButton
-                accessibilityLabel={`Archive ${agentTitle(item.entry)}`}
+                accessibilityLabel={`${zh.archive} ${agentTitle(item.entry)}`}
                 color={theme.colors.foregroundMuted}
                 disabled={action.isPending}
                 icon="Archive"
@@ -757,25 +792,48 @@ export function AgentCrew({
 
   function renderRow({ item }: ListRenderItemInfo<CrewListItem>) {
     if (item.kind === "run") {
+      const run = item.run;
+      const coordinator = run?.coordinator;
+      const detailOpen = Boolean(run && openRunDetails.has(item.runId));
       return (
-        <RunHeader
-          theme={theme}
-          title={item.title}
-          collapsed={collapsedRunIds.has(item.runId)}
-          highlighted={highlightRunId === item.runId}
-          onToggle={() =>
-            setCollapsedRunIds((current) => {
-              const next = new Set(current);
-              if (next.has(item.runId)) next.delete(item.runId);
-              else next.add(item.runId);
-              return next;
-            })
-          }
-        />
+        <View>
+          <RunHeader
+            theme={theme}
+            title={item.title}
+            collapsed={collapsedRunIds.has(item.runId)}
+            highlighted={highlightRunId === item.runId}
+            progress={item.progress}
+            detailOpen={detailOpen}
+            onToggle={() => setCollapsedRunIds((current) => toggled(current, item.runId))}
+            onToggleDetail={
+              run ? () => setOpenRunDetails((current) => toggled(current, item.runId)) : undefined
+            }
+            onFollowUp={
+              coordinator
+                ? () =>
+                    setFollowUp({
+                      coordinatorId: coordinator.id,
+                      teamName: run?.teamName ?? zh.teamFallback,
+                    })
+                : undefined
+            }
+          />
+          {run && detailOpen ? (
+            <RunDetail
+              theme={theme}
+              run={run}
+              onOpenAgent={navigation ? (agentId) => navigation.openAgent({ agentId }) : undefined}
+            />
+          ) : null}
+        </View>
       );
     }
     return renderAgentRow(item.node);
   }
+  const launchPrefill =
+    launch && teams.status === "ready"
+      ? resolveLaunchPrefill(launch.request, teams.values.teams)
+      : undefined;
   const currentWorkspaceTitle = workspaceTitle?.trim() || zh.currentWorkspace;
   let dialogTitle = "";
   let dialogCopy = "";
@@ -836,7 +894,7 @@ export function AgentCrew({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={zh.launchTeam}
-              onPress={() => setLaunchOpen(true)}
+              onPress={() => openLaunch({ workspaceId })}
               style={({ pressed }) => [panelStyles.refreshButton, pressed && styles.pressed]}
             >
               <Text style={panelStyles.summary}>{zh.launchTeam}</Text>
@@ -880,7 +938,7 @@ export function AgentCrew({
             <Text
               style={[panelStyles.chipText, selectedState === null && panelStyles.chipTextSelected]}
             >
-              All {memberNodes.length}
+              {zh.all} {memberNodes.length}
             </Text>
           </Pressable>
           {CREW_STATES.map((state) => (
@@ -908,10 +966,7 @@ export function AgentCrew({
       </View>
 
       {data?.truncated ? (
-        <Text style={panelStyles.truncated}>
-          Showing the first {PAGE_LIMIT * MAX_PAGES} daemon agents. Some agents in this workspace or
-          their crew may be missing.
-        </Text>
+        <Text style={panelStyles.truncated}>{zh.truncatedAgents(PAGE_LIMIT * MAX_PAGES)}</Text>
       ) : null}
       {error ? (
         <Text style={panelStyles.error}>
@@ -1086,6 +1141,20 @@ export function AgentCrew({
                     {permissionAction.isPending ? zh.workingEllipsis : zh.deny}
                   </Text>
                 </Pressable>
+                {sessionAllowUpdates(permissionDialog.request.suggestions).length > 0 ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={permissionAction.isPending}
+                    onPress={() => submitPermissionAction("allow", "session")}
+                    style={({ pressed }) => [
+                      panelStyles.permissionButton,
+                      pressed && styles.pressed,
+                      permissionAction.isPending && styles.disabled,
+                    ]}
+                  >
+                    <Text style={panelStyles.permissionButtonText}>{zh.allowForSession}</Text>
+                  </Pressable>
+                ) : null}
                 <Pressable
                   accessibilityRole="button"
                   disabled={permissionAction.isPending}
@@ -1106,34 +1175,36 @@ export function AgentCrew({
           ) : null}
         </Modal.Content>
       </Modal>
-      {launchOpen &&
+      {launch &&
       roles.status === "ready" &&
       teams.status === "ready" &&
       preferences.status === "ready" ? (
         <LaunchDialog
+          key={launch.key}
           theme={theme}
           layout={layout}
-          open={launchOpen}
+          open
           adapter={adapter}
+          hostId={host.id}
           teams={teams.values.teams}
           roles={roles.values.roles}
-          profiles={hostProfiles.status === "ready" ? hostProfiles.profiles : []}
-          availability={availability}
-          projects={[]}
-          preferences={preferences.values}
-          initialWorkspaceId={workspaceId}
-          onClose={() => setLaunchOpen(false)}
-          onLaunched={(runId) => {
-            setHighlightRunId(runId);
-            setLaunchOpen(false);
-          }}
-          onSavePreferences={async (next) => {
-            await preferences.save(next, preferences.revision);
-          }}
+          initialTeamId={launchPrefill?.teamId}
+          initialTask={launchPrefill?.task}
+          workspaceId={workspaceId}
+          onClose={closeLaunch}
+          onLaunched={onLaunched}
         />
       ) : null}
+      <FollowUpDialog theme={theme} target={followUp} onClose={() => setFollowUp(null)} />
     </View>
   );
+}
+
+function toggled(current: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const next = new Set(current);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
 }
 
 const styles = StyleSheet.create({

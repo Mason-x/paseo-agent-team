@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { DescriptionSchema, ShortTextSchema, SlugSchema, StringListSchema } from "./common";
+import { StoredDesignerOriginSchema } from "./design-origin";
 import { ProfileRefSchema } from "./profile-ref";
+import { StoredRoleExecutionPolicySchema } from "./team-mode";
 
 const controlFree = (max: number) =>
   z
@@ -53,6 +55,20 @@ export const McpServersSchema = z
 
 export type McpServers = z.infer<typeof McpServersSchema>;
 
+// Persisted inside Roles. Deliberately tolerant: a newer or damaged origin must never invalidate
+// the whole Roles document (the settings screen would only offer a full reset). Unknown keys are
+// preserved so a newer writer's metadata survives a round-trip through this version.
+export const PresetOriginSchema = z
+  .object({
+    catalogId: z.string().min(1),
+    templateId: z.string().min(1),
+    catalogRevision: z.string(),
+    templateHash: z.string(),
+    appliedHash: z.string(),
+    importedAt: z.string(),
+  })
+  .passthrough();
+
 export const RoleSchema = z
   .object({
     id: SlugSchema,
@@ -71,6 +87,15 @@ export const RoleSchema = z
     enabled: z.boolean().default(true),
     createdAt: z.string(),
     updatedAt: z.string(),
+    // Tier and task kind for mode planning. Values are preserved as stored, even when a newer
+    // writer used an unknown value or the wrong type; resolveRoleExecution reports them.
+    executionPolicy: StoredRoleExecutionPolicySchema.optional(),
+    // Other origins (including team-designer) remain valid extension values.
+    source: z.string().optional(),
+    // Team-designer provenance. A damaged block drops only the origin; the Role stays editable.
+    designer: StoredDesignerOriginSchema.optional().catch(undefined),
+    // A damaged preset origin drops only that block for the same reason.
+    preset: PresetOriginSchema.optional().catch(undefined),
   })
   .passthrough();
 

@@ -1,9 +1,10 @@
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import { zh } from "../../shared/zh";
-import type { PaseoProfile } from "../paseo/adapter";
+import { addProfileRef, moveProfileRef, removeProfileRef } from "../catalog/preset-metadata";
 import type { PluginTheme } from "../shared/theme";
 
 function profileLine(profile: PaseoProfile): string {
@@ -60,15 +61,6 @@ export function ProfilePicker({
     [theme],
   );
 
-  function move(index: number, direction: -1 | 1) {
-    const next = [...selected];
-    const target = index + direction;
-    if (target < 0 || target >= next.length) return;
-    const [item] = next.splice(index, 1);
-    if (item) next.splice(target, 0, item);
-    onChange(next);
-  }
-
   return (
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
@@ -93,21 +85,21 @@ export function ProfilePicker({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Move up"
-              onPress={() => move(index, -1)}
+              onPress={() => onChange(moveProfileRef(selected, index, -1))}
             >
               <Icon name="ChevronUp" size={14} color={theme.colors.foregroundMuted} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Move down"
-              onPress={() => move(index, 1)}
+              onPress={() => onChange(moveProfileRef(selected, index, 1))}
             >
               <Icon name="ChevronDown" size={14} color={theme.colors.foregroundMuted} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Remove profile"
-              onPress={() => onChange(selected.filter((_, itemIndex) => itemIndex !== index))}
+              onPress={() => onChange(removeProfileRef(selected, index))}
               hitSlop={4}
             >
               <Icon name="X" size={14} color={theme.colors.statusDanger} />
@@ -133,8 +125,7 @@ export function ProfilePicker({
               accessibilityRole="button"
               accessibilityLabel={`Select ${profile.name}`}
               onPress={() => {
-                if (selected.some((ref) => ref.profileId === profile.id)) return;
-                onChange([...selected, { profileId: profile.id, nameSnapshot: profile.name }]);
+                onChange(addProfileRef(selected, profile));
                 setOpen(false);
               }}
               style={styles.row}

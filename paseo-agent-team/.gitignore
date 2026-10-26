@@ -4,4 +4,4 @@ dist/
 *.log
 .DS_Store
 .paseo-dev/
-.tmp-ruflo-agents/
+.es-launch/

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
+import { exampleCatalog } from "../server/templates";
 import { toJsonValue } from "../shared/json";
 import { RoleSchema } from "../shared/schemas/role";
 import { RolesDocumentSchema } from "../shared/settings";
-import { exampleCatalog } from "../shared/templates";
 import { claudeOpus, NOW } from "./fixtures";
 
 describe("settings write payload", () => {

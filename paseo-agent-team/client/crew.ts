@@ -1,11 +1,10 @@
 import type { usePaseo } from "@getpaseo/plugin/client";
+import { PARENT_AGENT_ID_LABEL } from "../shared/paseo/labels";
 
 export type PaseoApi = ReturnType<typeof usePaseo>;
 export type PaseoWorkspace = Awaited<ReturnType<PaseoApi["workspaces"]["list"]>>["entries"][number];
 export type AgentEntry = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number];
-type AgentSnapshot = AgentEntry["agent"];
-
-const LEGACY_PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+export type AgentSnapshot = AgentEntry["agent"];
 
 export type CrewState = "needs-input" | "failed" | "working" | "ready" | "idle" | "closed";
 
@@ -50,11 +49,12 @@ export interface CrewTreeOptions {
   workspaceNames?: ReadonlyMap<string, string>;
 }
 
+/** Paseo 0.13 snapshots carry the parent as a label; some releases also exposed a field. */
 export function parentAgentId(agent: AgentSnapshot): string | null {
-  const firstClass = "parentAgentId" in agent ? agent.parentAgentId : null;
-  if (typeof firstClass === "string" && firstClass.trim()) return firstClass.trim();
-  const legacy = agent.labels?.[LEGACY_PARENT_AGENT_ID_LABEL];
-  return typeof legacy === "string" && legacy.trim().length > 0 ? legacy.trim() : null;
+  const field = "parentAgentId" in agent ? agent.parentAgentId : null;
+  if (typeof field === "string" && field.trim()) return field.trim();
+  const label = agent.labels?.[PARENT_AGENT_ID_LABEL];
+  return typeof label === "string" && label.trim().length > 0 ? label.trim() : null;
 }
 
 export function crewState(agent: AgentSnapshot): CrewState {
@@ -63,6 +63,7 @@ export function crewState(agent: AgentSnapshot): CrewState {
     return "needs-input";
   }
   if (agent.status === "running" || agent.status === "initializing") return "working";
+  if (agent.attentionReason === "error") return "failed";
   if (agent.requiresAttention || agent.attentionReason === "finished") return "ready";
   if (agent.status === "closed") return "closed";
   return "idle";

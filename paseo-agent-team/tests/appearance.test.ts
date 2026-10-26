@@ -11,7 +11,7 @@ import {
   storedIdentityColor,
   storedRoleIcon,
 } from "../client/shared/appearance";
-import { exampleCatalog } from "../shared/templates";
+import { exampleCatalog } from "../server/templates";
 import { claudeOpus, NOW } from "./fixtures";
 
 describe("identity colors", () => {

@@ -1,0 +1,171 @@
+import { spawnSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { z } from "zod";
+// Node 24 strips the types, so the tier table has exactly one definition shared with runtime code.
+import { DEFAULT_ROLE_EXECUTION } from "../shared/domain/role-execution.ts";
+
+// Never read a host's config implicitly. The input is an explicitly exported, read-only file.
+const root = path.resolve(import.meta.dirname, "..");
+const args = process.argv.slice(2);
+const options = {};
+for (let index = 0; index < args.length; index += 2) {
+  const key = args[index];
+  const value = args[index + 1];
+  if (
+    !["--input", "--output", "--fixtures", "--revision"].includes(key) ||
+    !value ||
+    value.startsWith("--")
+  ) {
+    throw new Error(
+      "Usage: --input <preset-source.json> --revision <catalog revision> [--output <catalog.ts>] [--fixtures <dir>]",
+    );
+  }
+  if (options[key]) throw new Error(`Duplicate option: ${key}`);
+  options[key] = value;
+}
+if (!options["--input"]) throw new Error("An explicit --input <preset-source.json> is required");
+if (!options["--revision"])
+  throw new Error("An explicit --revision <catalog revision> is required");
+const catalogRevision = options["--revision"];
+
+const hintSchema = z.strictObject({
+  name: z.string().min(1).max(200),
+  provider: z.string().min(1).max(100),
+  model: z.string().max(200).optional(),
+  modeId: z.string().max(100).optional(),
+  thinkingOptionId: z.string().max(100).optional(),
+});
+const referenceSchema = hintSchema.extend({ profileId: z.string().min(1) });
+const sourceProfileSchema = referenceSchema.extend({ notes: z.string().optional() });
+const contentFields = [
+  "id",
+  "name",
+  "description",
+  "mission",
+  "responsibilities",
+  "restrictions",
+  "systemPrompt",
+  "outputContract",
+  "mcpServers",
+  "color",
+  "icon",
+  "enabled",
+];
+const hintFields = ["name", "provider", "model", "modeId", "thinkingOptionId"];
+function pick(value, fields) {
+  return Object.fromEntries(
+    fields.filter((field) => value[field] !== undefined).map((field) => [field, value[field]]),
+  );
+}
+
+const source = JSON.parse(await readFile(path.resolve(options["--input"]), "utf8"));
+const profiles = z.array(sourceProfileSchema).min(1).parse(source.profiles);
+if (new Set(profiles.map((profile) => profile.profileId)).size !== profiles.length) {
+  throw new Error("Duplicate source Profile ID");
+}
+const sourceRoles = z
+  .array(
+    z
+      .object({
+        id: z.string().regex(/^[a-z][a-z0-9-]{1,47}$/),
+        name: z.string().min(1),
+        mission: z.string().min(1),
+        responsibilities: z.array(z.string()).min(1),
+        restrictions: z.array(z.string()),
+        systemPrompt: z.string().min(1),
+        outputContract: z.array(z.string()),
+        enabled: z.boolean(),
+        preferredProfiles: z.array(referenceSchema).min(1).max(5),
+        fallbackProfiles: z.array(referenceSchema).max(5),
+      })
+      .passthrough(),
+  )
+  .min(1)
+  .parse(source.roles);
+if (new Set(sourceRoles.map((role) => role.id)).size !== sourceRoles.length) {
+  throw new Error("Duplicate source Role ID");
+}
+function hints(refs) {
+  return refs.map((ref) => {
+    const profile = profiles.find((candidate) => candidate.profileId === ref.profileId);
+    if (!profile || hintFields.some((field) => ref[field] !== profile[field])) {
+      throw new Error(`Inconsistent source reference: ${ref.name}`);
+    }
+    return pick(ref, hintFields);
+  });
+}
+const roles = sourceRoles.map((role) => {
+  const executionPolicy = DEFAULT_ROLE_EXECUTION[role.id];
+  if (!executionPolicy) {
+    throw new Error(`Missing default execution policy for Role ${role.id}`);
+  }
+  return {
+    ...pick(role, contentFields),
+    executionPolicy,
+    preferredHints: hints(role.preferredProfiles),
+    fallbackHints: hints(role.fallbackProfiles),
+  };
+});
+function assertPortable(value) {
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "profileId" || key === "notes") throw new Error(`Forbidden catalog field: ${key}`);
+    assertPortable(child);
+  }
+}
+assertPortable(roles);
+const serialized = JSON.stringify(roles, null, 2);
+if (/agent_profile_|(^|[\s"'(])[a-z]:[\\/]/i.test(serialized)) {
+  throw new Error("Catalog contains a host Profile ID or absolute Windows path");
+}
+
+async function writeFormatted(file, content) {
+  const formatted = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL("../node_modules/@biomejs/biome/bin/biome", import.meta.url)),
+      "format",
+      `--config-path=${root}`,
+      `--stdin-file-path=${file}`,
+    ],
+    { input: content, encoding: "utf8", cwd: root },
+  );
+  if (formatted.status !== 0) throw new Error(formatted.stderr || "Could not format catalog");
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, formatted.stdout, "utf8");
+}
+
+const output = path.resolve(
+  options["--output"] ?? path.join(root, "server/templates/default-catalog.ts"),
+);
+await writeFormatted(
+  output,
+  `// Generated by scripts/generate-default-catalog.mjs. Do not edit by hand.\n` +
+    `import type { DefaultRoleTemplate } from "../../shared/schemas/default-catalog";\n\n` +
+    `export const defaultCatalogRevision = ${JSON.stringify(catalogRevision)};\n\n` +
+    `export const defaultRoleTemplates = ${serialized} satisfies DefaultRoleTemplate[];\n`,
+);
+if (options["--fixtures"]) {
+  const fixtureDir = path.resolve(options["--fixtures"]);
+  const fixtures = {
+    "source-profiles.json": profiles.map((profile) => ({
+      id: profile.profileId,
+      ...pick(profile, hintFields),
+      ...(profile.notes === undefined ? {} : { notes: profile.notes }),
+    })),
+    "expected-bindings.json": sourceRoles.map((role) => ({
+      id: role.id,
+      preferred: role.preferredProfiles.map((ref) => ref.profileId),
+      fallback: role.fallbackProfiles.map((ref) => ref.profileId),
+    })),
+    "expected-role-content.json": roles,
+  };
+  for (const [name, value] of Object.entries(fixtures)) {
+    await writeFormatted(path.join(fixtureDir, name), `${JSON.stringify(value, null, 2)}\n`);
+  }
+}
+console.log(
+  `Generated ${roles.length} default Roles (${catalogRevision}); ${profiles.length} source Profiles`,
+);

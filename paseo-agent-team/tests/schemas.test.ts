@@ -1,10 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { createAutoSlug, isSlug, slugify } from "../shared/ids";
+import { ProfileHintSchema } from "../shared/schemas/default-catalog";
 import { PreferencesSchema } from "../shared/schemas/preferences";
+import { ProfileRefSchema } from "../shared/schemas/profile-ref";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
 import { RolesDocumentSchema, TeamsDocumentSchema } from "../shared/settings";
-import { architect, NOW } from "./fixtures";
+import { architect, codingTeam, NOW } from "./fixtures";
 
 describe("slug", () => {
   test("accepts lowercase ids that start with a letter", () => {
@@ -168,18 +170,26 @@ describe("TeamSchema", () => {
     expect(TeamSchema.safeParse({ ...base, members: [] }).success).toBe(false);
   });
 
-  test("strips a leftover member profileOverride", () => {
+  test("preserves newer member fields, including seatId, instead of stripping them", () => {
     const parsed = TeamSchema.parse({
       ...base,
       members: [
         {
           roleId: "architect",
+          seatId: "seat-architect-1",
           enabled: true,
           profileOverride: { profileId: "claude-opus-high", nameSnapshot: "Claude" },
         },
       ],
     });
-    expect(parsed.members[0]).toEqual({ roleId: "architect", enabled: true });
+    // A leftover profileOverride no longer selects a Profile, but a save must not drop it or any
+    // other field a newer writer stored on the member.
+    expect(parsed.members[0]).toEqual({
+      roleId: "architect",
+      seatId: "seat-architect-1",
+      enabled: true,
+      profileOverride: { profileId: "claude-opus-high", nameSnapshot: "Claude" },
+    });
   });
 });
 
@@ -214,8 +224,42 @@ describe("settings documents", () => {
 
   test("preferences fill defaults", () => {
     const parsed = PreferencesSchema.parse({});
-    expect(parsed.maxMembers).toBe(8);
+    expect(parsed.maxMembers).toBe(24);
     expect(parsed.archiveOnLaunchFailure).toBe(true);
     expect(parsed.recentRuns).toEqual([]);
+  });
+});
+
+describe("unknown field preservation", () => {
+  test("Profile refs and hints round-trip unknown keys", () => {
+    const hint = { name: "Hint", provider: "codex", futureHint: { keep: true } };
+    const ref = { profileId: "p1", nameSnapshot: "P", futureRef: 1, hint };
+    expect(ProfileHintSchema.parse(hint)).toEqual(hint);
+    expect(ProfileRefSchema.parse(ref)).toEqual(ref);
+  });
+
+  test("Roles and Teams documents keep top-level keys", () => {
+    expect(
+      RolesDocumentSchema.parse({ roles: [architect], futureDoc: { keep: true } }),
+    ).toMatchObject({ futureDoc: { keep: true } });
+    expect(
+      TeamsDocumentSchema.parse({ teams: [codingTeam], futureTeamsDoc: "keep" }),
+    ).toMatchObject({ futureTeamsDoc: "keep" });
+  });
+
+  test("Team members and collaboration keep nested keys", () => {
+    const parsed = TeamSchema.parse({
+      ...codingTeam,
+      futureTeam: 1,
+      members: codingTeam.members.map((member, index) =>
+        index === 0 ? { ...member, futureMember: true } : member,
+      ),
+      collaboration: { replicas: 2, futureCollab: { keep: true } },
+    });
+    expect(parsed).toMatchObject({
+      futureTeam: 1,
+      collaboration: { futureCollab: { keep: true } },
+    });
+    expect(parsed.members[0]).toMatchObject({ futureMember: true });
   });
 });

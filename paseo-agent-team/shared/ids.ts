@@ -44,6 +44,14 @@ export function createAutoSlug(fallback: string): AutoSlug {
   };
 }
 
+/** Unique per launch even when two clients start the same Team in the same millisecond. */
+export function createRunId(now = Date.now(), random = Math.random()): string {
+  const suffix = Math.floor(random * 36 ** 4)
+    .toString(36)
+    .padStart(4, "0");
+  return `run-${now.toString(36)}-${suffix}`;
+}
+
 export function uniqueCopyId(baseId: string, existingIds: ReadonlySet<string>): string {
   const root = baseId.replace(/-copy(?:-\d+)?$/, "");
   let candidate = `${root}-copy`.slice(0, 48);

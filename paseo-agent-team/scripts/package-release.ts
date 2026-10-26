@@ -1,33 +1,35 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { zipSync } from "fflate";
 
-const packageJson = JSON.parse(
-  await readFile(join(import.meta.dirname, "..", "package.json"), "utf8"),
-) as { version: string };
+const root = join(import.meta.dirname, "..");
+const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as {
+  version: string;
+  files: string[];
+};
 
-const releaseFiles = [
-  "package-lock.json",
-  "CHANGELOG.md",
-  "LICENSE",
-  "README.md",
-  "client/crew.ts",
-  "client/main.tsx",
-  "docs/images/agent-crew-overview.png",
-  "docs/images/agent-crew-action.png",
-  "index.client.tsx",
-  "index.server.ts",
-  "package.json",
-  "paseo-plugin.json",
-  "tsconfig.json",
-] as const;
+// Ship exactly what `npm pack` ships, plus the lockfile that makes `npm ci` reproducible.
+const entries = [...packageJson.files, "package-lock.json"];
+
+async function collect(relative: string, into: string[]): Promise<void> {
+  const absolute = join(root, relative);
+  if ((await stat(absolute)).isDirectory()) {
+    for (const name of (await readdir(absolute)).sort()) {
+      await collect(posix.join(relative, name), into);
+    }
+  } else {
+    into.push(relative);
+  }
+}
 
 const output = process.argv[2] ?? `dist/paseo-agent-team-v${packageJson.version}.zip`;
-const root = "paseo-agent-team";
-const files: Record<string, Uint8Array> = {};
+const archiveRoot = "paseo-agent-team";
+const releaseFiles: string[] = [];
+for (const entry of entries) await collect(entry, releaseFiles);
 
+const files: Record<string, Uint8Array> = {};
 for (const path of releaseFiles) {
-  files[posix.join(root, path)] = await readFile(path);
+  files[posix.join(archiveRoot, path)] = await readFile(join(root, path));
 }
 
 await mkdir("dist", { recursive: true });

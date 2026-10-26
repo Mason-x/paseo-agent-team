@@ -60,6 +60,33 @@ describe("crewState", () => {
     ).toBe("ready");
     expect(crewState(entry("closed", "root", { status: "closed" }).agent)).toBe("closed");
   });
+
+  test("an idle member with an unread error attention is failed, not ready", () => {
+    expect(
+      crewState(
+        entry("stuck", "root", {
+          status: "idle",
+          attentionReason: "error",
+          requiresAttention: true,
+        }).agent,
+      ),
+    ).toBe("failed");
+    expect(
+      crewState(
+        entry("ask", "root", {
+          status: "idle",
+          attentionReason: "error",
+          pendingPermissions: [{}],
+        }).agent,
+      ),
+    ).toBe("needs-input");
+    expect(
+      crewState(entry("retry", "root", { status: "running", attentionReason: "error" }).agent),
+    ).toBe("working");
+    expect(
+      crewState(entry("boot", "root", { status: "initializing", attentionReason: "error" }).agent),
+    ).toBe("working");
+  });
 });
 
 describe("buildCrewForest", () => {

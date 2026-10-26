@@ -9,12 +9,14 @@ export const RolesDocumentSchema = z
   .object({
     roles: z.array(RoleSchema).default([]),
   })
+  .passthrough()
   .refine(uniqueIds("roles"), { message: "Duplicate role id" });
 
 export const TeamsDocumentSchema = z
   .object({
     teams: z.array(TeamSchema).default([]),
   })
+  .passthrough()
   .refine(uniqueIds("teams"), { message: "Duplicate team id" });
 
 export const rolesSettings = defineSettings({

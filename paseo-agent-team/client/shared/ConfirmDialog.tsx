@@ -9,6 +9,8 @@ export function ConfirmDialog({
   title,
   body,
   confirmLabel,
+  cancelLabel,
+  confirmHidden,
   danger,
   onCancel,
   onConfirm,
@@ -18,6 +20,8 @@ export function ConfirmDialog({
   title: string;
   body: string;
   confirmLabel: string;
+  cancelLabel?: string;
+  confirmHidden?: boolean;
   danger?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -28,7 +32,9 @@ export function ConfirmDialog({
         <Text style={{ color: theme.colors.foreground, fontSize: 14, lineHeight: 20 }}>{body}</Text>
         <ModalActions
           theme={theme}
+          cancelLabel={cancelLabel}
           confirmLabel={confirmLabel}
+          confirmHidden={confirmHidden}
           danger={danger}
           onCancel={onCancel}
           onConfirm={onConfirm}
