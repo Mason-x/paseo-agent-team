@@ -85,15 +85,35 @@ const MEMBER_TEAMWORK = [
   "If you are blocked or the task is ambiguous, stop and state exactly what you need.",
 ];
 
+export type CoordinatorRosterEntry = {
+  seatId: string;
+  role: PromptRole;
+  instanceLabel?: string;
+  profile: Pick<PaseoProfile, "name" | "provider" | "model"> | null;
+  activation: "eager" | "on-demand" | "escalation-only";
+};
+
 export function compileCoordinatorSystemPrompt(input: {
   role: PromptRole;
   team: Pick<Team, "name" | "operatingRules">;
+  /** Planned seats for this run. Omitted keeps the legacy "already running" prompt. */
+  roster?: readonly CoordinatorRosterEntry[];
+  /** False means this version cannot create standby escalation seats yet. */
+  escalationAvailable?: boolean;
 }): string {
+  const roster = input.roster && input.roster.length > 0 ? input.roster : undefined;
+  const escalationAvailable = input.escalationAvailable === true;
+  const standbyPhrase = escalationAvailable
+    ? "standby seats are not created until the run explicitly escalates"
+    : "standby seats are not created by this version";
+  const firstBullet = roster
+    ? `The roster below lists this run's planned seats. "running" seats are already your subagents; "on first task" seats are created when you first delegate to them; ${standbyPhrase}. Do not use create_agent for a seat that is already planned.`
+    : "Your team members are already running as your subagents. Their IDs and roles arrive in the first user message.";
   const parts = [
     `You are the ${input.role.name}, coordinator of the "${input.team.name}" team in Paseo.`,
     roleSections(input.role),
     `## How this team works
-- Your team members are already running as your subagents. Their IDs and roles arrive in the first user message.
+- ${firstBullet}
 - Delegate with send_agent_prompt(agentId, prompt). Keep notifyOnFinish at its default: Paseo notifies you with the member's final reply when it finishes, fails, or needs permission. Do not poll get_agent_status, get_agent_activity, or list_agents in a loop.
 - Give each member one self-contained task at a time: goal, relevant files, constraints, and expected output. Run independent tasks in parallel.
 - A prompt sent to a member that is still working is steered into its current turn, or interrupts it when the provider cannot steer. Wait for its report unless you mean to redirect it.
@@ -104,6 +124,29 @@ export function compileCoordinatorSystemPrompt(input: {
 - When two members would edit the same files at the same time, sequence them or ask one to work in a separate worktree via create_workspace.
 - Finish by writing a synthesis for the human: what was done, evidence, open issues, and next steps.`,
   ];
+  if (roster) {
+    const rows = roster.map((entry) => {
+      const state =
+        entry.activation === "eager"
+          ? "running"
+          : entry.activation === "on-demand"
+            ? "on first task"
+            : escalationAvailable
+              ? "standby"
+              : "standby (not created in this version)";
+      const profile = entry.profile
+        ? `${entry.profile.name} (${
+            entry.profile.model
+              ? `${entry.profile.provider}/${entry.profile.model}`
+              : entry.profile.provider
+          })`
+        : "unavailable";
+      return `| ${entry.seatId} | ${entry.role.name}${instanceSuffix(entry.instanceLabel)} | ${profile} | ${state} |`;
+    });
+    parts.push(
+      `## Planned seats\n\n| seatId | role | profile | state |\n| --- | --- | --- | --- |\n${rows.join("\n")}`,
+    );
+  }
   if (input.team.operatingRules?.trim()) {
     parts.push(input.team.operatingRules.trim());
   }

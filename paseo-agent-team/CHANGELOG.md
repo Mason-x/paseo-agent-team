@@ -41,6 +41,9 @@
   store the economy pool and quota recovery policy; the default seat cap is now 24 with no storage
   upper bound, a launch never creates more than 64 members, and stored documents keep unknown
   values and fields instead of invalidating
+- 启动前按 Team 模式规划席位：SOTA 模式与未设模式的旧 Team 保持原有的成员与 Profile；经济模式
+  的执行席位在当前版本启动时全部创建并给出提示，升级席位待命、不创建；协作模式暂不可启动，
+  需要后续版本
 ### Bug Fixes
 
 - default preset sync compares the effective Role tier, so an existing pre-tier Role with the
