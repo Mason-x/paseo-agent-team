@@ -24,6 +24,8 @@
   Roles with the exact settings revisions a merge must be saved against
 - the first empty catalog imports the default Roles automatically; “同步默认预设” groups and
   previews every change before writing; editing or copying keeps or strips preset origin metadata
+- version entry in the Agent Teams header and an update panel: source, current/remote revisions,
+  check throttling, blockers and remedies, update confirmation, and reconnect/recovery after reload
 - version management (`agent-team.version.*` RPCs): report the installed version, source and latest
   stable release (or the default branch head); fast-forward a clean directory checkout on its default
   branch, run `npm ci` and reload through a detached runner that survives the reload, and roll a

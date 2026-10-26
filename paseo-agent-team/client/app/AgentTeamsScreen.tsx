@@ -38,6 +38,7 @@ import { ErrorState } from "../shared/ErrorState";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
 import { TeamsTab } from "../teams/TeamsTab";
+import { VersionEntry } from "../version/VersionEntry";
 import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from "./tabs";
 
 const rolesReadRpc = settingsRpc(rolesSettings.id).read;
@@ -614,6 +615,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           ))}
         </View>
         <View style={styles.headerActions}>
+          <VersionEntry key={host.id} theme={theme} layout={layout} hostId={host.id} />
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={newLabel}
