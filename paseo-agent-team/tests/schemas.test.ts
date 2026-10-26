@@ -1,10 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { createAutoSlug, isSlug, slugify } from "../shared/ids";
+import { ProfileHintSchema } from "../shared/schemas/default-catalog";
 import { PreferencesSchema } from "../shared/schemas/preferences";
+import { ProfileRefSchema } from "../shared/schemas/profile-ref";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
 import { RolesDocumentSchema, TeamsDocumentSchema } from "../shared/settings";
-import { architect, NOW } from "./fixtures";
+import { architect, codingTeam, NOW } from "./fixtures";
 
 describe("slug", () => {
   test("accepts lowercase ids that start with a letter", () => {
@@ -225,5 +227,39 @@ describe("settings documents", () => {
     expect(parsed.maxMembers).toBe(24);
     expect(parsed.archiveOnLaunchFailure).toBe(true);
     expect(parsed.recentRuns).toEqual([]);
+  });
+});
+
+describe("unknown field preservation", () => {
+  test("Profile refs and hints round-trip unknown keys", () => {
+    const hint = { name: "Hint", provider: "codex", futureHint: { keep: true } };
+    const ref = { profileId: "p1", nameSnapshot: "P", futureRef: 1, hint };
+    expect(ProfileHintSchema.parse(hint)).toEqual(hint);
+    expect(ProfileRefSchema.parse(ref)).toEqual(ref);
+  });
+
+  test("Roles and Teams documents keep top-level keys", () => {
+    expect(
+      RolesDocumentSchema.parse({ roles: [architect], futureDoc: { keep: true } }),
+    ).toMatchObject({ futureDoc: { keep: true } });
+    expect(
+      TeamsDocumentSchema.parse({ teams: [codingTeam], futureTeamsDoc: "keep" }),
+    ).toMatchObject({ futureTeamsDoc: "keep" });
+  });
+
+  test("Team members and collaboration keep nested keys", () => {
+    const parsed = TeamSchema.parse({
+      ...codingTeam,
+      futureTeam: 1,
+      members: codingTeam.members.map((member, index) =>
+        index === 0 ? { ...member, futureMember: true } : member,
+      ),
+      collaboration: { replicas: 2, futureCollab: { keep: true } },
+    });
+    expect(parsed).toMatchObject({
+      futureTeam: 1,
+      collaboration: { futureCollab: { keep: true } },
+    });
+    expect(parsed.members[0]).toMatchObject({ futureMember: true });
   });
 });

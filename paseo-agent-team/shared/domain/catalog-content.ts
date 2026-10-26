@@ -165,6 +165,15 @@ export type PresetPreviewSnapshot = {
 };
 
 /**
+ * Keep everything the preset row does not own: unknown extensions and metadata such as `designer`.
+ * `source`/`preset` come from the candidate because adoption records the preset origin.
+ */
+function adoptionExtensions(existing: Role, candidate: Role): Record<string, unknown> {
+  const owned = new Set([...Object.keys(candidate), "createdAt", "updatedAt", "preset"]);
+  return Object.fromEntries(Object.entries(existing).filter(([key]) => !owned.has(key)));
+}
+
+/**
  * Merge only into the Roles array whose revision equals preview.revisions.roles. A mismatch means
  * another writer changed the document after the preview; re-read, recompute, and reconfirm rather
  * than saving a stale base (which would silently drop concurrent additions). Save the result with
@@ -201,6 +210,7 @@ export function applyPresetSelection(
       throw new Error(zh.defaultPresetsInvalidSelection);
     }
     const role: Role = {
+      ...(existing ? adoptionExtensions(existing, row.candidate) : {}),
       ...row.candidate,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,

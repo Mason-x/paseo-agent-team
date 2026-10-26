@@ -238,7 +238,8 @@ describe("design gateway", () => {
     });
     expect(await gateway.readRoles()).toEqual({
       status: "ready",
-      values: { roles: [] },
+      // Document-level extensions survive parsing, so values and raw now agree here.
+      values: rawRoles,
       raw: rawRoles,
       revision: "roles-x",
     });

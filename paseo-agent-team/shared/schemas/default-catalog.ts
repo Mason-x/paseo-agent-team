@@ -7,6 +7,9 @@ export { type ProfileHint, ProfileHintSchema } from "./profile-ref";
 
 export const DEFAULT_CATALOG_ID = "agent-team-default";
 
+// Generator input stays strict: the persisted hint schema is passthrough for compatibility.
+const TemplateProfileHintSchema = ProfileHintSchema.strict();
+
 export const DefaultRoleTemplateSchema = RoleSchema.omit({
   preferredProfiles: true,
   fallbackProfiles: true,
@@ -16,8 +19,8 @@ export const DefaultRoleTemplateSchema = RoleSchema.omit({
   preset: true,
 })
   .extend({
-    preferredHints: z.array(ProfileHintSchema).min(1).max(5),
-    fallbackHints: z.array(ProfileHintSchema).max(5).default([]),
+    preferredHints: z.array(TemplateProfileHintSchema).min(1).max(5),
+    fallbackHints: z.array(TemplateProfileHintSchema).max(5).default([]),
   })
   .strict();
 

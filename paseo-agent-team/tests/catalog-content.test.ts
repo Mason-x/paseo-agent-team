@@ -16,7 +16,7 @@ import {
   type Preferences,
   PreferencesSchema,
 } from "../shared/schemas/preferences";
-import type { Role } from "../shared/schemas/role";
+import { type Role, RoleSchema } from "../shared/schemas/role";
 import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
 import { architect, NOW, role } from "./fixtures";
 
@@ -319,7 +319,7 @@ describe("default preset diff and selected merge", () => {
   test("an explicit adoption preserves createdAt, rebinds Profiles, and updates origin/hashes", () => {
     const old = exampleCatalog([], NOW).roles[0];
     const current = [
-      { ...old, systemPrompt: "Modified", extension: "remove on adoption" },
+      { ...old, systemPrompt: "Modified", extension: "keep on adoption" },
       architect,
     ];
     const rows = diff(current);
@@ -334,8 +334,16 @@ describe("default preset diff and selected merge", () => {
     );
     const result = apply(current, rows, selection);
     expect(result).toHaveLength(2);
-    expect(result[0]).toEqual({ ...candidates[0], createdAt: NOW, updatedAt: LATER });
-    expect(result[0].preset?.appliedHash).toBe(hashCatalogContent(result[0]));
+    expect(result[0]).toEqual({
+      ...candidates[0],
+      createdAt: NOW,
+      updatedAt: LATER,
+      extension: "keep on adoption",
+    });
+    // Extensions are outside the preset baseline, so the applied hash stays the candidate's and
+    // the next preview reports them as a local difference.
+    expect(result[0].preset?.appliedHash).toBe(candidates[0].preset?.appliedHash);
+    expect(result[0].preset?.importedAt).toBe(LATER);
     expect(result[0].preferredProfiles[0].profileId).toBe(
       candidates[0].preferredProfiles[0].profileId,
     );
@@ -399,6 +407,27 @@ describe("default preset diff and selected merge", () => {
     const result = apply([], rows, selected);
     expect(result).toEqual([candidates[0]]);
     expect(apply([], rows).map((entry) => entry.id)).not.toContain(candidates[0].id);
+  });
+
+  test("adoption keeps the row's unknown fields and designer while the preset wins", () => {
+    const collision = RoleSchema.parse({
+      ...role({ id: candidates[0].id, name: "Local" }),
+      futureTop: { keep: true },
+      designer: { jobId: "designer-job" },
+    });
+    const rows = diff([collision]);
+    const selection = Object.fromEntries(
+      rows.map((row) => [row.id, row.id === collision.id ? ("adopt" as const) : ("skip" as const)]),
+    );
+    const result = apply([collision], rows, selection);
+    expect(result[0]).toMatchObject({
+      id: candidates[0].id,
+      name: candidates[0].name,
+      source: "preset",
+      futureTop: { keep: true },
+      designer: { jobId: "designer-job" },
+    });
+    expect(result[0]?.preset?.templateId).toBe(candidates[0].id);
   });
 
   test("explicit adoption of a reviewed ID collision is possible, default still keeps it", () => {

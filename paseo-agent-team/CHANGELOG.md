@@ -49,6 +49,9 @@
 - 启动前先预览席位与预算并冻结 `planHash`；配置或可用性变化后旧预览会被拒绝，避免按旧额度启动
 ### Bug Fixes
 
+- 写入 Roles / Teams 时保留 Profile 引用、hint、文档顶层以及 Team 成员与协作对象的未知字段；
+  “采用预设”保留原行的扩展字段与 designer 元数据
+
 - Team / Role 编辑器保存时检测目录冲突，提示覆盖保存或重新加载，不再静默覆盖其他客户端刚保存的修改
 
 - default preset sync compares the effective Role tier, so an existing pre-tier Role with the
