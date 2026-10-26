@@ -1,5 +1,5 @@
 import { buildLaunchPlan, type LaunchPlan } from "../shared/domain/launch-plan";
-import { toModeLaunchPreview } from "../shared/domain/launch-preview";
+import { launchPreviewWarnings, toModeLaunchPreview } from "../shared/domain/launch-preview";
 import { isLaunchError, launchTeam } from "../shared/domain/launch-team";
 import {
   type EconomyPolicy,
@@ -331,7 +331,7 @@ export function createLaunchService(deps: {
         memberTotal: plan.members.length,
         workspaceId: workspace?.id,
         memberIds: [],
-        warnings: plan.warnings,
+        warnings: launchPreviewWarnings(plan, prepared.prepared.economyIssues),
         startedAt: now().toISOString(),
         mode: plan.mode,
         planHash: prepared.prepared.planHash,

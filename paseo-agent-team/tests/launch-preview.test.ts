@@ -163,6 +163,28 @@ describe("launch preview DTO", () => {
     expect(hashLaunchPlan(input)).toBe(hash);
   });
 
+  test("keeps distinct pool warnings for two missing Profiles", () => {
+    const economy = normalizeEconomyPolicy(
+      {
+        pool: [
+          { profileId: "ghost", enabled: true },
+          { profileId: "ghost2", enabled: true },
+        ],
+      },
+      [claudeOpus, codexXhigh],
+    );
+    if (!economy.ok) throw new Error("unexpected economy policy failure");
+    const plan = makePlan({ ...codingTeam, mode: "economy" }, undefined, {
+      mode: "economy",
+      economy: economy.value,
+    });
+    const preview = toModeLaunchPreview(plan, "c".repeat(64), economy.issues ?? [], economy.value);
+    const ghostWarnings = preview.warnings.filter((warning) => warning.includes("经济池条目"));
+    expect(ghostWarnings).toHaveLength(2);
+    expect(ghostWarnings.some((warning) => warning.includes("ghost2"))).toBe(true);
+    expect(new Set(ghostWarnings).size).toBe(2);
+  });
+
   test("keeps an unavailable escalation seat explicit instead of dropping it", () => {
     const expert = role({
       id: "eng-expert",

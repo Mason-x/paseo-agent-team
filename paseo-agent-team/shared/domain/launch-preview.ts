@@ -53,19 +53,15 @@ function issuesOf(selection: ProfileSelection) {
   }));
 }
 
-function previewWarnings(
+/** Preview and start share these warnings; text is the identity, so two pool rows stay distinct. */
+export function launchPreviewWarnings(
   plan: LaunchPlan,
   extraIssues: readonly ModeIssue[],
-  seats: LaunchPlan["seats"],
 ): string[] {
   const warnings = [...plan.warnings];
-  const seen = new Set<string>();
   for (const issue of [...extraIssues, ...plan.seatIssues]) {
     if (issue.severity !== "warning") continue;
-    const key = `${issue.code}:${issue.seatId ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const text = warningIssueText(issue, seats);
+    const text = warningIssueText(issue, plan.seats);
     if (!warnings.includes(text)) warnings.push(text);
   }
   return warnings;
@@ -122,7 +118,7 @@ export function toModeLaunchPreview(
     counts: plan.seatCounts,
     budget: plan.seatBudget,
     issues: dedupeIssues([...extraIssues, ...plan.seatIssues]),
-    warnings: previewWarnings(plan, extraIssues, plan.seats),
+    warnings: launchPreviewWarnings(plan, extraIssues),
     planHash,
   };
 }

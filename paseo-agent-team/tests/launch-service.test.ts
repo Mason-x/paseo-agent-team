@@ -396,6 +396,31 @@ describe("launch preview and hash", () => {
     expect(profile.created).toHaveLength(0);
   });
 
+  test("start warnings match preview warnings for pool problems", async () => {
+    const { service, port } = setup({
+      prefs: {
+        ...preferences,
+        economy: {
+          pool: [
+            { profileId: "ghost", enabled: true },
+            { profileId: "ghost2", enabled: true },
+          ],
+        },
+      },
+    });
+    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
+    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+    expect(
+      preview.preview.warnings.filter((warning) => warning.includes("经济池条目")),
+    ).toHaveLength(2);
+    const started = await service.start(
+      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(started.ok).toBe(true);
+    if (started.ok) expect(started.job.warnings).toEqual(preview.preview.warnings);
+  });
+
   test("an economy pool participates in the hash and accepts a matching start", async () => {
     const { service, port } = setup({
       prefs: {

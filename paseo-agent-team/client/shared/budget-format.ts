@@ -13,7 +13,7 @@ const BASIS_LABELS: Record<SeatPreview["budgetBasis"], string> = {
   "conservative-default": zh.modes.budgetBasisConservative,
 };
 
-/** Same wording as F2's formatDesignBudget; kept local until the designer module is on this branch. */
+/** Shared launch/design budget wording; labels live in `zh.modes`. */
 export function formatLaunchBudget(
   budget?: SeatPreview["budget"],
   basis?: SeatPreview["budgetBasis"],
