@@ -203,6 +203,18 @@ function sendTimeOf(attempt: DesignAttemptRecord | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function profileResolutionIssue(issue: DesignIssue): boolean {
+  if (issue.code === "DESIGN_MODE_PLAN_INVALID")
+    return issue.params.modeCode === "MODE_PROFILE_UNRESOLVED";
+  if (issue.code === "DESIGN_LAUNCH_BLOCKED") {
+    const reason = issue.params.reason;
+    return (
+      typeof reason === "string" && reason.includes("Profile") && reason.includes("all-missing")
+    );
+  }
+  return false;
+}
+
 function roleWrittenByJob(
   record: StoredDesignJob,
   roles: readonly { id: string; source?: string; designer?: unknown }[],
@@ -606,10 +618,38 @@ export function createDesignService(deps: DesignServiceDeps) {
     }));
   }
 
+  function profileResolutionFailure(
+    issues: readonly DesignIssue[],
+    context: DesignContextSnapshot,
+  ): { roles: string[]; available: ReturnType<typeof summarizeProfiles> } | null {
+    const profileIssues = issues.filter(profileResolutionIssue);
+    if (profileIssues.length === 0) return null;
+    const roles = new Set<string>();
+    for (const issue of profileIssues) {
+      const roleId = issue.params.roleId;
+      if (typeof roleId === "string") {
+        const role = context.roles.find((item) => item.id === roleId);
+        roles.add(role ? `${role.name} (${role.id})` : roleId);
+      }
+      if (issue.code === "DESIGN_LAUNCH_BLOCKED") {
+        const reason = issue.params.reason;
+        if (typeof reason === "string") roles.add(reason);
+      }
+    }
+    return {
+      roles: [...roles],
+      available: summarizeProfiles(
+        context.profiles,
+        context.availability,
+        economyOf(context),
+      ).filter((profile) => profile.available),
+    };
+  }
+
   async function handleFailure(
     record: StoredDesignJob,
     context: DesignContextSnapshot,
-    issues: readonly DesignIssue[],
+    inputIssues: readonly DesignIssue[],
     proposal: DesignProposal | null,
     mismatches:
       | readonly {
@@ -621,6 +661,35 @@ export function createDesignService(deps: DesignServiceDeps) {
       | null,
     allowCorrection: boolean,
   ) {
+    const profileFailure = profileResolutionFailure(inputIssues, context);
+    let issues = inputIssues;
+    if (profileFailure) {
+      const roles = profileFailure.roles.length > 0 ? profileFailure.roles : ["所选 Role"];
+      if (profileFailure.available.length === 0) {
+        const actionable = error(
+          "DESIGN_LAUNCH_BLOCKED",
+          ["plan", "profiles"],
+          {
+            reason: `本 host 没有可用 Profile。请先在 Role 编辑器为以下 Role 绑定 Profile：${roles.join("、")}`,
+          },
+          "choose-profile",
+        );
+        await failJob(record.job.jobId, [...inputIssues, actionable]);
+        return;
+      }
+      const profileList = profileFailure.available
+        .map((profile) => `${profile.id} / ${profile.name} / ${profile.family ?? "未标注"}`)
+        .join("；");
+      const aggregate = error(
+        "DESIGN_LAUNCH_BLOCKED",
+        ["plan", "profiles"],
+        {
+          reason: `以下 Role 在本 host 不可启动：${roles.join("、")}。可用 Profile（id / 名称 / family）：${profileList}。请改用其他 Role，或用这些 Profile 新建 Role。`,
+        },
+        "repair",
+      );
+      issues = [...inputIssues.filter((issue) => !profileResolutionIssue(issue)), aggregate];
+    }
     const finalized = finalizeDesignIssues(issues);
     if (!allowCorrection) {
       await failJob(record.job.jobId, finalized.issues, "needs_continue");

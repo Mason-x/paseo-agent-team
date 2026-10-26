@@ -120,6 +120,7 @@ class FakeAdapter implements DesignAdapter {
   sendFails = false;
   readFails = false;
   profilesValue = profiles;
+  availabilityValue = availability;
   delayCreate = false;
   createStarted = Promise.withResolvers<void>();
   releaseCreate = Promise.withResolvers<void>();
@@ -128,7 +129,7 @@ class FakeAdapter implements DesignAdapter {
     return { agentProfiles: this.profilesValue };
   }
   async listProviderAvailability() {
-    return availability;
+    return this.availabilityValue;
   }
   async listRecentWorkspaces() {
     return { workspaces: [carrier], nextCursor: null, hasMore: false };
@@ -1672,6 +1673,97 @@ describe("design service", () => {
         action: "repair",
       }),
     ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_STATE_CHANGED" }] });
+    await service.dispose();
+  });
+
+  test("turns unresolved role profiles into a correction with usable profiles", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const blockedPlanner: DesignPlanningPort = {
+      ...planner,
+      plan() {
+        return {
+          ok: false,
+          issues: [
+            {
+              code: "MODE_PROFILE_UNRESOLVED",
+              severity: "blocker",
+              roleId: "architect",
+              params: { reason: "all-missing" },
+            },
+          ],
+          launchBlockers: ["无法解析 Architect 的 Profile（all-missing）。"],
+          launchWarnings: [],
+        };
+      },
+    };
+    const service = createDesignService(serviceDeps(store, adapter, { planner: blockedPlanner }));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.entries = answerFor(stored, proposalFor(stored));
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => adapter.sent.length === 1);
+    await until(() => store.records.get(started.job.jobId)?.job.attempt === 2);
+    const correction = adapter.sent[0] ?? "";
+    expect(correction).toContain("以下 Role 在本 host 不可启动");
+    expect(correction).toContain("Architect");
+    expect(correction).toContain(DESIGNER.id);
+    expect(correction).toContain(DESIGNER.name);
+    expect(correction).toContain("未标注");
+    await service.dispose();
+  });
+
+  test("fails immediately with actionable guidance when no profile is available", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const blockedPlanner: DesignPlanningPort = {
+      ...planner,
+      plan() {
+        return {
+          ok: false,
+          issues: [
+            {
+              code: "MODE_PROFILE_UNRESOLVED",
+              severity: "blocker",
+              roleId: "architect",
+              params: { reason: "all-missing" },
+            },
+          ],
+          launchBlockers: ["无法解析 Architect 的 Profile（all-missing）。"],
+          launchWarnings: [],
+        };
+      },
+    };
+    const service = createDesignService(serviceDeps(store, adapter, { planner: blockedPlanner }));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.availabilityValue = [
+      { provider: "claude", available: false },
+      { provider: "codex", available: false },
+    ];
+    adapter.entries = answerFor(stored, proposalFor(stored));
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => store.records.get(started.job.jobId)?.job.state === "failed");
+    const failed = store.records.get(started.job.jobId);
+    expect(failed?.job.allowed.continueAction).toBeNull();
+    expect(
+      failed?.job.issues.some((issue) =>
+        String(issue.params.reason ?? "").includes("请先在 Role 编辑器为以下 Role 绑定 Profile"),
+      ),
+    ).toBe(true);
+    expect(adapter.sent).toHaveLength(0);
     await service.dispose();
   });
 
