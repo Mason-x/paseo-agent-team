@@ -1,16 +1,19 @@
 import { spawn } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PaseoPort } from "../../shared/paseo/port";
 import {
   type Blocker,
   blocker,
   CHECK_STEP_TIMEOUT_MS,
+  CHECK_TOTAL_TIMEOUT_MS,
   CHECK_TTL_MS,
   type Current,
   type InstallSource,
   type Job,
   JobSchema,
+  type PendingCommits,
   PLUGIN_ID,
   type Relation,
   type RemoteTarget,
@@ -36,6 +39,15 @@ import {
   safeRealpath,
 } from "./local-install";
 import { resolveNpmCli } from "./npm";
+import {
+  isPrivateRef,
+  PENDING_CLEANUP_BUDGET_MS,
+  PENDING_CLEANUP_RESERVE_MS,
+  PENDING_COMMITS_BUDGET_MS,
+  PENDING_OUTER_MARGIN_MS,
+  privateRefFor,
+  readPendingCommits,
+} from "./pending";
 import type { Clock, ExecPort, FilesPort, Ids } from "./process";
 import { nodeExec, nodeFiles, systemClock, systemIds } from "./process";
 import {
@@ -71,6 +83,7 @@ export type VersionDeps = {
   platform?: NodeJS.Platform;
   pathExists?: (candidate: string) => boolean;
   cliExists?: (candidate: string) => Promise<boolean>;
+  now?: () => number;
 };
 
 export type VersionService = {
@@ -134,6 +147,7 @@ export function createVersionService(overrides: Partial<VersionDeps> = {}): Vers
     platform: overrides.platform ?? process.platform,
     pathExists: overrides.pathExists,
     cliExists: overrides.cliExists,
+    now: overrides.now,
   };
   const memory: Memory = new Map();
   return {
@@ -187,7 +201,8 @@ async function runCheck(
   const job = newJob(deps, requestId, "check", "checking", local.current, null);
   memory.set(job.id, { job, check: null });
   try {
-    const info = await withDeadline(inspectRemote(deps, local), 25_000);
+    const deadline = (deps.now ?? Date.now)() + CHECK_TOTAL_TIMEOUT_MS;
+    const info = await withDeadline(inspectRemote(deps, local, deadline), CHECK_TOTAL_TIMEOUT_MS);
     const finished = finishCheck(deps, job, info);
 
     const check = info.checkId ? saveCheck(info.checkId, info, local, deps) : null;
@@ -512,7 +527,11 @@ async function discover(deps: VersionDeps, paseo: Pick<PaseoPort, "config">): Pr
   };
 }
 
-async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<VersionInfo> {
+async function inspectRemote(
+  deps: VersionDeps,
+  local: Discovery,
+  deadline: number,
+): Promise<VersionInfo> {
   const registry = local.installSource.kind === "git" && Boolean(local.installSource.registry);
   if (
     local.installSource.kind === "unknown" ||
@@ -597,8 +616,10 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
     if ("blocker" in version) return remoteError(local.info, version.blocker, deps.clock.iso());
     target = branchTarget(branch, version.version, local.remoteUrl);
   }
-  const tracked = await trackingMismatch(deps, local, cwd);
-  const blockers = tracked ? [...local.info.blockers, tracked] : local.info.blockers;
+  const tracking = await trackingReview(deps, local, cwd);
+  const blockers = tracking.blocker
+    ? [...local.info.blockers, tracking.blocker]
+    : local.info.blockers;
   const relation = await relate(deps, local, target.commit);
   const decision = decideUpdate({
     source: local.installSource.kind,
@@ -608,13 +629,64 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
     blockers,
     cliAvailable: local.info.cliAvailable,
   });
+  const checkId = deps.ids.uuid();
+  const now = deps.now ?? Date.now;
+  const pendingStart = now();
+  let pendingCommits: PendingCommits | null = null;
+  let pendingStaleRefs: string[] = [];
+  if (deadline - PENDING_CLEANUP_RESERVE_MS > pendingStart) {
+    const stale = await readStaleRefs(deps);
+    const listStart = now();
+    const pendingDeadline = Math.min(
+      listStart + PENDING_COMMITS_BUDGET_MS,
+      deadline - PENDING_CLEANUP_RESERVE_MS,
+    );
+    if (pendingDeadline > listStart) {
+      const privateRef = privateRefFor(checkId);
+      await writeStaleRefs(
+        deps,
+        stale.file,
+        [...new Set([...stale.refs, privateRef])].filter((ref) => isPrivateRef(ref)),
+      );
+      const cleanupDeadline = Math.min(
+        deadline - PENDING_OUTER_MARGIN_MS,
+        pendingDeadline + PENDING_CLEANUP_BUDGET_MS,
+      );
+      const hooksPath = await ensureEmptyDir(
+        deps,
+        stale.hooksDir ?? path.join(tmpdir(), "paseo-agent-team-hooks"),
+      );
+      const pending = await readPendingCommits({
+        git: deps.git,
+        cwd,
+        checkId,
+        target,
+        checkout: local.checkout,
+        installSource: local.installSource,
+        defaultRef: tracking.defaultRef,
+        fromCommit: local.current.commit,
+        staleRefs: stale.refs,
+        hooksPath,
+        now,
+        deadline: pendingDeadline,
+        cleanupDeadline,
+      });
+      pendingCommits = pending.commits;
+      pendingStaleRefs = pending.staleRefs;
+      await writeStaleRefs(deps, stale.file, pendingStaleRefs);
+    }
+  }
   return VersionInfoSchema.parse({
     ...local.info,
     ...decision,
     blockers,
-    canUpdate: decision.canUpdate && !tracked,
+    canUpdate: decision.canUpdate && !tracking.blocker,
     relation,
-    checkId: deps.ids.uuid(),
+    pendingCommits,
+    ...(pendingStaleRefs.length > 0
+      ? { pendingCommitsDiagnostics: { staleRefs: pendingStaleRefs.slice(0, 10) } }
+      : {}),
+    checkId,
     remote: {
       state: "ready",
       repositoryLatest: target,
@@ -626,25 +698,28 @@ async function inspectRemote(deps: VersionDeps, local: Discovery): Promise<Versi
   });
 }
 
-async function trackingMismatch(
+async function trackingReview(
   deps: VersionDeps,
   local: Discovery,
   cwd: string,
-): Promise<Blocker | null> {
+): Promise<{ blocker: Blocker | null; defaultRef: string | null }> {
   if (local.installSource.kind !== "directory" || !local.checkout?.branch || !local.remoteUrl) {
-    return null;
+    return { blocker: null, defaultRef: null };
   }
   const head = await readDefaultBranch(deps.git, local.remoteUrl, cwd, CHECK_STEP_TIMEOUT_MS);
   const branch = head ? parseSymrefHead(head) : null;
   const expected = branch?.ref.replace(/^refs\/heads\//, "") ?? null;
   const remoteName = local.checkout.upstream?.slice(0, local.checkout.upstream.indexOf("/"));
   if (expected && remoteName && local.checkout.upstream === `${remoteName}/${expected}`)
-    return null;
-  return blocker(
-    "branch_mismatch",
-    "switch_tracking_branch",
-    `local branch ${local.checkout.branch} tracks ${local.checkout.upstream ?? "nothing"}; remote default branch is ${expected ?? "unknown"}. Check out the default branch and retry, or update manually.`,
-  );
+    return { blocker: null, defaultRef: branch?.ref ?? null };
+  return {
+    blocker: blocker(
+      "branch_mismatch",
+      "switch_tracking_branch",
+      `local branch ${local.checkout.branch} tracks ${local.checkout.upstream ?? "nothing"}; remote default branch is ${expected ?? "unknown"}. Check out the default branch and retry, or update manually.`,
+    ),
+    defaultRef: branch?.ref ?? null,
+  };
 }
 
 async function packageVersionAt(
@@ -816,6 +891,77 @@ async function locateStore(
   return { root, serverId, store: createStore(deps.files, root) };
 }
 
+const STALE_REFS_FILE = "pending-commits-refs.json";
+const STALE_REFS_LIMIT = 50;
+
+type StaleRefsStore = { file: string | null; hooksDir: string | null; refs: string[] };
+
+async function readStaleRefs(deps: VersionDeps): Promise<StaleRefsStore> {
+  const located = await locateStore(deps);
+  if (!located) return { file: null, hooksDir: null, refs: [] };
+  const checks = path.join(located.root, "checks");
+  const file = path.join(checks, STALE_REFS_FILE);
+  // Plugin reload briefly overlaps the old and new processes. The new process
+  // may delete a private ref the old one is still fetching; only that check's
+  // pending list becomes null, and the ref itself has no repository side effect.
+  const text = await readOptional(deps.files, file, 64 * 1024);
+  if (!text) return { file, hooksDir: path.join(checks, "hooks"), refs: [] };
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const values =
+      parsed && typeof parsed === "object" && "refs" in parsed && Array.isArray(parsed.refs)
+        ? parsed.refs
+        : [];
+    const refs = values.filter(
+      (ref): ref is string => typeof ref === "string" && isPrivateRef(ref),
+    );
+    return {
+      file,
+      hooksDir: path.join(checks, "hooks"),
+      refs: [...new Set(refs)].slice(0, STALE_REFS_LIMIT),
+    };
+  } catch {
+    return { file, hooksDir: path.join(checks, "hooks"), refs: [] };
+  }
+}
+
+async function writeStaleRefs(
+  deps: VersionDeps,
+  file: string | null,
+  refs: readonly string[],
+): Promise<void> {
+  if (!file) return;
+  if (refs.length === 0) {
+    try {
+      await deps.files.remove(file);
+    } catch {
+      // The stale marker is advisory; a missing file needs no further action.
+    }
+    return;
+  }
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await deps.files.writeAtomic(
+      file,
+      `${JSON.stringify({ refs: refs.slice(0, STALE_REFS_LIMIT) })}\n`,
+    );
+  } catch {
+    // Keep the current result; the next check retries only when the write succeeded.
+  }
+}
+
+/** Create an empty directory so `core.hooksPath` points at no hooks. */
+async function ensureEmptyDir(deps: VersionDeps, dir: string): Promise<string> {
+  const marker = path.join(dir, ".keep");
+  try {
+    await deps.files.writeAtomic(marker, "");
+    await deps.files.remove(marker);
+  } catch {
+    // A missing hooks directory also has no hooks; the isolation flags still apply.
+  }
+  return dir;
+}
+
 async function readServerId(files: FilesPort, home: string): Promise<string | null> {
   const text = (await readOptional(files, path.join(home, "server-id"), 4096))?.trim() ?? "";
   return text || null;
@@ -928,6 +1074,7 @@ function blankInfo(observedAt: string): VersionInfo {
     canUpdate: false,
     cliAvailable: false,
     checkId: null,
+    pendingCommits: null,
     blockers: [],
   });
 }

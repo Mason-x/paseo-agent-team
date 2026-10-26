@@ -35,12 +35,12 @@
   npm and registry installs are only reported
 - the reloaded plugin confirms its own commit and version, npm is resolved from a real `npm-cli.js`
   before any git write, and remote credentials never reach RPC results or job files
+- 版本管理：检查更新时列出待更新的提交数和标题
 - Team mode data model: Teams store `mode`, `memberCreation`, and `collaboration`; Roles store an
   explicit `executionPolicy` tier/task kind (defaults written for the 22 presets); host Preferences
   store the economy pool and quota recovery policy; the default seat cap is now 24 with no storage
   upper bound, a launch never creates more than 64 members, and stored documents keep unknown
   values and fields instead of invalidating
-
 ### Bug Fixes
 
 - default preset sync compares the effective Role tier, so an existing pre-tier Role with the

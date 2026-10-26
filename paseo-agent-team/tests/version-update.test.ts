@@ -76,6 +76,7 @@ function info(canUpdate: boolean): VersionInfo {
       error: null,
     },
     relation: "behind",
+    pendingCommits: null,
     updateAvailable: true,
     canUpdate,
     cliAvailable: true,
@@ -247,6 +248,57 @@ describe("update start", () => {
     );
     const store = createStore(memoryFiles(), storeRoot(HOME, "server-1"));
     expect(store.root).toContain("agent-team-runtime");
+  });
+  test("legacy update jobs still load while a legacy check result is rejected", async () => {
+    const files = memoryFiles({ [path.join(HOME, "server-id")]: "server-1" });
+    const store = createStore(files, storeRoot(HOME, "server-1"));
+    const base = {
+      schemaVersion: 1,
+      requestId: REQUEST,
+      kind: "update",
+      phase: "fetching",
+      seq: 1,
+      startedAt: "2026-10-25T00:00:00.000Z",
+      updatedAt: "2026-10-25T00:00:00.000Z",
+      finishedAt: null,
+      from: null,
+      target: null,
+      result: null,
+      error: null,
+      rollback: "not-needed",
+    };
+    const runningId = "44444444-4444-4444-8444-444444444444";
+    const doneId = "55555555-5555-4555-8555-555555555555";
+    const checkId = "66666666-6666-4666-8666-666666666666";
+    const legacyResult = JSON.parse(JSON.stringify(info(true))) as Record<string, unknown>;
+    delete legacyResult.pendingCommits;
+    await files.writeAtomic(
+      path.join(store.jobDir(runningId), "status.json"),
+      JSON.stringify({ ...base, id: runningId, state: "running" }),
+    );
+    await files.writeAtomic(
+      path.join(store.jobDir(doneId), "status.json"),
+      JSON.stringify({
+        ...base,
+        id: doneId,
+        state: "succeeded",
+        phase: "done",
+        finishedAt: "2026-10-25T00:01:00.000Z",
+      }),
+    );
+    await files.writeAtomic(
+      path.join(store.jobDir(checkId), "status.json"),
+      JSON.stringify({
+        ...base,
+        id: checkId,
+        kind: "check",
+        state: "succeeded",
+        result: legacyResult,
+      }),
+    );
+    expect((await store.readJob(runningId))?.state).toBe("running");
+    expect((await store.readJob(doneId))?.state).toBe("succeeded");
+    expect(await store.readJob(checkId)).toBeNull();
   });
 });
 

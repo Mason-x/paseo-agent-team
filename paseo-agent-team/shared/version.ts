@@ -7,6 +7,7 @@ export const PACKAGE_NAME = "@mason-x/paseo-agent-team";
 export const RELEASE_TAG_PREFIX = "paseo-agent-team-v";
 /** A persisted check may start an update only inside this window. */
 export const CHECK_TTL_MS = 5 * 60 * 1000;
+export const CHECK_TOTAL_TIMEOUT_MS = 25_000;
 export const CHECK_STEP_TIMEOUT_MS = 15_000;
 export const RUNTIME_VERIFY_TIMEOUT_MS = 90_000;
 
@@ -145,6 +146,20 @@ export const RelationSchema = z.enum([
   "unknown",
 ]);
 
+export const PendingCommitsSchema = z
+  .object({
+    count: z.number().int().nonnegative(),
+    subjects: z.array(z.string().max(200)).max(10),
+    truncated: z.boolean(),
+  })
+  .strict();
+
+export const PendingCommitsDiagnosticsSchema = z
+  .object({
+    staleRefs: z.array(z.string().max(200)).max(10),
+  })
+  .strict();
+
 export const VersionInfoSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -161,6 +176,8 @@ export const VersionInfoSchema = z
       })
       .strict(),
     relation: RelationSchema,
+    pendingCommits: PendingCommitsSchema.nullable(),
+    pendingCommitsDiagnostics: PendingCommitsDiagnosticsSchema.optional(),
     updateAvailable: z.boolean().nullable(),
     canUpdate: z.boolean(),
     /** False when this install has no usable `@getpaseo/cli` entry. Display and check still work. */
@@ -299,6 +316,8 @@ export type BlockerCode = z.infer<typeof BlockerCodeSchema>;
 export type RemedyCode = z.infer<typeof RemedyCodeSchema>;
 export type Blocker = z.infer<typeof BlockerSchema>;
 export type Relation = z.infer<typeof RelationSchema>;
+export type PendingCommits = z.infer<typeof PendingCommitsSchema>;
+export type PendingCommitsDiagnostics = z.infer<typeof PendingCommitsDiagnosticsSchema>;
 export type VersionInfo = z.infer<typeof VersionInfoSchema>;
 export type Phase = z.infer<typeof PhaseSchema>;
 export type JobState = z.infer<typeof JobStateSchema>;
