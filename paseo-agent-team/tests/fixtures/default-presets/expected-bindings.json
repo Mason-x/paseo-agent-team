@@ -65,6 +65,11 @@
     "fallback": ["agent_profile_mutltn52_uvfm5351b97", "agent_profile_mubbhclu_e57toxj0x"]
   },
   {
+    "id": "eng-rapid",
+    "preferred": ["agent_profile_mtw3l35d_kiz9cdpp92f"],
+    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a", "agent_profile_mubbhclu_e57toxj0x"]
+  },
+  {
     "id": "eng-ops",
     "preferred": ["agent_profile_mubbhclu_e57toxj0x", "agent_profile_mucika28_q5u3fhksr9"],
     "fallback": ["agent_profile_mutlstlz_riirwcu36j"]

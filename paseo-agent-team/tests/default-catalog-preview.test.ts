@@ -38,11 +38,11 @@ describe("default catalog preview", () => {
       warnings: [],
     });
     if (!preview.ok) throw new Error("unexpected blocked preview");
-    expect(preview.roles).toHaveLength(22);
+    expect(preview.roles).toHaveLength(23);
     expect(
       preview.roles.every((row) => row.kind === "missing" && row.defaultAction === "add"),
     ).toBe(true);
-    expect(preview.bindingReport.length).toBeGreaterThan(22);
+    expect(preview.bindingReport.length).toBeGreaterThan(23);
     expect(preview.bindingReport.every((entry) => entry.method === "exact")).toBe(true);
     expect(JSON.stringify(preview)).not.toContain('"notes"');
     expect(deps.roles.read).toHaveBeenCalledTimes(1);

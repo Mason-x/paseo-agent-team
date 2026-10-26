@@ -218,7 +218,7 @@ describe("server entry", () => {
     expect(await status({ runId: "run-unknown" }, { paseo: port })).toEqual({ job: null });
   });
 
-  test("serves exactly 22 default Roles bound to this host's Profiles and no Teams", async () => {
+  test("serves exactly 23 default Roles bound to this host's Profiles and no Teams", async () => {
     const { server, handlers } = fakeServer();
     contribute(server);
     const { port } = fakePort({ agentProfiles: sourceProfiles });
@@ -226,7 +226,7 @@ describe("server entry", () => {
       {},
       { paseo: port },
     )) as { roles: unknown[]; teams: unknown[] };
-    expect(catalog.roles).toHaveLength(22);
+    expect(catalog.roles).toHaveLength(23);
     expect(catalog.teams).toEqual([]);
     expect(exampleCatalogRpc.output.parse(catalog)).toEqual(catalog);
     for (const role of catalog.roles) RoleSchema.parse(role);

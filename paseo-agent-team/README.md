@@ -49,7 +49,7 @@ and **Launch agent team** Command Center actions open the panel directly.
 
 1. Create at least one Paseo Agent Profile per provider you want on a team
    (**Settings → Agents / Profiles**). Roles store Profile ids and optional binding hints.
-2. Open **Agent Teams → Roles**. Create a Role or import the 22 default Role presets
+2. Open **Agent Teams → Roles**. Create a Role or import the 23 default Role presets
    when the catalog is empty. The presets do not include Teams.
 3. Bind each Role to a preferred Profile (and optional fallbacks). Missing
    Profiles are marked; they are never silently replaced.
@@ -60,6 +60,11 @@ The first import into a new, empty catalog uses the default Role presets. **同�
 previews additions and field differences: missing presets are selected by default; changed
 Roles and previously deleted presets are kept unless you explicitly select them. Adopting a
 preset preserves its creation time and rebinds its Profiles using the current host.
+
+The **【工程】快速开发** preset uses Grok 4.6 High (the configured
+`Grok-4.6-High-Fast` Profile), with DeepSeek V4.1 Flash Max and GPT-6.1-Sol Max as
+fallbacks. It handles clearly specified features, local fixes, scripts, tests, and review fixes
+as an `execution/coding` member. Existing catalogs can add it with **同步默认预设**.
 
 Binding requires a normalized name and identical provider/model/mode/thinking settings, or a
 unique runtime match when there is no same-name Profile. Ambiguous, changed, or missing
