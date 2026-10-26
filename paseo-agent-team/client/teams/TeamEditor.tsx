@@ -1,12 +1,23 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
+import { toJsonValue } from "../../shared/json";
 import type { Role } from "../../shared/schemas/role";
 import type { Team, TeamMember } from "../../shared/schemas/team";
 import { TeamSchema } from "../../shared/schemas/team";
 import type { TeamMode } from "../../shared/schemas/team-mode";
+import { TeamsDocumentSchema, teamsSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import {
+  type EditorDocumentSnapshot,
+  type EditorParsed,
+  loadEditorSnapshot,
+  saveEditorRow,
+} from "../catalog/editor-save";
 import { keepTeamMetadata } from "../catalog/preset-metadata";
 import { ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
@@ -30,6 +41,16 @@ import {
   usedSeatIds,
 } from "./team-mode-edit";
 
+const teamsRead = settingsRpc(teamsSettings.id).read;
+const teamsWrite = settingsRpc(teamsSettings.id).write;
+
+function parseTeamsDocument(values: unknown): EditorParsed<Team> {
+  const parsed = TeamsDocumentSchema.safeParse(values);
+  return parsed.success
+    ? { ok: true, rows: parsed.data.teams }
+    : { ok: false, error: parsed.error.issues.map((entry) => entry.message).join("\n") };
+}
+
 export function TeamEditor({
   theme,
   layout,
@@ -40,7 +61,6 @@ export function TeamEditor({
   existingIds,
   saving,
   onClose,
-  onSave,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -53,6 +73,8 @@ export function TeamEditor({
   onClose: () => void;
   onSave: (team: Team, overwrite: boolean) => Promise<boolean | "conflict">;
 }) {
+  const readTeamsDoc = useRpc(teamsRead);
+  const writeTeamsDoc = useRpc(teamsWrite);
   const defaultCoordinatorId = roles[0]?.id ?? "";
   const [name, setName] = useState(team?.name ?? "");
   const [id, setId] = useState(team?.id ?? slugify(team?.name ?? "", "team"));
@@ -86,6 +108,10 @@ export function TeamEditor({
   const [conflict, setConflict] = useState(false);
   const [formSeed, setFormSeed] = useState(0);
   const [idSeed, setIdSeed] = useState(0);
+  const [snapshotReady, setSnapshotReady] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savingHere, setSavingHere] = useState(false);
+  const opened = useRef<EditorDocumentSnapshot<Team> | null>(null);
   const idLocked = mode === "edit";
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
@@ -122,6 +148,26 @@ export function TeamEditor({
     setFormSeed((seed) => seed + 1);
     setIdSeed((seed) => seed + 1);
   }, [autoSlug, defaultCoordinatorId, mode, open, roles, team]);
+
+  useEffect(() => {
+    opened.current = null;
+    setSnapshotReady(false);
+    setSaveError(null);
+    if (!open) return;
+    let live = true;
+    void loadEditorSnapshot(() => readTeamsDoc({}), parseTeamsDocument).then((result) => {
+      if (!live) return;
+      if (!result.ok) {
+        setSaveError(result.error || zh.saveFail);
+        return;
+      }
+      opened.current = result.snapshot;
+      setSnapshotReady(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open, readTeamsDoc]);
 
   async function submit(overwrite = false) {
     const resolvedName = nameRef.current;
@@ -160,12 +206,47 @@ export function TeamEditor({
       setErrors(next);
       return;
     }
-    const result = await onSave(keepTeamMetadata(team, parsed.data), overwrite);
+    const result = await saveEditorRowWithSnapshot(
+      mode,
+      keepTeamMetadata(team, parsed.data),
+      overwrite,
+    );
     if (result === "conflict") {
       setConflict(true);
       return;
     }
-    if (result) onClose();
+    if (result === "saved") onClose();
+  }
+
+  async function saveEditorRowWithSnapshot(
+    editorMode: "create" | "edit",
+    row: Team,
+    overwrite: boolean,
+  ) {
+    const snapshot = opened.current;
+    if (!snapshot) {
+      setSaveError(zh.saveFail);
+      return "failed" as const;
+    }
+    setSaveError(null);
+    setSavingHere(true);
+    try {
+      const result = await saveEditorRow({
+        mode: editorMode,
+        key: "teams",
+        row,
+        opened: snapshot,
+        forceOverwrite: overwrite,
+        read: () => readTeamsDoc({}),
+        write: (document, revision) =>
+          writeTeamsDoc({ revision, values: toJsonValue(document) as JSONType }),
+        parse: parseTeamsDocument,
+      });
+      if (result !== "saved" && result !== "conflict") setSaveError(zh.saveFail);
+      return result;
+    } finally {
+      setSavingHere(false);
+    }
   }
 
   return (
@@ -439,10 +520,13 @@ export function TeamEditor({
               multiline
               onChange={setOperatingRules}
             />
+            {saveError ? (
+              <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{saveError}</Text>
+            ) : null}
             <ModalActions
               theme={theme}
-              confirmLabel={saving ? zh.saving : zh.save}
-              confirmDisabled={saving}
+              confirmLabel={saving || savingHere ? zh.saving : zh.save}
+              confirmDisabled={saving || savingHere || !snapshotReady}
               onCancel={onClose}
               onConfirm={() => void submit(false)}
             />
@@ -455,6 +539,7 @@ export function TeamEditor({
         title={zh.conflictTitle}
         body={zh.conflictTeam}
         confirmLabel={zh.overwrite}
+        cancelLabel={zh.reload}
         danger
         onCancel={() => {
           setConflict(false);

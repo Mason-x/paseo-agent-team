@@ -94,6 +94,7 @@ export const zh = {
     `无法删除 ${name}。它被以下 Team 使用：${teams}。`,
   ok: "确定",
   overwrite: "覆盖",
+  reload: "重新加载",
   conflictTitle: "内容已被更新",
   conflictRole: "另一台客户端已保存此目录。重新加载最新副本，或用当前 Role 覆盖。",
   conflictTeam: "另一台客户端已保存此目录。重新加载最新副本，或用当前 Team 覆盖。",

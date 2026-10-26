@@ -1,7 +1,11 @@
+import { settingsRpc } from "@getpaseo/plugin";
+import { useRpc } from "@getpaseo/plugin/client";
 import { Modal } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
+import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
+import { toJsonValue } from "../../shared/json";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import {
@@ -10,7 +14,14 @@ import {
   type Role,
   RoleSchema,
 } from "../../shared/schemas/role";
+import { RolesDocumentSchema, rolesSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import {
+  type EditorDocumentSnapshot,
+  type EditorParsed,
+  loadEditorSnapshot,
+  saveEditorRow,
+} from "../catalog/editor-save";
 import { keepRoleMetadata, mergeRoleExecutionPolicy } from "../catalog/preset-metadata";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
@@ -28,6 +39,16 @@ import {
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { ListEditor } from "./ListEditor";
 import { ProfilePicker } from "./ProfilePicker";
+
+const rolesRead = settingsRpc(rolesSettings.id).read;
+const rolesWrite = settingsRpc(rolesSettings.id).write;
+
+function parseRolesDocument(values: unknown): EditorParsed<Role> {
+  const parsed = RolesDocumentSchema.safeParse(values);
+  return parsed.success
+    ? { ok: true, rows: parsed.data.roles }
+    : { ok: false, error: parsed.error.issues.map((entry) => entry.message).join("\n") };
+}
 
 export type RoleDraft = {
   id: string;
@@ -120,7 +141,6 @@ export function RoleEditor({
   saving,
   onRefreshProfiles,
   onClose,
-  onSave,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -136,12 +156,18 @@ export function RoleEditor({
   onClose: () => void;
   onSave: (role: Role, overwrite: boolean) => Promise<boolean | "conflict">;
 }) {
+  const readRolesDoc = useRpc(rolesRead);
+  const writeRolesDoc = useRpc(rolesWrite);
   const [draft, setDraft] = useState<RoleDraft>(() => toDraft(role));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState(false);
   const [mcpError, setMcpError] = useState<string | undefined>();
   const [formSeed, setFormSeed] = useState(0);
   const [idSeed, setIdSeed] = useState(0);
+  const [snapshotReady, setSnapshotReady] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savingHere, setSavingHere] = useState(false);
+  const opened = useRef<EditorDocumentSnapshot<Role> | null>(null);
   const idLocked = mode === "edit";
   const overwriteRef = useRef(false);
   const autoSlug = useRef(createAutoSlug("role")).current;
@@ -162,6 +188,26 @@ export function RoleEditor({
       setIdSeed((seed) => seed + 1);
     }
   }, [autoSlug, mode, open, role]);
+
+  useEffect(() => {
+    opened.current = null;
+    setSnapshotReady(false);
+    setSaveError(null);
+    if (!open) return;
+    let live = true;
+    void loadEditorSnapshot(() => readRolesDoc({}), parseRolesDocument).then((result) => {
+      if (!live) return;
+      if (!result.ok) {
+        setSaveError(result.error || zh.saveFail);
+        return;
+      }
+      opened.current = result.snapshot;
+      setSnapshotReady(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open, readRolesDoc]);
 
   function parseMcp(): McpServers | undefined | "invalid" {
     const text = draft.mcpServersText.trim();
@@ -224,12 +270,37 @@ export function RoleEditor({
       return;
     }
     setErrors({});
-    const result = await onSave(keepRoleMetadata(role, parsed.data), overwrite);
-    if (result === "conflict") {
-      setConflict(true);
+    const snapshot = opened.current;
+    if (!snapshot) {
+      setSaveError(zh.saveFail);
       return;
     }
-    if (result) onClose();
+    setSaveError(null);
+    setSavingHere(true);
+    try {
+      const result = await saveEditorRow({
+        mode,
+        key: "roles",
+        row: keepRoleMetadata(role, parsed.data),
+        opened: snapshot,
+        forceOverwrite: overwrite,
+        read: () => readRolesDoc({}),
+        write: (document, revision) =>
+          writeRolesDoc({ revision, values: toJsonValue(document) as JSONType }),
+        parse: parseRolesDocument,
+      });
+      if (result === "saved") {
+        onClose();
+        return;
+      }
+      if (result === "conflict") {
+        setConflict(true);
+        return;
+      }
+      setSaveError(zh.saveFail);
+    } finally {
+      setSavingHere(false);
+    }
   }
 
   return (
@@ -425,10 +496,13 @@ export function RoleEditor({
                 }}
               />
             </Field>
+            {saveError ? (
+              <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{saveError}</Text>
+            ) : null}
             <ModalActions
               theme={theme}
-              confirmLabel={saving ? zh.saving : zh.save}
-              confirmDisabled={saving}
+              confirmLabel={saving || savingHere ? zh.saving : zh.save}
+              confirmDisabled={saving || savingHere || !snapshotReady}
               onCancel={onClose}
               onConfirm={() => void submit(false)}
             />
@@ -441,6 +515,7 @@ export function RoleEditor({
         title={zh.conflictTitle}
         body={zh.conflictRole}
         confirmLabel={zh.overwrite}
+        cancelLabel={zh.reload}
         danger
         onCancel={() => {
           setConflict(false);
