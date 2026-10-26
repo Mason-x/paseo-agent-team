@@ -1,4 +1,6 @@
-import type { DesignIssueAction, DesignIssueCode, DesignState } from "../schemas/design";
+import type { DesignIssueAction, DesignIssueCode, DesignJob, DesignState } from "../schemas/design";
+import type { SeatPreview } from "../schemas/launch-preview";
+import type { TeamMode } from "../schemas/team-mode";
 
 /**
  * Chinese copy for the Team designer. `zh.design` is this object; error keys deliberately sit at
@@ -85,6 +87,105 @@ export const designZh = {
     "retry-save": "重试保存",
     inspect: "查看详情",
   } satisfies Record<DesignIssueAction, string>,
+
+  modes: {
+    sota: "SOTA",
+    economy: "经济",
+    collaborative: "协作",
+  } satisfies Record<TeamMode, string>,
+
+  budgets: {
+    economy: "经济",
+    sota: "SOTA",
+    unknown: "未核实",
+  },
+  budgetUnknown: "未核实",
+  budgetBasis: {
+    host: "宿主标签",
+    pool: "经济池",
+    "conservative-default": "保守默认",
+  },
+  sources: {
+    "role-preferred": "Role 首选",
+    "role-fallback": "Role 备选",
+    "economy-pool": "经济池",
+    unavailable: "待命",
+  },
+  permissionKinds: {
+    tool: "工具",
+    plan: "计划",
+    question: "提问",
+    mode: "模式",
+    other: "其他",
+  } satisfies Record<DesignJob["pendingPermissions"][number]["kind"], string>,
+
+  jobHeading: "设计任务",
+  jobUntitled: "未填写需求",
+  jobAttempt: (attempt: number, max: number) => `第 ${attempt} / ${max} 轮`,
+  jobModeValue: (mode: string) => `模式：${mode}`,
+  jobDesignerProfileValue: (profile: string) => `设计 Agent：${profile}`,
+  jobPermissionLine: (kind: string, title: string) => `${kind} · ${title}`,
+  jobExpand: "展开设计任务",
+  jobCollapse: "收起设计任务",
+  jobOpenAgent: "打开设计对话",
+  jobAgentUnavailable: (agentId: string) => `当前客户端无法跳转，agentId：${agentId}`,
+  jobPermissions: (count: number) => `${count} 个权限请求待处理`,
+  jobPermissionOpen: "打开原对话处理权限",
+  jobPermissionEmpty: "请到原对话处理权限请求",
+  jobPermissionTruncated: "还有权限请求未显示，请到原对话处理",
+  jobCancel: "取消设计",
+  jobRetrySave: "重试保存",
+  jobContinueRecheck: "重新核验",
+  jobContinueRepair: "继续修正",
+  jobBusy: "正在处理…",
+  jobSaveRolesOnly: "Role 已保存，Team 尚未确认",
+  jobSaveUnknown: "写入结果尚未确认，请核对目录",
+  jobSaveCommitted: (teamId: string) => `已保存为 Team：${teamId}`,
+  jobRecovered: "已从本地记录恢复任务",
+  jobIssuesTruncated: (count: number) => `另有 ${count} 个问题未显示`,
+
+  resultHeading: "设计方案",
+  resultMode: "模式",
+  resultTeamLine: (name: string, id: string) => `${name} · ${id}`,
+  resultNewRoleLine: (name: string, id: string) => `${name} · ${id}`,
+  resultTargetLabel: "目标工作区",
+  resultNoTarget: "未指定目标工作区（不会自动使用承载工作区）",
+  resultReuse: "复用 Role",
+  resultNewRoles: "新增 Role",
+  resultSeats: "物理席位",
+  resultCoordinator: "协调者",
+  resultSeatCohort: "协作组",
+  resultCounts: (logical: number, physical: number) => `逻辑席位 ${logical} · 物理席位 ${physical}`,
+  resultCountsNote: "计数不含协调者",
+  resultPreviewUnavailable: "预览数据不完整，无法展示席位",
+  seatPurposes: {
+    member: "成员",
+    candidate: "候选",
+    judge: "裁判",
+    escalation: "升级",
+  } satisfies Record<SeatPreview["purpose"], string>,
+  seatActivations: {
+    eager: "启动时创建",
+    "on-demand": "首次派活时创建",
+    "escalation-only": "待命",
+  } satisfies Record<SeatPreview["activation"], string>,
+  resultWarnings: "警告",
+  resultSeatProfile: "Profile",
+  resultSeatRuntime: "运行配置",
+  resultSeatSource: "来源",
+  resultSeatFamily: "家族",
+  resultSeatBudget: "预算",
+  resultSeatReason: "理由",
+  resultSeatUnavailable: "无可用 Profile",
+  resultNoSeats: "没有可展示的席位",
+  resultUnknownValue: "—",
+  resultLaunch: "预览启动",
+  resultLaunchHint: "保存 Team 后才能预览启动",
+
+  prefillQueued: "已填入设计任务，请确认后开始。",
+  prefillTooLong: "需求过长，未打开设计师。",
+  prefillScopeUnavailable: "无法确认当前 host，已打开空白设计师。",
+  submitInFlight: "上一次提交尚未完成",
 } as const;
 
 export type DesignIssueMessageKey = Exclude<keyof typeof designZh, "phases" | "actions">;
