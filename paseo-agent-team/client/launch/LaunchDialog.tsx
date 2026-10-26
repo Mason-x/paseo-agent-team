@@ -1,24 +1,37 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { buildLaunchPlan } from "../../shared/domain/launch-plan";
-import type { PaseoAdapter, PaseoProfile } from "../../shared/paseo/adapter";
+import type { PaseoAdapter } from "../../shared/paseo/adapter";
 import {
   type LaunchJob,
   type LaunchTarget,
+  launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
 } from "../../shared/rpc";
+import type { LaunchPreviewResult } from "../../shared/schemas/launch-preview";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
+import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 import { ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
 import { TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
+import { TeamModePicker } from "../shared/TeamModePicker";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
+import { readStoredTeamMode } from "../teams/team-mode-edit";
 import { LaunchPreview } from "./LaunchPreview";
+import {
+  launchGate,
+  launchPreviewIdentity,
+  launchPreviewQueryKey,
+  PREVIEW_TASK_DEBOUNCE_MS,
+  previewTaskState,
+  startFailureAction,
+} from "./launch-preview-state";
 import { useLaunchContext } from "./use-launch-context";
 
 const POLL_MS = 800;
@@ -104,8 +117,8 @@ function SegmentedTarget({
 }
 
 /**
- * Previews a launch locally, then hands it to the host, which re-validates and creates the team
- * in the background. Closing the dialog mid-launch is safe: the host keeps going.
+ * Requests a host preview, then starts with its plan hash. The host re-validates and creates the
+ * team in the background. Closing the dialog mid-launch is safe: the host keeps going.
  *
  * Mount it per launch request: the initial Team and task seed its state once, so a catalog
  * refresh never overwrites what the user is typing.
@@ -118,11 +131,11 @@ export function LaunchDialog({
   hostId,
   teams,
   roles,
-  profiles,
-  maxMembers,
   initialTeamId,
   lockTeam,
   initialTask,
+  initialMode,
+  initialWorkspaceId,
   workspaceId: fixedWorkspaceId,
   onClose,
   onLaunched,
@@ -134,12 +147,14 @@ export function LaunchDialog({
   hostId: string;
   teams: readonly Team[];
   roles: readonly Role[];
-  profiles: readonly PaseoProfile[];
-  maxMembers: number;
   initialTeamId?: string;
   /** Hide the Team picker: the caller already chose the Team. */
   lockTeam?: boolean;
   initialTask?: string;
+  /** One launch only; defaults to the selected Team's saved mode. */
+  initialMode?: TeamMode;
+  /** Preselected, still-editable workspace target; unlike `workspaceId`, it never locks the target. */
+  initialWorkspaceId?: string;
   /** Launch into this workspace; otherwise the user picks or creates one. */
   workspaceId?: string;
   onClose: () => void;
@@ -158,14 +173,27 @@ export function LaunchDialog({
       : (teams[0]?.id ?? "");
   const [teamId, setTeamId] = useState(defaultTeamId);
   const [targetKind, setTargetKind] = useState<TargetKind>("workspace");
-  const [workspaceId, setWorkspaceId] = useState("");
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspaceId ?? "");
   const [projectId, setProjectId] = useState("");
   const [newWorkspaceTitle, setNewWorkspaceTitle] = useState("");
   const [task, setTask] = useState(initialTask ?? "");
+  const [composing, setComposing] = useState(false);
+  const [debouncedTask, setDebouncedTask] = useState(() => (initialTask ?? "").trim());
+  const storedMode = readStoredTeamMode(teams.find((entry) => entry.id === defaultTeamId)?.mode);
+  const [mode, setMode] = useState<TeamMode>(initialMode ?? storedMode.mode);
+  const [modeUnknown, setModeUnknown] = useState<string | null>(
+    initialMode ? null : storedMode.unknown,
+  );
   const [starting, setStarting] = useState(false);
   const [job, setJob] = useState<LaunchJob | null>(null);
   const [serverBlockers, setServerBlockers] = useState<string[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [shownPreview, setShownPreview] = useState<{
+    identity: string;
+    result: LaunchPreviewResult;
+  } | null>(null);
+  const startingRef = useRef(false);
   const announcedRunId = useRef<string | null>(null);
 
   // A single-project host has nothing to choose.
@@ -207,24 +235,6 @@ export function LaunchDialog({
   }, [job, onLaunched, toast]);
 
   const team = teams.find((entry) => entry.id === teamId);
-  const selectedWorkspaceId = fixedWorkspaceId ?? (targetKind === "workspace" ? workspaceId : "");
-  const { availability, daemonConfig } = context;
-  const plan = useMemo(
-    () =>
-      buildLaunchPlan({
-        team,
-        roles,
-        profiles,
-        availability,
-        workspaceId: selectedWorkspaceId,
-        task,
-        runId: "preview",
-        maxMembers,
-        daemonConfig,
-      }),
-    [availability, daemonConfig, maxMembers, profiles, roles, selectedWorkspaceId, task, team],
-  );
-
   const target: LaunchTarget | null = fixedWorkspaceId
     ? { kind: "workspace", workspaceId: fixedWorkspaceId }
     : targetKind === "workspace"
@@ -239,21 +249,121 @@ export function LaunchDialog({
           }
         : null;
   const running = job?.state === "running";
-  const blocked = plan.blockers.length > 0 || !target || starting || running || context.loading;
+  const trimmedTask = task.trim();
+  const { task: previewTask, pending: taskPending } = previewTaskState(
+    trimmedTask,
+    debouncedTask,
+    composing,
+  );
+  useEffect(() => {
+    // Web composition is explicit; native IMEs only have this quiet-period merge.
+    if (composing) return;
+    const timer = setTimeout(() => setDebouncedTask(trimmedTask), PREVIEW_TASK_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [composing, trimmedTask]);
+  const preview = useRpc(launchPreviewRpc);
+  const currentIdentity = launchPreviewIdentity({
+    hostId,
+    teamId,
+    task: previewTask,
+    target,
+    mode,
+  });
+  const previewQuery = useQuery({
+    queryKey: launchPreviewQueryKey({ hostId, teamId, task: previewTask, target, mode }),
+    enabled: open && Boolean(teamId) && previewTask.length > 0 && target !== null && !running,
+    queryFn: async () => {
+      if (!target) throw new Error(zh.modes.previewNoTarget);
+      return preview({ teamId, task: previewTask, target, mode });
+    },
+    staleTime: 0,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const previewError = previewQuery.error
+    ? previewQuery.error instanceof Error
+      ? previewQuery.error.message
+      : zh.modes.previewFailed
+    : null;
+  useEffect(() => {
+    if (!previewQuery.data) {
+      if (!previewQuery.isFetching) setShownPreview(null);
+      return;
+    }
+    setShownPreview({ identity: currentIdentity, result: previewQuery.data });
+  }, [currentIdentity, previewQuery.data, previewQuery.isFetching]);
+  const visiblePreview =
+    shownPreview && (shownPreview.identity === currentIdentity || previewQuery.isFetching)
+      ? shownPreview.result
+      : undefined;
+  const gate = launchGate({
+    starting,
+    running,
+    contextLoading: context.loading,
+    taskReady: trimmedTask.length > 0,
+    taskPending,
+    targetReady: target !== null,
+    preview: shownPreview?.result,
+    previewIdentity: shownPreview?.identity ?? "",
+    currentIdentity,
+    fetching: previewQuery.isFetching,
+    error: previewError,
+  });
+  const blocked = gate.disabled;
+
+  useEffect(() => {
+    if (!currentIdentity) return;
+    setServerBlockers([]);
+    setNotice(null);
+  }, [currentIdentity]);
+
+  function chooseTeam(nextId: string) {
+    const next = teams.find((entry) => entry.id === nextId);
+    const nextMode = readStoredTeamMode(next?.mode);
+    setTeamId(nextId);
+    setMode(nextMode.mode);
+    setModeUnknown(nextMode.unknown);
+  }
 
   async function launch() {
-    if (blocked || !target) return;
+    if (
+      startingRef.current ||
+      blocked ||
+      !target ||
+      !shownPreview ||
+      shownPreview.identity !== currentIdentity ||
+      !shownPreview.result.ok
+    ) {
+      return;
+    }
+    const shown = shownPreview.result.preview;
+    startingRef.current = true;
     setStarting(true);
     setError(null);
     setServerBlockers([]);
+    setNotice(null);
     setJob(null);
     try {
-      const result = await start({ teamId, task, target });
-      if (result.ok) setJob(result.job);
-      else setServerBlockers(result.blockers);
+      const result = await start({
+        teamId,
+        task: previewTask,
+        target,
+        mode,
+        expectedPlanHash: shown.planHash,
+      });
+      if (result.ok) {
+        setJob(result.job);
+      } else if (startFailureAction(result.blockers) === "refresh-preview") {
+        setNotice(zh.modes.previewRefreshed);
+        toast.show(zh.modes.planChanged, { variant: "info" });
+        void previewQuery.refetch();
+      } else {
+        setServerBlockers(result.blockers);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : zh.launchFailed);
     } finally {
+      startingRef.current = false;
       setStarting(false);
     }
   }
@@ -298,9 +408,28 @@ export function LaunchDialog({
                   />
                 );
               }}
-              onChange={setTeamId}
+              onChange={chooseTeam}
             />
           ) : null}
+          <View style={{ gap: 4 }}>
+            <TeamModePicker
+              theme={theme}
+              layout={layout}
+              value={mode}
+              label={zh.modes.launchMode}
+              disabled={starting || running}
+              onChange={(next) => {
+                setMode(next);
+                setModeUnknown(null);
+              }}
+            />
+            <Text style={muted}>{zh.modes.launchModeHint}</Text>
+            {modeUnknown ? (
+              <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+                {zh.modes.launchModeUnknown(modeUnknown)}
+              </Text>
+            ) : null}
+          </View>
           {!fixedWorkspaceId ? (
             <View style={{ gap: 8 }}>
               <SegmentedTarget theme={theme} value={targetKind} onChange={setTargetKind} />
@@ -355,10 +484,22 @@ export function LaunchDialog({
             revision={0}
             multiline
             onChange={setTask}
+            onCompositionChange={setComposing}
           />
-          <LaunchPreview theme={theme} plan={plan} />
+          <LaunchPreview
+            theme={theme}
+            layout={layout}
+            loading={previewQuery.isFetching && !visiblePreview}
+            updating={(previewQuery.isFetching || taskPending) && Boolean(visiblePreview)}
+            error={previewError}
+            result={visiblePreview}
+          />
+          {gate.reason && !visiblePreview ? <Text style={muted}>{gate.reason}</Text> : null}
           {context.error ? (
             <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{context.error}</Text>
+          ) : null}
+          {notice ? (
+            <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{notice}</Text>
           ) : null}
           {serverBlockers.map((blocker) => (
             <Text

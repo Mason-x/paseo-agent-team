@@ -2,9 +2,14 @@ import { describe, expect, test } from "vitest";
 import { hashLaunchPlan } from "../server/launch-hash";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
 import { toModeLaunchPreview } from "../shared/domain/launch-preview";
-import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
+import {
+  type EconomyPolicy,
+  type HostSnapshot,
+  normalizeEconomyPolicy,
+} from "../shared/domain/mode-resolver";
 import { ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
 import type { Team } from "../shared/schemas/team";
+import { zh } from "../shared/zh";
 import {
   allAvailable,
   architect,
@@ -86,9 +91,14 @@ describe("launch preview DTO", () => {
   test("reports the coordinator budget for SOTA and economy pool bindings", () => {
     const sotaPreview = previewOf(makePlan(codingTeam));
     expect(sotaPreview.coordinator).toMatchObject({
-      budget: "sota",
-      budgetBasis: "host",
+      budget: "unknown",
+      budgetBasis: "conservative-default",
     });
+    expect(
+      sotaPreview.seats.every(
+        (seat) => seat.budget === "unknown" && seat.budgetBasis === "conservative-default",
+      ),
+    ).toBe(true);
 
     const poolEconomy: EconomyPolicy = {
       pool: [{ profileId: claudeOpus.id, family: "claude", enabled: true }],
@@ -109,6 +119,30 @@ describe("launch preview DTO", () => {
     });
   });
 
+  test("includes every warning issue once, including missing economy pool entries", () => {
+    const normalized = normalizeEconomyPolicy(
+      {
+        pool: [{ profileId: "missing-profile", family: "ghost", enabled: true }],
+        taskOrder: {},
+        profileBudget: {},
+      },
+      [claudeOpus, codexXhigh],
+    );
+    expect(normalized.ok).toBe(true);
+    if (!normalized.ok) return;
+    const extraIssues = [...(normalized.issues ?? []), ...(normalized.issues ?? [])];
+    const plan = makePlan({ ...codingTeam, mode: "economy" }, [techLead, architect, developer], {
+      mode: "economy",
+      economy: normalized.value,
+    });
+    const preview = toModeLaunchPreview(plan, "a".repeat(64), extraIssues, normalized.value);
+    const missing = preview.warnings.filter(
+      (warning) => warning === zh.modes.poolEntryMissing("missing-profile"),
+    );
+    expect(missing).toHaveLength(1);
+    expect(new Set(preview.warnings).size).toBe(preview.warnings.length);
+  });
+
   test("adding coordinator budget fields does not change the plan hash", () => {
     const plan = makePlan(codingTeam);
     const input = {
@@ -125,7 +159,7 @@ describe("launch preview DTO", () => {
     const hash = hashLaunchPlan(input);
     const preview = toModeLaunchPreview(plan, hash, [], emptyEconomy);
     expect(preview.planHash).toBe(hash);
-    expect(preview.coordinator.budget).toBe("sota");
+    expect(preview.coordinator.budget).toBe("unknown");
     expect(hashLaunchPlan(input)).toBe(hash);
   });
 

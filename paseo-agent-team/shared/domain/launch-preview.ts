@@ -1,6 +1,6 @@
 import type { PaseoProfile } from "../paseo/adapter";
 import type { CoordinatorPreview, ModeLaunchPreview, SeatPreview } from "../schemas/launch-preview";
-import type { LaunchPlan } from "./launch-plan";
+import { type LaunchPlan, warningIssueText } from "./launch-plan";
 import { budgetOf, type EconomyPolicy, type ProfileSelection } from "./mode-resolver";
 import type { ModeIssue } from "./role-execution";
 
@@ -53,6 +53,24 @@ function issuesOf(selection: ProfileSelection) {
   }));
 }
 
+function previewWarnings(
+  plan: LaunchPlan,
+  extraIssues: readonly ModeIssue[],
+  seats: LaunchPlan["seats"],
+): string[] {
+  const warnings = [...plan.warnings];
+  const seen = new Set<string>();
+  for (const issue of [...extraIssues, ...plan.seatIssues]) {
+    if (issue.severity !== "warning") continue;
+    const key = `${issue.code}:${issue.seatId ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const text = warningIssueText(issue, seats);
+    if (!warnings.includes(text)) warnings.push(text);
+  }
+  return warnings;
+}
+
 /** Maps an internal launch plan to the app-facing preview DTO; prompts, MCP, and notes stay out. */
 export function toModeLaunchPreview(
   plan: LaunchPlan,
@@ -86,24 +104,14 @@ export function toModeLaunchPreview(
     plan.coordinator.profile.id === "missing"
       ? undefined
       : budgetOf(plan.coordinator.profile.id, economy);
-  // SOTA is the host's explicit original-binding mode, so an unlabeled seat there is SOTA budget.
-  const effectiveCoordinatorBudget =
-    plan.mode === "sota" &&
-    coordinatorBudget?.budget === "unknown" &&
-    coordinatorBudget.basis === "conservative-default"
-      ? { budget: "sota" as const, basis: "host" as const }
-      : coordinatorBudget;
   const coordinator: CoordinatorPreview = {
     roleId: plan.coordinator.role.id,
     roleName: plan.coordinator.role.name,
     profile: coordinatorProfile,
     source: plan.coordinator.source === "role-fallback" ? "role-fallback" : "role-preferred",
-    ...(effectiveCoordinatorBudget === undefined
+    ...(coordinatorBudget === undefined
       ? {}
-      : {
-          budget: effectiveCoordinatorBudget.budget,
-          budgetBasis: effectiveCoordinatorBudget.basis,
-        }),
+      : { budget: coordinatorBudget.budget, budgetBasis: coordinatorBudget.basis }),
     issues: [],
   };
 
@@ -114,7 +122,7 @@ export function toModeLaunchPreview(
     counts: plan.seatCounts,
     budget: plan.seatBudget,
     issues: dedupeIssues([...extraIssues, ...plan.seatIssues]),
-    warnings: plan.warnings,
+    warnings: previewWarnings(plan, extraIssues, plan.seats),
     planHash,
   };
 }

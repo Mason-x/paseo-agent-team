@@ -10,12 +10,14 @@ export function TeamModePicker({
   layout,
   value,
   onChange,
+  label,
   disabled = false,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
   value: TeamMode;
   onChange: (mode: TeamMode) => void;
+  label?: string;
   disabled?: boolean;
 }) {
   const styles = useMemo(
@@ -53,7 +55,7 @@ export function TeamModePicker({
   const selected = TEAM_MODE_OPTIONS.find((option) => option.value === value);
   return (
     <View style={[styles.root, disabled && styles.disabled]}>
-      <Text style={styles.label}>{zh.teamMode}</Text>
+      <Text style={styles.label}>{label ?? zh.teamMode}</Text>
       <View style={styles.row}>
         {TEAM_MODE_OPTIONS.map((option) => {
           const isSelected = option.value === value;

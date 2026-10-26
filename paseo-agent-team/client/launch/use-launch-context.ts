@@ -1,15 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import type {
-  PaseoAdapter,
-  ProjectSummary,
-  ProviderAvailability,
-  WorkspaceSummary,
-} from "../../shared/paseo/adapter";
+import type { PaseoAdapter, ProjectSummary, WorkspaceSummary } from "../../shared/paseo/adapter";
 import { zh } from "../../shared/zh";
 
 export type LaunchContext = {
-  availability: readonly ProviderAvailability[];
-  daemonConfig: unknown;
   projects: readonly ProjectSummary[];
   workspaces: readonly WorkspaceSummary[];
   loading: boolean;
@@ -18,7 +11,7 @@ export type LaunchContext = {
 
 const EMPTY: readonly never[] = [];
 
-/** Live host facts the launch preview needs. The host re-checks all of them on launch. */
+/** Target choices for the dialog; the host preview owns planning and re-checks everything on launch. */
 export function useLaunchContext(
   adapter: PaseoAdapter,
   hostId: string,
@@ -29,18 +22,14 @@ export function useLaunchContext(
     enabled: options.open,
     staleTime: 15_000,
     queryFn: async () => {
-      const [availability, daemonConfig, projects, workspaces] = await Promise.all([
-        adapter.listProviderAvailability().catch(() => []),
-        adapter.readConfig().catch(() => undefined),
+      const [projects, workspaces] = await Promise.all([
         options.withTargets ? adapter.listProjects() : [],
         options.withTargets ? adapter.listWorkspaces() : [],
       ]);
-      return { availability, daemonConfig, projects, workspaces };
+      return { projects, workspaces };
     },
   });
   return {
-    availability: query.data?.availability ?? EMPTY,
-    daemonConfig: query.data?.daemonConfig,
     projects: query.data?.projects ?? EMPTY,
     workspaces: query.data?.workspaces ?? EMPTY,
     loading: query.isPending && options.open,

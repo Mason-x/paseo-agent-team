@@ -129,6 +129,88 @@ function seatBlockerText(
   }
 }
 
+function warningLabel(entry: ModeIssue, seats: readonly PlannedSeat[]): string {
+  const seat = entry.seatId
+    ? seats.find((item) => item.seatId === entry.seatId || item.logicalSeatId === entry.seatId)
+    : undefined;
+  const instanceLabel =
+    typeof entry.params.instanceLabel === "string"
+      ? entry.params.instanceLabel
+      : seat?.instanceLabel;
+  const name = seat?.roleName ?? entry.roleId ?? "";
+  return instanceLabel ? `${name} (${instanceLabel})` : name;
+}
+
+/** One warning-level issue becomes a warning sentence; the preview and start share this mapping. */
+export function warningIssueText(entry: ModeIssue, seats: readonly PlannedSeat[]): string {
+  const label = warningLabel(entry, seats);
+  const reason = typeof entry.params.reason === "string" ? entry.params.reason : "";
+  const field = typeof entry.params.field === "string" ? entry.params.field : "";
+  const value = entry.params.value === undefined ? "" : String(entry.params.value);
+  const profileId = typeof entry.params.profileId === "string" ? entry.params.profileId : "";
+  const requested = Number(entry.params.requested);
+  const families = Number(entry.params.families);
+  const provider = typeof entry.params.provider === "string" ? entry.params.provider : undefined;
+
+  switch (entry.code) {
+    case "MODE_MEMBER_LIMIT":
+      return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
+    case "MODE_SEAT_DUPLICATE":
+      if (typeof entry.params.instanceLabel === "string") {
+        return zh.modes.duplicateLabelWarning(entry.params.instanceLabel);
+      }
+      return zh.modes.duplicateLabelWarning(label);
+    case "MODE_PROFILE_UNRESOLVED":
+      return reason === "role-missing"
+        ? zh.memberMissing(entry.roleId ?? "")
+        : zh.memberProfileFail(label, reason);
+    case "MODE_ROLE_DISABLED":
+      return zh.modes.roleDisabledWarning(label);
+    case "MODE_CONTEXT_UNAVAILABLE":
+      return reason === "availability-unverified"
+        ? zh.modes.availabilityUnverified
+        : zh.modes.contextUnavailable;
+    case "MODE_UNKNOWN":
+      return zh.modes.unknown([field, value].filter(Boolean).join("="));
+    case "MODE_ROLE_POLICY_UNKNOWN":
+      return zh.modes.rolePolicyWarning(label);
+    case "MODE_ESCALATION_INVALID":
+      return zh.modes.escalationInvalid(label, reason);
+    case "MODE_ESCALATION_UNAVAILABLE":
+      return zh.modes.escalationUnavailable(label, reason);
+    case "MODE_JUDGE_REQUIRED":
+      return zh.modes.judgeRequired(reason);
+    case "MODE_ONDEMAND_FALLBACK_EAGER":
+      return zh.modes.onDemandFallbackEager;
+    case "MODE_ONDEMAND_UNAVAILABLE":
+      return zh.modes.onDemandUnavailable;
+    case "MODE_POOL_EMPTY":
+      return zh.modes.poolEmpty;
+    case "MODE_POOL_UNAVAILABLE":
+      return zh.modes.poolUnavailable(provider);
+    case "MODE_POOL_ENTRY_MISSING":
+      return zh.modes.poolEntryMissing(profileId || label);
+    case "MODE_POOL_CONFIG_INVALID":
+      return zh.modes.poolConfigInvalid(field);
+    case "MODE_POOL_DUPLICATE":
+      return zh.modes.poolDuplicate(profileId || label);
+    case "MODE_POOL_ORDER_IGNORED":
+      return zh.modes.poolOrderIgnored(profileId || label);
+    case "MODE_FAMILY_MISSING":
+      return zh.modes.familyMissing(profileId || label);
+    case "MODE_FAMILIES_REDUCED":
+      return zh.modes.familiesReduced(requested, families);
+    case "MODE_COLLAB_UNAVAILABLE":
+      return zh.modes.collaborationUnavailable;
+    case "MODE_NO_EXECUTION_COHORT":
+      return zh.modes.noExecutionCohort;
+    case "MODE_LIMIT_CLAMPED":
+      return zh.modes.limitClamped(Number(entry.params.limit));
+    default:
+      return zh.modes.unknownFallback(entry.code);
+  }
+}
+
 export function buildLaunchPlan(input: {
   team: Team | undefined;
   roles: readonly Role[];
@@ -248,27 +330,7 @@ export function buildLaunchPlan(input: {
   }
   for (const entry of seatPlan.issues) {
     if (entry.severity !== "warning") continue;
-    const role = entry.roleId ? roleById.get(entry.roleId) : undefined;
-    const label = role
-      ? roleLabel(
-          role,
-          typeof entry.params.instanceLabel === "string" ? entry.params.instanceLabel : undefined,
-        )
-      : (entry.roleId ?? "");
-    if (entry.code === "MODE_ONDEMAND_FALLBACK_EAGER") {
-      warnings.push(zh.modes.onDemandFallbackEager);
-    } else if (entry.code === "MODE_ROLE_DISABLED") {
-      warnings.push(zh.modes.roleDisabledWarning(label));
-    } else if (entry.code === "MODE_ROLE_POLICY_UNKNOWN") {
-      warnings.push(zh.modes.rolePolicyWarning(label));
-    } else if (entry.code === "MODE_SEAT_DUPLICATE") {
-      warnings.push(zh.modes.duplicateLabelWarning(String(entry.params.instanceLabel ?? "")));
-    } else if (
-      entry.code === "MODE_CONTEXT_UNAVAILABLE" &&
-      entry.params.reason === "availability-unverified"
-    ) {
-      warnings.push(zh.modes.availabilityUnverified);
-    }
+    warnings.push(warningIssueText(entry, seatPlan.seats));
   }
   if (seatPlan.mode === "collaborative" && !capabilities.collaboration) {
     blockers.push(zh.modes.collaborationRuntimeUnavailable);

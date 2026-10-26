@@ -870,8 +870,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           hostId={host.id}
           teams={teams.values.teams}
           roles={roles.values.roles}
-          profiles={profileList}
-          maxMembers={preferences.values.maxMembers}
           initialTeamId={launch.teamId}
           lockTeam={launch.teamId !== undefined}
           onClose={() => setLaunch(null)}

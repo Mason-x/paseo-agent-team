@@ -15,6 +15,7 @@
 - launch runs on the daemon host as a background job (`agent-team.launch.*` RPCs), survives a
   closed dialog, and is available from the `/team` slash command and `npm run launch:team`
 - launch into an existing workspace or a new worktree from the Agent Teams screen
+- 启动对话框可临时切换本次运行的模式，并按物理席位预览成员、Profile 与预算。
 - Crew panel: allow a permission for the rest of the session
 - the launch task is stored on the coordinator as a label, so runs describe themselves
 - default Role presets: import 22 built-in Roles that bind to local Profiles by normalized name and

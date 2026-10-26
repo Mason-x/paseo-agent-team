@@ -39,7 +39,6 @@ import { type CrewListItem, crewListItems, roleLine, runIdOf } from "./crew/run-
 import { type LaunchRequest, subscribeLaunchRequests } from "./launch/events";
 import { LaunchDialog } from "./launch/LaunchDialog";
 import { resolveLaunchPrefill } from "./launch/launch-args";
-import { useHostProfiles } from "./paseo/profiles";
 import { ImeTextInput } from "./shared/ImeTextInput";
 
 const PAGE_LIMIT = 200;
@@ -204,7 +203,6 @@ export function AgentCrew({
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
-  const hostProfiles = useHostProfiles(adapter);
   const workspaceTitle = useWorkspace(workspaceId, ({ name, title }) => title?.trim() || name);
   const queryKey = useMemo(() => ["agent-crew", "directory", host.id], [host.id]);
   const { data, error, isPending, isFetching, refetch } = useQuery({
@@ -1190,8 +1188,6 @@ export function AgentCrew({
           hostId={host.id}
           teams={teams.values.teams}
           roles={roles.values.roles}
-          profiles={hostProfiles.status === "ready" ? hostProfiles.profiles : []}
-          maxMembers={preferences.values.maxMembers}
           initialTeamId={launchPrefill?.teamId}
           initialTask={launchPrefill?.task}
           workspaceId={workspaceId}

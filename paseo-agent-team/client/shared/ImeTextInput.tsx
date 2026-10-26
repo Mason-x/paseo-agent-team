@@ -1,12 +1,15 @@
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef } from "react";
 import { Platform, type TextInputProps } from "react-native";
+import { finishComposition } from "./ime-composition";
 
 export type ImeTextInputProps = Omit<TextInputProps, "value" | "defaultValue"> & {
   /** Seed shown on mount and whenever `revision` changes. Never replayed as a controlled `value`. */
   initialValue?: string;
   /** Bump to remount and apply `initialValue` (open a dialog, clear a draft). */
   revision?: string | number;
+  /** Web composition notifications; native callers rely on their own debounce. */
+  onCompositionChange?: (composing: boolean) => void;
 };
 
 /**
@@ -18,6 +21,7 @@ export function ImeTextInput({
   revision = 0,
   onChangeText,
   onBlur,
+  onCompositionChange,
   ...rest
 }: ImeTextInputProps) {
   const composing = useRef(false);
@@ -55,10 +59,10 @@ export function ImeTextInput({
 
   const handleBlur = useCallback<NonNullable<TextInputProps["onBlur"]>>(
     (event) => {
-      flushPending();
+      finishComposition(flushPending, onCompositionChange);
       onBlur?.(event);
     },
-    [flushPending, onBlur],
+    [flushPending, onBlur, onCompositionChange],
   );
 
   const webComposition =
@@ -66,9 +70,10 @@ export function ImeTextInput({
       ? {
           onCompositionStart: () => {
             composing.current = true;
+            onCompositionChange?.(true);
           },
           onCompositionEnd: () => {
-            flushPending();
+            finishComposition(flushPending, onCompositionChange);
           },
         }
       : undefined;
