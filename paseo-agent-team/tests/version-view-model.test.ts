@@ -89,6 +89,7 @@ function info(patch: Partial<VersionInfo> = {}): VersionInfo {
       error: null,
     },
     relation: "behind",
+    pendingCommits: null,
     updateAvailable: true,
     canUpdate: true,
     cliAvailable: true,
@@ -118,6 +119,12 @@ function job(state: Job["state"], phase: Job["phase"], overrides: Partial<Job> =
     ...overrides,
   });
 }
+
+test("VersionInfo tolerates a missing pendingCommits field", () => {
+  const complete = info();
+  const { pendingCommits: _pending, ...legacy } = complete;
+  expect(VersionInfoSchema.parse(legacy).pendingCommits).toBeNull();
+});
 
 describe("header entry", () => {
   test("an available update is marked, and up to date is distinct from unknown", () => {

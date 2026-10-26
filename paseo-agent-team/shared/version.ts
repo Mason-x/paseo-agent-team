@@ -176,7 +176,8 @@ export const VersionInfoSchema = z
       })
       .strict(),
     relation: RelationSchema,
-    pendingCommits: PendingCommitsSchema.nullable(),
+    // Older peers may omit this optional display DTO during a plugin update. Normalize to null.
+    pendingCommits: PendingCommitsSchema.nullable().default(null),
     pendingCommitsDiagnostics: PendingCommitsDiagnosticsSchema.optional(),
     updateAvailable: z.boolean().nullable(),
     canUpdate: z.boolean(),

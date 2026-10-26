@@ -249,7 +249,7 @@ describe("update start", () => {
     const store = createStore(memoryFiles(), storeRoot(HOME, "server-1"));
     expect(store.root).toContain("agent-team-runtime");
   });
-  test("legacy update jobs still load while a legacy check result is rejected", async () => {
+  test("legacy update jobs and check results still load", async () => {
     const files = memoryFiles({ [path.join(HOME, "server-id")]: "server-1" });
     const store = createStore(files, storeRoot(HOME, "server-1"));
     const base = {
@@ -298,7 +298,9 @@ describe("update start", () => {
     );
     expect((await store.readJob(runningId))?.state).toBe("running");
     expect((await store.readJob(doneId))?.state).toBe("succeeded");
-    expect(await store.readJob(checkId)).toBeNull();
+    const legacyCheck = await store.readJob(checkId);
+    expect(legacyCheck?.result?.pendingCommits).toBeNull();
+    expect(legacyCheck?.result?.canUpdate).toBe(true);
   });
 });
 
