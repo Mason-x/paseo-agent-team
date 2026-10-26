@@ -44,6 +44,8 @@ export const CoordinatorPreviewSchema = z.strictObject({
   roleName: z.string(),
   profile: SeatProfileSchema.nullable(),
   source: z.enum(["role-preferred", "role-fallback", "unavailable"]),
+  budget: z.enum(["economy", "sota", "unknown"]).optional(),
+  budgetBasis: z.enum(["host", "pool", "conservative-default"]).optional(),
   issues: z.array(ModeIssueSchema),
 });
 

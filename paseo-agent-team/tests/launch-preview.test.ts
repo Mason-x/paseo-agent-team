@@ -29,6 +29,7 @@ function makePlan(
   options: {
     host?: HostSnapshot;
     mode?: "sota" | "economy" | "collaborative";
+    economy?: EconomyPolicy;
   } = {},
 ) {
   return buildLaunchPlan({
@@ -42,13 +43,17 @@ function makePlan(
     maxMembers: 24,
     mode: options.mode,
     host: options.host ?? host,
-    economy: emptyEconomy,
+    economy: options.economy ?? emptyEconomy,
     runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
   });
 }
 
-function previewOf(plan: ReturnType<typeof makePlan>, hash = "a".repeat(64)) {
-  return toModeLaunchPreview(plan, hash);
+function previewOf(
+  plan: ReturnType<typeof makePlan>,
+  hash = "a".repeat(64),
+  economy: EconomyPolicy = emptyEconomy,
+) {
+  return toModeLaunchPreview(plan, hash, [], economy);
 }
 
 describe("launch preview DTO", () => {
@@ -76,6 +81,52 @@ describe("launch preview DTO", () => {
     expect(json).not.toContain('"notes"');
     expect(json).not.toContain("systemPrompt");
     expect(json).not.toContain("mcpServers");
+  });
+
+  test("reports the coordinator budget for SOTA and economy pool bindings", () => {
+    const sotaPreview = previewOf(makePlan(codingTeam));
+    expect(sotaPreview.coordinator).toMatchObject({
+      budget: "sota",
+      budgetBasis: "host",
+    });
+
+    const poolEconomy: EconomyPolicy = {
+      pool: [{ profileId: claudeOpus.id, family: "claude", enabled: true }],
+      taskOrder: {},
+      profileBudget: {},
+    };
+    const economyPreview = previewOf(
+      makePlan({ ...codingTeam, mode: "economy" }, [techLead, architect, developer], {
+        mode: "economy",
+        economy: poolEconomy,
+      }),
+      "b".repeat(64),
+      poolEconomy,
+    );
+    expect(economyPreview.coordinator).toMatchObject({
+      budget: "economy",
+      budgetBasis: "pool",
+    });
+  });
+
+  test("adding coordinator budget fields does not change the plan hash", () => {
+    const plan = makePlan(codingTeam);
+    const input = {
+      team: codingTeam,
+      roles: [techLead, architect, developer],
+      plan,
+      host,
+      economy: emptyEconomy,
+      target: { kind: "workspace" as const, workspaceId: "ws-1" },
+      task: "Add Stripe",
+      maxMembers: 24,
+      runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
+    };
+    const hash = hashLaunchPlan(input);
+    const preview = toModeLaunchPreview(plan, hash, [], emptyEconomy);
+    expect(preview.planHash).toBe(hash);
+    expect(preview.coordinator.budget).toBe("sota");
+    expect(hashLaunchPlan(input)).toBe(hash);
   });
 
   test("keeps an unavailable escalation seat explicit instead of dropping it", () => {

@@ -353,7 +353,7 @@ function availabilityOf(
   return row.available ? "available" : "unavailable";
 }
 
-function budgetOf(
+export function budgetOf(
   profileId: string,
   economy: EconomyPolicy,
 ): { budget: EconomyBudget; basis: "host" | "pool" | "conservative-default" } {

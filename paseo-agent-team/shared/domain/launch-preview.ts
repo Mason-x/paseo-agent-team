@@ -1,7 +1,7 @@
 import type { PaseoProfile } from "../paseo/adapter";
 import type { CoordinatorPreview, ModeLaunchPreview, SeatPreview } from "../schemas/launch-preview";
 import type { LaunchPlan } from "./launch-plan";
-import type { ProfileSelection } from "./mode-resolver";
+import { budgetOf, type EconomyPolicy, type ProfileSelection } from "./mode-resolver";
 import type { ModeIssue } from "./role-execution";
 
 function profileTuple(profile: PaseoProfile) {
@@ -57,7 +57,8 @@ function issuesOf(selection: ProfileSelection) {
 export function toModeLaunchPreview(
   plan: LaunchPlan,
   planHash: string,
-  extraIssues: readonly ModeIssue[] = [],
+  extraIssues: readonly ModeIssue[],
+  economy: EconomyPolicy,
 ): ModeLaunchPreview {
   const seats: SeatPreview[] = plan.seats.map((seat) => ({
     seatId: seat.seatId,
@@ -79,12 +80,30 @@ export function toModeLaunchPreview(
     issues: issuesOf(seat.selected),
   }));
 
+  const coordinatorProfile =
+    plan.coordinator.profile.id === "missing" ? null : profileTuple(plan.coordinator.profile);
+  const coordinatorBudget =
+    plan.coordinator.profile.id === "missing"
+      ? undefined
+      : budgetOf(plan.coordinator.profile.id, economy);
+  // SOTA is the host's explicit original-binding mode, so an unlabeled seat there is SOTA budget.
+  const effectiveCoordinatorBudget =
+    plan.mode === "sota" &&
+    coordinatorBudget?.budget === "unknown" &&
+    coordinatorBudget.basis === "conservative-default"
+      ? { budget: "sota" as const, basis: "host" as const }
+      : coordinatorBudget;
   const coordinator: CoordinatorPreview = {
     roleId: plan.coordinator.role.id,
     roleName: plan.coordinator.role.name,
-    profile:
-      plan.coordinator.profile.id === "missing" ? null : profileTuple(plan.coordinator.profile),
+    profile: coordinatorProfile,
     source: plan.coordinator.source === "role-fallback" ? "role-fallback" : "role-preferred",
+    ...(effectiveCoordinatorBudget === undefined
+      ? {}
+      : {
+          budget: effectiveCoordinatorBudget.budget,
+          budgetBasis: effectiveCoordinatorBudget.basis,
+        }),
     issues: [],
   };
 

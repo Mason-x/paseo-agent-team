@@ -58,6 +58,7 @@ type PreparedLaunch = {
   workspace: { id: string } | null;
   project: ProjectSummary | undefined;
   preferences: Preferences;
+  economy: EconomyPolicy;
   economyIssues: ModeIssue[];
 };
 
@@ -210,6 +211,7 @@ export function createLaunchService(deps: {
       workspace,
       project,
       preferences: preferences.values,
+      economy,
       economyIssues,
     };
     if (blockers.length > 0) {
@@ -295,6 +297,7 @@ export function createLaunchService(deps: {
           prepared.prepared.plan,
           prepared.prepared.planHash,
           prepared.prepared.economyIssues,
+          prepared.prepared.economy,
         ),
       };
     },
