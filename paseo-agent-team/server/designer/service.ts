@@ -111,8 +111,14 @@ function active(job: DesignJob): boolean {
   return DESIGN_ACTIVE.has(job.state);
 }
 
-function needsReconcile(job: DesignJob): boolean {
-  return job.state === "starting" || job.state === "canceling" || RECONCILE_STATES.has(job.state);
+function needsReconcile(record: StoredDesignJob): boolean {
+  const job = record.job;
+  return (
+    job.state === "starting" ||
+    job.state === "canceling" ||
+    RECONCILE_STATES.has(job.state) ||
+    (job.state === "needs_continue" && !job.agentCreated && record.creation !== null)
+  );
 }
 
 function allowedFor(state: DesignJob["state"]): DesignJob["allowed"] {
@@ -460,6 +466,9 @@ export function createDesignService(deps: DesignServiceDeps) {
       const current = await deps.store.get(jobId);
       if (!current) throw new Error("design job missing");
       const next = mutate(structuredClone(current));
+      if (next.creation?.request && (next.job.agentCreated || TERMINAL.has(next.job.state))) {
+        next.creation = { ...next.creation, request: null };
+      }
       next.job.stateRevision = deps.ids.next();
       next.job.updatedAt = deps.clock.now();
       try {
@@ -926,7 +935,7 @@ export function createDesignService(deps: DesignServiceDeps) {
   }
 
   async function reconcile(jobId: string) {
-    const record = await deps.store.get(jobId);
+    let record = await deps.store.get(jobId);
     if (!record || TERMINAL.has(record.job.state)) return;
     if (record.job.cancelRequested || record.job.state === "canceling") {
       await resolveCancellation(jobId);
@@ -939,6 +948,15 @@ export function createDesignService(deps: DesignServiceDeps) {
     if (record.job.state === "designing" && !record.job.agentCreated) {
       await resumeUnconfirmedCreate(record);
       return;
+    }
+    if (record.job.state === "needs_continue" && !record.job.agentCreated && record.creation) {
+      const adapter = await requireAdapter();
+      if (!adapter) return;
+      const agent = await providerAgent(record, adapter).catch(() => null);
+      if (!agent) return;
+      const claimed = await claimDiscoveredAgent(record, agent);
+      if (!claimed) return;
+      record = claimed;
     }
     if (!RECONCILE_STATES.has(record.job.state)) return;
     const adapter = await requireAdapter();
@@ -1443,7 +1461,7 @@ export function createDesignService(deps: DesignServiceDeps) {
             return failure([
               error("DESIGN_JOB_NOT_FOUND", ["jobId"], { jobId: input.jobId }, "refresh"),
             ]);
-          if (needsReconcile(record.job)) {
+          if (needsReconcile(record)) {
             void enqueue(record.job.jobId, () => reconcile(record.job.jobId)).catch((cause) =>
               log("design reconcile failed", cause),
             );
@@ -1462,7 +1480,7 @@ export function createDesignService(deps: DesignServiceDeps) {
           const activeOrder = Number(active(b.job)) - Number(active(a.job));
           return activeOrder !== 0 ? activeOrder : b.job.updatedAt.localeCompare(a.job.updatedAt);
         });
-        for (const record of sorted.filter((entry) => needsReconcile(entry.job)).slice(0, 50)) {
+        for (const record of sorted.filter((entry) => needsReconcile(entry)).slice(0, 50)) {
           void enqueue(record.job.jobId, () => reconcile(record.job.jobId)).catch((cause) =>
             log("design reconcile failed", cause),
           );
@@ -1872,6 +1890,19 @@ export function createDesignService(deps: DesignServiceDeps) {
           Date.parse(record.job.saveLeaseExpiresAt) > Date.parse(deps.clock.now());
         if (continueLeaseActive) {
           return failure([error("DESIGN_SAVE_BUSY", ["lease"], {}, "refresh")], record.job);
+        }
+        if (input.action === "repair" && !record.job.agentCreated) {
+          return failure(
+            [
+              error(
+                "DESIGN_RECOVERY_INCOMPLETE",
+                ["agent"],
+                { reason: "create-unconfirmed" },
+                "refresh",
+              ),
+            ],
+            record.job,
+          );
         }
         if (input.action === "recheck") {
           if (record.job.state !== "needs_continue" && record.job.state !== "ready") {

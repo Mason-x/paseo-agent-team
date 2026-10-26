@@ -112,12 +112,13 @@ class FakeAdapter implements DesignAdapter {
   createError: unknown = null;
   sendFails = false;
   readFails = false;
+  profilesValue = profiles;
   delayCreate = false;
   createStarted = Promise.withResolvers<void>();
   releaseCreate = Promise.withResolvers<void>();
 
   async readConfig() {
-    return { agentProfiles: profiles };
+    return { agentProfiles: this.profilesValue };
   }
   async listProviderAvailability() {
     return availability;
@@ -325,6 +326,26 @@ async function until(check: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error("condition not met");
+}
+
+function retryRequestFor(jobId: string) {
+  return {
+    agentId: jobId,
+    idempotencyKey: `agent-team-design:${jobId}`,
+    workspaceId: "ws-carrier",
+    title: "原始请求",
+    labels: {
+      "agent-team.design": jobId,
+      "agent-team.design.version": "1",
+      "agent-team.design.request-id": "44444444-4444-4444-8444-444444444444",
+      "agent-team.design.request-hash": DESIGN_HASH,
+      "agent-team.design.mode": "sota",
+    },
+    profile: { provider: "claude", model: "claude-opus-5-5" },
+    systemPrompt: "原始系统提示",
+    prompt: "原始首轮消息",
+    clientMessageId: "55555555-5555-4555-8555-555555555599",
+  };
 }
 
 function proposalFor(record: StoredDesignJob, attempt = 1) {
@@ -782,7 +803,7 @@ describe("design service", () => {
         expectedRevision: current.job.stateRevision,
         action: "repair",
       }),
-    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_STATE_CHANGED" }] });
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_RECOVERY_INCOMPLETE" }] });
     await service.dispose();
   });
 
@@ -2140,9 +2161,69 @@ describe("design service", () => {
     await service.dispose();
   });
 
+  test("settles a late uncertain create and rejects repair before confirmation", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const jobId = "abcdef37-2345-4678-8abc-def012345678";
+    const request = retryRequestFor(jobId);
+    const record = seededJob(jobId, "needs_continue", {
+      job: designJob({
+        jobId,
+        state: "needs_continue",
+        attempt: 1,
+        agentCreated: false,
+        agentId: jobId,
+      }),
+      creation: {
+        intentHash: DESIGN_HASH,
+        idempotencyKey: `agent-team-design:${jobId}`,
+        request,
+      },
+      outcomeUnknown: true,
+    });
+    await store.create(record);
+    expect(
+      await service.continue({
+        jobId,
+        expectedRevision: record.job.stateRevision,
+        action: "repair",
+      }),
+    ).toMatchObject({
+      ok: false,
+      issues: [{ code: "DESIGN_RECOVERY_INCOMPLETE", action: "refresh" }],
+    });
+    await service.status({ jobId });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.records.get(jobId)?.job.state).toBe("needs_continue");
+
+    adapter.agents.set(jobId, {
+      id: jobId,
+      labels: request.labels,
+      status: "running",
+      activeTurn: true,
+      archivedAt: null,
+      requiresAttention: false,
+      attentionReason: null,
+      pendingPermissions: [],
+      lastError: null,
+      providerUnavailable: false,
+    });
+    await service.status({ jobId });
+    await until(() => store.records.get(jobId)?.job.agentCreated === true);
+    expect(store.records.get(jobId)?.job.state).toBe("designing");
+    expect(store.records.get(jobId)?.creation?.request).toBeFalsy();
+    await service.dispose();
+  });
+
   test("records create before dispatch and recovers uncertain create errors", async () => {
     const store = new FakeStore();
     const adapter = new FakeAdapter();
+    adapter.profilesValue = [
+      { ...DESIGNER, featureValues: { token: "FEATURE_SECRET_VALUE" } },
+      claudeOpus,
+      codexXhigh,
+    ];
     adapter.delayCreate = true;
     adapter.createFails = true;
     const service = createDesignService(serviceDeps(store, adapter));
@@ -2155,6 +2236,11 @@ describe("design service", () => {
     if (!stored?.creation?.request) throw new Error("create request not persisted before dispatch");
     expect(stored.creation.request.agentId).toBe(started.job.jobId);
     expect(stored.creation.request.prompt.length).toBeGreaterThan(0);
+    expect(stored.creation.request.profile.featureValues).toEqual({
+      token: "FEATURE_SECRET_VALUE",
+    });
+    const originalPrompt = stored.creation.request.prompt;
+    const originalSystemPrompt = stored.creation.request.systemPrompt;
     adapter.agents.set(started.job.jobId, {
       id: started.job.jobId,
       labels: stored.creation.request.labels,
@@ -2171,6 +2257,41 @@ describe("design service", () => {
     await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
     expect(store.records.get(started.job.jobId)?.job.state).toBe("designing");
     expect(adapter.archived).toHaveLength(0);
+    const settled = store.records.get(started.job.jobId);
+    expect(settled?.creation?.request).toBeFalsy();
+    const settledJson = JSON.stringify(settled);
+    expect(settledJson).not.toContain("FEATURE_SECRET_VALUE");
+    expect(settledJson).not.toContain(originalPrompt);
+    expect(settledJson).not.toContain(originalSystemPrompt);
+
+    const terminal = "abcdef36-2345-4678-8abc-def012345678";
+    const terminalRequest = {
+      ...retryRequestFor(terminal),
+      profile: { provider: "claude", featureValues: { token: "FEATURE_SECRET_VALUE" } },
+      prompt: "TERMINAL_SECRET_PROMPT",
+      systemPrompt: "TERMINAL_SECRET_SYSTEM",
+    };
+    await store.create(
+      seededJob(terminal, "needs_continue", {
+        job: designJob({
+          jobId: terminal,
+          state: "needs_continue",
+          attempt: 1,
+          agentCreated: false,
+          agentId: terminal,
+        }),
+        creation: {
+          intentHash: DESIGN_HASH,
+          idempotencyKey: `agent-team-design:${terminal}`,
+          request: terminalRequest,
+        },
+      }),
+    );
+    await service.cancel({ jobId: terminal });
+    const terminalRecord = store.records.get(terminal);
+    expect(terminalRecord?.creation?.request).toBeFalsy();
+    expect(JSON.stringify(terminalRecord)).not.toContain("FEATURE_SECRET_VALUE");
+    expect(JSON.stringify(terminalRecord)).not.toContain("TERMINAL_SECRET_PROMPT");
 
     adapter.delayCreate = false;
     adapter.createFails = false;
