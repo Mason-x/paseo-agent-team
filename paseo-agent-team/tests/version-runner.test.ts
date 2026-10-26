@@ -305,9 +305,7 @@ describe("runner destinations", () => {
     expect(self.stdout).toContain("ok");
   }, 30_000);
 
-  test("managed success and a missing npm stop on the expected states", async () => {
-    const directory = mkdtempSync(path.join(tmpdir(), "agent-team-managed-success-"));
-    roots.push(directory);
+  test("managed success stops in the succeeded state", async () => {
     const managed = await stage({ mode: "managed-git" });
     await runRequest(managed.request, {
       git: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
@@ -323,6 +321,9 @@ describe("runner destinations", () => {
     });
     const managedJob = JSON.parse(readFileSync(managed.jobFile, "utf8"));
     expect(managedJob.error?.code ?? managedJob.state).toBe("succeeded");
+  });
+
+  test("a missing npm stops on npm_missing", async () => {
     const noNpm = await stage({ npmCli: "" });
     let head: string = OLD;
     await runRequest(noNpm.request, {
@@ -353,6 +354,10 @@ describe("runner destinations", () => {
       readBoot: () => null,
     });
     expect(JSON.parse(readFileSync(noNpm.jobFile, "utf8")).error.code).toBe("npm_missing");
+    expect(npmCli(process.execPath)).toContain("npm-cli.js");
+  });
+
+  test("an unsafe checkout target stops on unsupported_checkout", async () => {
     const unsafe = await stage({ targetRef: "refs/heads/../escape" });
     await runRequest(unsafe.request, {
       git: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
@@ -365,7 +370,9 @@ describe("runner destinations", () => {
     expect(JSON.parse(readFileSync(unsafe.jobFile, "utf8")).error.code).toBe(
       "unsupported_checkout",
     );
-    expect(npmCli(process.execPath)).toContain("npm-cli.js");
+  });
+
+  test("a throwing git runner needs recovery", async () => {
     const thrown = await stage({});
     await runRequest(thrown.request, {
       git: async () => {
@@ -377,6 +384,9 @@ describe("runner destinations", () => {
       readBoot: () => null,
     });
     expect(JSON.parse(readFileSync(thrown.jobFile, "utf8")).state).toBe("recovery_required");
+  });
+
+  test("a detached HEAD stops on detached_head", async () => {
     const detached = await stage({});
     await runRequest(detached.request, {
       git: async (args: string[]) => {
@@ -393,6 +403,9 @@ describe("runner destinations", () => {
       readBoot: () => null,
     });
     expect(JSON.parse(readFileSync(detached.jobFile, "utf8")).error.code).toBe("detached_head");
+  });
+
+  test("the CLI entry reports request-path mistakes", async () => {
     const io = { stdout: { write: () => {} }, stderr: { write: () => {} } };
     expect(await main(["--request"], io)).toBe(2);
     expect(await main(["--request", path.join(tmpdir(), "missing-request.json")], io)).toBe(1);
