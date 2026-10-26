@@ -1221,7 +1221,6 @@ export function createDesignService(deps: DesignServiceDeps) {
           ...current.job,
           state: "canceled",
           cancelRequested: true,
-          saveLeaseExpiresAt: null,
           finishedAt: deps.clock.now(),
           allowed: allowedFor("canceled"),
         },
@@ -1256,7 +1255,6 @@ export function createDesignService(deps: DesignServiceDeps) {
           ...current.job,
           state: "canceled",
           cancelRequested: true,
-          saveLeaseExpiresAt: null,
           finishedAt: deps.clock.now(),
           allowed: allowedFor("canceled"),
         },
@@ -1306,7 +1304,6 @@ export function createDesignService(deps: DesignServiceDeps) {
         ...record.job,
         state: "canceled",
         cancelRequested: true,
-        saveLeaseExpiresAt: null,
         finishedAt: deps.clock.now(),
         allowed: allowedFor("canceled"),
       },
@@ -1628,8 +1625,42 @@ export function createDesignService(deps: DesignServiceDeps) {
           deps.planner,
         );
         if (!validated.ok) {
+          if (canceledCompensation) {
+            const finalized = finalizeDesignIssues(validated.issues);
+            const updated = await updateRecord(record.job.jobId, (current) => ({
+              ...current,
+              job: {
+                ...current.job,
+                issues: finalized.issues,
+                issuesTruncated: finalized.issuesTruncated,
+              },
+            }));
+            return failure(finalized.issues, updated.job);
+          }
           await failJob(record.job.jobId, validated.issues, "needs_continue");
           return failure(validated.issues, record.job);
+        }
+        if (canceledCompensation) {
+          const leaseExpired =
+            leaseOwner !== null &&
+            Number.isFinite(leaseExpires) &&
+            leaseExpires <= Date.parse(deps.clock.now());
+          if (leaseOwner !== null && !leaseExpired) {
+            return failure([error("DESIGN_SAVE_BUSY", ["lease"], {}, "refresh")], record.job);
+          }
+          if (!record.job.needsCleanup) {
+            return failure(
+              [
+                error(
+                  "DESIGN_STATE_CHANGED",
+                  ["cleanup"],
+                  { state: record.job.state, reason: "no-cleanup" },
+                  "refresh",
+                ),
+              ],
+              record.job,
+            );
+          }
         }
         if (
           input.intent === "compensate" &&
@@ -1679,9 +1710,9 @@ export function createDesignService(deps: DesignServiceDeps) {
             leaseOwner: encodeLeaseOwner(input.clientId, leaseId),
             job: {
               ...current.job,
-              state: "saving",
+              state: canceledCompensation ? current.job.state : "saving",
               saveLeaseExpiresAt: expiresAt,
-              allowed: allowedFor("saving"),
+              allowed: canceledCompensation ? current.job.allowed : allowedFor("saving"),
             },
           }));
           return {
@@ -1837,6 +1868,7 @@ export function createDesignService(deps: DesignServiceDeps) {
           input.reason === "canceled" &&
           input.phase === "team" &&
           record.result.newRoles.length > 0;
+        const compensated = input.reason === "compensated";
         const issue = error(
           input.reason === "compensated" ? "DESIGN_COMPENSATION_UNSAFE" : "DESIGN_SAVE_FAILED",
           ["save"],
@@ -1862,15 +1894,19 @@ export function createDesignService(deps: DesignServiceDeps) {
           job: {
             ...current.job,
             state,
-            saveState:
-              input.reason === "unknown"
+            saveState: compensated
+              ? "none"
+              : input.reason === "unknown"
                 ? "unknown"
                 : input.reason === "partial" || canceledAfterRoles
                   ? "roles-only"
                   : current.job.saveState,
             saveLeaseExpiresAt: null,
-            needsCleanup:
-              input.reason === "partial" || canceledAfterRoles ? true : current.job.needsCleanup,
+            needsCleanup: compensated
+              ? false
+              : input.reason === "partial" || canceledAfterRoles
+                ? true
+                : current.job.needsCleanup,
             issues: [...current.job.issues, issue],
             finishedAt: state === "canceled" ? deps.clock.now() : current.job.finishedAt,
             allowed: allowedFor(state),

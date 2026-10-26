@@ -1,9 +1,12 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { DesignSettingsReaders } from "../server/designer/context";
 import { createDesignHooks } from "../server/designer/hooks";
 import { createDesignService, type DesignServiceDeps } from "../server/designer/service";
 import type { DesignJobStore, StoredDesignJob } from "../server/designer/store";
-import { DESIGN_RECORD_VERSION } from "../server/designer/store";
+import { createDesignJobStore, DESIGN_RECORD_VERSION } from "../server/designer/store";
 import type { DesignPlanningPort } from "../shared/domain/design-planning";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type {
@@ -96,6 +99,10 @@ class FakeStore implements DesignJobStore {
     const current = this.records.get(jobId);
     if (!current) throw { issue: "missing" };
     if (current.job.stateRevision !== expectedRevision) throw { issue: "conflict" };
+    const terminal = new Set(["saved", "failed", "canceled"]);
+    if (terminal.has(current.job.state) && !terminal.has(next.job.state)) {
+      throw { issue: "conflict" };
+    }
     this.records.set(jobId, structuredClone(next));
   }
 }
@@ -275,7 +282,7 @@ const planner: DesignPlanningPort = {
 let serviceSequence = 0;
 
 function serviceDeps(
-  store: FakeStore,
+  store: DesignJobStore,
   adapter: FakeAdapter,
   overrides: Partial<DesignServiceDeps> = {},
 ) {
@@ -323,6 +330,14 @@ function input(
 async function until(check: () => boolean): Promise<void> {
   for (let index = 0; index < 100; index += 1) {
     if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("condition not met");
+}
+
+async function untilAsync(check: () => Promise<boolean>): Promise<void> {
+  for (let index = 0; index < 100; index += 1) {
+    if (await check()) return;
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error("condition not met");
@@ -2274,6 +2289,27 @@ describe("design service", () => {
       saveState: "roles-only",
       needsCleanup: true,
     });
+    const brokenCleaner = createDesignService(
+      serviceDeps(store, adapter, {
+        readers: readers({
+          roles: [{ ...written, name: "被他人修改" }],
+          teams: [codingTeam],
+        }),
+      }),
+    );
+    expect(
+      await brokenCleaner.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "compensate",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(store.records.get(ready.job.jobId)?.job).toMatchObject({
+      state: "canceled",
+      allowed: { continueAction: null },
+    });
+    await brokenCleaner.dispose();
     const cleaner = createDesignService(
       serviceDeps(store, adapter, {
         readers: readers({
@@ -2363,8 +2399,160 @@ describe("design service", () => {
         clientId: "22222222-2222-4222-8222-222222222222",
         intent: "compensate",
       }),
-    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_NOT_SAVED" }] });
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_STATE_CHANGED" }] });
     await service.dispose();
+  });
+
+  test("compensates a canceled design in the real file ledger", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-g6-"));
+    const store = createDesignJobStore({ home: dir });
+    await store.initialize();
+    try {
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const started = await service.start(input());
+      if (!started.ok) throw new Error("start failed");
+      await untilAsync(async () => {
+        const record = await store.get(started.job.jobId);
+        return record?.job.agentCreated === true;
+      });
+      const stored = await store.get(started.job.jobId);
+      if (!stored) throw new Error("missing");
+      const role = newDesignRole({ id: "eng-observability", name: "【工程】可观测" });
+      const base = proposalFor(stored);
+      const proposal = {
+        ...base,
+        team: {
+          ...base.team,
+          members: base.team.members.map((member) =>
+            member.key === "m2" ? { ...member, roleId: role.id } : member,
+          ),
+        },
+        newRoles: [role],
+        reuse: base.reuse.filter((entry) => entry.roleId !== "developer"),
+      };
+      adapter.entries = answerFor(stored, proposal);
+      await service.onTurnEnded({
+        agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+        outcome: { kind: "completed" },
+      });
+      await untilAsync(async () => {
+        const record = await store.get(started.job.jobId);
+        return record?.job.state === "ready";
+      });
+      const ready = await store.get(started.job.jobId);
+      if (!ready?.result) throw new Error("missing result");
+      const written = ready.result.newRoles[0];
+      if (!written) throw new Error("missing written role");
+      const clientId = "22222222-2222-4222-8222-222222222222";
+      const prepared = await service.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+      });
+      if (!prepared.ok || prepared.prepared.outcome !== "write") throw new Error("prepare failed");
+      await service.saveFailed({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        leaseId: prepared.prepared.lease.id,
+        phase: "team",
+        reason: "canceled",
+      });
+      await service.cancel({ jobId: ready.job.jobId });
+      const cleaner = createDesignService(
+        serviceDeps(store, adapter, {
+          readers: readers({
+            roles: [...[techLead, architect, developer], written],
+            teams: [codingTeam],
+          }),
+        }),
+      );
+      const cleanup = await cleaner.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "compensate",
+      });
+      if (!cleanup.ok || cleanup.prepared.outcome !== "compensate")
+        throw new Error("cleanup not authorized");
+      expect(cleanup.prepared.job.state).toBe("canceled");
+      const receipt = await cleaner.saveFailed({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        leaseId: cleanup.prepared.lease.id,
+        phase: "compensation",
+        reason: "compensated",
+      });
+      expect(receipt).toMatchObject({
+        ok: true,
+        job: { state: "canceled", saveState: "none", needsCleanup: false },
+      });
+      expect((await store.get(ready.job.jobId))?.job.state).toBe("canceled");
+      await cleaner.dispose();
+      await service.dispose();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects canceled compensation while a write lease is live", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.entries = answerFor(stored, proposalFor(stored));
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => store.records.get(started.job.jobId)?.job.state === "ready");
+    const ready = await store.get(started.job.jobId);
+    if (!ready?.result) throw new Error("missing result");
+    const clientId = "22222222-2222-4222-8222-222222222222";
+    const prepared = await service.prepareSave({
+      jobId: ready.job.jobId,
+      resultId: ready.result.resultId,
+      clientId,
+    });
+    if (!prepared.ok) throw new Error("prepare failed");
+    await service.cancel({ jobId: ready.job.jobId });
+    const canceled = store.records.get(ready.job.jobId);
+    expect(canceled?.job.state).toBe("canceled");
+    expect(canceled?.job.saveLeaseExpiresAt).not.toBeNull();
+    expect(
+      await service.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "compensate",
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_SAVE_BUSY" }] });
+    await service.dispose();
+  });
+
+  test("terminal updates match the real store and keep canceled validation failures terminal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-terminal-"));
+    const real = createDesignJobStore({ home: dir });
+    await real.initialize();
+    try {
+      const fake = new FakeStore();
+      const base = seededJob("abcdef41-2345-4678-8abc-def012345678", "ready", {
+        job: designJob({ jobId: "abcdef41-2345-4678-8abc-def012345678", state: "canceled" }),
+      });
+      await fake.create(base);
+      await real.create(base);
+      const next = { ...base, job: { ...base.job, state: "saving" as const } };
+      const attempt = (store: DesignJobStore) =>
+        store.update(base.job.jobId, base.job.stateRevision, next);
+      await expect(attempt(fake)).rejects.toMatchObject({ issue: "conflict" });
+      await expect(attempt(real)).rejects.toMatchObject({ issue: "conflict" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("records create before dispatch and recovers uncertain create errors", async () => {
