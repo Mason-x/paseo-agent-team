@@ -12,7 +12,7 @@ export type EditorDocumentSnapshot<Row> = {
   rows: readonly Row[];
 };
 
-export type EditorSaveDecision = "write" | "conflict";
+export type EditorSaveDecision = "write" | "modified" | "deleted" | "id-taken";
 
 export type EditorReadReply =
   | { status: "ready"; revision: string; values: unknown }
@@ -25,7 +25,14 @@ export type EditorWriteReply =
   | { status: "conflict" }
   | { status: "invalid"; error?: string };
 
-export type EditorSaveResult = "saved" | "conflict" | "invalid" | "failed";
+export type EditorSaveResult =
+  | "saved"
+  | "modified"
+  | "deleted"
+  | "id-taken"
+  | "busy"
+  | "invalid"
+  | "failed";
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((entry) => canonical(entry) ?? null);
@@ -46,23 +53,28 @@ export function sameEditorRow(left: unknown, right: unknown): boolean {
 }
 
 /**
- * A save may proceed when the document still holds the row exactly as it was opened. Any change
- * to that row (or its deletion) is a conflict; unrelated row changes are merged.
+ * A save may proceed only while the document still holds exactly the row the draft was seeded
+ * from. The opened snapshot is compared with that baseline too: if the hook state and the read
+ * disagree, the draft is already stale. Unrelated row changes are merged, not reported.
+ * Create mode never replaces an existing row, even on overwrite: an occupied id must be renamed.
  */
 export function decideEditorSave<Row extends { id: string }>(input: {
   mode: "create" | "edit";
   id: string;
+  baseline: Row | null;
   opened: EditorDocumentSnapshot<Row>;
   latest: EditorDocumentSnapshot<Row>;
   forceOverwrite?: boolean;
 }): EditorSaveDecision {
-  if (input.forceOverwrite) return "write";
-  if (input.opened.revision === input.latest.revision) return "write";
   const latestRow = input.latest.rows.find((row) => row.id === input.id);
-  if (input.mode === "create") return latestRow ? "conflict" : "write";
+  if (input.mode === "create") return latestRow ? "id-taken" : "write";
+  if (input.forceOverwrite) return "write";
   const openedRow = input.opened.rows.find((row) => row.id === input.id);
-  if (!openedRow || !latestRow) return "conflict";
-  return sameEditorRow(openedRow, latestRow) ? "write" : "conflict";
+  if (!input.baseline || !openedRow || !sameEditorRow(openedRow, input.baseline)) {
+    return "modified";
+  }
+  if (!latestRow) return "deleted";
+  return sameEditorRow(latestRow, input.baseline) ? "write" : "modified";
 }
 
 /** Replace the row in place, or append it when absent. Array order is otherwise untouched. */
@@ -117,6 +129,7 @@ export async function saveEditorRow<Row extends { id: string }>(input: {
   mode: "create" | "edit";
   key: "roles" | "teams";
   row: Row;
+  baseline: Row | null;
   opened: EditorDocumentSnapshot<Row>;
   forceOverwrite?: boolean;
   read: () => Promise<EditorReadReply>;
@@ -135,17 +148,15 @@ export async function saveEditorRow<Row extends { id: string }>(input: {
     if (!parsed.ok) return "invalid";
 
     const latest = { revision: reply.revision, rows: parsed.rows };
-    if (
-      decideEditorSave({
-        mode: input.mode,
-        id: input.row.id,
-        opened: input.opened,
-        latest,
-        forceOverwrite: input.forceOverwrite,
-      }) === "conflict"
-    ) {
-      return "conflict";
-    }
+    const decision = decideEditorSave({
+      mode: input.mode,
+      id: input.row.id,
+      baseline: input.baseline,
+      opened: input.opened,
+      latest,
+      forceOverwrite: input.forceOverwrite,
+    });
+    if (decision !== "write") return decision;
 
     const merged = mergeEditorRow(rawRows(reply.values, input.key) as Row[], input.row);
     let write: EditorWriteReply;
@@ -160,5 +171,6 @@ export async function saveEditorRow<Row extends { id: string }>(input: {
     if (write.status === "saved") return "saved";
     if (write.status === "invalid") return "invalid";
   }
-  return "conflict";
+  // Two CAS races are not evidence that the user's row changed.
+  return "busy";
 }

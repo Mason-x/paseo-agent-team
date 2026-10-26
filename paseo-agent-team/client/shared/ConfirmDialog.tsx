@@ -10,6 +10,7 @@ export function ConfirmDialog({
   body,
   confirmLabel,
   cancelLabel,
+  confirmHidden,
   danger,
   onCancel,
   onConfirm,
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   body: string;
   confirmLabel: string;
   cancelLabel?: string;
+  confirmHidden?: boolean;
   danger?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -32,6 +34,7 @@ export function ConfirmDialog({
           theme={theme}
           cancelLabel={cancelLabel}
           confirmLabel={confirmLabel}
+          confirmHidden={confirmHidden}
           danger={danger}
           onCancel={onCancel}
           onConfirm={onConfirm}

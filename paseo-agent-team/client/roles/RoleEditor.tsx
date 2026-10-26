@@ -1,7 +1,7 @@
 import { settingsRpc } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Modal } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
@@ -19,6 +19,7 @@ import { zh } from "../../shared/zh";
 import {
   type EditorDocumentSnapshot,
   type EditorParsed,
+  type EditorSaveResult,
   loadEditorSnapshot,
   saveEditorRow,
 } from "../catalog/editor-save";
@@ -42,6 +43,8 @@ import { ProfilePicker } from "./ProfilePicker";
 
 const rolesRead = settingsRpc(rolesSettings.id).read;
 const rolesWrite = settingsRpc(rolesSettings.id).write;
+
+type ConflictKind = Extract<EditorSaveResult, "modified" | "deleted" | "id-taken">;
 
 function parseRolesDocument(values: unknown): EditorParsed<Role> {
   const parsed = RolesDocumentSchema.safeParse(values);
@@ -158,9 +161,10 @@ export function RoleEditor({
 }) {
   const readRolesDoc = useRpc(rolesRead);
   const writeRolesDoc = useRpc(rolesWrite);
+  const roleState = useSettings(rolesSettings);
   const [draft, setDraft] = useState<RoleDraft>(() => toDraft(role));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<ConflictKind | null>(null);
   const [mcpError, setMcpError] = useState<string | undefined>();
   const [formSeed, setFormSeed] = useState(0);
   const [idSeed, setIdSeed] = useState(0);
@@ -168,26 +172,32 @@ export function RoleEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savingHere, setSavingHere] = useState(false);
   const opened = useRef<EditorDocumentSnapshot<Role> | null>(null);
+  const baseline = useRef<Role | null>(role);
   const idLocked = mode === "edit";
   const overwriteRef = useRef(false);
   const autoSlug = useRef(createAutoSlug("role")).current;
   const nameRef = useRef(draft.name);
-  const createdAt = role?.createdAt;
 
-  useEffect(() => {
-    if (open) {
-      const next = toDraft(role);
+  const seedRole = useCallback(
+    (nextRole: Role | null) => {
+      const next = toDraft(nextRole);
       autoSlug.reset(mode === "edit", next.id, next.name);
       nameRef.current = next.name;
+      baseline.current = nextRole;
       setDraft(next);
       setErrors({});
-      setConflict(false);
+      setConflict(null);
       setMcpError(undefined);
       overwriteRef.current = false;
       setFormSeed((seed) => seed + 1);
       setIdSeed((seed) => seed + 1);
-    }
-  }, [autoSlug, mode, open, role]);
+    },
+    [autoSlug, mode],
+  );
+
+  useEffect(() => {
+    if (open) seedRole(role);
+  }, [open, role, seedRole]);
 
   useEffect(() => {
     opened.current = null;
@@ -208,6 +218,23 @@ export function RoleEditor({
       live = false;
     };
   }, [open, readRolesDoc]);
+
+  async function reloadDraft() {
+    setConflict(null);
+    const result = await loadEditorSnapshot(() => readRolesDoc({}), parseRolesDocument);
+    if (!result.ok) {
+      setSaveError(result.error || zh.saveFail);
+      return;
+    }
+    opened.current = result.snapshot;
+    const id = baseline.current?.id;
+    const latest = id ? result.snapshot.rows.find((row) => row.id === id) : undefined;
+    if (!latest) {
+      onClose();
+      return;
+    }
+    seedRole(latest);
+  }
 
   function parseMcp(): McpServers | undefined | "invalid" {
     const text = draft.mcpServersText.trim();
@@ -254,14 +281,14 @@ export function RoleEditor({
       ...(mcp ? { mcpServers: mcp } : {}),
       ...(color ? { color } : {}),
       ...(icon ? { icon } : {}),
-      executionPolicy: mergeRoleExecutionPolicy(role?.executionPolicy, {
+      executionPolicy: mergeRoleExecutionPolicy(baseline.current?.executionPolicy, {
         tier: draft.executionTier,
         taskKind: draft.executionTaskKind,
         tierTouched: draft.executionTierTouched,
         taskKindTouched: draft.executionTaskKindTouched,
       }),
       enabled: true,
-      createdAt: createdAt ?? now,
+      createdAt: baseline.current?.createdAt ?? now,
       updatedAt: now,
     };
     const parsed = RoleSchema.safeParse(candidate);
@@ -281,7 +308,8 @@ export function RoleEditor({
       const result = await saveEditorRow({
         mode,
         key: "roles",
-        row: keepRoleMetadata(role, parsed.data),
+        row: keepRoleMetadata(baseline.current, parsed.data),
+        baseline: baseline.current,
         opened: snapshot,
         forceOverwrite: overwrite,
         read: () => readRolesDoc({}),
@@ -290,14 +318,19 @@ export function RoleEditor({
         parse: parseRolesDocument,
       });
       if (result === "saved") {
+        try {
+          await roleState.reload();
+        } catch {
+          // The host event refreshes the list; the save itself succeeded.
+        }
         onClose();
         return;
       }
-      if (result === "conflict") {
-        setConflict(true);
+      if (result === "modified" || result === "deleted" || result === "id-taken") {
+        setConflict(result);
         return;
       }
-      setSaveError(zh.saveFail);
+      setSaveError(result === "busy" ? zh.saveConflictRetry : zh.saveFail);
     } finally {
       setSavingHere(false);
     }
@@ -511,18 +544,28 @@ export function RoleEditor({
       </Modal>
       <ConfirmDialog
         theme={theme}
-        open={conflict}
+        open={conflict !== null}
         title={zh.conflictTitle}
-        body={zh.conflictRole}
+        body={
+          conflict === "id-taken"
+            ? zh.conflictRoleIdTaken
+            : conflict === "deleted"
+              ? zh.conflictRoleDeleted
+              : zh.conflictRoleModified
+        }
         confirmLabel={zh.overwrite}
-        cancelLabel={zh.reload}
+        cancelLabel={conflict === "id-taken" ? zh.editAgain : zh.reload}
+        confirmHidden={conflict === "id-taken"}
         danger
         onCancel={() => {
-          setConflict(false);
-          onClose();
+          if (conflict === "id-taken") {
+            setConflict(null);
+            return;
+          }
+          void reloadDraft();
         }}
         onConfirm={() => {
-          setConflict(false);
+          setConflict(null);
           void submit(true);
         }}
       />

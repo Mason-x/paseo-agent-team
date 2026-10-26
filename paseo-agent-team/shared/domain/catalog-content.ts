@@ -212,6 +212,56 @@ export function applyPresetSelection(
   return roles;
 }
 
+function rawDocument(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : null;
+}
+
+function rawRowId(row: unknown): string | null {
+  if (!row || typeof row !== "object" || !("id" in row)) return null;
+  return typeof row.id === "string" ? row.id : null;
+}
+
+/**
+ * Build the write document for a preset selection from the raw settings read: only selected rows
+ * are replaced or appended. Unrelated rows and unknown top-level keys therefore survive, matching
+ * the editor and design-save write paths instead of rewriting the parsed document.
+ */
+export function applyPresetSelectionDocument(
+  current: { roles: readonly Role[]; raw: unknown; revision: string },
+  preview: PresetPreviewSnapshot,
+  selection: PresetSelection,
+  now: string,
+): { roles: Role[]; document: Record<string, unknown> } {
+  const roles = applyPresetSelection(
+    { roles: current.roles, revision: current.revision },
+    preview,
+    selection,
+    now,
+  );
+  const changed = new Set<string>();
+  for (const row of preview.roles) {
+    const action = selection[row.id] ?? row.defaultAction;
+    if (action === "add" || action === "adopt") changed.add(row.id);
+  }
+  const byId = new Map(roles.map((role) => [role.id, role]));
+  const document = rawDocument(current.raw);
+  const rawRows = document && Array.isArray(document.roles) ? document.roles : current.roles;
+  const seen = new Set<string>();
+  const merged: unknown[] = rawRows.map((row) => {
+    const id = rawRowId(row);
+    if (!id || !changed.has(id)) return row;
+    seen.add(id);
+    return byId.get(id) ?? row;
+  });
+  for (const id of changed) {
+    const role = byId.get(id);
+    if (role && !seen.has(id)) merged.push(role);
+  }
+  return { roles, document: { ...(document ?? {}), roles: merged } };
+}
+
 /**
  * Call only after the Role write succeeds. Pass the same preview result the Roles write was based
  * on: current.revision must equal preview.revisions.preferences, otherwise another writer changed

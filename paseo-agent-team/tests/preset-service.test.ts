@@ -14,7 +14,7 @@ import type { Role } from "../shared/schemas/role";
 import { RolesDocumentSchema } from "../shared/settings";
 import { zh } from "../shared/zh";
 import { sourceProfiles } from "./default-presets.fixtures";
-import { NOW } from "./fixtures";
+import { architect, NOW } from "./fixtures";
 
 const candidates = exampleCatalog(sourceProfiles, NOW).roles.slice(0, 2);
 
@@ -45,20 +45,25 @@ const preferences: Preferences = PreferencesSchema.parse({
   recentRuns: [],
 });
 
+function readyRoles(roles: readonly Role[], revision: string, raw: unknown = { roles }) {
+  return {
+    status: "ready" as const,
+    values: RolesDocumentSchema.parse({ roles }),
+    raw,
+    revision,
+  };
+}
+
+function readyPreferences(values: Preferences, revision: string) {
+  return { status: "ready" as const, values, raw: values, revision };
+}
+
 function gateway(overrides: Partial<PresetGateway> = {}): PresetGateway {
   return {
     preview: vi.fn(async () => preview()),
-    readRoles: vi.fn(async () => ({
-      status: "ready" as const,
-      values: RolesDocumentSchema.parse({ roles: [] }),
-      revision: "r1",
-    })),
-    readPreferences: vi.fn(async () => ({
-      status: "ready" as const,
-      values: preferences,
-      revision: "p1",
-    })),
-    saveRoles: vi.fn(async () => "saved" as const),
+    readRoles: vi.fn(async () => readyRoles([], "r1")),
+    readPreferences: vi.fn(async () => readyPreferences(preferences, "p1")),
+    saveRolesDocument: vi.fn(async () => "saved" as const),
     savePreferences: vi.fn(async () => "saved" as const),
     reloadRoles: vi.fn(async () => undefined),
     reloadPreferences: vi.fn(async () => undefined),
@@ -74,8 +79,8 @@ describe("first-open import", () => {
     const result = await importDefaultPresets(fake, importOptions);
     expect(result.kind).toBe("imported");
     expect(fake.preview).toHaveBeenCalledWith(false);
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
-    const saved = vi.mocked(fake.saveRoles).mock.calls[0];
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(fake.saveRolesDocument).mock.calls[0];
     expect(saved?.[0].roles).toHaveLength(2);
     expect(saved?.[1]).toBe("r1");
     expect(fake.savePreferences).toHaveBeenCalledTimes(1);
@@ -87,27 +92,24 @@ describe("first-open import", () => {
 
   test("does nothing when history says the user already imported", async () => {
     const fake = gateway({
-      readPreferences: vi.fn(async () => ({
-        status: "ready" as const,
-        values: PreferencesSchema.parse({ ...preferences, templatesImportedAt: NOW }),
-        revision: "p1",
-      })),
+      readPreferences: vi.fn(async () =>
+        readyPreferences(
+          PreferencesSchema.parse({ ...preferences, templatesImportedAt: NOW }),
+          "p1",
+        ),
+      ),
     });
     expect(await importDefaultPresets(fake, importOptions)).toEqual({ kind: "already-present" });
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
     expect(fake.savePreferences).not.toHaveBeenCalled();
   });
 
   test("does nothing when another window created Roles first", async () => {
     const fake = gateway({
-      readRoles: vi.fn(async () => ({
-        status: "ready" as const,
-        values: RolesDocumentSchema.parse({ roles: candidates }),
-        revision: "r1",
-      })),
+      readRoles: vi.fn(async () => readyRoles(candidates, "r1")),
     });
     expect(await importDefaultPresets(fake, importOptions)).toEqual({ kind: "already-present" });
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
   });
 
   test("reports a Profile read failure as forceable instead of writing", async () => {
@@ -124,7 +126,7 @@ describe("first-open import", () => {
     });
     const result = await importDefaultPresets(fake, importOptions);
     expect(result).toMatchObject({ kind: "blocked", canForce: true });
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
   });
 
   test("re-previews when a document moved between the preview and the write", async () => {
@@ -133,40 +135,28 @@ describe("first-open import", () => {
         .fn<PresetGateway["preview"]>()
         .mockResolvedValueOnce(preview({ roles: "r1", preferences: "p1" }))
         .mockResolvedValueOnce(preview({ roles: "r2", preferences: "p1" })),
-      readRoles: vi.fn(async () => ({
-        status: "ready" as const,
-        values: RolesDocumentSchema.parse({ roles: [] }),
-        revision: "r2",
-      })),
+      readRoles: vi.fn(async () => readyRoles([], "r2")),
     });
     const result = await importDefaultPresets(fake, importOptions);
     expect(result.kind).toBe("imported");
     expect(fake.preview).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(fake.saveRoles).mock.calls[0]?.[1]).toBe("r2");
+    expect(vi.mocked(fake.saveRolesDocument).mock.calls[0]?.[1]).toBe("r2");
   });
 
   test("a Roles conflict observes the other import and does not write preferences", async () => {
     const fake = gateway({
-      saveRoles: vi.fn(async () => "conflict" as const),
+      saveRolesDocument: vi.fn(async () => "conflict" as const),
       readRoles: vi
         .fn<PresetGateway["readRoles"]>()
-        .mockResolvedValueOnce({
-          status: "ready" as const,
-          values: RolesDocumentSchema.parse({ roles: [] }),
-          revision: "r1",
-        })
-        .mockResolvedValueOnce({
-          status: "ready" as const,
-          values: RolesDocumentSchema.parse({ roles: candidates }),
-          revision: "r2",
-        }),
+        .mockResolvedValueOnce(readyRoles([], "r1"))
+        .mockResolvedValueOnce(readyRoles(candidates, "r2")),
     });
     expect(await importDefaultPresets(fake, importOptions)).toEqual({ kind: "already-present" });
     expect(fake.savePreferences).not.toHaveBeenCalled();
   });
 
   test("an invalid Roles write is not treated as another window's import", async () => {
-    const fake = gateway({ saveRoles: vi.fn(async () => "invalid" as const) });
+    const fake = gateway({ saveRolesDocument: vi.fn(async () => "invalid" as const) });
     const result = await importDefaultPresets(fake, importOptions);
     expect(result).toMatchObject({ kind: "failed", message: zh.defaultPresetsInvalidData });
     expect(fake.savePreferences).not.toHaveBeenCalled();
@@ -176,11 +166,7 @@ describe("first-open import", () => {
     let revision = "p1";
     let saves = 0;
     const fake = gateway({
-      readPreferences: vi.fn(async () => ({
-        status: "ready" as const,
-        values: preferences,
-        revision,
-      })),
+      readPreferences: vi.fn(async () => readyPreferences(preferences, revision)),
       savePreferences: vi.fn(async () => {
         saves += 1;
         if (saves === 1) {
@@ -191,7 +177,7 @@ describe("first-open import", () => {
       }),
     });
     expect((await importDefaultPresets(fake, importOptions)).kind).toBe("imported");
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
     expect(fake.savePreferences).toHaveBeenCalledTimes(2);
     const retried = vi.mocked(fake.savePreferences).mock.calls[1]?.[0];
     expect(retried?.maxMembers).toBe(3);
@@ -205,7 +191,7 @@ describe("first-open import", () => {
     if (result.kind === "preferences-failed") {
       expect(result.roles).toHaveLength(2);
     }
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
     expect(fake.savePreferences).toHaveBeenCalledTimes(2);
   });
 
@@ -214,7 +200,7 @@ describe("first-open import", () => {
     const current = preview();
     const roles = candidates;
     expect(await retryPresetPreferences(fake, current, roles, NOW)).toBe("saved");
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
     expect(fake.savePreferences).toHaveBeenCalledTimes(1);
   });
 });
@@ -244,21 +230,40 @@ function sameContentPreview(
 }
 
 function rolesSnapshot(roles: readonly Role[], revision: string) {
-  return {
-    status: "ready" as const,
-    values: RolesDocumentSchema.parse({ roles }),
-    revision,
-  };
+  return readyRoles(roles, revision);
 }
 
 describe("default preset sync", () => {
+  test("writes only selected rows onto the raw document, preserving unrelated data", async () => {
+    const unrelated = { ...architect, futureRoleKey: "keep" };
+    const rawDocument = {
+      roles: [unrelated],
+      futureDocKey: { keep: true },
+    };
+    const fake = gateway({
+      readRoles: vi.fn(async () => readyRoles([unrelated], "r1", rawDocument)),
+      saveRolesDocument: vi.fn(async () => "saved" as const),
+    });
+    const current = preview();
+    const selection = defaultPresetSelection(current.roles);
+
+    const result = await syncDefaultPresets(fake, { preview: current, selection, now: NOW });
+    expect(result).toMatchObject({ kind: "synced", wroteRoles: true });
+    const savedDocument = vi.mocked(fake.saveRolesDocument).mock.calls[0]?.[0];
+    expect(savedDocument?.futureDocKey).toEqual({ keep: true });
+    const savedRoles =
+      savedDocument && Array.isArray(savedDocument.roles) ? savedDocument.roles : [];
+    expect(savedRoles[0]).toEqual(unrelated);
+    expect(savedRoles).toHaveLength(3);
+    expect(vi.mocked(fake.saveRolesDocument).mock.calls[0]?.[1]).toBe("r1");
+  });
   test("applies the selected rows and records the sync", async () => {
     const fake = gateway();
     const current = preview();
     const selection = defaultPresetSelection(current.roles);
     const result = await syncDefaultPresets(fake, { preview: current, selection, now: NOW });
     expect(result).toMatchObject({ kind: "synced", wroteRoles: true });
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
     expect(fake.savePreferences).toHaveBeenCalledTimes(1);
   });
 
@@ -268,7 +273,7 @@ describe("default preset sync", () => {
     const fake = gateway();
     const result = await syncDefaultPresets(fake, { preview: current, selection, now: NOW });
     expect(result).toMatchObject({ kind: "synced", wroteRoles: false });
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
     expect(fake.savePreferences).toHaveBeenCalledTimes(1);
   });
 
@@ -289,7 +294,7 @@ describe("default preset sync", () => {
       expect(result.selection[initial.roles[0]?.id ?? ""]).toBe("skip");
     }
     expect(fake.reloadRoles).toHaveBeenCalled();
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
   });
 
   test("a Roles save conflict re-previews without writing preferences", async () => {
@@ -297,7 +302,7 @@ describe("default preset sync", () => {
     const fresh = preview({ roles: "r2", preferences: "p1" });
     const fake = gateway({
       preview: vi.fn(async () => fresh),
-      saveRoles: vi.fn(async () => "conflict" as const),
+      saveRolesDocument: vi.fn(async () => "conflict" as const),
     });
     const result = await syncDefaultPresets(fake, {
       preview: initial,
@@ -315,11 +320,7 @@ describe("default preset sync", () => {
     let revision = "p1";
     let saves = 0;
     const fake = gateway({
-      readPreferences: vi.fn(async () => ({
-        status: "ready" as const,
-        values: preferences,
-        revision,
-      })),
+      readPreferences: vi.fn(async () => readyPreferences(preferences, revision)),
       savePreferences: vi.fn(async () => {
         saves += 1;
         if (saves === 1) {
@@ -336,7 +337,7 @@ describe("default preset sync", () => {
       now: NOW,
     });
     expect(result.kind).toBe("synced");
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
     expect(fake.savePreferences).toHaveBeenCalledTimes(2);
   });
 
@@ -349,11 +350,11 @@ describe("default preset sync", () => {
       now: NOW,
     });
     expect(result).toMatchObject({ kind: "failed", rolesImported: true });
-    expect(fake.saveRoles).toHaveBeenCalledTimes(1);
+    expect(fake.saveRolesDocument).toHaveBeenCalledTimes(1);
   });
 
   test("an invalid Roles write is not reported as a catalog conflict", async () => {
-    const fake = gateway({ saveRoles: vi.fn(async () => "invalid" as const) });
+    const fake = gateway({ saveRolesDocument: vi.fn(async () => "invalid" as const) });
     const current = preview();
     const result = await syncDefaultPresets(fake, {
       preview: current,
@@ -389,7 +390,7 @@ describe("default preset sync", () => {
       now: NOW,
     });
     expect(result).toMatchObject({ kind: "failed", rolesImported: false });
-    expect(fake.saveRoles).not.toHaveBeenCalled();
+    expect(fake.saveRolesDocument).not.toHaveBeenCalled();
     expect(fake.savePreferences).not.toHaveBeenCalled();
   });
 
@@ -427,14 +428,12 @@ describe("default preset sync", () => {
     const fake: PresetGateway = {
       preview: vi.fn(async () => currentPreview()),
       readRoles: vi.fn(async () => rolesSnapshot(roles, rolesRevision)),
-      readPreferences: vi.fn(async () => ({
-        status: "ready" as const,
-        values: storedPreferences,
-        revision: preferencesRevision,
-      })),
-      saveRoles: vi.fn(async (values, revision) => {
+      readPreferences: vi.fn(async () => readyPreferences(storedPreferences, preferencesRevision)),
+      saveRolesDocument: vi.fn(async (values, revision) => {
         if (revision !== rolesRevision) return "conflict";
-        roles = values.roles;
+        const nextRoles = values.roles;
+        if (!Array.isArray(nextRoles)) return "invalid";
+        roles = nextRoles as Role[];
         rolesRevision = String(Number(rolesRevision) + 1);
         return "saved";
       }),

@@ -3,6 +3,7 @@ import { exampleCatalog } from "../server/templates";
 import { hashCatalogContent } from "../server/templates/hash";
 import {
   applyPresetSelection,
+  applyPresetSelectionDocument,
   canonicalize,
   changedCatalogFields,
   diffPresetRoles,
@@ -265,6 +266,33 @@ describe("default preset diff and selected merge", () => {
       locallyChanged: true,
       changedFields: ["description", "mission"],
     });
+  });
+
+  test("writes only selected preset rows into the raw document", () => {
+    const unrelated = { id: "custom-role", name: "Custom", future: true };
+    const raw = { roles: [unrelated], futureDoc: { keep: true } };
+    const rows = diff([]);
+    const selected = Object.fromEntries(
+      rows.map((row) => [
+        row.id,
+        row.id === candidates[0].id ? ("add" as const) : ("skip" as const),
+      ]),
+    );
+    const result = applyPresetSelectionDocument(
+      { roles: [], raw, revision: REVISIONS.roles },
+      snapshot(rows),
+      selected,
+      LATER,
+    );
+    expect(result.document.futureDoc).toEqual({ keep: true });
+    const written = result.document.roles;
+    expect(Array.isArray(written)).toBe(true);
+    if (Array.isArray(written)) {
+      expect(written[0]).toBe(unrelated);
+      expect(written).toHaveLength(2);
+      expect(written[1]).toMatchObject({ id: candidates[0].id, source: "preset" });
+    }
+    expect(result.roles).toEqual([expect.objectContaining({ id: candidates[0].id })]);
   });
 
   test("default selection appends only the 12 missing presets; all 13 existing Roles are byte-identical", () => {

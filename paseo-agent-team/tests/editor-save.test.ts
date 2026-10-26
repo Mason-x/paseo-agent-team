@@ -13,24 +13,68 @@ import {
 type Row = { id: string; name: string; future?: unknown };
 
 const parseRoles = (values: unknown): EditorParsed<Row> => {
-  const document = values as { roles?: Row[] } | null;
-  return Array.isArray(document?.roles)
-    ? { ok: true, rows: document.roles }
-    : { ok: false, error: "bad roles" };
+  if (!values || typeof values !== "object" || !("roles" in values)) {
+    return { ok: false, error: "bad roles" };
+  }
+  const roles = values.roles;
+  if (!Array.isArray(roles)) return { ok: false, error: "bad roles" };
+  return { ok: true, rows: roles as Row[] };
 };
 
 function snapshot(rows: Row[], revision: string): EditorDocumentSnapshot<Row> {
   return { revision, rows };
 }
 
+const rowA: Row = { id: "a", name: "A" };
+const rowB: Row = { id: "b", name: "B" };
+
+/** Stateful CAS settings fake: exact revision compare, commit, then increment. */
+class CasStore {
+  private rows: Row[];
+  private revision: number;
+
+  constructor(rows: Row[], revision = 1) {
+    this.rows = structuredClone(rows);
+    this.revision = revision;
+  }
+
+  get currentRevision(): string {
+    return `r${this.revision}`;
+  }
+
+  read() {
+    return {
+      status: "ready" as const,
+      revision: this.currentRevision,
+      values: { roles: structuredClone(this.rows), futureDoc: { keep: true } },
+    };
+  }
+
+  async write(document: unknown, expected: string) {
+    if (expected !== this.currentRevision) return { status: "conflict" as const };
+    if (!document || typeof document !== "object" || !("roles" in document)) {
+      return { status: "invalid" as const };
+    }
+    const roles = document.roles;
+    if (!Array.isArray(roles)) return { status: "invalid" as const };
+    this.rows = structuredClone(roles);
+    this.revision += 1;
+    return { status: "saved" as const };
+  }
+
+  /** Another client's committed write, simulated between a read and a CAS. */
+  externalWrite(mutate: (rows: Row[]) => Row[]): void {
+    this.rows = mutate(structuredClone(this.rows));
+    this.revision += 1;
+  }
+
+  rowsSnapshot(): Row[] {
+    return structuredClone(this.rows);
+  }
+}
+
 describe("editor conflict decisions", () => {
-  const opened = snapshot(
-    [
-      { id: "a", name: "A" },
-      { id: "b", name: "B" },
-    ],
-    "r1",
-  );
+  const opened = snapshot([rowA, rowB], "r1");
 
   test("compares rows canonically and ignores key order", () => {
     expect(sameEditorRow({ b: 1, a: 2 }, { a: 2, b: 1 })).toBe(true);
@@ -38,19 +82,21 @@ describe("editor conflict decisions", () => {
     expect(sameEditorRow(null, null)).toBe(true);
   });
 
-  test("same revision or unrelated row changes may write", () => {
+  test("writes when the baseline still matches the latest row", () => {
     expect(
       decideEditorSave({
         mode: "edit",
         id: "a",
+        baseline: rowA,
         opened,
-        latest: snapshot([{ id: "a", name: "changed" }], "r1"),
+        latest: snapshot([{ id: "a", name: "A" }], "r2"),
       }),
     ).toBe("write");
     expect(
       decideEditorSave({
         mode: "edit",
         id: "a",
+        baseline: rowA,
         opened,
         latest: snapshot(
           [
@@ -63,49 +109,85 @@ describe("editor conflict decisions", () => {
     ).toBe("write");
   });
 
-  test("a changed or deleted edited row is a conflict", () => {
+  test("a changed or deleted row is the matching conflict kind", () => {
     expect(
       decideEditorSave({
         mode: "edit",
         id: "a",
+        baseline: rowA,
         opened,
         latest: snapshot([{ id: "a", name: "changed" }], "r2"),
       }),
-    ).toBe("conflict");
+    ).toBe("modified");
     expect(
       decideEditorSave({
         mode: "edit",
         id: "a",
+        baseline: rowA,
         opened,
         latest: snapshot([{ id: "b", name: "B" }], "r2"),
       }),
-    ).toBe("conflict");
+    ).toBe("deleted");
   });
 
-  test("create conflicts only when the id was taken", () => {
+  test("a baseline that disagrees with the opened snapshot is stale", () => {
+    expect(
+      decideEditorSave({
+        mode: "edit",
+        id: "a",
+        baseline: rowA,
+        opened: snapshot([{ id: "a", name: "already changed" }], "r1"),
+        latest: snapshot([{ id: "a", name: "already changed" }], "r1"),
+      }),
+    ).toBe("modified");
+    expect(
+      decideEditorSave({
+        mode: "edit",
+        id: "a",
+        baseline: null,
+        opened,
+        latest: snapshot([{ id: "a", name: "A" }], "r1"),
+      }),
+    ).toBe("modified");
+  });
+
+  test("create always rejects an occupied id, even with overwrite or the same revision", () => {
+    expect(
+      decideEditorSave({
+        mode: "create",
+        id: "a",
+        baseline: null,
+        opened,
+        latest: snapshot([{ id: "a", name: "A" }], "r1"),
+      }),
+    ).toBe("id-taken");
+    expect(
+      decideEditorSave({
+        mode: "create",
+        id: "a",
+        baseline: null,
+        opened,
+        latest: snapshot([{ id: "a", name: "A" }], "r2"),
+        forceOverwrite: true,
+      }),
+    ).toBe("id-taken");
     expect(
       decideEditorSave({
         mode: "create",
         id: "c",
+        baseline: null,
         opened,
         latest: snapshot([{ id: "a", name: "A" }], "r2"),
       }),
     ).toBe("write");
-    expect(
-      decideEditorSave({
-        mode: "create",
-        id: "a",
-        opened,
-        latest: snapshot([{ id: "a", name: "A" }], "r2"),
-      }),
-    ).toBe("conflict");
   });
 
-  test("force overwrite always writes", () => {
+  test("force overwrite replaces a modified row", () => {
     expect(
       decideEditorSave({
         mode: "edit",
         id: "a",
+        baseline: rowA,
         opened,
         latest: snapshot([{ id: "a", name: "changed" }], "r2"),
         forceOverwrite: true,
@@ -164,156 +246,193 @@ describe("loadEditorSnapshot", () => {
 
 describe("saveEditorRow", () => {
   test("merges into the fresh document and keeps unrelated rows and unknown keys", async () => {
-    const opened = snapshot(
-      [
-        { id: "a", name: "A" },
-        { id: "b", name: "B" },
-      ],
-      "r1",
-    );
-    const write = vi.fn(async () => ({ status: "saved" as const }));
+    const store = new CasStore([rowA, rowB]);
+    const opened = store.read();
+    const write = vi.fn((document: unknown, revision: string) => store.write(document, revision));
 
     const result = await saveEditorRow({
       mode: "edit",
       key: "roles",
       row: { id: "a", name: "A-edited" },
-      opened,
-      read: async () => ({
-        status: "ready",
-        revision: "r2",
-        values: {
-          roles: [
-            { id: "b", name: "B2", future: "keep" },
-            { id: "a", name: "A" },
-          ],
-          futureDoc: { keep: true },
-        },
-      }),
+      baseline: rowA,
+      opened: { revision: opened.revision, rows: [rowA, rowB] },
+      read: async () => store.read(),
       write,
       parse: parseRoles,
     });
 
     expect(result).toBe("saved");
+    expect(store.rowsSnapshot()).toEqual([
+      { id: "a", name: "A-edited" },
+      { id: "b", name: "B" },
+    ]);
     expect(write).toHaveBeenCalledWith(
-      {
-        roles: [
-          { id: "b", name: "B2", future: "keep" },
-          { id: "a", name: "A-edited" },
-        ],
-        futureDoc: { keep: true },
-      },
-      "r2",
+      { roles: [{ id: "a", name: "A-edited" }, rowB], futureDoc: { keep: true } },
+      "r1",
     );
   });
 
-  test("does not write when the edited row changed or was deleted", async () => {
-    const opened = snapshot([{ id: "a", name: "A" }], "r1");
+  test("returns the matching conflict kind without writing", async () => {
     const write = vi.fn(async () => ({ status: "saved" as const }));
+    const base = {
+      mode: "edit" as const,
+      key: "roles" as const,
+      row: { id: "a", name: "A-edited" },
+      baseline: rowA,
+      opened: snapshot([rowA], "r1"),
+      write,
+      parse: parseRoles,
+    };
 
     expect(
       await saveEditorRow({
-        mode: "edit",
-        key: "roles",
-        row: { id: "a", name: "A-edited" },
-        opened,
+        ...base,
         read: async () => ({
           status: "ready",
           revision: "r2",
           values: { roles: [{ id: "a", name: "changed" }] },
         }),
-        write,
-        parse: parseRoles,
       }),
-    ).toBe("conflict");
+    ).toBe("modified");
+    expect(
+      await saveEditorRow({
+        ...base,
+        read: async () => ({ status: "ready", revision: "r2", values: { roles: [] } }),
+      }),
+    ).toBe("deleted");
     expect(write).not.toHaveBeenCalled();
   });
 
-  test("force overwrite replaces the concurrent row", async () => {
-    const opened = snapshot([{ id: "a", name: "A" }], "r1");
+  test("create rejects an existing id even when the revision did not move", async () => {
     const write = vi.fn(async () => ({ status: "saved" as const }));
-
-    expect(
-      await saveEditorRow({
-        mode: "edit",
-        key: "roles",
-        row: { id: "a", name: "A-mine" },
-        opened,
-        forceOverwrite: true,
-        read: async () => ({
-          status: "ready",
-          revision: "r2",
-          values: { roles: [{ id: "a", name: "theirs" }] },
-        }),
-        write,
-        parse: parseRoles,
-      }),
-    ).toBe("saved");
-    expect(write).toHaveBeenCalledWith({ roles: [{ id: "a", name: "A-mine" }] }, "r2");
-  });
-
-  test("create conflicts when another client took the id", async () => {
-    const write = vi.fn(async () => ({ status: "saved" as const }));
+    const result = await saveEditorRow({
+      mode: "create",
+      key: "roles",
+      row: { id: "a", name: "new" },
+      baseline: null,
+      opened: snapshot([rowA], "r1"),
+      read: async () => ({ status: "ready", revision: "r1", values: { roles: [rowA] } }),
+      write,
+      parse: parseRoles,
+    });
+    expect(result).toBe("id-taken");
+    expect(write).not.toHaveBeenCalled();
     expect(
       await saveEditorRow({
         mode: "create",
         key: "roles",
-        row: { id: "a", name: "A" },
-        opened: snapshot([], "r1"),
-        read: async () => ({
-          status: "ready",
-          revision: "r2",
-          values: { roles: [{ id: "a", name: "theirs" }] },
-        }),
+        row: { id: "a", name: "new" },
+        baseline: null,
+        opened: snapshot([rowA], "r1"),
+        forceOverwrite: true,
+        read: async () => ({ status: "ready", revision: "r1", values: { roles: [rowA] } }),
         write,
         parse: parseRoles,
       }),
-    ).toBe("conflict");
+    ).toBe("id-taken");
     expect(write).not.toHaveBeenCalled();
   });
 
-  test("retries once after a write conflict and reports exhaustion", async () => {
-    const opened = snapshot([{ id: "a", name: "A" }], "r1");
-    const values = { roles: [{ id: "a", name: "A" }] };
-    const read = async () => ({ status: "ready" as const, revision: "r2", values });
-    const succeeding = vi
-      .fn()
-      .mockResolvedValueOnce({ status: "conflict" })
-      .mockResolvedValueOnce({ status: "saved" });
-    expect(
-      await saveEditorRow({
-        mode: "edit",
-        key: "roles",
-        row: { id: "a", name: "A" },
-        opened,
-        read,
-        write: succeeding,
-        parse: parseRoles,
-      }),
-    ).toBe("saved");
-    expect(succeeding).toHaveBeenCalledTimes(2);
+  test("force overwrite replaces the modified row after a fresh read", async () => {
+    const store = new CasStore([{ id: "a", name: "theirs" }]);
+    const result = await saveEditorRow({
+      mode: "edit",
+      key: "roles",
+      row: { id: "a", name: "mine" },
+      baseline: rowA,
+      opened: snapshot([rowA], "r1"),
+      forceOverwrite: true,
+      read: async () => store.read(),
+      write: (document, revision) => store.write(document, revision),
+      parse: parseRoles,
+    });
+    expect(result).toBe("saved");
+    expect(store.rowsSnapshot()).toEqual([{ id: "a", name: "mine" }]);
+  });
 
-    const failing = vi.fn(async () => ({ status: "conflict" as const }));
-    expect(
-      await saveEditorRow({
-        mode: "edit",
-        key: "roles",
-        row: { id: "a", name: "A" },
-        opened,
-        read,
-        write: failing,
-        parse: parseRoles,
-      }),
-    ).toBe("conflict");
-    expect(failing).toHaveBeenCalledTimes(2);
+  test("re-reads after a CAS conflict and merges an unrelated change", async () => {
+    const store = new CasStore([rowA, rowB]);
+    const opened = store.read();
+    let interfered = false;
+    const result = await saveEditorRow({
+      mode: "edit",
+      key: "roles",
+      row: { id: "a", name: "A-edited" },
+      baseline: rowA,
+      opened: { revision: opened.revision, rows: [rowA, rowB] },
+      read: async () => {
+        if (!interfered) {
+          interfered = true;
+          store.externalWrite((rows) => [...rows, { id: "c", name: "C" }]);
+        }
+        return store.read();
+      },
+      write: (document, revision) => store.write(document, revision),
+      parse: parseRoles,
+    });
+    expect(result).toBe("saved");
+    expect(store.rowsSnapshot()).toEqual([
+      { id: "a", name: "A-edited" },
+      { id: "b", name: "B" },
+      { id: "c", name: "C" },
+    ]);
+  });
+
+  test("re-reads after a CAS conflict and reports a changed row", async () => {
+    const store = new CasStore([rowA, rowB]);
+    const opened = store.read();
+    let interfered = false;
+    const result = await saveEditorRow({
+      mode: "edit",
+      key: "roles",
+      row: { id: "a", name: "A-edited" },
+      baseline: rowA,
+      opened: { revision: opened.revision, rows: [rowA, rowB] },
+      read: async () => {
+        if (!interfered) {
+          interfered = true;
+          store.externalWrite((rows) =>
+            rows.map((row) => (row.id === "a" ? { ...row, name: "theirs" } : row)),
+          );
+        }
+        return store.read();
+      },
+      write: (document, revision) => store.write(document, revision),
+      parse: parseRoles,
+    });
+    expect(result).toBe("modified");
+    expect(store.rowsSnapshot().find((row) => row.id === "a")).toEqual({
+      id: "a",
+      name: "theirs",
+    });
+  });
+
+  test("two consecutive CAS interruptions are busy, not a row conflict", async () => {
+    const store = new CasStore([rowA]);
+    const opened = store.read();
+    const result = await saveEditorRow({
+      mode: "edit",
+      key: "roles",
+      row: { id: "a", name: "A-edited" },
+      baseline: rowA,
+      opened: { revision: opened.revision, rows: [rowA] },
+      read: async () => store.read(),
+      write: async () => {
+        store.externalWrite((rows) => [...rows]);
+        return { status: "conflict" as const };
+      },
+      parse: parseRoles,
+    });
+    expect(result).toBe("busy");
   });
 
   test("reports invalid reads, invalid writes, and transport failures", async () => {
-    const opened = snapshot([{ id: "a", name: "A" }], "r1");
     const base = {
       mode: "edit" as const,
       key: "roles" as const,
       row: { id: "a", name: "A" },
-      opened,
+      baseline: rowA,
+      opened: snapshot([rowA], "r1"),
       parse: parseRoles,
     };
     expect(

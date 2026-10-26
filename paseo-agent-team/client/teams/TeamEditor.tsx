@@ -1,7 +1,7 @@
 import { settingsRpc } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
@@ -15,6 +15,7 @@ import { zh } from "../../shared/zh";
 import {
   type EditorDocumentSnapshot,
   type EditorParsed,
+  type EditorSaveResult,
   loadEditorSnapshot,
   saveEditorRow,
 } from "../catalog/editor-save";
@@ -43,6 +44,8 @@ import {
 
 const teamsRead = settingsRpc(teamsSettings.id).read;
 const teamsWrite = settingsRpc(teamsSettings.id).write;
+
+type ConflictKind = Extract<EditorSaveResult, "modified" | "deleted" | "id-taken">;
 
 function parseTeamsDocument(values: unknown): EditorParsed<Team> {
   const parsed = TeamsDocumentSchema.safeParse(values);
@@ -105,49 +108,58 @@ export function TeamEditor({
     escalationRoleId: false,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [conflict, setConflict] = useState(false);
+  const [conflict, setConflict] = useState<ConflictKind | null>(null);
   const [formSeed, setFormSeed] = useState(0);
   const [idSeed, setIdSeed] = useState(0);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savingHere, setSavingHere] = useState(false);
   const opened = useRef<EditorDocumentSnapshot<Team> | null>(null);
+  const baseline = useRef<Team | null>(team);
+  const teamState = useSettings(teamsSettings);
   const idLocked = mode === "edit";
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
 
+  const seedTeam = useCallback(
+    (next: Team | null) => {
+      const nextName = next?.name ?? "";
+      const nextId = next?.id ?? slugify(nextName, "team");
+      autoSlug.reset(mode === "edit", nextId, nextName);
+      nameRef.current = nextName;
+      baseline.current = next;
+      setName(nextName);
+      setId(nextId);
+      setDescription(next?.description ?? "");
+      setCoordinatorRoleId(next?.coordinatorRoleId ?? defaultCoordinatorId);
+      const nextCoordinator = next?.coordinatorRoleId ?? defaultCoordinatorId;
+      setMembers(next?.members ?? [newTeamMember(roles, nextCoordinator, new Set())]);
+      setOperatingRules(next?.operatingRules ?? "");
+      const storedMode = readStoredTeamMode(next?.mode);
+      setTeamMode(storedMode.mode);
+      setModeUnknown(storedMode.unknown);
+      setMemberCreation(readMemberCreation(next?.memberCreation));
+      const storedCollaboration = readCollaboration(next?.collaboration);
+      setCollaboration(storedCollaboration);
+      setAdvancedOpen(storedMode.mode === "collaborative" || Boolean(next?.collaboration));
+      setModeTouched(false);
+      setMemberCreationTouched(false);
+      setCollaborationTouched({
+        replicas: false,
+        judgeRoleId: false,
+        escalationRoleId: false,
+      });
+      setErrors({});
+      setConflict(null);
+      setFormSeed((seed) => seed + 1);
+      setIdSeed((seed) => seed + 1);
+    },
+    [autoSlug, defaultCoordinatorId, mode, roles],
+  );
+
   useEffect(() => {
-    if (!open) return;
-    const nextName = team?.name ?? "";
-    const nextId = team?.id ?? slugify(nextName, "team");
-    autoSlug.reset(mode === "edit", nextId, nextName);
-    nameRef.current = nextName;
-    setName(nextName);
-    setId(nextId);
-    setDescription(team?.description ?? "");
-    setCoordinatorRoleId(team?.coordinatorRoleId ?? defaultCoordinatorId);
-    const nextCoordinator = team?.coordinatorRoleId ?? defaultCoordinatorId;
-    setMembers(team?.members ?? [newTeamMember(roles, nextCoordinator, new Set())]);
-    setOperatingRules(team?.operatingRules ?? "");
-    const storedMode = readStoredTeamMode(team?.mode);
-    setTeamMode(storedMode.mode);
-    setModeUnknown(storedMode.unknown);
-    setMemberCreation(readMemberCreation(team?.memberCreation));
-    const storedCollaboration = readCollaboration(team?.collaboration);
-    setCollaboration(storedCollaboration);
-    setAdvancedOpen(storedMode.mode === "collaborative" || Boolean(team?.collaboration));
-    setModeTouched(false);
-    setMemberCreationTouched(false);
-    setCollaborationTouched({
-      replicas: false,
-      judgeRoleId: false,
-      escalationRoleId: false,
-    });
-    setErrors({});
-    setConflict(false);
-    setFormSeed((seed) => seed + 1);
-    setIdSeed((seed) => seed + 1);
-  }, [autoSlug, defaultCoordinatorId, mode, open, roles, team]);
+    if (open) seedTeam(team);
+  }, [open, team, seedTeam]);
 
   useEffect(() => {
     opened.current = null;
@@ -169,6 +181,23 @@ export function TeamEditor({
     };
   }, [open, readTeamsDoc]);
 
+  async function reloadDraft() {
+    setConflict(null);
+    const result = await loadEditorSnapshot(() => readTeamsDoc({}), parseTeamsDocument);
+    if (!result.ok) {
+      setSaveError(result.error || zh.saveFail);
+      return;
+    }
+    opened.current = result.snapshot;
+    const id = baseline.current?.id;
+    const latest = id ? result.snapshot.rows.find((row) => row.id === id) : undefined;
+    if (!latest) {
+      onClose();
+      return;
+    }
+    seedTeam(latest);
+  }
+
   async function submit(overwrite = false) {
     const resolvedName = nameRef.current;
     const resolvedId = autoSlug.resolve(idLocked, resolvedName, id);
@@ -184,7 +213,7 @@ export function TeamEditor({
       coordinatorRoleId,
       members,
       ...buildTeamModeFields({
-        original: team,
+        original: baseline.current,
         mode: teamMode,
         modeTouched,
         memberCreation,
@@ -194,7 +223,7 @@ export function TeamEditor({
       }),
       operatingRules: operatingRules.trim() || undefined,
       enabled: true,
-      createdAt: team?.createdAt ?? now,
+      createdAt: baseline.current?.createdAt ?? now,
       updatedAt: now,
     });
     if (!parsed.success) {
@@ -208,14 +237,23 @@ export function TeamEditor({
     }
     const result = await saveEditorRowWithSnapshot(
       mode,
-      keepTeamMetadata(team, parsed.data),
+      keepTeamMetadata(baseline.current, parsed.data),
       overwrite,
     );
-    if (result === "conflict") {
-      setConflict(true);
+    if (result === "saved") {
+      try {
+        await teamState.reload();
+      } catch {
+        // The host event refreshes the list; the save itself succeeded.
+      }
+      onClose();
       return;
     }
-    if (result === "saved") onClose();
+    if (result === "modified" || result === "deleted" || result === "id-taken") {
+      setConflict(result);
+      return;
+    }
+    if (result === "busy") setSaveError(zh.saveConflictRetry);
   }
 
   async function saveEditorRowWithSnapshot(
@@ -235,6 +273,7 @@ export function TeamEditor({
         mode: editorMode,
         key: "teams",
         row,
+        baseline: baseline.current,
         opened: snapshot,
         forceOverwrite: overwrite,
         read: () => readTeamsDoc({}),
@@ -242,7 +281,7 @@ export function TeamEditor({
           writeTeamsDoc({ revision, values: toJsonValue(document) as JSONType }),
         parse: parseTeamsDocument,
       });
-      if (result !== "saved" && result !== "conflict") setSaveError(zh.saveFail);
+      if (result === "invalid" || result === "failed") setSaveError(zh.saveFail);
       return result;
     } finally {
       setSavingHere(false);
@@ -535,18 +574,28 @@ export function TeamEditor({
       </Modal>
       <ConfirmDialog
         theme={theme}
-        open={conflict}
+        open={conflict !== null}
         title={zh.conflictTitle}
-        body={zh.conflictTeam}
+        body={
+          conflict === "id-taken"
+            ? zh.conflictTeamIdTaken
+            : conflict === "deleted"
+              ? zh.conflictTeamDeleted
+              : zh.conflictTeamModified
+        }
         confirmLabel={zh.overwrite}
-        cancelLabel={zh.reload}
+        cancelLabel={conflict === "id-taken" ? zh.editAgain : zh.reload}
+        confirmHidden={conflict === "id-taken"}
         danger
         onCancel={() => {
-          setConflict(false);
-          onClose();
+          if (conflict === "id-taken") {
+            setConflict(null);
+            return;
+          }
+          void reloadDraft();
         }}
         onConfirm={() => {
-          setConflict(false);
+          setConflict(null);
           void submit(true);
         }}
       />

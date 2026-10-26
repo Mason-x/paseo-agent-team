@@ -1,5 +1,5 @@
 import {
-  applyPresetSelection,
+  applyPresetSelectionDocument,
   type PresetSelection,
   recordPresetSync,
 } from "../../shared/domain/catalog-content";
@@ -20,7 +20,7 @@ import {
 export type PreviewSuccess = Extract<DefaultCatalogPreviewResult, { ok: true }>;
 
 export type SettingsSnapshot<Values> =
-  | { status: "ready"; values: Values; revision: string }
+  | { status: "ready"; values: Values; raw: unknown; revision: string }
   | { status: "invalid"; error: string };
 
 /** The settings write result, mapped from the host's saved/conflict/invalid answer. */
@@ -31,7 +31,7 @@ export type PresetGateway = {
   preview(allowUnboundOnProfileError: boolean): Promise<DefaultCatalogPreviewResult>;
   readRoles(): Promise<SettingsSnapshot<RolesDocument>>;
   readPreferences(): Promise<SettingsSnapshot<Preferences>>;
-  saveRoles(values: RolesDocument, revision: string): Promise<WriteResult>;
+  saveRolesDocument(values: Record<string, unknown>, revision: string): Promise<WriteResult>;
   savePreferences(values: Preferences, revision: string): Promise<WriteResult>;
   reloadRoles(): Promise<void>;
   reloadPreferences(): Promise<void>;
@@ -158,10 +158,10 @@ export async function importDefaultPresets(
       continue;
     }
 
-    let roles: Role[];
+    let selectionResult: { roles: Role[]; document: Record<string, unknown> };
     try {
-      roles = applyPresetSelection(
-        { roles: rolesState.values.roles, revision: rolesState.revision },
+      selectionResult = applyPresetSelectionDocument(
+        { roles: rolesState.values.roles, raw: rolesState.raw, revision: rolesState.revision },
         preview,
         defaultPresetSelection(preview.roles),
         options.now,
@@ -184,7 +184,11 @@ export async function importDefaultPresets(
       continue;
     }
 
-    const rolesWrite = await gateway.saveRoles({ roles }, rolesState.revision);
+    const roles = selectionResult.roles;
+    const rolesWrite = await gateway.saveRolesDocument(
+      selectionResult.document,
+      rolesState.revision,
+    );
     if (rolesWrite !== "saved") {
       try {
         await gateway.reloadRoles();
@@ -278,9 +282,10 @@ export async function syncDefaultPresets(
   let roles = rolesState.values.roles;
   let wroteRoles = false;
   if (selectionNeedsRoleWrite(input.preview.roles, input.selection)) {
+    let selectionResult: { roles: Role[]; document: Record<string, unknown> };
     try {
-      roles = applyPresetSelection(
-        { roles: rolesState.values.roles, revision: rolesState.revision },
+      selectionResult = applyPresetSelectionDocument(
+        { roles: rolesState.values.roles, raw: rolesState.raw, revision: rolesState.revision },
         input.preview,
         input.selection,
         input.now,
@@ -288,7 +293,8 @@ export async function syncDefaultPresets(
     } catch {
       return repreviewForConfirmation(gateway, input.selection, zh.defaultPresetsCatalogChanged);
     }
-    const write = await gateway.saveRoles({ roles }, rolesState.revision);
+    roles = selectionResult.roles;
+    const write = await gateway.saveRolesDocument(selectionResult.document, rolesState.revision);
     if (write === "invalid") {
       return { kind: "failed", message: zh.defaultPresetsInvalidData, rolesImported: false };
     }

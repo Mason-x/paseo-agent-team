@@ -42,7 +42,12 @@ export function createPresetGateway(input: {
     }
     const parsed = parse(result.values);
     if (!parsed.success) return { status: "invalid", error: parsed.error };
-    return { status: "ready", values: parsed.data, revision: result.revision };
+    return {
+      status: "ready",
+      values: parsed.data,
+      raw: result.values,
+      revision: result.revision,
+    };
   }
 
   return {
@@ -61,7 +66,8 @@ export function createPresetGateway(input: {
           ? { success: true, data: parsed.data }
           : { success: false, error: parsed.error.issues.map((issue) => issue.message).join("\n") };
       }),
-    saveRoles: (values, revision) => input.roles.write(toJsonValue(values), revision),
+    saveRolesDocument: (values, revision) =>
+      input.roles.write(toJsonValue(values) as RolesDocument, revision),
     savePreferences: (values, revision) => input.preferences.write(toJsonValue(values), revision),
     reloadRoles: input.roles.reload,
     reloadPreferences: input.preferences.reload,
