@@ -15,7 +15,7 @@ import type {
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
-import { DESIGN_HASH, designJob, designProposal } from "./design-fixtures";
+import { DESIGN_HASH, designJob, designProposal, newDesignRole } from "./design-fixtures";
 import {
   architect,
   claudeOpus,
@@ -2213,6 +2213,157 @@ describe("design service", () => {
     await until(() => store.records.get(jobId)?.job.agentCreated === true);
     expect(store.records.get(jobId)?.job.state).toBe("designing");
     expect(store.records.get(jobId)?.creation?.request).toBeFalsy();
+    await service.dispose();
+  });
+
+  test("authorizes canceled cleanup only for written roles", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    const role = newDesignRole({ id: "eng-observability", name: "【工程】可观测" });
+    const base = proposalFor(stored);
+    const proposal = {
+      ...base,
+      team: {
+        ...base.team,
+        members: base.team.members.map((member) =>
+          member.key === "m2" ? { ...member, roleId: role.id } : member,
+        ),
+      },
+      newRoles: [role],
+      reuse: base.reuse.filter((entry) => entry.roleId !== "developer"),
+    };
+    adapter.entries = answerFor(stored, proposal);
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => store.records.get(started.job.jobId)?.job.state === "ready");
+    const ready = await store.get(started.job.jobId);
+    if (ready?.result?.newRoles.length !== 1) throw new Error("missing new role");
+    const written = ready.result.newRoles[0];
+    if (!written) throw new Error("missing written role");
+    const clientId = "22222222-2222-4222-8222-222222222222";
+    const prepared = await service.prepareSave({
+      jobId: ready.job.jobId,
+      resultId: ready.result.resultId,
+      clientId,
+    });
+    if (!prepared.ok || prepared.prepared.outcome !== "write") throw new Error("prepare failed");
+    await service.saveFailed({
+      jobId: ready.job.jobId,
+      resultId: ready.result.resultId,
+      leaseId: prepared.prepared.lease.id,
+      phase: "team",
+      reason: "canceled",
+    });
+    expect(store.records.get(ready.job.jobId)?.job).toMatchObject({
+      saveState: "roles-only",
+      needsCleanup: true,
+    });
+    await service.cancel({ jobId: ready.job.jobId });
+    const canceled = await store.get(ready.job.jobId);
+    expect(canceled?.job).toMatchObject({
+      state: "canceled",
+      cancelRequested: true,
+      saveState: "roles-only",
+      needsCleanup: true,
+    });
+    const cleaner = createDesignService(
+      serviceDeps(store, adapter, {
+        readers: readers({
+          roles: [...[techLead, architect, developer], written],
+          teams: [codingTeam],
+        }),
+      }),
+    );
+    const cleanup = await cleaner.prepareSave({
+      jobId: ready.job.jobId,
+      resultId: ready.result.resultId,
+      clientId,
+      intent: "compensate",
+    });
+    expect(cleanup).toMatchObject({
+      ok: true,
+      prepared: { outcome: "compensate", removableRoleIds: [written.id] },
+    });
+    expect(
+      await cleaner.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "save",
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_STATE_CHANGED" }] });
+
+    const live = store.records.get(ready.job.jobId);
+    if (!live) throw new Error("missing live");
+    live.outcomeUnknown = true;
+    live.job.state = "canceled";
+    live.job.cancelRequested = true;
+    live.job.needsCleanup = true;
+    live.job.saveState = "roles-only";
+    live.leaseOwner = null;
+    live.job.saveLeaseExpiresAt = null;
+    expect(
+      await cleaner.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "compensate",
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_SAVE_UNKNOWN" }] });
+
+    live.outcomeUnknown = false;
+    live.leaseOwner = JSON.stringify({ clientId, leaseId: "44444444-4444-4444-8444-444444444444" });
+    live.job.saveLeaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
+    expect(
+      await cleaner.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId,
+        intent: "compensate",
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_SAVE_BUSY" }] });
+    await cleaner.dispose();
+    await service.dispose();
+  });
+
+  test("does not authorize canceled cleanup without written roles", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const started = await service.start(input());
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.entries = answerFor(stored, proposalFor(stored));
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => store.records.get(started.job.jobId)?.job.state === "ready");
+    const ready = await store.get(started.job.jobId);
+    if (!ready?.result) throw new Error("missing result");
+    await service.cancel({ jobId: ready.job.jobId });
+    expect(store.records.get(ready.job.jobId)?.job).toMatchObject({
+      state: "canceled",
+      needsCleanup: false,
+    });
+    expect(
+      await service.prepareSave({
+        jobId: ready.job.jobId,
+        resultId: ready.result.resultId,
+        clientId: "22222222-2222-4222-8222-222222222222",
+        intent: "compensate",
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_NOT_SAVED" }] });
     await service.dispose();
   });
 

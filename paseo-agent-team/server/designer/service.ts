@@ -203,6 +203,25 @@ function sendTimeOf(attempt: DesignAttemptRecord | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function roleWrittenByJob(
+  record: StoredDesignJob,
+  roles: readonly { id: string; source?: string; designer?: unknown }[],
+): boolean {
+  if (!record.result) return false;
+  return record.result.newRoles.some((candidate) =>
+    roles.some((role) => {
+      if (role.id !== candidate.id || role.source !== "team-designer") return false;
+      const designer = role.designer;
+      return (
+        !!designer &&
+        typeof designer === "object" &&
+        "jobId" in designer &&
+        designer.jobId === record.job.jobId
+      );
+    }),
+  );
+}
+
 function uncertainCreate(cause: unknown): boolean {
   const text =
     cause instanceof Error
@@ -1545,7 +1564,12 @@ export function createDesignService(deps: DesignServiceDeps) {
             record.job,
           );
         }
-        if (record.job.cancelRequested || record.job.state === "canceling") {
+        const canceledCompensation =
+          input.intent === "compensate" && record.job.state === "canceled";
+        if (
+          (record.job.cancelRequested || record.job.state === "canceling") &&
+          !canceledCompensation
+        ) {
           return failure(
             [error("DESIGN_STATE_CHANGED", ["state"], { state: record.job.state }, "refresh")],
             record.job,
@@ -1572,6 +1596,7 @@ export function createDesignService(deps: DesignServiceDeps) {
           return failure([error("DESIGN_SAVE_BUSY", ["lease"], {}, "refresh")], record.job);
         }
         if (
+          !canceledCompensation &&
           record.job.state !== "ready" &&
           record.job.state !== "save_conflict" &&
           !(record.job.state === "saving" && leaseOwner?.clientId === input.clientId)
@@ -1609,7 +1634,8 @@ export function createDesignService(deps: DesignServiceDeps) {
         if (
           input.intent === "compensate" &&
           record.job.state !== "save_conflict" &&
-          !record.job.needsCleanup
+          !record.job.needsCleanup &&
+          !canceledCompensation
         ) {
           return failure(
             [error("DESIGN_STATE_CHANGED", ["state"], { state: record.job.state }, "refresh")],
@@ -1629,6 +1655,12 @@ export function createDesignService(deps: DesignServiceDeps) {
                 "inspect",
               ),
             ],
+            record.job,
+          );
+        }
+        if (canceledCompensation && !roleWrittenByJob(record, context.roles)) {
+          return failure(
+            [error("DESIGN_NOT_SAVED", ["newRoles"], { reason: "no-written-role" }, "inspect")],
             record.job,
           );
         }
@@ -1801,6 +1833,10 @@ export function createDesignService(deps: DesignServiceDeps) {
         }
         const canceled = record.job.cancelRequested || input.reason === "compensated";
         const state: DesignJob["state"] = canceled ? "canceled" : "save_conflict";
+        const canceledAfterRoles =
+          input.reason === "canceled" &&
+          input.phase === "team" &&
+          record.result.newRoles.length > 0;
         const issue = error(
           input.reason === "compensated" ? "DESIGN_COMPENSATION_UNSAFE" : "DESIGN_SAVE_FAILED",
           ["save"],
@@ -1829,11 +1865,12 @@ export function createDesignService(deps: DesignServiceDeps) {
             saveState:
               input.reason === "unknown"
                 ? "unknown"
-                : input.reason === "partial"
+                : input.reason === "partial" || canceledAfterRoles
                   ? "roles-only"
                   : current.job.saveState,
             saveLeaseExpiresAt: null,
-            needsCleanup: input.reason === "partial" ? true : current.job.needsCleanup,
+            needsCleanup:
+              input.reason === "partial" || canceledAfterRoles ? true : current.job.needsCleanup,
             issues: [...current.job.issues, issue],
             finishedAt: state === "canceled" ? deps.clock.now() : current.job.finishedAt,
             allowed: allowedFor(state),
