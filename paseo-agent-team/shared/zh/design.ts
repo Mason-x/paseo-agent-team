@@ -94,17 +94,6 @@ export const designZh = {
     collaborative: "协作",
   } satisfies Record<TeamMode, string>,
 
-  budgets: {
-    economy: "经济",
-    sota: "SOTA",
-    unknown: "未核实",
-  },
-  budgetUnknown: "未核实",
-  budgetBasis: {
-    host: "宿主标签",
-    pool: "经济池",
-    "conservative-default": "保守默认",
-  },
   sources: {
     "role-preferred": "Role 首选",
     "role-fallback": "Role 备选",
@@ -185,7 +174,23 @@ export const designZh = {
   prefillQueued: "已填入设计任务，请确认后开始。",
   prefillTooLong: "需求过长，未打开设计师。",
   prefillScopeUnavailable: "无法确认当前 host，已打开空白设计师。",
+  prefillExpired: "设计预填已过期，请重新执行 /team-design",
   submitInFlight: "上一次提交尚未完成",
+  startAccepted: "已开始设计",
+  startUnknown: "提交结果尚未确认，请稍后重试",
+  targetOnlyWorkspace: "当前只有所选目标工作区，可不选目标直接开始，或另建一个工作区。",
+  jobsLoading: "正在加载设计任务…",
+  jobsError: (reason: string) => `无法加载设计任务：${reason}`,
+  jobsTruncated: "部分设计任务未显示",
+  resultLoadFail: "无法读取设计方案",
+  saveSucceeded: "设计已保存",
+  savePendingReview: "设计尚未保存完成，请检查任务状态",
+  saveRefused: "设计保存未开始，请重试",
+  savedTeamDeleted: "已保存的 Team 已不存在，请重新保存设计",
+  cleanupDone: "已清理取消后遗留的 Role",
+  cleanupPending: "取消后的清理尚未完成，请检查目录或稍后重试",
+  teamDesignSlashDescription: "预填 Team 设计师需求（不会自动开始）",
+  teamDesignSlashHint: "描述要设计的 Team 或项目需求",
 } as const;
 
 export type DesignIssueMessageKey = Exclude<keyof typeof designZh, "phases" | "actions">;

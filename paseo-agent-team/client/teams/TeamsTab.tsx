@@ -20,6 +20,7 @@ export function TeamsTab({
   teams,
   roles,
   designer,
+  progress,
   empty,
   onLaunch,
   onEdit,
@@ -32,6 +33,8 @@ export function TeamsTab({
   roles: readonly Role[];
   /** Everything the designer card needs except what this tab decides from the Team list. */
   designer: Omit<TeamDesignerCardProps, "theme" | "layout" | "collapseByDefault">;
+  /** Jobs and results below the designer; stays mounted while the card is folded. */
+  progress?: ReactNode;
   /** Shown between the search box and the list, e.g. the empty-catalog state. */
   empty?: ReactNode;
   onLaunch: (team: Team) => void;
@@ -73,6 +76,7 @@ export function TeamsTab({
         layout={layout}
         collapseByDefault={resolveCollapseDefault(layout.compact, teams.length)}
       />
+      {progress}
       <View style={styles.searchWrap}>
         <Icon name="Search" size={15} color={theme.colors.foregroundMuted} />
         <ImeTextInput

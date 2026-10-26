@@ -10,8 +10,17 @@ import { createPaseoAdapter } from "../../shared/paseo/adapter";
 import { defaultCatalogPreviewRpc } from "../../shared/rpc";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
-import { preferencesSettings, rolesSettings, teamsSettings } from "../../shared/settings";
+import type { TeamMode } from "../../shared/schemas/team-mode";
+import {
+  preferencesSettings,
+  RolesDocumentSchema,
+  rolesSettings,
+  TeamsDocumentSchema,
+  teamsSettings,
+} from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import { designZh } from "../../shared/zh/design";
+import { appendDocumentRow, removeDocumentRow } from "../catalog/editor-save";
 import { PresetSyncDialog } from "../catalog/PresetSyncDialog";
 import { createPresetGateway } from "../catalog/preset-gateway";
 import { copyRole as copyRoleRecord, copyTeam as copyTeamRecord } from "../catalog/preset-metadata";
@@ -27,6 +36,11 @@ import {
   countBindingReport,
   resolveEmptyCatalogMode,
 } from "../catalog/preset-state";
+import { DesignJobsPanel } from "../designer/DesignJobsPanel";
+import { type DesignerPrefill, designerPrefillFromEvent } from "../designer/design-screen-state";
+import { subscribeDesignPrefills } from "../designer/events";
+import { createDesignClientRequestId, DESIGN_JOB_MAX_ATTEMPTS } from "../designer/submission-state";
+import { useDesignJobs } from "../designer/use-design-jobs";
 import { LaunchDialog } from "../launch/LaunchDialog";
 import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
@@ -44,6 +58,8 @@ import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from 
 
 const rolesReadRpc = settingsRpc(rolesSettings.id).read;
 const rolesWriteRpc = settingsRpc(rolesSettings.id).write;
+const teamsReadRpc = settingsRpc(teamsSettings.id).read;
+const teamsWriteRpc = settingsRpc(teamsSettings.id).write;
 const preferencesReadRpc = settingsRpc(preferencesSettings.id).read;
 const preferencesWriteRpc = settingsRpc(preferencesSettings.id).write;
 
@@ -71,17 +87,14 @@ const TAB_LABELS: Record<AgentTeamTab, string> = {
   runs: zh.runs,
 };
 
-function upsert<T extends { id: string }>(items: T[], item: T): T[] {
-  const index = items.findIndex((entry) => entry.id === item.id);
-  if (index === -1) return [...items, item];
-  const next = [...items];
-  next[index] = item;
-  return next;
-}
-
-function isConflict(message: string | null): boolean {
-  return (message ?? "").toLowerCase().includes("conflict");
-}
+type LaunchSeed = {
+  key: string;
+  teamId?: string;
+  lockTeam?: boolean;
+  initialTask?: string;
+  initialMode?: TeamMode;
+  initialWorkspaceId?: string;
+};
 
 export function AgentTeamsScreen({ theme, layout, host, navigation, params }: PluginScreenProps) {
   const toast = useToast();
@@ -89,8 +102,10 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const adapter = useMemo(() => createPaseoAdapter(paseo), [paseo]);
   const previewPresets = useRpc(defaultCatalogPreviewRpc);
   const readRolesDoc = useRpc(rolesReadRpc);
+  const readTeamsDoc = useRpc(teamsReadRpc);
   const readPreferencesDoc = useRpc(preferencesReadRpc);
   const writeRolesDoc = useRpc(rolesWriteRpc);
+  const writeTeamsDoc = useRpc(teamsWriteRpc);
   const writePreferencesDoc = useRpc(preferencesWriteRpc);
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
@@ -114,12 +129,54 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     mode: "create" | "edit";
     team: Team | null;
   } | null>(null);
-  const [launch, setLaunch] = useState<{ teamId?: string } | null>(null);
+  const [launch, setLaunch] = useState<LaunchSeed | null>(null);
   const [resetTarget, setResetTarget] = useState<"roles" | "teams" | "preferences" | null>(null);
+  const designJobs = useDesignJobs({ hostId: host.id, active: tab === "teams" });
+  const designClientId = useRef(createDesignClientRequestId()).current;
+  const [designPrefill, setDesignPrefill] = useState<{
+    hostId: string;
+    value: DesignerPrefill;
+  } | null>(null);
+  const attemptedPrefills = useRef(new Set<string>());
+  const designHostRef = useRef(host.id);
 
   useEffect(() => {
-    if (requestedTab) setTab(requestedTab);
-  }, [requestedTab]);
+    // A design command changes screen params, not the existing tab: always reveal the draft.
+    if (params.designToken || params.designNotice) setTab("teams");
+    else if (requestedTab) setTab(requestedTab);
+  }, [params.designNotice, params.designToken, requestedTab]);
+
+  useEffect(() => {
+    const nonce = params.designNoticeNonce;
+    if (params.designNotice !== "too-long") return;
+    void nonce;
+    toast.show(designZh.prefillTooLong, { variant: "warning" });
+  }, [params.designNotice, params.designNoticeNonce, toast]);
+
+  useEffect(() => {
+    if (designHostRef.current === host.id) return;
+    designHostRef.current = host.id;
+    attemptedPrefills.current.clear();
+    setDesignPrefill(null);
+    setLaunch(null);
+  }, [host.id]);
+
+  useEffect(() => {
+    const token = params.designToken;
+    if (!token || !designJobs.scopeId || attemptedPrefills.current.has(token)) return;
+    attemptedPrefills.current.add(token);
+    let delivered = false;
+    const unsubscribe = subscribeDesignPrefills(
+      { scopeId: designJobs.scopeId, token, now: Date.now() },
+      (event) => {
+        delivered = true;
+        setDesignPrefill({ hostId: host.id, value: designerPrefillFromEvent(event) });
+        return true;
+      },
+    );
+    if (!delivered) toast.show(designZh.prefillExpired, { variant: "info" });
+    return unsubscribe;
+  }, [designJobs.scopeId, host.id, params.designToken, toast]);
 
   const economyHostRef = useRef(host.id);
   useEffect(() => {
@@ -405,48 +462,143 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     [layout.compact, theme],
   );
 
-  const saveRoles = useCallback(
-    async (next: Role[], revision: string) => {
-      if (roles.status !== "ready") return false;
-      return roles.save(toJsonValue({ roles: next }), revision);
-    },
-    [roles],
-  );
+  function showCatalogWriteFailure(status: "conflict" | "invalid" | "failed"): void {
+    toast.error(
+      status === "conflict"
+        ? zh.saveConflictRetry
+        : status === "invalid"
+          ? zh.parseFail
+          : zh.saveFail,
+    );
+  }
 
-  const persistRole = useCallback(
-    async (role: Role, overwrite: boolean): Promise<boolean | "conflict"> => {
-      if (roles.status !== "ready") return false;
-      if (overwrite) await roles.reload();
-      if (roles.status !== "ready") return false;
-      const ok = await saveRoles(upsert(roles.values.roles, role), roles.revision);
-      if (!ok) {
-        if (isConflict(roles.saveError)) return "conflict";
-        toast.error(roles.saveError ?? zh.saveFail);
-        return false;
+  async function readFreshRoles() {
+    try {
+      const reply = await readRolesDoc({});
+      if (reply.status !== "ready") {
+        toast.error(reply.error ?? zh.defaultPresetsSettingsUnavailable);
+        return null;
       }
-      return true;
-    },
-    [roles, saveRoles, toast],
-  );
+      const parsed = RolesDocumentSchema.safeParse(reply.values);
+      if (!parsed.success) {
+        toast.error(zh.parseFail);
+        return null;
+      }
+      return { raw: reply.values, rows: parsed.data.roles, revision: reply.revision };
+    } catch {
+      toast.error(zh.defaultPresetsSettingsUnavailable);
+      return null;
+    }
+  }
 
-  const persistTeam = useCallback(
-    async (team: Team, overwrite: boolean): Promise<boolean | "conflict"> => {
-      if (teams.status !== "ready") return false;
-      if (overwrite) await teams.reload();
-      if (teams.status !== "ready") return false;
-      const ok = await teams.save(
-        toJsonValue({ teams: upsert(teams.values.teams, team) }),
-        teams.revision,
-      );
-      if (!ok) {
-        if (isConflict(teams.saveError)) return "conflict";
-        toast.error(teams.saveError ?? zh.saveFail);
-        return false;
+  async function readFreshTeams() {
+    try {
+      const reply = await readTeamsDoc({});
+      if (reply.status !== "ready") {
+        toast.error(reply.error ?? zh.defaultPresetsSettingsUnavailable);
+        return null;
       }
-      return true;
-    },
-    [teams, toast],
-  );
+      const parsed = TeamsDocumentSchema.safeParse(reply.values);
+      if (!parsed.success) {
+        toast.error(zh.parseFail);
+        return null;
+      }
+      return { raw: reply.values, rows: parsed.data.teams, revision: reply.revision };
+    } catch {
+      toast.error(zh.defaultPresetsSettingsUnavailable);
+      return null;
+    }
+  }
+
+  async function saveRawRoles(document: Record<string, unknown>, revision: string) {
+    try {
+      const result = await writeRolesDoc({
+        revision,
+        values: toJsonValue(document) as JSONType,
+      });
+      if (result.status === "saved") {
+        await roles.reload();
+        return true;
+      }
+      showCatalogWriteFailure(result.status);
+    } catch {
+      toast.error(zh.saveFail);
+    }
+    return false;
+  }
+
+  async function saveRawTeams(document: Record<string, unknown>, revision: string) {
+    try {
+      const result = await writeTeamsDoc({
+        revision,
+        values: toJsonValue(document) as JSONType,
+      });
+      if (result.status === "saved") {
+        await teams.reload();
+        return true;
+      }
+      showCatalogWriteFailure(result.status);
+    } catch {
+      toast.error(zh.saveFail);
+    }
+    return false;
+  }
+
+  async function copyRole(role: Role) {
+    const fresh = await readFreshRoles();
+    if (!fresh) return;
+    const source = fresh.rows.find((entry) => entry.id === role.id);
+    if (!source) {
+      toast.error(zh.saveConflictRetry);
+      return;
+    }
+    const now = new Date().toISOString();
+    const copy = copyRoleRecord(
+      source,
+      uniqueCopyId(source.id, new Set(fresh.rows.map((entry) => entry.id))),
+      `${source.name} ${zh.copySuffix}`.slice(0, 40),
+      now,
+    );
+    await saveRawRoles(appendDocumentRow(fresh.raw, "roles", copy), fresh.revision);
+  }
+
+  async function deleteRole(role: Role) {
+    const fresh = await readFreshRoles();
+    if (!fresh) return;
+    if (!fresh.rows.some((entry) => entry.id === role.id)) {
+      toast.error(zh.saveConflictRetry);
+      return;
+    }
+    await saveRawRoles(removeDocumentRow(fresh.raw, "roles", role.id), fresh.revision);
+  }
+
+  async function copyTeam(team: Team) {
+    const fresh = await readFreshTeams();
+    if (!fresh) return;
+    const source = fresh.rows.find((entry) => entry.id === team.id);
+    if (!source) {
+      toast.error(zh.saveConflictRetry);
+      return;
+    }
+    const now = new Date().toISOString();
+    const copy = copyTeamRecord(
+      source,
+      uniqueCopyId(source.id, new Set(fresh.rows.map((entry) => entry.id))),
+      `${source.name} ${zh.copySuffix}`.slice(0, 40),
+      now,
+    );
+    await saveRawTeams(appendDocumentRow(fresh.raw, "teams", copy), fresh.revision);
+  }
+
+  async function deleteTeam(team: Team) {
+    const fresh = await readFreshTeams();
+    if (!fresh) return;
+    if (!fresh.rows.some((entry) => entry.id === team.id)) {
+      toast.error(zh.saveConflictRetry);
+      return;
+    }
+    await saveRawTeams(removeDocumentRow(fresh.raw, "teams", team.id), fresh.revision);
+  }
 
   async function runManualImport(allowUnbound: boolean) {
     setPresetImport({ kind: "running" });
@@ -494,36 +646,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     toast.show(zh.defaultPresetsImported(presetNotice.unbound), { variant: "success" });
   }
 
-  const copyTeam = useCallback(
-    (team: Team) => {
-      if (teams.status !== "ready") return;
-      const now = new Date().toISOString();
-      const copy = copyTeamRecord(
-        team,
-        uniqueCopyId(team.id, new Set(teams.values.teams.map((entry) => entry.id))),
-        `${team.name} ${zh.copySuffix}`.slice(0, 40),
-        now,
-      );
-      void persistTeam(copy, false);
-    },
-    [persistTeam, teams],
-  );
-
-  const deleteTeam = useCallback(
-    (team: Team) => {
-      if (teams.status !== "ready") return;
-      void teams
-        .save(
-          toJsonValue({ teams: teams.values.teams.filter((entry) => entry.id !== team.id) }),
-          teams.revision,
-        )
-        .then((ok) => {
-          if (!ok) toast.error(teams.saveError ?? zh.saveFail);
-        });
-    },
-    [teams, toast],
-  );
-
   function renderSettingsState(
     document: typeof roles | typeof teams | typeof preferences,
     name: "roles" | "teams" | "preferences",
@@ -569,6 +691,25 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     renderSettingsState(teams, "teams") ??
     renderSettingsState(preferences, "preferences");
   const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
+  const latestDesignJob = designJobs.jobs[0];
+  const latestDesignSummary = latestDesignJob
+    ? [
+        designZh.phases[latestDesignJob.state],
+        latestDesignJob.attempt > 0
+          ? designZh.jobAttempt(latestDesignJob.attempt, DESIGN_JOB_MAX_ATTEMPTS)
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : undefined;
+  const latestDesignTone =
+    latestDesignJob?.state === "failed" ||
+    latestDesignJob?.state === "canceled" ||
+    latestDesignJob?.state === "save_conflict"
+      ? "danger"
+      : latestDesignJob?.state === "needs_continue" || latestDesignJob?.requiresAttention
+        ? "attention"
+        : "neutral";
   const newLabel = tab === "roles" ? zh.newRole : tab === "teams" ? zh.newTeam : zh.launchTeam;
   const presetBusy =
     presetImport.kind === "running" ||
@@ -644,7 +785,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             onPress={() => {
               if (tab === "roles") setRoleEditor({ mode: "create", role: null });
               else if (tab === "teams") setTeamEditor({ mode: "create", team: null });
-              else setLaunch({});
+              else setLaunch({ key: "new" });
             }}
             style={({ pressed }) => [
               styles.newButton,
@@ -739,6 +880,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             {/* Kept mounted while another tab shows, so a half-written request survives a tab switch. */}
             <View style={tab === "teams" ? undefined : styles.hidden}>
               <TeamsTab
+                key={host.id}
                 theme={theme}
                 layout={layout}
                 teams={teams.values.teams}
@@ -750,9 +892,35 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   profilesLoading: hostProfiles.status === "loading",
                   profilesError: hostProfiles.status === "error" ? hostProfiles.error : undefined,
                   onRefreshProfiles: hostProfiles.reload,
+                  prefill: designPrefill?.hostId === host.id ? designPrefill.value : undefined,
+                  collapsedSummary: latestDesignSummary,
+                  collapsedSummaryTone: latestDesignTone,
+                  onStart: (input) => designJobs.start(input),
+                  onAccepted: () => {
+                    toast.show(designZh.startAccepted, { variant: "success" });
+                    void designJobs.refresh();
+                  },
                 }}
+                progress={
+                  <DesignJobsPanel
+                    theme={theme}
+                    hostId={host.id}
+                    jobs={designJobs}
+                    teams={teams.values.teams}
+                    active={tab === "teams"}
+                    clientId={designClientId}
+                    navigation={navigation}
+                    onPreviewLaunch={(seed) => {
+                      if (!teams.values.teams.some((team) => team.id === seed.teamId)) {
+                        toast.error(designZh.savedTeamDeleted);
+                        return;
+                      }
+                      setLaunch(seed);
+                    }}
+                  />
+                }
                 empty={teamEmptyView}
-                onLaunch={(team) => setLaunch({ teamId: team.id })}
+                onLaunch={(team) => setLaunch({ key: team.id, teamId: team.id })}
                 onEdit={(team) => setTeamEditor({ mode: "edit", team })}
                 onCopy={copyTeam}
                 onDelete={deleteTeam}
@@ -767,24 +935,8 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                 profiles={profileList}
                 query={roleQuery}
                 onEdit={(role) => setRoleEditor({ mode: "edit", role })}
-                onCopy={(role) => {
-                  const now = new Date().toISOString();
-                  const copy = copyRoleRecord(
-                    role,
-                    uniqueCopyId(role.id, new Set(roles.values.roles.map((entry) => entry.id))),
-                    `${role.name} ${zh.copySuffix}`.slice(0, 40),
-                    now,
-                  );
-                  void persistRole(copy, false);
-                }}
-                onDelete={(role) =>
-                  void saveRoles(
-                    roles.values.roles.filter((entry) => entry.id !== role.id),
-                    roles.revision,
-                  ).then((ok) => {
-                    if (!ok) toast.error(roles.saveError ?? zh.saveFail);
-                  })
-                }
+                onCopy={(role) => void copyRole(role)}
+                onDelete={(role) => void deleteRole(role)}
               />
             ) : tab === "runs" ? (
               <RunsTab
@@ -847,7 +999,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         saving={roles.status === "ready" && roles.saving}
         onRefreshProfiles={hostProfiles.reload}
         onClose={() => setRoleEditor(null)}
-        onSave={persistRole}
       />
       <TeamEditor
         theme={theme}
@@ -859,10 +1010,10 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         existingIds={new Set(ready ? teams.values.teams.map((team) => team.id) : [])}
         saving={teams.status === "ready" && teams.saving}
         onClose={() => setTeamEditor(null)}
-        onSave={persistTeam}
       />
       {ready && launch ? (
         <LaunchDialog
+          key={launch.key}
           theme={theme}
           layout={layout}
           open
@@ -871,7 +1022,10 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           teams={teams.values.teams}
           roles={roles.values.roles}
           initialTeamId={launch.teamId}
-          lockTeam={launch.teamId !== undefined}
+          lockTeam={launch.lockTeam ?? launch.teamId !== undefined}
+          initialTask={launch.initialTask}
+          initialMode={launch.initialMode}
+          initialWorkspaceId={launch.initialWorkspaceId}
           onClose={() => setLaunch(null)}
           onLaunched={() => {
             setLaunch(null);

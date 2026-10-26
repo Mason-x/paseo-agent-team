@@ -64,7 +64,7 @@ export type UseDesignJobsResult = {
     expectedRevision: string;
     action: "recheck" | "repair";
   }): Promise<DesignContinueOutput>;
-  refresh(): Promise<void>;
+  refresh(): Promise<readonly DesignJob[]>;
   result(jobId: string): Promise<DesignResultOutput>;
 };
 
@@ -194,8 +194,9 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
     [continueCall, queryClient, queryKey],
   );
 
-  const refresh = useCallback(async (): Promise<void> => {
-    await query.refetch();
+  const refresh = useCallback(async (): Promise<readonly DesignJob[]> => {
+    const result = await query.refetch();
+    return result.data?.jobs ?? EMPTY_JOBS;
   }, [query]);
 
   const readResult = useCallback(
@@ -203,17 +204,16 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
     [resultCall],
   );
 
+  useEffect(() => {
+    if (query.error) console.error("agent-team design status failed", query.error);
+  }, [query.error]);
+
   const data = query.data;
   return {
     scopeId: data?.scopeId ?? null,
     jobs: (data?.jobs ?? EMPTY_JOBS) as readonly DesignJob[],
     loading: active && query.isPending,
-    error:
-      query.error === null || query.error === undefined
-        ? null
-        : query.error instanceof Error
-          ? query.error.message
-          : designZh.storageUnavailable,
+    error: query.error === null || query.error === undefined ? null : designZh.storageUnavailable,
     truncated: data?.truncated ?? false,
     discoveryIssues: (data?.discoveryIssues ?? EMPTY_ISSUES) as readonly DesignIssue[],
     start,

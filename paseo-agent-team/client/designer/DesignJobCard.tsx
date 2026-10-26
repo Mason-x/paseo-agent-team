@@ -22,6 +22,8 @@ export type DesignJobCardProps = {
   busy?: boolean;
   onCancel?: (job: DesignJob) => void;
   onRetrySave?: (job: DesignJob) => void;
+  /** A client-side save failure that has not yet moved the server job state. */
+  forceRetrySave?: boolean;
   onContinue?: (job: DesignJob, action: "recheck" | "repair") => void;
 };
 
@@ -79,6 +81,7 @@ export function DesignJobCard({
   busy = false,
   onCancel,
   onRetrySave,
+  forceRetrySave = false,
   onContinue,
 }: DesignJobCardProps) {
   const [collapsed, setCollapsed] = useState(false);
@@ -229,7 +232,7 @@ export function DesignJobCard({
         ) : null}
 
         <View style={styles.actions}>
-          {view.canRetrySave && onRetrySave ? (
+          {(view.canRetrySave || forceRetrySave) && onRetrySave ? (
             <Action
               theme={theme}
               label={designZh.jobRetrySave}

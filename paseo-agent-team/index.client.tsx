@@ -2,9 +2,12 @@ import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { AgentTeamsScreen } from "./client/app/AgentTeamsScreen";
 import { AgentTeamsSidebarItem } from "./client/app/AgentTeamsSidebarItem";
 import { AGENT_TEAMS_SCREEN } from "./client/app/tabs";
+import { handleDesignSlashCommand } from "./client/designer/events";
 import { requestLaunch } from "./client/launch/events";
 import { AgentCrew } from "./client/main";
+import { designStatusRpc } from "./shared/rpc";
 import { zh } from "./shared/zh";
+import { designZh } from "./shared/zh/design";
 
 export default function contribute(client: PluginClientContext) {
   const cleanups = [
@@ -83,6 +86,38 @@ export default function contribute(client: PluginClientContext) {
       onSubmit({ workspace, openPanel, args }) {
         openPanel("crew", { location: "explorer" });
         requestLaunch({ workspaceId: workspace.id, args });
+      },
+    }),
+    client.addSlashCommand({
+      name: "team-design",
+      description: designZh.teamDesignSlashDescription,
+      argumentHint: designZh.teamDesignSlashHint,
+      context: "workspace",
+      async onSubmit({ args, workspace, rpc, openScreen }) {
+        const result = await handleDesignSlashCommand({
+          args,
+          workspaceId: workspace.id,
+          now: Date.now(),
+          readScopeId: async () => {
+            try {
+              const status = await rpc(designStatusRpc, {});
+              return status.ok ? status.scopeId : null;
+            } catch {
+              return null;
+            }
+          },
+          openScreen,
+        });
+        if (result.kind === "invalid") {
+          openScreen({
+            screenId: AGENT_TEAMS_SCREEN,
+            params: {
+              tab: "teams",
+              designNotice: "too-long",
+              designNoticeNonce: Date.now().toString(36),
+            },
+          });
+        }
       },
     }),
   ];

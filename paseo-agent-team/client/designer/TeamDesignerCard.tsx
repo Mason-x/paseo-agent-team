@@ -1,15 +1,20 @@
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   checkDesignRequest,
   DESIGN_REQUEST_MAX_CODE_POINTS,
 } from "../../shared/domain/design-request";
+import { LAUNCH_RUNTIME_CAPABILITIES } from "../../shared/domain/launch-runtime";
 import type { PaseoAdapter, PaseoProfile } from "../../shared/paseo/adapter";
+import type { DesignJob, DesignStartInput, DesignStartOutput } from "../../shared/schemas/design";
+import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
+import { designZh } from "../../shared/zh/design";
 import { CompactPicker } from "../shared/CompactPicker";
 import { Field, inputStyle } from "../shared/Field";
 import { ImeTextInput } from "../shared/ImeTextInput";
+import { TeamModePicker } from "../shared/TeamModePicker";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import {
   type FoldChoice,
@@ -20,14 +25,20 @@ import {
   resolveStartBlock,
   type StartBlock,
 } from "./card-state";
+import {
+  type DesignerPrefill,
+  designStartFailureMessage,
+  shouldWarnOnlyWorkspace,
+} from "./design-screen-state";
+import {
+  createDesignSubmissionController,
+  type DesignDraft,
+  type DesignSubmissionController,
+  type DesignSubmissionState,
+} from "./submission-state";
 import { useDesignerWorkspaces } from "./use-designer-workspaces";
 
-export type DesignerStartInput = {
-  /** Trimmed, non-empty, at most `DESIGN_REQUEST_MAX_CODE_POINTS` code points. */
-  request: string;
-  workspaceId?: string;
-  profileId?: string;
-};
+export type DesignerStartInput = DesignStartInput;
 
 export type DesignerSummaryTone = "neutral" | "attention" | "danger";
 
@@ -44,14 +55,22 @@ export type TeamDesignerCardProps = {
   onRefreshProfiles?: () => void;
   /** Preselected until the user picks; ignored while the host no longer lists it. */
   defaultProfileId?: string;
-  /** Seeds the request box, and re-seeds it whenever the value changes (the `/team-design` prefill). */
+  /** Initial Team mode; the designer keeps the user's later choice. */
+  mode?: TeamMode;
+  /** Notifies the screen when the user changes the design mode. */
+  onModeChange?: (mode: TeamMode) => void;
+  /** Seeds the request box, and re-seeds it whenever the value changes. */
   initialRequest?: string;
   /** Seeds the target workspace, and re-seeds it whenever the value changes. */
   initialWorkspaceId?: string;
+  /** One-shot `/team-design` prefill; consumed by nonce, never by re-render. */
+  prefill?: DesignerPrefill;
   /** A hard reason the designer cannot start right now; disables the button and is shown beside it. */
   disabledReason?: string;
   /** Absent means the designer is not wired up yet: the button stays disabled with a notice. */
-  onStart?: (input: DesignerStartInput) => void | Promise<void>;
+  onStart?: (input: DesignerStartInput) => Promise<DesignStartOutput>;
+  /** Called after a start is accepted, before the job finishes. */
+  onAccepted?: (job: DesignJob) => void;
   /** Fold the card to one line until the user opens it. The user's own choice then sticks. */
   collapseByDefault?: boolean;
   /** One line shown in the folded header, e.g. the latest design stage. */
@@ -77,60 +96,139 @@ export function TeamDesignerCard({
   profilesError,
   onRefreshProfiles,
   defaultProfileId,
+  mode,
+  onModeChange,
   initialRequest,
   initialWorkspaceId,
+  prefill,
   disabledReason,
   onStart,
+  onAccepted,
   collapseByDefault = false,
   collapsedSummary,
   collapsedSummaryTone = "neutral",
   children,
 }: TeamDesignerCardProps) {
-  const [request, setRequest] = useState(initialRequest ?? "");
-  const [inputRevision, setInputRevision] = useState(0);
-  const [workspaceChoice, setWorkspaceChoice] = useState(initialWorkspaceId ?? "");
-  // null follows `defaultProfileId`; "" is the user's explicit "pick for me".
-  const [profileChoice, setProfileChoice] = useState<string | null>(null);
+  const startRef = useRef(onStart);
+  startRef.current = onStart;
+  const startCall = useCallback(
+    (input: DesignerStartInput): Promise<DesignStartOutput> =>
+      startRef.current
+        ? startRef.current(input)
+        : Promise.reject(new Error(zh.designerUnavailable)),
+    [],
+  );
+  const controllerRef = useRef<DesignSubmissionController | null>(null);
+  if (!controllerRef.current) {
+    controllerRef.current = createDesignSubmissionController({
+      start: startCall,
+      initialDraft: {
+        request: initialRequest ?? "",
+        mode: mode ?? "sota",
+        workspaceId: initialWorkspaceId ?? "",
+        profileChoice: null,
+      },
+    });
+  }
+  const controller = controllerRef.current;
+  const [submission, setSubmission] = useState<DesignSubmissionState>(() => controller.getState());
   const [fold, setFold] = useState<FoldChoice>(initialRequest === undefined ? null : "expanded");
-  const [submitting, setSubmitting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const submittingRef = useRef(false);
   const seeded = useRef({ request: initialRequest, workspaceId: initialWorkspaceId });
+  const seenPrefill = useRef<string | null>(null);
+  const draft = submission.draftState.draft;
+  const request = draft.request;
+  const profileChoice = draft.profileChoice;
+  const submitting = submission.submitting;
 
-  // A new prefill (e.g. the /team-design command) replaces what is in the box and opens the card.
+  function syncSubmission() {
+    setSubmission(controller.getState());
+  }
+
+  /** Typing keeps the native input mounted: only the draft identity changes. */
+  function editDraft(patch: Partial<DesignDraft>) {
+    controller.edit(patch);
+    syncSubmission();
+    setStartError(null);
+  }
+
+  const applyPrefill = useCallback(
+    (next: DesignerPrefill) => {
+      const current = controller.getState().draftState.draft;
+      controller.prefill({
+        request: next.text,
+        workspaceId: next.workspaceId ?? "",
+        mode: next.mode ?? current.mode,
+        profileChoice: current.profileChoice,
+      });
+      setSubmission(controller.getState());
+      setFold("expanded");
+    },
+    [controller],
+  );
+
+  // The nonce is the one-shot guard; re-rendering with the same prefill never reseeds the draft.
   useEffect(() => {
+    if (!prefill || seenPrefill.current === prefill.nonce) return;
+    seenPrefill.current = prefill.nonce;
+    applyPrefill(prefill);
+  }, [applyPrefill, prefill]);
+
+  useEffect(() => {
+    if (prefill !== undefined) return;
     const previous = seeded.current;
     seeded.current = { request: initialRequest, workspaceId: initialWorkspaceId };
-    let reseeded = false;
-    if (initialRequest !== undefined && initialRequest !== previous.request) {
-      setRequest(initialRequest);
-      setInputRevision((value) => value + 1);
-      reseeded = true;
-    }
-    if (initialWorkspaceId !== undefined && initialWorkspaceId !== previous.workspaceId) {
-      setWorkspaceChoice(initialWorkspaceId);
-      reseeded = true;
-    }
-    if (reseeded) setFold("expanded");
-  }, [initialRequest, initialWorkspaceId]);
+    if (initialRequest === undefined && initialWorkspaceId === undefined) return;
+    const current = controller.getState().draftState.draft;
+    const nextRequest =
+      initialRequest !== undefined && initialRequest !== previous.request
+        ? initialRequest
+        : undefined;
+    const nextWorkspace =
+      initialWorkspaceId !== undefined && initialWorkspaceId !== previous.workspaceId
+        ? initialWorkspaceId
+        : undefined;
+    if (nextRequest === undefined && nextWorkspace === undefined) return;
+    controller.prefill({
+      request: nextRequest ?? current.request,
+      workspaceId: nextWorkspace ?? current.workspaceId,
+      mode: current.mode,
+      profileChoice: current.profileChoice,
+    });
+    setSubmission(controller.getState());
+    setFold("expanded");
+  }, [controller, initialRequest, initialWorkspaceId, prefill]);
 
   const collapsed = resolveCollapsed(collapseByDefault, fold);
   const workspaceQuery = useDesignerWorkspaces(adapter, hostId, !collapsed);
   const check = useMemo(() => checkDesignRequest(request), [request]);
   const tooLong = !check.ok && check.reason === "too-long";
   const workspace = resolveSelection(
-    workspaceChoice,
+    draft.workspaceId,
     workspaceQuery.workspaces,
     !workspaceQuery.loaded || workspaceQuery.loading || Boolean(workspaceQuery.error),
   );
+  const onlyWorkspaceWarning =
+    !workspaceQuery.loading &&
+    !workspaceQuery.error &&
+    shouldWarnOnlyWorkspace(
+      workspaceQuery.workspaces.map((entry) => entry.id),
+      workspace.id,
+    );
   const profile = resolveDesignerProfile(
     profileChoice,
     defaultProfileId,
     profiles,
     profilesLoading,
   );
+  const effectiveDisabledReason =
+    draft.mode === "collaborative" && !LAUNCH_RUNTIME_CAPABILITIES.collaboration
+      ? designZh.modeUnavailable
+      : disabledReason;
   const block = resolveStartBlock({
     hasStartHandler: onStart !== undefined,
-    disabledReason,
+    disabledReason: effectiveDisabledReason,
     submitting,
     request: check,
     workspaceMissing: workspace.missing,
@@ -244,7 +342,7 @@ export function TeamDesignerCard({
       case "unavailable":
         return zh.designerUnavailable;
       case "disabled":
-        return disabledReason ?? null;
+        return effectiveDisabledReason ?? null;
       case "request-empty":
         return zh.designerRequestEmpty;
       case "request-too-long":
@@ -267,21 +365,28 @@ export function TeamDesignerCard({
   }
 
   async function start() {
-    if (block !== null || !onStart || !check.ok) return;
+    if (block !== null || !onStart || !check.ok || submittingRef.current) return;
+    submittingRef.current = true;
     setStartError(null);
-    setSubmitting(true);
     // The new Team will land in the list below; do not fold the card the user is working in.
     if (fold === null && !collapsed) setFold("expanded");
+    const running = controller.submit();
+    syncSubmission();
     try {
-      await onStart({
-        request: check.request,
-        ...(workspace.id ? { workspaceId: workspace.id } : {}),
-        ...(profile.id ? { profileId: profile.id } : {}),
-      });
-    } catch (cause) {
-      setStartError(cause instanceof Error ? cause.message : zh.designerStartFail);
+      const result = await running;
+      syncSubmission();
+      if (result.kind === "accepted") {
+        onAccepted?.(result.job);
+      } else if (result.kind === "rejected") {
+        setStartError(designStartFailureMessage(result.issues));
+      } else if (result.kind === "unknown") {
+        setStartError(designZh.startUnknown);
+      }
+    } catch {
+      setStartError(zh.designerStartFail);
     } finally {
-      setSubmitting(false);
+      submittingRef.current = false;
+      syncSubmission();
     }
   }
 
@@ -338,9 +443,9 @@ export function TeamDesignerCard({
           <ImeTextInput
             accessibilityLabel={zh.designerRequestLabel}
             initialValue={request}
-            revision={inputRevision}
+            revision={submission.draftState.inputRevision}
             onChangeText={(text) => {
-              setRequest(text);
+              editDraft({ request: text });
               setFold((choice) => resolveFoldOnInput(choice));
             }}
             placeholder={zh.designerRequestPlaceholder}
@@ -372,13 +477,16 @@ export function TeamDesignerCard({
               leading={() => (
                 <Icon name="FolderOpen" size={16} color={theme.colors.foregroundMuted} />
               )}
-              onChange={setWorkspaceChoice}
+              onChange={(workspaceId) => editDraft({ workspaceId })}
             />
             {workspaceQuery.loading ? (
               <Text style={styles.muted}>{zh.loading(zh.workspace)}</Text>
             ) : null}
             {workspaceQuery.error ? (
               <Text style={styles.warning}>{zh.designerWorkspacesFail(workspaceQuery.error)}</Text>
+            ) : null}
+            {onlyWorkspaceWarning ? (
+              <Text style={styles.warning}>{designZh.targetOnlyWorkspace}</Text>
             ) : null}
           </View>
           <View style={styles.picker}>
@@ -392,7 +500,7 @@ export function TeamDesignerCard({
               emptyLabel={zh.designerNoMatchingProfiles}
               error={profile.missing ? zh.designerProfileMissing : undefined}
               subtitle={(item) => item.subtitle}
-              onChange={setProfileChoice}
+              onChange={(choice) => editDraft({ profileChoice: choice })}
             />
             {profilesLoading ? <Text style={styles.muted}>{zh.loadingProfiles}</Text> : null}
             {profilesError ? (
@@ -411,6 +519,17 @@ export function TeamDesignerCard({
             ) : null}
           </View>
         </View>
+        <TeamModePicker
+          theme={theme}
+          layout={layout}
+          value={draft.mode}
+          label={zh.teamMode}
+          disabled={submitting}
+          onChange={(next) => {
+            editDraft({ mode: next });
+            onModeChange?.(next);
+          }}
+        />
         <View style={styles.actions}>
           {note ? <Text style={[styles.muted, styles.note]}>{note}</Text> : null}
           <Pressable

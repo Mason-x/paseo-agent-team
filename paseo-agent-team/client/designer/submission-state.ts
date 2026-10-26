@@ -15,6 +15,7 @@ import type {
 import { ModeLaunchPreviewSchema } from "../../shared/schemas/launch-preview";
 import type { TeamMode } from "../../shared/schemas/team-mode";
 import { designZh } from "../../shared/zh/design";
+import { formatLaunchBudget } from "../shared/budget-format";
 
 /** Copy limits shared with the Card; the server validates the same schema. */
 export const DESIGN_JOB_MAX_ATTEMPTS = 3;
@@ -342,12 +343,19 @@ export function settleDesignSubmission(
   return { state: clearDesignRequest(settled), cleared: true, ignored: false };
 }
 
+export type DesignSubmissionController = {
+  getState(): DesignSubmissionState;
+  edit(patch: Partial<DesignDraft>): void;
+  prefill(draft: Partial<DesignDraft>): void;
+  submit(): Promise<DesignSubmitResult>;
+};
+
 /** Small controller used by hooks and tests; `start` is the injected RPC-shaped call. */
 export function createDesignSubmissionController(options: {
   start: (input: DesignStartInput) => Promise<DesignStartOutput>;
   nextId?: () => string;
   initialDraft?: Partial<DesignDraft>;
-}) {
+}): DesignSubmissionController {
   let state = createDesignSubmissionState(options.initialDraft);
   let inFlight: Promise<DesignSubmitResult> | null = null;
 
@@ -532,17 +540,23 @@ function uniqueIssues(issues: readonly DesignIssue[]): DesignIssue[] {
   return unique;
 }
 
+function asBudget(value: string | undefined): SeatPreview["budget"] | undefined {
+  return value === "economy" || value === "sota" || value === "unknown" ? value : undefined;
+}
+
+function asBudgetBasis(value: string | undefined): SeatPreview["budgetBasis"] | undefined {
+  return value === "host" || value === "pool" || value === "conservative-default"
+    ? value
+    : undefined;
+}
+
 export function formatDesignBudget(budget: unknown, basis?: unknown): string {
   const record = recordOf(budget);
   const label =
     typeof budget === "string" ? budget : (textOf(record.budget) ?? textOf(record.label));
-  const known = designZh.budgets as Record<string, string>;
-  const budgetLabel = label === undefined ? designZh.budgetUnknown : (known[label] ?? label);
   const basisLabel =
     typeof basis === "string" ? basis : (textOf(record.basis) ?? textOf(record.budgetBasis));
-  if (basisLabel === undefined) return budgetLabel;
-  const bases = designZh.budgetBasis as Record<string, string>;
-  return `${budgetLabel} · ${bases[basisLabel] ?? basisLabel}`;
+  return formatLaunchBudget(asBudget(label), asBudgetBasis(basisLabel));
 }
 
 function formatSource(source: string | undefined): string | null {

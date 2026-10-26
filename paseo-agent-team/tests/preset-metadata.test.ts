@@ -157,6 +157,50 @@ describe("copies", () => {
     expect(copy.designer).toBeUndefined();
     expect(copy.custom).toEqual({ keep: true });
   });
+
+  test("rebuilds every seat id and keeps the other member fields", () => {
+    const team = {
+      ...codingTeam,
+      members: [
+        {
+          roleId: "architect",
+          instanceLabel: "Backend",
+          seatId: "seat-old-a",
+          enabled: true,
+          custom: { keep: "a" },
+        },
+        {
+          roleId: "developer",
+          instanceLabel: "Frontend",
+          seatId: "seat-old-b",
+          enabled: false,
+          custom: { keep: "b" },
+        },
+      ],
+    };
+    const copy = copyTeam(team, "coding-copy", "Coding 副本", NOW, {
+      nowMs: 1_700_000_000_000,
+      random: () => 0.5,
+    });
+    const seatIds = copy.members.map((member) => member.seatId);
+    expect(seatIds).toHaveLength(2);
+    expect(seatIds.every((seatId) => typeof seatId === "string" && seatId !== "")).toBe(true);
+    expect(new Set(seatIds).size).toBe(2);
+    expect(seatIds).not.toContain("seat-old-a");
+    expect(seatIds).not.toContain("seat-old-b");
+    expect(copy.members[0]).toMatchObject({
+      roleId: "architect",
+      instanceLabel: "Backend",
+      enabled: true,
+      custom: { keep: "a" },
+    });
+    expect(copy.members[1]).toMatchObject({
+      roleId: "developer",
+      instanceLabel: "Frontend",
+      enabled: false,
+      custom: { keep: "b" },
+    });
+  });
 });
 
 describe("profile references", () => {

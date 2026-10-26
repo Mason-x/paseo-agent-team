@@ -69,6 +69,8 @@ function preview(overrides: Partial<ModeLaunchPreview> = {}): ModeLaunchPreview 
         model: "opus",
       }),
       source: "role-preferred",
+      budget: "sota",
+      budgetBasis: "host",
       issues: [],
     },
     seats: [],
@@ -251,7 +253,7 @@ describe("result seats", () => {
       purposeLabel: designZh.seatPurposes.member,
       activationLabel: designZh.seatActivations.eager,
       profileLabel: "Codex xhigh",
-      budgetLabel: `${designZh.budgets.economy} · ${designZh.budgetBasis.pool}`,
+      budgetLabel: "经济 · 经济池",
       sourceLabel: designZh.sources["economy-pool"],
       familyLabel: "openai",
     });
@@ -259,11 +261,11 @@ describe("result seats", () => {
       roleId: "architect",
       purposeLabel: designZh.seatPurposes.candidate,
       activationLabel: designZh.seatActivations["on-demand"],
-      budgetLabel: `${designZh.budgets.sota} · ${designZh.budgetBasis.host}`,
+      budgetLabel: "SOTA · 宿主标签",
     });
     expect(rows[2]).toMatchObject({
       purposeLabel: designZh.seatPurposes.judge,
-      budgetLabel: `${designZh.budgets.unknown} · ${designZh.budgetBasis["conservative-default"]}`,
+      budgetLabel: "未核实 · 保守默认",
     });
     expect(rows[3]).toMatchObject({
       purposeLabel: designZh.seatPurposes.escalation,
@@ -339,21 +341,16 @@ describe("result seats", () => {
       roleLabel: "Tech Lead",
       profileLabel: "Claude Opus",
       runtimeLabel: "claude/opus",
+      budgetLabel: "SOTA · 宿主标签",
       reasonLabel: "统筹",
     });
   });
 
   test("budgets keep the host, pool, and conservative-default basis", () => {
-    expect(formatDesignBudget("economy", "pool")).toBe(
-      `${designZh.budgets.economy} · ${designZh.budgetBasis.pool}`,
-    );
-    expect(formatDesignBudget("sota", "host")).toBe(
-      `${designZh.budgets.sota} · ${designZh.budgetBasis.host}`,
-    );
-    expect(formatDesignBudget("unknown", "conservative-default")).toBe(
-      `${designZh.budgets.unknown} · ${designZh.budgetBasis["conservative-default"]}`,
-    );
-    expect(formatDesignBudget(undefined)).toBe(designZh.budgetUnknown);
+    expect(formatDesignBudget("economy", "pool")).toBe("经济 · 经济池");
+    expect(formatDesignBudget("sota", "host")).toBe("SOTA · 宿主标签");
+    expect(formatDesignBudget("unknown", "conservative-default")).toBe("未核实 · 保守默认");
+    expect(formatDesignBudget(undefined)).toBe("未核实");
   });
 
   test("T4 counts are shown unchanged and marked as excluding the coordinator", () => {

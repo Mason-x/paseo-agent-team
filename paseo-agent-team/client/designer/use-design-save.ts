@@ -24,6 +24,8 @@ import {
   type SettingsWriteReply,
 } from "./design-gateway";
 import {
+  compensateDesign,
+  type DesignCompensationOutcome,
   type DesignSaveOutcome,
   type DesignUnknownWrites,
   saveDesign,
@@ -37,15 +39,18 @@ const preferencesReadRpc = settingsRpc(preferencesSettings.id).read;
 
 export type UseDesignSaveInput = {
   hostId: string;
-  jobId: string | null;
-  resultId: string | null;
   clientId: string;
-  onOutcome?: (outcome: DesignSaveOutcome) => void;
+  onOutcome?: (jobId: string, outcome: DesignSaveOutcome) => void;
+  onCleanupOutcome?: (jobId: string, outcome: DesignCompensationOutcome) => void;
 };
 
 export type UseDesignSaveResult = {
   /** One save per host/job/result; repeated calls join the in-flight promise. */
-  save(): Promise<DesignSaveOutcome | null>;
+  save(jobId: string, resultId: string): Promise<DesignSaveOutcome | null>;
+  /** Compensate a canceled partial write; unknown writes block it inside the shared runner. */
+  cleanup(jobId: string, resultId: string): Promise<DesignCompensationOutcome | null>;
+  /** Abort this job's in-flight save before the user cancels it. */
+  abort(jobId: string): void;
   pending: boolean;
   /** Unknown writes block compensation for the same job in this host session. */
   unknownWrites: DesignUnknownWrites;
@@ -110,21 +115,30 @@ export type DesignSaveRunInput = {
 
 export type DesignSaveRunner = {
   run(input: DesignSaveRunInput): Promise<DesignSaveOutcome | null>;
+  cleanup(input: DesignSaveRunInput): Promise<DesignCompensationOutcome | null>;
+  abort(jobId: string): void;
   switchHost(hostId: string): void;
   dispose(): void;
   unknownWrites: DesignUnknownWrites;
 };
 
 /**
- * Host-scoped run bookkeeping without React. `run` uses the gateway captured in its input for
- * every RPC, so a host switch can never reroute an in-flight save. It also rejects a run whose
- * host is not the current one, so a stale render's callback cannot pull the runner back.
+ * Host-scoped run bookkeeping without React. `run`/`cleanup` use the gateway captured in their
+ * input for every RPC, so a host switch can never reroute an in-flight write. A stale render's
+ * callback is rejected instead of switching the runner.
  */
 export function createDesignSaveRunner(
   options: {
     initialHostId?: string;
     /** `hostId` is the host that ran the save, so the caller can drop a stale render's outcome. */
     onOutcome?: (outcome: DesignSaveOutcome, hostId: string) => void;
+    onJobOutcome?: (jobId: string, outcome: DesignSaveOutcome, hostId: string) => void;
+    onCleanupOutcome?: (outcome: DesignCompensationOutcome, hostId: string) => void;
+    onJobCleanupOutcome?: (
+      jobId: string,
+      outcome: DesignCompensationOutcome,
+      hostId: string,
+    ) => void;
     onActiveChange?: (active: number) => void;
     timeoutMs?: number;
     now?: () => number;
@@ -132,7 +146,8 @@ export function createDesignSaveRunner(
 ): DesignSaveRunner {
   let hostId = options.initialHostId ?? "";
   let generation = 0;
-  const inFlight = new Map<string, Promise<DesignSaveOutcome | null>>();
+  const saves = new Map<string, Promise<DesignSaveOutcome | null>>();
+  const cleanups = new Map<string, Promise<DesignCompensationOutcome | null>>();
   const controllers = new Map<string, AbortController>();
   const unknownJobIds = new Set<string>();
   const unknownWrites: DesignUnknownWrites = {
@@ -141,7 +156,17 @@ export function createDesignSaveRunner(
   };
 
   function notify(): void {
-    options.onActiveChange?.(inFlight.size);
+    options.onActiveChange?.(saves.size + cleanups.size);
+  }
+
+  function clearAll(): void {
+    clearDesignSaveRuns(controllers, saves);
+    cleanups.clear();
+    notify();
+  }
+
+  function keyFor(input: DesignSaveRunInput): string {
+    return [input.hostId, input.jobId, input.resultId].join("\u0000");
   }
 
   return {
@@ -150,20 +175,26 @@ export function createDesignSaveRunner(
       if (next === hostId) return;
       hostId = next;
       generation += 1;
-      clearDesignSaveRuns(controllers, inFlight);
-      notify();
+      clearAll();
     },
     dispose(): void {
       generation += 1;
-      clearDesignSaveRuns(controllers, inFlight);
-      notify();
+      clearAll();
+    },
+    abort(jobId: string): void {
+      const prefix = `${hostId}\u0000${jobId}\u0000`;
+      for (const [key, controller] of controllers) {
+        if (key.startsWith(prefix)) controller.abort();
+      }
     },
     run(input: DesignSaveRunInput): Promise<DesignSaveOutcome | null> {
       // A stale render's save callback is a no-op, never a host switch or a write.
       if (input.hostId !== hostId) return Promise.resolve(null);
-      const key = [input.hostId, input.jobId, input.resultId].join("\u0000");
-      const existing = inFlight.get(key);
+      const key = keyFor(input);
+      const existing = saves.get(key);
       if (existing) return existing;
+      // Compensation owns the document while it runs; never start a competing save.
+      if (cleanups.has(key)) return Promise.resolve(null);
 
       const generationAtStart = generation;
       const controller = new AbortController();
@@ -181,15 +212,53 @@ export function createDesignSaveRunner(
         .then((outcome) => {
           if (input.hostId !== hostId || generation !== generationAtStart) return null;
           options.onOutcome?.(outcome, input.hostId);
+          options.onJobOutcome?.(input.jobId, outcome, input.hostId);
           return outcome;
         })
         .finally(() => {
           if (generation !== generationAtStart) return;
-          inFlight.delete(key);
+          saves.delete(key);
           controllers.delete(key);
           notify();
         });
-      inFlight.set(key, run);
+      saves.set(key, run);
+      notify();
+      return run;
+    },
+    cleanup(input: DesignSaveRunInput): Promise<DesignCompensationOutcome | null> {
+      if (input.hostId !== hostId) return Promise.resolve(null);
+      const key = keyFor(input);
+      const existing = cleanups.get(key);
+      if (existing) return existing;
+      // A save still in flight must be aborted by the caller first; never race its writes.
+      if (saves.has(key)) return Promise.resolve(null);
+
+      const generationAtStart = generation;
+      const controller = new AbortController();
+      controllers.set(key, controller);
+      const run = compensateDesign(
+        { jobId: input.jobId, resultId: input.resultId, clientId: input.clientId },
+        {
+          gateway: input.gateway,
+          signal: controller.signal,
+          now: options.now ?? Date.now,
+          unknownWrites,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        },
+      )
+        .then((outcome) => {
+          if (input.hostId !== hostId || generation !== generationAtStart) return null;
+          options.onCleanupOutcome?.(outcome, input.hostId);
+          options.onJobCleanupOutcome?.(input.jobId, outcome, input.hostId);
+          return outcome;
+        })
+        .finally(() => {
+          if (generation !== generationAtStart) return;
+          cleanups.delete(key);
+          controllers.delete(key);
+          notify();
+        });
+      cleanups.set(key, run);
       notify();
       return run;
     },
@@ -197,9 +266,8 @@ export function createDesignSaveRunner(
 }
 
 /**
- * React glue. Each `save()` snapshots the current render's RPCs into a gateway before starting,
- * so nothing inside the run can late-bind to a later-rendered host. The effect owns the host;
- * a stale callback is rejected by the runner instead of switching it.
+ * React glue. The runner lives for the whole panel, not one job section, so a polling failure or
+ * a section unmount cannot abort an in-flight write or forget unknown-write memory.
  */
 export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
   const readRoles = useRpc(rolesReadRpc);
@@ -220,9 +288,13 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
   if (!runnerRef.current) {
     runnerRef.current = createDesignSaveRunner({
       initialHostId: input.hostId,
-      onOutcome: (outcome, host) => {
+      onJobOutcome: (jobId, outcome, host) => {
         if (host !== latest.current.hostId) return;
-        latest.current.onOutcome?.(outcome);
+        latest.current.onOutcome?.(jobId, outcome);
+      },
+      onJobCleanupOutcome: (jobId, outcome, host) => {
+        if (host !== latest.current.hostId) return;
+        latest.current.onCleanupOutcome?.(jobId, outcome);
       },
       onActiveChange: setActive,
     });
@@ -235,10 +307,22 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
 
   useEffect(() => () => runner.dispose(), [runner]);
 
-  const { hostId, jobId, resultId, clientId } = input;
-  const save = useCallback(async (): Promise<DesignSaveOutcome | null> => {
-    if (!jobId || !resultId) return null;
-    const gateway = buildDesignSaveGateway({
+  const { hostId, clientId } = input;
+  const makeGateway = useCallback(
+    () =>
+      buildDesignSaveGateway({
+        readRoles,
+        writeRoles,
+        readTeams,
+        writeTeams,
+        readPreferences,
+        prepareSave,
+        markSaved,
+        saveFailed,
+        reloadRoles: () => roles.reload(),
+        reloadTeams: () => teams.reload(),
+      }),
+    [
       readRoles,
       writeRoles,
       readTeams,
@@ -247,27 +331,24 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
       prepareSave,
       markSaved,
       saveFailed,
-      reloadRoles: () => roles.reload(),
-      reloadTeams: () => teams.reload(),
-    });
-    return runner.run({ hostId, jobId, resultId, clientId, gateway });
-  }, [
-    runner,
-    hostId,
-    jobId,
-    resultId,
-    clientId,
-    readRoles,
-    writeRoles,
-    readTeams,
-    writeTeams,
-    readPreferences,
-    prepareSave,
-    markSaved,
-    saveFailed,
-    roles.reload,
-    teams.reload,
-  ]);
+      roles.reload,
+      teams.reload,
+    ],
+  );
 
-  return { save, pending: active > 0, unknownWrites: runner.unknownWrites };
+  const save = useCallback(
+    (jobId: string, resultId: string): Promise<DesignSaveOutcome | null> =>
+      runner.run({ hostId, jobId, resultId, clientId, gateway: makeGateway() }),
+    [runner, hostId, clientId, makeGateway],
+  );
+
+  const cleanup = useCallback(
+    (jobId: string, resultId: string): Promise<DesignCompensationOutcome | null> =>
+      runner.cleanup({ hostId, jobId, resultId, clientId, gateway: makeGateway() }),
+    [runner, hostId, clientId, makeGateway],
+  );
+
+  const abort = useCallback((jobId: string) => runner.abort(jobId), [runner]);
+
+  return { save, cleanup, abort, pending: active > 0, unknownWrites: runner.unknownWrites };
 }

@@ -157,7 +157,6 @@ export function RoleEditor({
   saving: boolean;
   onRefreshProfiles: () => void;
   onClose: () => void;
-  onSave: (role: Role, overwrite: boolean) => Promise<boolean | "conflict">;
 }) {
   const readRolesDoc = useRpc(rolesRead);
   const writeRolesDoc = useRpc(rolesWrite);

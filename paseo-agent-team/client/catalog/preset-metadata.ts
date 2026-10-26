@@ -2,6 +2,7 @@ import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import { type Role, RoleSchema } from "../../shared/schemas/role";
 import { type Team, TeamSchema } from "../../shared/schemas/team";
+import { createSeatId } from "../teams/team-mode-edit";
 
 /** Fields the Role editor owns; everything else on a stored Role is metadata or an extension. */
 const ROLE_FORM_FIELDS: Record<string, true> = {
@@ -89,9 +90,31 @@ export function copyRole(role: Role, id: string, name: string, now: string): Rol
   return RoleSchema.parse({ ...rest, id, name, createdAt: now, updatedAt: now });
 }
 
-export function copyTeam(team: Team, id: string, name: string, now: string): Team {
+export function copyTeam(
+  team: Team,
+  id: string,
+  name: string,
+  now: string,
+  options: { nowMs?: number; random?: () => number } = {},
+): Team {
   const { source: _source, preset: _preset, designer: _designer, ...rest } = team;
-  return TeamSchema.parse({ ...rest, id, name, createdAt: now, updatedAt: now });
+  const parsedNow = Date.parse(now);
+  const nowMs = options.nowMs ?? (Number.isFinite(parsedNow) ? parsedNow : Date.now());
+  const random = options.random ?? Math.random;
+  const seats = new Set<string>();
+  const members = rest.members.map((member) => {
+    const seatId = createSeatId(seats, nowMs, random);
+    seats.add(seatId);
+    return { ...member, seatId };
+  });
+  return TeamSchema.parse({
+    ...rest,
+    members,
+    id,
+    name,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 /** A newly picked Profile reference carries no hint; only an untouched stored reference keeps one. */

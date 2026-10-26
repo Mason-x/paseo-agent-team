@@ -1,11 +1,13 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  appendDocumentRow,
   decideEditorSave,
   type EditorDocumentSnapshot,
   type EditorParsed,
   loadEditorSnapshot,
   mergeEditorDocument,
   mergeEditorRow,
+  removeDocumentRow,
   sameEditorRow,
   saveEditorRow,
 } from "../client/catalog/editor-save";
@@ -466,5 +468,37 @@ describe("saveEditorRow", () => {
         }),
       }),
     ).toBe("failed");
+  });
+});
+
+describe("raw document copy and delete", () => {
+  const original = {
+    id: "alpha",
+    name: "Alpha",
+    futureRowField: { keep: true },
+  };
+  const untouched = { id: "beta", name: "Beta", futureRowField: ["keep"] };
+  const raw = {
+    roles: [original, untouched],
+    futureTopLevel: { keep: true },
+    extensionList: ["keep"],
+  };
+
+  test("copy appends one row and keeps every other row and top-level field", () => {
+    const copy = { id: "alpha-copy", name: "Alpha copy", futureRowField: "new" };
+    const document = appendDocumentRow(raw, "roles", copy);
+    expect(document.futureTopLevel).toEqual({ keep: true });
+    expect(document.extensionList).toEqual(["keep"]);
+    expect(document.roles).toEqual([original, untouched, copy]);
+    expect((document.roles as unknown[])[0]).toBe(original);
+    expect((document.roles as unknown[])[1]).toBe(untouched);
+  });
+
+  test("delete removes one row and keeps every other row and top-level field", () => {
+    const document = removeDocumentRow(raw, "roles", "alpha");
+    expect(document.futureTopLevel).toEqual({ keep: true });
+    expect(document.extensionList).toEqual(["keep"]);
+    expect(document.roles).toEqual([untouched]);
+    expect((document.roles as unknown[])[0]).toBe(untouched);
   });
 });

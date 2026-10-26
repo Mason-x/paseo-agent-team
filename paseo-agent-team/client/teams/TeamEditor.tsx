@@ -74,7 +74,6 @@ export function TeamEditor({
   existingIds: ReadonlySet<string>;
   saving: boolean;
   onClose: () => void;
-  onSave: (team: Team, overwrite: boolean) => Promise<boolean | "conflict">;
 }) {
   const readTeamsDoc = useRpc(teamsRead);
   const writeTeamsDoc = useRpc(teamsWrite);

@@ -1292,4 +1292,56 @@ describe("createDesignSaveRunner", () => {
       teamId: result.team.id,
     });
   });
+
+  test("cleanup joins an in-flight compensation and reports the job", async () => {
+    const result = saveResult();
+    const store = makeStore({ roles: { roles: [...reusedRoles, newRole] } });
+    const prepareSave = vi.fn(async () => compensationReply(store, result));
+    const saveFailed = vi.fn(async () => ({
+      ok: true as const,
+      job: saveJob(result, { state: "canceled" }),
+    }));
+    const gateway = gatewayFor(store, result, { prepareSave, saveFailed });
+    const delivery: Array<{ jobId: string; status: string; host: string }> = [];
+    const runner = createDesignSaveRunner({
+      initialHostId: "A",
+      now: () => NOW_MS,
+      timeoutMs: 1_000,
+      onJobCleanupOutcome: (jobId, outcome, host) =>
+        delivery.push({ jobId, status: outcome.status, host }),
+    });
+
+    const first = runner.cleanup({ hostId: "A", ...INPUT, gateway });
+    expect(runner.cleanup({ hostId: "A", ...INPUT, gateway })).toBe(first);
+    const outcome = await first;
+    expect(outcome?.status).toBe("compensated");
+    expect(roleIds(store)).toEqual(["tech-lead", "architect", "developer"]);
+    expect(delivery).toEqual([{ jobId: DESIGN_JOB_ID, status: "compensated", host: "A" }]);
+  });
+
+  test("abort stops an in-flight save before it writes", async () => {
+    const result = saveResult();
+    const store = makeStore();
+    const gate = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const prepareSave = vi.fn(async () => {
+      entered.resolve();
+      await gate.promise;
+      return preparedReply(store, result);
+    });
+    const gateway = gatewayFor(store, result, { prepareSave });
+    const runner = createDesignSaveRunner({
+      initialHostId: "A",
+      now: () => NOW_MS,
+      timeoutMs: 1_000,
+    });
+
+    const run = runner.run({ hostId: "A", ...INPUT, gateway });
+    await entered.promise;
+    runner.abort(DESIGN_JOB_ID);
+    gate.resolve();
+    const outcome = await run;
+    expect(outcome?.status).toBe("waiting");
+    expect(gateway.saveRoles).not.toHaveBeenCalled();
+  });
 });

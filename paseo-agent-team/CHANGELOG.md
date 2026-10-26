@@ -4,11 +4,12 @@
 
 ### Features
 
+- Team 页新增设计师——描述需求后生成可启动的 Team，结果可预览并一键保存、启动。
 - Agent Teams opens on the Team page, with tabs ordered Team / Role / 运行; Role and Team
   searches keep independent queries
-- Team page: the Team designer card (request, target workspace, design Profile; “开始设计”
-  stays disabled until the design backend lands) above the search box and list; compact
-  layouts fold the designer and show an icon-only “新建”
+- Team page: the Team designer card (request, mode, target workspace, design Profile) above the
+  search box and list; it starts a design job, shows every physical seat, and saves the result;
+  compact layouts fold the designer and show an icon-only “新建”
 - run progress: Agent Teams **运行** tab and per-run phase, member state, plan, assignment, and
   latest report in the Crew panel
 - **追加任务** sends follow-up work to a run's coordinator

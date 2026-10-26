@@ -105,6 +105,34 @@ function rawRows(raw: unknown, key: "roles" | "teams"): unknown[] {
   return Array.isArray(rows) ? rows : [];
 }
 
+function rawDocumentRowId(row: unknown): string | null {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const id = (row as Record<string, unknown>).id;
+  return typeof id === "string" && id !== "" ? id : null;
+}
+
+/** Append one raw row while keeping every other row and top-level field untouched. */
+export function appendDocumentRow(
+  raw: unknown,
+  key: "roles" | "teams",
+  row: unknown,
+): Record<string, unknown> {
+  return mergeEditorDocument(raw, key, [...rawRows(raw, key), row]);
+}
+
+/** Remove one raw row by id; every other raw row keeps its unknown fields. */
+export function removeDocumentRow(
+  raw: unknown,
+  key: "roles" | "teams",
+  id: string,
+): Record<string, unknown> {
+  return mergeEditorDocument(
+    raw,
+    key,
+    rawRows(raw, key).filter((row) => rawDocumentRowId(row) !== id),
+  );
+}
+
 /** Read one version of the document and remember its revision plus parsed rows. */
 export async function loadEditorSnapshot<Row extends { id: string }>(
   read: () => Promise<EditorReadReply>,
