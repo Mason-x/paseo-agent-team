@@ -285,7 +285,7 @@ describe("preferences merge", () => {
       ],
       templatesImportedAt: NOW,
       defaultPresets: { catalogRevision: "cat", seenRoleIds: ["qa-test"] },
-      designerProfile: "designer",
+      designerProfile: { profileId: "designer", future: "kept" },
     });
     const draft = {
       ...addPoolEntry(base, "p-grok", "grok"),
@@ -297,7 +297,7 @@ describe("preferences merge", () => {
     expect(next.recentRuns).toEqual(current.recentRuns);
     expect(next.templatesImportedAt).toBe(NOW);
     expect(next.defaultPresets).toEqual(current.defaultPresets);
-    expect((next as Record<string, unknown>).designerProfile).toBe("designer");
+    expect(next.designerProfile).toEqual({ profileId: "designer", future: "kept" });
     expect(next.economy?.pool).toEqual([
       expect.objectContaining({
         profileId: "p-grok",

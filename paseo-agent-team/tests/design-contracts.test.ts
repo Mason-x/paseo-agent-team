@@ -6,11 +6,6 @@ import type { ProfileSelection } from "../shared/domain/mode-resolver";
 import { LABELS } from "../shared/paseo/labels";
 import {
   defaultCatalogPreviewRpc,
-  exampleCatalogRpc,
-  launchStartRpc,
-  launchStatusRpc,
-} from "../shared/rpc";
-import {
   designCancelRpc,
   designContinueRpc,
   designMarkSavedRpc,
@@ -19,7 +14,10 @@ import {
   designSaveFailedRpc,
   designStartRpc,
   designStatusRpc,
-} from "../shared/rpc/design";
+  exampleCatalogRpc,
+  launchStartRpc,
+  launchStatusRpc,
+} from "../shared/rpc";
 import type { DesignStartOutput } from "../shared/schemas/design";
 import {
   DESIGN_ISSUE_CODES,
@@ -33,6 +31,7 @@ import {
   DesignStatusInputSchema,
 } from "../shared/schemas/design";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
+import { zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
 import {
   DESIGN_CLIENT_REQUEST_ID,
@@ -252,12 +251,10 @@ describe("shared boundary", () => {
     });
   });
 
-  test.todo("D3.27/I1: only owned agent hooks enqueue a design job");
-  test.todo("D3.27/I1: no global before-create override is registered");
-  test.todo(
-    "D3.27/I1: contributions expose no server.paseo; discovery starts only after the first adapter-bound RPC/hook",
-  );
-  test.todo(
-    "D3.27/I1: shared modules read zh.design through shared/zh.ts instead of importing ../zh/design directly",
-  );
+  test("zh exposes the designer copy and the contribution has no global Paseo API", () => {
+    expect(zh.design).toBe(designZh);
+    const source = readFileSync(join(import.meta.dirname, "..", "index.server.ts"), "utf8");
+    expect(source).not.toMatch(/server\.paseo\b/);
+    expect(source).not.toMatch(/server\.before\s*\(/);
+  });
 });

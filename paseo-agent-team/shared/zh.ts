@@ -1,5 +1,7 @@
 /** Default UI copy and catalog display names (Simplified Chinese). */
 
+import { designZh } from "./zh/design";
+
 export const zh = {
   sidebarAgentTeams: "Agent Team",
   sidebarAgentCrew: "Agent 班组",
@@ -662,6 +664,7 @@ export const zh = {
   economyPoolOrderEmpty: "池中没有可排序的 Profile。",
 
   // 组队模式：规划、预览与启动闸门
+  design: designZh,
   modes: {
     sota: "旗舰（SOTA）",
     economy: "经济",

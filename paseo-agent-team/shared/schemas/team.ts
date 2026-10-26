@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DescriptionSchema, ShortTextSchema, SlugSchema } from "./common";
+import { StoredDesignerOriginSchema } from "./design-origin";
 import { StoredCollaborationSchema } from "./team-mode";
 
 // Persisted inside Teams. passthrough keeps fields a newer writer added (mode/seat metadata,
@@ -32,6 +33,10 @@ export const TeamSchema = z
     enabled: z.boolean().default(true),
     createdAt: z.string(),
     updatedAt: z.string(),
+    // Team-designer provenance and the generic origin marker. Both stay tolerant here; the
+    // settings store parses the whole catalog document, so bad provenance must not invalidate it.
+    source: z.string().optional(),
+    designer: StoredDesignerOriginSchema.optional().catch(undefined),
   })
   .passthrough()
   .refine((team) => !team.members.some((member) => member.roleId === team.coordinatorRoleId), {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProfileRefSchema } from "./profile-ref";
 import { StoredEconomyPolicySchema, StoredQuotaRecoverySchema } from "./team-mode";
 
 export const MAX_SEEN_PRESET_ROLE_IDS = 1000;
@@ -30,6 +31,10 @@ export const RunSummarySchema = z.object({
   createdAt: z.string(),
 });
 
+// A stored reference may carry newer metadata. Keep it through a settings round-trip without
+// tightening the public ProfileRefSchema used by Role bindings.
+const StoredDesignerProfileSchema = ProfileRefSchema.passthrough();
+
 export const PreferencesSchema = z
   .object({
     // Storage has no upper bound: existing Teams may exceed what this version runs, and the
@@ -43,6 +48,9 @@ export const PreferencesSchema = z
     // reports per-entry problems before a launch.
     economy: StoredEconomyPolicySchema.optional(),
     quotaRecovery: StoredQuotaRecoverySchema.optional(),
+    // The designer's remembered Profile. Explicit start options override it; a malformed block
+    // only clears the preference instead of invalidating the whole settings document.
+    designerProfile: StoredDesignerProfileSchema.optional().catch(undefined),
     // A damaged block drops only preset history; launch preferences remain usable.
     defaultPresets: DefaultPresetsPreferencesSchema.optional().catch(undefined),
   })

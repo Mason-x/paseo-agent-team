@@ -1,26 +1,59 @@
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { describe, expect, test, vi } from "vitest";
-import contribute from "../index.server";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import contribute, { createDesignTurnEndedHandler } from "../index.server";
+import {
+  DESIGN_AGENT_LABEL,
+  DESIGN_AGENT_VERSION_LABEL,
+  type DesignHookEvent,
+} from "../server/designer/hooks";
+import type { StoredDesignJob } from "../server/designer/store";
 import { exampleCatalog } from "../server/templates";
+import type { DesignAdapter, DesignPaseoPort } from "../shared/paseo/port";
 import { defaultCatalogPreviewRpc, exampleCatalogRpc } from "../shared/rpc";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
 import { sourceProfiles } from "./default-presets.fixtures";
+import {
+  DESIGN_CLIENT_REQUEST_ID,
+  DESIGN_HASH,
+  DESIGN_JOB_ID,
+  DESIGN_LEASE_ID,
+  DESIGN_STATE_REVISION,
+} from "./design-fixtures";
 import { fakePort, preferences } from "./fakes";
 import { architect, codingTeam, developer, techLead } from "./fixtures";
 
 type Handler = (input: unknown, context: { paseo: unknown }) => unknown;
+type HookHandler = (event: unknown, context: { paseo: unknown }) => unknown;
+
+const originalPaseoHome = process.env.PASEO_HOME;
+beforeAll(() => {
+  // Unit tests never read or lock the real host's ledger.
+  delete process.env.PASEO_HOME;
+});
+afterAll(() => {
+  if (originalPaseoHome === undefined) delete process.env.PASEO_HOME;
+  else process.env.PASEO_HOME = originalPaseoHome;
+});
 
 /** Stands in for the daemon's plugin context and records what the plugin registers. */
 function fakeServer() {
   const settings: string[] = [];
   const handlers = new Map<string, Handler>();
+  const hooks = new Map<string, HookHandler[]>();
   const revisions: Record<string, string> = {};
   const documents: Record<string, unknown> = {
     "agent-team-roles": { roles: [techLead, architect, developer] },
     "agent-team-teams": { teams: [codingTeam] },
     "agent-team-preferences": preferences,
   };
+  const handle = vi.fn((contract: { name: string }, handler: Handler) => {
+    handlers.set(contract.name, handler);
+  });
   const server = {
     registerSettings: vi.fn((definition: { id: string }) => {
       settings.push(definition.id);
@@ -33,18 +66,25 @@ function fakeServer() {
         subscribe: () => () => {},
       };
     }),
-    handle: vi.fn((contract: { name: string }, handler: Handler) => {
-      handlers.set(contract.name, handler);
+    handle,
+    on: vi.fn((name: string, handler: HookHandler) => {
+      hooks.set(name, [...(hooks.get(name) ?? []), handler]);
+      return () =>
+        hooks.set(
+          name,
+          (hooks.get(name) ?? []).filter((item) => item !== handler),
+        );
     }),
-    on: vi.fn(() => () => {}),
     before: vi.fn(() => () => {}),
     registerProvider: vi.fn(),
     registerUsageSource: vi.fn(),
   };
   return {
     server: server as unknown as PluginServerContext,
+    handle,
     settings,
     handlers,
+    hooks,
     documents,
     revisions,
   };
@@ -57,11 +97,19 @@ function handler(handlers: Map<string, Handler>, name: string): Handler {
 }
 
 describe("server entry", () => {
-  test("registers the three settings documents and the plugin RPCs", () => {
-    const { server, settings, handlers } = fakeServer();
+  test("registers the three settings documents and the plugin RPCs", async () => {
+    const { server, handle, settings, handlers, hooks } = fakeServer();
     const cleanup = contribute(server);
     expect(settings).toEqual(["agent-team-roles", "agent-team-teams", "agent-team-preferences"]);
     expect([...handlers.keys()].sort()).toEqual([
+      "agent-team.design.cancel",
+      "agent-team.design.continue",
+      "agent-team.design.mark-saved",
+      "agent-team.design.prepare-save",
+      "agent-team.design.result",
+      "agent-team.design.save-failed",
+      "agent-team.design.start",
+      "agent-team.design.status",
       "agent-team.launch.preview",
       "agent-team.launch.start",
       "agent-team.launch.status",
@@ -73,8 +121,14 @@ describe("server entry", () => {
       "agent-team.version.update.start",
       "agent-team.version.update.status",
     ]);
+    expect([...handlers.keys()]).toHaveLength(18);
+    expect(handle).toHaveBeenCalledTimes(18);
+    expect(new Set(handle.mock.calls.map(([contract]) => contract.name)).size).toBe(18);
+    expect([...hooks.keys()]).toEqual(["agent.turn_ended"]);
+    expect(hooks.get("agent.turn_ended")).toHaveLength(1);
+    expect(server.before).not.toHaveBeenCalled();
     expect(typeof cleanup).toBe("function");
-    expect(() => cleanup()).not.toThrow();
+    await cleanup();
   });
 
   test("version RPCs stay local when PASEO_HOME is absent", async () => {
@@ -244,6 +298,259 @@ describe("server entry", () => {
     expect(allowed).toMatchObject({
       ok: true,
       warnings: expect.arrayContaining(["无法读取 Profile，已全部标为未绑定。"]),
+    });
+  });
+  test("design RPCs fail explicitly when PASEO_HOME is absent", async () => {
+    const { server, handlers } = fakeServer();
+    const cleanup = contribute(server);
+    const { port } = fakePort();
+    const status = await handler(handlers, "agent-team.design.status")({}, { paseo: port });
+    expect(status).toMatchObject({
+      ok: false,
+      issues: [{ code: "DESIGN_STORAGE_UNAVAILABLE" }],
+    });
+    await cleanup();
+  });
+
+  test("all eight design RPCs are wired to the service", async () => {
+    const { server, handlers } = fakeServer();
+    const cleanup = contribute(server);
+    const { port } = fakePort();
+    const inputs = {
+      "agent-team.design.start": { clientRequestId: DESIGN_CLIENT_REQUEST_ID, request: "改版" },
+      "agent-team.design.status": {},
+      "agent-team.design.result": { jobId: DESIGN_JOB_ID },
+      "agent-team.design.prepare-save": {
+        jobId: DESIGN_JOB_ID,
+        resultId: DESIGN_HASH,
+        clientId: DESIGN_CLIENT_REQUEST_ID,
+      },
+      "agent-team.design.mark-saved": { jobId: DESIGN_JOB_ID, resultId: DESIGN_HASH },
+      "agent-team.design.save-failed": {
+        jobId: DESIGN_JOB_ID,
+        resultId: DESIGN_HASH,
+        leaseId: DESIGN_LEASE_ID,
+        phase: "roles",
+        reason: "write-failed",
+      },
+      "agent-team.design.cancel": { jobId: DESIGN_JOB_ID },
+      "agent-team.design.continue": {
+        jobId: DESIGN_JOB_ID,
+        expectedRevision: DESIGN_STATE_REVISION,
+        action: "recheck",
+      },
+    };
+    for (const [name, input] of Object.entries(inputs)) {
+      expect(await handler(handlers, name)(input, { paseo: port })).toMatchObject({
+        ok: false,
+        issues: [{ code: "DESIGN_STORAGE_UNAVAILABLE" }],
+      });
+    }
+    await cleanup();
+  });
+
+  test("retries ledger initialization after the first lock failure", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agent-team-entry-retry-"));
+    const previous = process.env.PASEO_HOME;
+    process.env.PASEO_HOME = home;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const versionDir = join(home, "agent-team-designer", "v1");
+      const lock = join(versionDir, ".lock");
+      await mkdir(versionDir, { recursive: true });
+      await writeFile(
+        lock,
+        JSON.stringify({
+          version: 1,
+          ownerToken: "held-by-another-instance",
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+          processStartedAt: null,
+        }),
+      );
+      const { server, handlers } = fakeServer();
+      const cleanup = contribute(server);
+      const { port } = fakePort();
+      const status = handler(handlers, "agent-team.design.status");
+      expect(await status({}, { paseo: port })).toMatchObject({
+        ok: false,
+        issues: [{ code: "DESIGN_STORAGE_UNAVAILABLE" }],
+      });
+      await rm(lock);
+      expect(await status({}, { paseo: port })).toMatchObject({ ok: true });
+      await cleanup();
+    } finally {
+      logged.mockRestore();
+      if (previous === undefined) delete process.env.PASEO_HOME;
+      else process.env.PASEO_HOME = previous;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("cleanup releases the design ledger lock", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agent-team-entry-"));
+    const previous = process.env.PASEO_HOME;
+    process.env.PASEO_HOME = home;
+    try {
+      const { server, handlers, hooks } = fakeServer();
+      const cleanup = contribute(server);
+      const { port } = fakePort();
+      const status = handler(handlers, "agent-team.design.status");
+      await vi.waitFor(
+        async () => {
+          expect(await status({}, { paseo: port })).toMatchObject({ ok: true });
+        },
+        { timeout: 5_000 },
+      );
+      const lock = join(home, "agent-team-designer", "v1", ".lock");
+      expect(existsSync(lock)).toBe(true);
+      await cleanup();
+      expect(existsSync(lock)).toBe(false);
+      expect(await status({}, { paseo: port })).toMatchObject({ ok: false });
+      expect(hooks.get("agent.turn_ended")).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_HOME;
+      else process.env.PASEO_HOME = previous;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("design turn-ended hook wiring", () => {
+  const JOB_ID = "44444444-4444-4444-8444-444444444444";
+  const labels = {
+    [DESIGN_AGENT_LABEL]: JOB_ID,
+    [DESIGN_AGENT_VERSION_LABEL]: "1",
+  };
+
+  function event(agentId: string, agentLabels?: Record<string, string>): DesignHookEvent {
+    return {
+      agent: { id: agentId, ...(agentLabels ? { labels: agentLabels } : {}) },
+      turnId: "turn-1",
+      outcome: { kind: "completed" },
+    };
+  }
+
+  function record(
+    creation: StoredDesignJob["creation"] = {
+      request: null,
+    } as StoredDesignJob["creation"],
+  ): StoredDesignJob {
+    return {
+      job: { jobId: JOB_ID, agentId: JOB_ID },
+      creation,
+    } as unknown as StoredDesignJob;
+  }
+
+  test("the hook no longer depends on the stored creation request", () => {
+    const source = readFileSync(join(import.meta.dirname, "..", "index.server.ts"), "utf8");
+    expect(source).not.toMatch(/record\.creation/);
+  });
+
+  test("an unrelated agent exits before binding the adapter or enqueuing", async () => {
+    const getRecord = vi.fn(async () => null);
+    const onTurnEnded = vi.fn(async () => {});
+    const bindAdapter = vi.fn(() => ({}) as DesignAdapter);
+    const turnEnded = createDesignTurnEndedHandler({
+      getRecord: getRecord as unknown as Parameters<
+        typeof createDesignTurnEndedHandler
+      >[0]["getRecord"],
+      hooks: { onTurnEnded },
+      bindAdapter,
+    });
+    await turnEnded(event("55555555-5555-4555-8555-555555555555", { "agent-team.run": "run-1" }), {
+      paseo: {} as DesignPaseoPort,
+    });
+    expect(getRecord).not.toHaveBeenCalled();
+    expect(bindAdapter).not.toHaveBeenCalled();
+    expect(onTurnEnded).not.toHaveBeenCalled();
+  });
+
+  test("forged design labels still require a matching ledger record", async () => {
+    const getRecord = vi.fn(async () => null);
+    const onTurnEnded = vi.fn(async () => {});
+    const bindAdapter = vi.fn(() => ({}) as DesignAdapter);
+    const turnEnded = createDesignTurnEndedHandler({
+      getRecord: getRecord as unknown as Parameters<
+        typeof createDesignTurnEndedHandler
+      >[0]["getRecord"],
+      hooks: { onTurnEnded },
+      bindAdapter,
+    });
+    await turnEnded(event("55555555-5555-4555-8555-555555555555", labels), {
+      paseo: {} as DesignPaseoPort,
+    });
+    expect(getRecord).toHaveBeenCalledOnce();
+    expect(bindAdapter).not.toHaveBeenCalled();
+    expect(onTurnEnded).not.toHaveBeenCalled();
+  });
+
+  test("creation.request null still reaches the service with rebuilt labels", async () => {
+    const getRecord = vi.fn(async () => record());
+    const onTurnEnded = vi.fn(async () => {});
+    const bindAdapter = vi.fn(() => ({}) as DesignAdapter);
+    const turnEnded = createDesignTurnEndedHandler({
+      getRecord: getRecord as unknown as Parameters<
+        typeof createDesignTurnEndedHandler
+      >[0]["getRecord"],
+      hooks: { onTurnEnded },
+      bindAdapter,
+    });
+    const paseo = {} as DesignPaseoPort;
+    await turnEnded(event(JOB_ID), { paseo });
+    expect(bindAdapter).toHaveBeenCalledWith(paseo);
+    expect(bindAdapter.mock.invocationCallOrder[0]).toBeLessThan(
+      onTurnEnded.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(onTurnEnded).toHaveBeenCalledWith({
+      agent: { id: JOB_ID, labels },
+      turnId: "turn-1",
+      outcome: { kind: "completed" },
+    });
+  });
+
+  test("a null creation still reaches the service with rebuilt labels", async () => {
+    const getRecord = vi.fn(async () => record(null));
+    const onTurnEnded = vi.fn(async () => {});
+    const bindAdapter = vi.fn(() => ({}) as DesignAdapter);
+    const turnEnded = createDesignTurnEndedHandler({
+      getRecord: getRecord as unknown as Parameters<
+        typeof createDesignTurnEndedHandler
+      >[0]["getRecord"],
+      hooks: { onTurnEnded },
+      bindAdapter,
+    });
+    await turnEnded(event(JOB_ID), { paseo: {} as DesignPaseoPort });
+    expect(bindAdapter).toHaveBeenCalledOnce();
+    expect(onTurnEnded).toHaveBeenCalledWith({
+      agent: { id: JOB_ID, labels },
+      turnId: "turn-1",
+      outcome: { kind: "completed" },
+    });
+  });
+
+  test("forged design labels on an owned agent are replaced by the ledger jobId", async () => {
+    const getRecord = vi.fn(async () => record(null));
+    const onTurnEnded = vi.fn(async () => {});
+    const bindAdapter = vi.fn(() => ({}) as DesignAdapter);
+    const turnEnded = createDesignTurnEndedHandler({
+      getRecord: getRecord as unknown as Parameters<
+        typeof createDesignTurnEndedHandler
+      >[0]["getRecord"],
+      hooks: { onTurnEnded },
+      bindAdapter,
+    });
+    await turnEnded(
+      event(JOB_ID, {
+        [DESIGN_AGENT_LABEL]: "66666666-6666-4666-8666-666666666666",
+        [DESIGN_AGENT_VERSION_LABEL]: "1",
+      }),
+      { paseo: {} as DesignPaseoPort },
+    );
+    expect(onTurnEnded).toHaveBeenCalledWith({
+      agent: { id: JOB_ID, labels },
+      turnId: "turn-1",
+      outcome: { kind: "completed" },
     });
   });
 });

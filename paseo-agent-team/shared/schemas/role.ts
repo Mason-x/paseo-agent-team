@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DescriptionSchema, ShortTextSchema, SlugSchema, StringListSchema } from "./common";
+import { StoredDesignerOriginSchema } from "./design-origin";
 import { ProfileRefSchema } from "./profile-ref";
 import { StoredRoleExecutionPolicySchema } from "./team-mode";
 
@@ -89,9 +90,11 @@ export const RoleSchema = z
     // Tier and task kind for mode planning. Values are preserved as stored, even when a newer
     // writer used an unknown value or the wrong type; resolveRoleExecution reports them.
     executionPolicy: StoredRoleExecutionPolicySchema.optional(),
-    // Other origins (including a future team-designer) remain valid extension values.
+    // Other origins (including team-designer) remain valid extension values.
     source: z.string().optional(),
-    // A damaged origin drops only the origin; the Role keeps its content and stays editable.
+    // Team-designer provenance. A damaged block drops only the origin; the Role stays editable.
+    designer: StoredDesignerOriginSchema.optional().catch(undefined),
+    // A damaged preset origin drops only that block for the same reason.
     preset: PresetOriginSchema.optional().catch(undefined),
   })
   .passthrough();

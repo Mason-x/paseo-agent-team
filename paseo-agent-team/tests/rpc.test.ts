@@ -1,6 +1,14 @@
 import { describe, expect, test } from "vitest";
 import {
   defaultCatalogPreviewRpc,
+  designCancelRpc,
+  designContinueRpc,
+  designMarkSavedRpc,
+  designPrepareSaveRpc,
+  designResultRpc,
+  designSaveFailedRpc,
+  designStartRpc,
+  designStatusRpc,
   exampleCatalogRpc,
   LaunchPreviewInputSchema,
   LaunchStartInputSchema,
@@ -20,11 +28,42 @@ describe("plugin RPC contracts", () => {
       launchStatusRpc.name,
       exampleCatalogRpc.name,
       defaultCatalogPreviewRpc.name,
+      designStartRpc.name,
+      designStatusRpc.name,
+      designResultRpc.name,
+      designPrepareSaveRpc.name,
+      designMarkSavedRpc.name,
+      designSaveFailedRpc.name,
+      designCancelRpc.name,
+      designContinueRpc.name,
     ]) {
       expect(name).toMatch(/^[a-z][a-z0-9._-]*$/);
     }
     expect(exampleCatalogRpc.name).toBe("agent-team.templates.examples");
     expect(defaultCatalogPreviewRpc.name).toBe("agent-team.templates.defaults.preview");
+  });
+
+  test("the eight design RPCs are re-exported from the main shared/rpc entry", () => {
+    expect([
+      designStartRpc.name,
+      designStatusRpc.name,
+      designResultRpc.name,
+      designPrepareSaveRpc.name,
+      designMarkSavedRpc.name,
+      designSaveFailedRpc.name,
+      designCancelRpc.name,
+      designContinueRpc.name,
+    ]).toEqual([
+      "agent-team.design.start",
+      "agent-team.design.status",
+      "agent-team.design.result",
+      "agent-team.design.prepare-save",
+      "agent-team.design.mark-saved",
+      "agent-team.design.save-failed",
+      "agent-team.design.cancel",
+      "agent-team.design.continue",
+    ]);
+    expect(new Set([designStartRpc, designStatusRpc, designResultRpc]).size).toBe(3);
   });
 
   test("a launch needs a Team, a task, and a target", () => {

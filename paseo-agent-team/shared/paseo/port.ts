@@ -93,3 +93,7 @@ export type PortAgentCreateOptions = {
     mcpServers?: Record<string, PortMcpServer>;
   };
 };
+
+/** Team-designer client port and its pure Paseo projection. */
+export { createDesignAdapter } from "./design-adapter";
+export type * from "./design-port";

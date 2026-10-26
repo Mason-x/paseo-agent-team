@@ -11,7 +11,6 @@ import {
 } from "../shared/schemas/design";
 import { StoredDesignerOriginSchema } from "../shared/schemas/design-origin";
 import { PreferencesSchema } from "../shared/schemas/preferences";
-import { ProfileRefSchema } from "../shared/schemas/profile-ref";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
 import {
@@ -22,16 +21,6 @@ import {
   newDesignRole,
 } from "./design-fixtures";
 import { architect, codingTeam, NOW } from "./fixtures";
-
-const RoleWithDesigner = RoleSchema.extend({
-  designer: StoredDesignerOriginSchema.optional().catch(undefined),
-});
-const TeamWithDesigner = TeamSchema.extend({
-  designer: StoredDesignerOriginSchema.optional().catch(undefined),
-});
-const PreferencesWithDesigner = PreferencesSchema.extend({
-  designerProfile: ProfileRefSchema.optional().catch(undefined),
-});
 
 describe("stored designer origin", () => {
   test("is tolerant and preserves future metadata", () => {
@@ -52,7 +41,7 @@ describe("stored designer origin", () => {
   });
 
   test("Role and Team round-trip source and designer metadata, including future fields", () => {
-    const role = RoleWithDesigner.parse({
+    const role = RoleSchema.parse({
       ...architect,
       source: "team-designer",
       designer: { jobId: DESIGN_JOB_ID, createdAt: NOW, future: "kept" },
@@ -64,7 +53,7 @@ describe("stored designer origin", () => {
       future: "kept",
     });
 
-    const team = TeamWithDesigner.parse({
+    const team = TeamSchema.parse({
       ...codingTeam,
       source: "team-designer",
       designer: { jobId: DESIGN_JOB_ID, requestExcerpt: "改版" },
@@ -74,31 +63,37 @@ describe("stored designer origin", () => {
   });
 
   test("a damaged designer block drops only the origin, never the Role, Team, or Preferences document", () => {
-    expect(RoleWithDesigner.parse({ ...architect, designer: { jobId: 42 } }).designer).toBe(
-      undefined,
-    );
-    expect(RoleWithDesigner.parse({ ...architect, designer: "broken" }).id).toBe(architect.id);
-    expect(TeamWithDesigner.parse({ ...codingTeam, designer: null }).id).toBe(codingTeam.id);
-    expect(TeamWithDesigner.parse({ ...codingTeam, designer: { createdAt: 1 } }).designer).toBe(
+    expect(RoleSchema.parse({ ...architect, designer: { jobId: 42 } }).designer).toBe(undefined);
+    expect(RoleSchema.parse({ ...architect, designer: "broken" }).id).toBe(architect.id);
+    expect(TeamSchema.parse({ ...codingTeam, designer: null }).id).toBe(codingTeam.id);
+    expect(TeamSchema.parse({ ...codingTeam, designer: { createdAt: 1 } }).designer).toBe(
       undefined,
     );
 
-    const preferences = PreferencesWithDesigner.parse({
+    const preferences = PreferencesSchema.parse({
       maxMembers: 8,
       designerProfile: { profileId: "claude-opus-high", nameSnapshot: "Opus", future: "kept" },
       futurePreference: "kept",
     });
-    expect(preferences.designerProfile?.profileId).toBe("claude-opus-high");
+    expect(preferences.designerProfile).toEqual({
+      profileId: "claude-opus-high",
+      nameSnapshot: "Opus",
+      future: "kept",
+    });
     expect(preferences.futurePreference).toBe("kept");
     expect(
-      PreferencesWithDesigner.parse({ designerProfile: { profileId: 42 } }).designerProfile,
+      PreferencesSchema.parse({ designerProfile: { profileId: 42 } }).designerProfile,
     ).toBeUndefined();
-    expect(PreferencesWithDesigner.parse({ designerProfile: "broken" }).maxMembers).toBe(24);
+    expect(PreferencesSchema.parse({ designerProfile: "broken" }).maxMembers).toBe(24);
   });
 
-  test.todo(
-    "I1: re-run designer-origin tolerance against the real Role/Team/Preferences schemas and keep a damaged designerProfile from invalidating Preferences",
-  );
+  test("documents written before the designer fields remain readable", () => {
+    expect(RoleSchema.parse(architect).designer).toBeUndefined();
+    expect(TeamSchema.parse(codingTeam).designer).toBeUndefined();
+    const legacy = PreferencesSchema.parse({ maxMembers: 8, recentRuns: [] });
+    expect(legacy.maxMembers).toBe(8);
+    expect(legacy.designerProfile).toBeUndefined();
+  });
 });
 
 describe("design request limits", () => {

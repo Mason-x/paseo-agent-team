@@ -71,6 +71,17 @@ export type LaunchTarget = z.infer<typeof LaunchTargetSchema>;
 export type LaunchStartInput = z.infer<typeof LaunchStartInputSchema>;
 export type LaunchPreviewInput = z.infer<typeof LaunchPreviewInputSchema>;
 export type LaunchJob = z.infer<typeof LaunchJobSchema>;
+export {
+  designCancelRpc,
+  designContinueRpc,
+  designMarkSavedRpc,
+  designPrepareSaveRpc,
+  designResultRpc,
+  designSaveFailedRpc,
+  designStartRpc,
+  designStatusRpc,
+} from "./rpc/design";
+
 export type {
   CoordinatorPreview,
   LaunchPreviewResult,
