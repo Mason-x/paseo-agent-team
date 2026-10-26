@@ -1675,6 +1675,104 @@ describe("design service", () => {
     await service.dispose();
   });
 
+  test("repair trusts the live idle agent instead of a stale running ledger status", async () => {
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const jobId = "abcdef51-2345-4678-8abc-def012345678";
+    const record = seededJob(jobId, "needs_continue", {
+      job: designJob({
+        jobId,
+        state: "needs_continue",
+        attempt: 1,
+        agentCreated: true,
+        agentId: jobId,
+        agentStatus: "running",
+        issues: [
+          {
+            code: "DESIGN_OUTPUT_IDENTITY",
+            severity: "error",
+            path: ["nonce"],
+            params: { field: "nonce" },
+            action: "repair",
+          },
+        ],
+      }),
+    });
+    await store.create(record);
+    const labels = {
+      "agent-team.design": jobId,
+      "agent-team.design.version": "1",
+      "agent-team.design.request-hash": DESIGN_HASH,
+    };
+    adapter.agents.set(jobId, {
+      id: jobId,
+      labels,
+      status: "idle",
+      activeTurn: false,
+      archivedAt: null,
+      requiresAttention: false,
+      attentionReason: null,
+      pendingPermissions: [],
+      lastError: null,
+      providerUnavailable: false,
+    });
+    const repaired = await service.continue({
+      jobId,
+      expectedRevision: record.job.stateRevision,
+      action: "repair",
+    });
+    expect(repaired).toMatchObject({ ok: true, job: { state: "designing" } });
+    expect(adapter.sent).toHaveLength(1);
+
+    for (const [status, archivedAt, reason] of [
+      ["closed", null, "closed"],
+      ["idle", "2026-10-26T17:46:11.902Z", "archived"],
+    ] as const) {
+      const blockedId = `abcdef5${status === "closed" ? "2" : "3"}-2345-4678-8abc-def012345678`;
+      adapter.sent = [];
+      const blocked = seededJob(blockedId, "needs_continue", {
+        job: designJob({
+          jobId: blockedId,
+          state: "needs_continue",
+          attempt: 1,
+          agentCreated: true,
+          agentId: blockedId,
+          agentStatus: "running",
+        }),
+      });
+      await store.create(blocked);
+      adapter.agents.set(blockedId, {
+        id: blockedId,
+        labels: {
+          "agent-team.design": blockedId,
+          "agent-team.design.version": "1",
+          "agent-team.design.request-hash": DESIGN_HASH,
+        },
+        status,
+        activeTurn: false,
+        archivedAt,
+        requiresAttention: false,
+        attentionReason: null,
+        pendingPermissions: [],
+        lastError: null,
+        providerUnavailable: false,
+      });
+      expect(
+        await service.continue({
+          jobId: blockedId,
+          expectedRevision: blocked.job.stateRevision,
+          action: "repair",
+        }),
+      ).toMatchObject({
+        ok: false,
+        issues: [{ code: "DESIGN_STATE_CHANGED", params: { reason } }],
+      });
+      expect(adapter.sent).toHaveLength(0);
+    }
+    await service.dispose();
+  });
+
   test("continue rejects active leases and survives repair send failure", async () => {
     const store = new FakeStore();
     const adapter = new FakeAdapter();
@@ -1856,10 +1954,27 @@ describe("design service", () => {
           state: "needs_continue",
           attempt: 1,
           agentCreated: true,
+          agentId: guard,
           agentStatus: "running",
         }),
       }),
     );
+    adapter.agents.set(guard, {
+      id: guard,
+      labels: {
+        "agent-team.design": guard,
+        "agent-team.design.version": "1",
+        "agent-team.design.request-hash": DESIGN_HASH,
+      },
+      status: "running",
+      activeTurn: true,
+      archivedAt: null,
+      requiresAttention: false,
+      attentionReason: null,
+      pendingPermissions: [],
+      lastError: null,
+      providerUnavailable: false,
+    });
     expect(
       await service.continue({
         jobId: guard,

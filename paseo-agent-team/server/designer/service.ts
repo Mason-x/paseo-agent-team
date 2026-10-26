@@ -2016,12 +2016,6 @@ export function createDesignService(deps: DesignServiceDeps) {
             record.job,
           );
         }
-        if (record.job.agentStatus === "running") {
-          return failure(
-            [error("DESIGN_STATE_CHANGED", ["agent"], { reason: "running" }, "refresh")],
-            record.job,
-          );
-        }
         if (record.job.attempt >= 3) {
           return failure([error("DESIGN_RETRY_EXHAUSTED", ["attempt"], {}, "none")], record.job);
         }
@@ -2031,6 +2025,62 @@ export function createDesignService(deps: DesignServiceDeps) {
             [error("DESIGN_STATE_CHANGED", ["attempt"], { reason: "already-sent" }, "inspect")],
             record.job,
           );
+        }
+        const repairAdapter = input.action === "repair" ? await requireAdapter() : null;
+        if (input.action === "repair" && !repairAdapter) {
+          return failure(
+            [error("DESIGN_CONFIG_UNAVAILABLE", ["adapter"], { source: "adapter" }, "refresh")],
+            record.job,
+          );
+        }
+        if (input.action === "repair" && repairAdapter) {
+          let live: Awaited<ReturnType<typeof repairAdapter.getDesignAgent>>;
+          try {
+            live = await repairAdapter.getDesignAgent(record.job.agentId);
+          } catch (cause) {
+            log("design repair agent refresh failed", cause);
+            return failure(
+              [
+                error(
+                  "DESIGN_CONFIG_UNAVAILABLE",
+                  ["agent"],
+                  { reason: "refresh-failed" },
+                  "refresh",
+                ),
+              ],
+              record.job,
+            );
+          }
+          if (!live) {
+            return failure(
+              [error("DESIGN_RECOVERY_INCOMPLETE", ["agent"], { reason: "missing" }, "refresh")],
+              record.job,
+            );
+          }
+          if (live.archivedAt !== null) {
+            return failure(
+              [error("DESIGN_STATE_CHANGED", ["agent"], { reason: "archived" }, "refresh")],
+              record.job,
+            );
+          }
+          if (live.status === "closed") {
+            return failure(
+              [error("DESIGN_STATE_CHANGED", ["agent"], { reason: "closed" }, "refresh")],
+              record.job,
+            );
+          }
+          if (live.status === "error") {
+            return failure(
+              [error("DESIGN_AGENT_FAILED", ["agent"], { reason: "error" }, "inspect")],
+              record.job,
+            );
+          }
+          if (live.activeTurn || live.status === "running" || live.status === "initializing") {
+            return failure(
+              [error("DESIGN_STATE_CHANGED", ["agent"], { reason: "running" }, "refresh")],
+              record.job,
+            );
+          }
         }
         const contextResult = await readContext(record);
         if (!contextResult.ok) return failure(contextResult.issues, record.job);
