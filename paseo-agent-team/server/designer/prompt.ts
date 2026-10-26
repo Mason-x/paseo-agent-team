@@ -419,6 +419,13 @@ function omissionsFor(context: DesignPromptContext, detail: PromptDetail): strin
   ];
 }
 
+/** Repeated at both ends of kickoff and correction; the nonce is never inferred. */
+function identityRequirement(
+  input: Pick<DesignPromptInput, "jobId" | "attempt" | "nonce">,
+): string {
+  return `jobId=${input.jobId} attempt=${input.attempt} nonce=${input.nonce}。identity 必须逐字复制：jobId、attempt、nonce 与本节完全一致，不得自行生成或改写。`;
+}
+
 function compose(input: DesignPromptInput, detail: PromptDetail): string {
   const { context } = input;
   const target = context.target
@@ -426,7 +433,8 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     : null;
   return [
     "## 身份",
-    `jobId=${input.jobId} attempt=${input.attempt} version=1。nonce 只用于本轮输出身份核对，不是执行许可。`,
+    identityRequirement(input),
+    "nonce 只用于本轮输出身份核对，不是执行许可。",
     "",
     "## 用户需求",
     JSON.stringify(context.request),
@@ -492,6 +500,9 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     ),
     "",
     outputTemplate(input),
+    "",
+    "## 身份复核",
+    `${identityRequirement(input)} nonce 只用于本轮身份核对，不是执行许可。`,
   ].join("\n");
 }
 
@@ -564,8 +575,10 @@ function issuePayload(issue: DesignIssue): Record<string, unknown> {
 }
 
 /**
- * Repair prompt for attempts 2 and 3. Only the first 20 aggregated issues travel back; the job
- * keeps the rest. The previous model output is not echoed.
+ * Repair prompt for attempts 2 and 3. The kickoff already carried the Role/Profile indexes and
+ * recipes, so a correction repeats only the exact identity, the first 20 aggregated issues,
+ * mismatch-only expected choices, and the full output contract. This keeps the real 22-Role case
+ * well below 24KiB without raising the hard cap.
  */
 export function buildDesignCorrection(input: {
   jobId: string;
@@ -577,40 +590,31 @@ export function buildDesignCorrection(input: {
 }): PromptBuildResult {
   const shown = input.issues.slice(0, MAX_CORRECTION_ISSUES);
   const hidden = input.issues.length - shown.length;
-  const header = [
+  const text = [
     "## 修正",
-    `jobId=${input.jobId} attempt=${input.attempt}。nonce 只用于本轮输出身份核对，不是执行许可。`,
-    "上一轮输出未通过校验。按下列聚合错误重写完整方案，只输出一个 agent-team-design fenced JSON 块，身份字段原样。不要复述上一轮全文。",
+    identityRequirement(input),
+    "上一轮输出未通过校验。按下列聚合错误重写完整方案，只输出一个 agent-team-design fenced JSON 块，身份字段原样。不要复述上一轮全文，也不要重新列举 Role/Profile 上下文。",
     jsonBlock("聚合错误", {
       issues: shown.map(issuePayload),
       omittedIssueCount: hidden,
     }),
     jsonBlock("准确期望", projectedChoices(input.expectedChoices)),
     "",
-  ].join("\n");
-  const bodyLimit = DESIGN_CORRECTION_MAX_BYTES - utf8ByteLength(header);
-  const fitted = withinBudget(
-    {
+    outputTemplate({
       jobId: input.jobId,
       attempt: input.attempt,
       nonce: input.nonce,
-      context: { ...input.context, expectedChoices: input.expectedChoices },
-    },
-    bodyLimit,
-  );
-  if (!fitted.ok) {
-    return {
-      ok: false,
-      issues: [inputTooLarge(utf8ByteLength(header) + fitted.bytes, DESIGN_CORRECTION_MAX_BYTES)],
-    };
+      context: input.context,
+    }),
+    "",
+    "## 身份复核",
+    `${identityRequirement(input)} nonce 只用于本轮身份核对，不是执行许可。`,
+  ].join("\n");
+  const bytes = utf8ByteLength(text);
+  if (bytes > DESIGN_CORRECTION_MAX_BYTES) {
+    return { ok: false, issues: [inputTooLarge(bytes, DESIGN_CORRECTION_MAX_BYTES)] };
   }
-  const text = `${header}${fitted.text}`;
-  return {
-    ok: true,
-    text,
-    utf8Bytes: utf8ByteLength(text),
-    omissions: fitted.omissions,
-  };
+  return { ok: true, text, utf8Bytes: bytes, omissions: [] };
 }
 
 /** Live availability is a host fact. Notes stay on the summary; feature values do not. */

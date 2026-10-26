@@ -22,7 +22,7 @@ import {
 import { TEAM_DESIGN_RECIPES } from "../server/templates/recipes";
 import { utf8ByteLength } from "../shared/domain/design-output";
 import { type DesignIssue, DesignProposalSchema } from "../shared/schemas/design";
-import { sourceProfiles } from "./default-presets.fixtures";
+import { expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
 
 const SOURCE_RECIPES = [
   {
@@ -417,7 +417,7 @@ describe("designer prompt budgets", () => {
     expect(result.text.match(/DESIGN_PROFILE_CHOICE/gu)?.length).toBe(20);
   });
 
-  test("correction fails closed instead of dropping the required index", () => {
+  test("correction ignores a huge context index instead of failing on it", () => {
     const roles = Array.from({ length: 500 }, (_, index) =>
       role(index, { id: `role-${"y".repeat(40)}-${index}`, name: "名称".repeat(20) }),
     );
@@ -439,14 +439,80 @@ describe("designer prompt budgets", () => {
         profiles: [profile(1)],
         occupiedRoleIds: roles.map((item) => item.id),
       }),
-      expectedChoices: [
-        { target: "coordinator", roleId: roles[0]?.id ?? "", expectedProfileIds: [] },
-      ],
+      expectedChoices: [],
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.issues[0]?.code).toBe("DESIGN_INPUT_TOO_LARGE");
-    expect(result.issues[0]?.params.limit).toBe(DESIGN_CORRECTION_MAX_BYTES);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
+    expect(result.text).not.toContain("## Role 索引");
+    expect(result.text).not.toContain(roles[0]?.mission ?? "missing");
+  });
+
+  test("realistic correction stays inside 24KiB without repeating context", () => {
+    const roles = expectedRoleContent.map((item, index) =>
+      role(index, {
+        id: item.id,
+        name: item.name,
+        mission: item.mission,
+        responsibilities: item.responsibilities,
+      }),
+    );
+    const realistic = context({
+      roles,
+      profiles: [profile(1)],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+      expectedChoices: [],
+    });
+    const result = buildDesignCorrection({
+      jobId: JOB_ID,
+      attempt: 2,
+      nonce: NONCE,
+      issues: [
+        {
+          code: "DESIGN_OUTPUT_IDENTITY",
+          severity: "error",
+          path: ["nonce"],
+          params: { field: "nonce" },
+          action: "repair",
+        },
+      ],
+      context: realistic,
+      expectedChoices: [],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
+    expect(result.text).toContain(NONCE);
+    expect(result.text.match(/identity 必须逐字复制/gu)?.length).toBe(2);
+    for (const heading of ["## Role 索引", "## Role 摘要", "## Profile 白名单", "## 九配方"]) {
+      expect(result.text).not.toContain(heading);
+    }
+    expect(result.text).not.toContain(realistic.roles[0]?.mission ?? "missing");
+    expect(result.text).not.toContain(realistic.profiles[0]?.name ?? "missing");
+    expect(result.text).toContain("## 输出合同");
+    for (const field of [
+      "required",
+      "optional",
+      "newRole",
+      "profileChoice",
+      "limits",
+      "forbidden",
+      "preferredProfiles",
+      "executionPolicy",
+      "collaboration",
+      "32768",
+    ]) {
+      expect(result.text).toContain(field);
+    }
+  });
+
+  test("kickoff repeats the exact identity requirement at both ends", () => {
+    const text = textOf(kickoff());
+    expect(text.startsWith("## 身份\n")).toBe(true);
+    expect(text).toContain("## 身份复核");
+    expect(text.match(/identity 必须逐字复制/gu)?.length).toBe(2);
+    expect(text).toContain(`nonce=${NONCE}`);
   });
 
   test("never copies machine profile ids, env, or credentials into prompt material", () => {
@@ -636,7 +702,7 @@ describe("designer prompt budgets", () => {
     });
     const repaired = textOf(correction);
     expect(repaired).not.toContain("CORRECTION_SENTINEL");
-    expect(repaired.match(/"expectedProfileIds":\["profile-1"\]/gu)?.length).toBe(2);
+    expect(repaired.match(/"expectedProfileIds":\["profile-1"\]/gu)?.length).toBe(1);
   });
 
   test("accepts a fully compressed 30–60KiB kickoff after every step", () => {
