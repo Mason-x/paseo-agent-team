@@ -193,7 +193,7 @@ const OUTPUT_CONTRACT = {
   ],
 } as const;
 
-function outputTemplate(input: Pick<DesignPromptInput, "jobId" | "attempt" | "nonce">): string {
+function outputTemplate(input: DesignPromptInput): string {
   const sample = {
     version: 1,
     jobId: input.jobId,
@@ -203,12 +203,18 @@ function outputTemplate(input: Pick<DesignPromptInput, "jobId" | "attempt" | "no
     team: {
       id: "rework-team",
       name: "改版团队",
-      mode: "sota",
+      mode: input.context.requestedMode,
       coordinatorRoleId: "lead-tech",
-      members: [{ key: "m1", roleId: "eng-rework" }],
+      members: [
+        { key: "m1", roleId: "eng-rework" },
+        { key: "m2", roleId: "qa-review" },
+      ],
       collaboration: { replicas: 2, judgeRoleId: "qa-review" },
     },
-    reuse: [{ roleId: "lead-tech", reason: "负责统筹与验收" }],
+    reuse: [
+      { roleId: "lead-tech", reason: "负责统筹与验收" },
+      { roleId: "qa-review", reason: "负责独立审查" },
+    ],
     newRoles: [
       {
         id: "eng-rework",
@@ -227,6 +233,7 @@ function outputTemplate(input: Pick<DesignPromptInput, "jobId" | "attempt" | "no
     profileChoices: [
       { target: "coordinator", profileIds: ["profile-1"], reason: "负责决策" },
       { target: "m1", profileIds: ["profile-1"], reason: "覆盖执行职责" },
+      { target: "m2", profileIds: ["profile-1"], reason: "覆盖独立审查" },
     ],
   };
   return [
@@ -251,6 +258,10 @@ function stringIds(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function isScalar(value: unknown): value is string | number | boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
 function projectedCapabilities(value: DesignPromptContext["runtimeCapabilities"]): {
@@ -293,7 +304,7 @@ function projectedChoices(
   return choices.map((choice) => ({
     target: choice.target,
     roleId: choice.roleId,
-    expectedProfileIds: [...choice.expectedProfileIds],
+    expectedProfileIds: stringIds(choice.expectedProfileIds),
   }));
 }
 
@@ -313,6 +324,7 @@ const FULL_DETAIL: PromptDetail = {
 
 function rolePayload(role: DesignPromptRoleSummary, detail: PromptDetail): Record<string, unknown> {
   const clamped = detail.roleText === "clamped";
+  const responsibilities = stringIds(role.responsibilities);
   return {
     id: role.id,
     name: role.name,
@@ -321,12 +333,12 @@ function rolePayload(role: DesignPromptRoleSummary, detail: PromptDetail): Recor
     taskKind: role.taskKind ?? null,
     mission: clamped ? clampCodePoints(role.mission, MISSION_CODE_POINTS) : role.mission,
     responsibilities: clamped
-      ? role.responsibilities
+      ? responsibilities
           .slice(0, RESPONSIBILITY_ITEMS)
           .map((item) => clampCodePoints(item, RESPONSIBILITY_CODE_POINTS))
-      : [...role.responsibilities],
-    preferredProfileIds: [...role.preferredProfileIds],
-    fallbackProfileIds: [...role.fallbackProfileIds],
+      : responsibilities,
+    preferredProfileIds: stringIds(role.preferredProfileIds),
+    fallbackProfileIds: stringIds(role.fallbackProfileIds),
   };
 }
 
@@ -379,11 +391,13 @@ function roleTextOmitted(roles: readonly DesignPromptRoleSummary[]): string[] {
   if (roles.some((role) => codePointLength(role.mission) > MISSION_CODE_POINTS))
     omitted.push("role-mission");
   if (
-    roles.some(
-      (role) =>
-        role.responsibilities.length > RESPONSIBILITY_ITEMS ||
-        role.responsibilities.some((item) => codePointLength(item) > RESPONSIBILITY_CODE_POINTS),
-    )
+    roles.some((role) => {
+      const responsibilities = stringIds(role.responsibilities);
+      return (
+        responsibilities.length > RESPONSIBILITY_ITEMS ||
+        responsibilities.some((item) => codePointLength(item) > RESPONSIBILITY_CODE_POINTS)
+      );
+    })
   ) {
     omitted.push("role-responsibilities");
   }
@@ -440,8 +454,8 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     "",
     "## 目录与 Profile 白名单",
     jsonBlock("目录约束", {
-      occupiedRoleIds: context.occupiedRoleIds,
-      occupiedRoleNames: context.occupiedRoleNames,
+      occupiedRoleIds: stringIds(context.occupiedRoleIds),
+      occupiedRoleNames: stringIds(context.occupiedRoleNames),
       occupiedTeams: projectedTeams(context.occupiedTeams),
       newRoleLimit: 3,
       namePrefixes: NAME_PREFIXES.map(([prefix, label]) => ({ prefix, label })),
@@ -456,8 +470,8 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
         name: role.name,
         enabled: role.enabled,
         tier: role.tier ?? null,
-        preferredProfileIds: [...role.preferredProfileIds],
-        fallbackProfileIds: [...role.fallbackProfileIds],
+        preferredProfileIds: stringIds(role.preferredProfileIds),
+        fallbackProfileIds: stringIds(role.fallbackProfileIds),
       })),
     ),
     jsonBlock(
@@ -501,30 +515,43 @@ function compressed(input: DesignPromptInput, detail: PromptDetail): PromptDetai
   return null;
 }
 
-function withinBudget(
-  input: DesignPromptInput,
-  limit: number,
-): { ok: true; text: string; bytes: number; omissions: string[] } | { ok: false; bytes: number } {
+type BudgetFit = {
+  ok: boolean;
+  text: string;
+  bytes: number;
+  omissions: string[];
+};
+
+function withinBudget(input: DesignPromptInput, limit: number): BudgetFit {
   let detail = FULL_DETAIL;
+  let text = "";
   let bytes = 0;
   for (;;) {
-    const text = compose(input, detail);
+    text = compose(input, detail);
     bytes = utf8ByteLength(text);
-    if (bytes <= limit)
-      return { ok: true, text, bytes, omissions: omissionsFor(input.context, detail) };
+    const omissions = omissionsFor(input.context, detail);
+    if (bytes <= limit) return { ok: true, text, bytes, omissions };
     const next = compressed(input, detail);
-    if (!next) return { ok: false, bytes };
+    if (!next) return { ok: false, text, bytes, omissions };
     detail = next;
   }
 }
 
-/** Assembles one kickoff. Compression aims for 30KiB and only accepts 30–60KiB when required data remains. */
+/**
+ * Compresses toward 30KiB. When that target is unreachable, keeps the fully
+ * compressed result if it is still within the 60KiB hard cap.
+ */
 export function buildDesignKickoff(input: DesignPromptInput): PromptBuildResult {
-  const aimed = withinBudget(input, DESIGN_KICKOFF_TARGET_BYTES);
-  const fitted = aimed.ok ? aimed : withinBudget(input, DESIGN_KICKOFF_MAX_BYTES);
-  if (!fitted.ok)
-    return { ok: false, issues: [inputTooLarge(fitted.bytes, DESIGN_KICKOFF_MAX_BYTES)] };
-  return { ok: true, text: fitted.text, utf8Bytes: fitted.bytes, omissions: fitted.omissions };
+  const fitted = withinBudget(input, DESIGN_KICKOFF_TARGET_BYTES);
+  if (fitted.ok || fitted.bytes <= DESIGN_KICKOFF_MAX_BYTES) {
+    return {
+      ok: true,
+      text: fitted.text,
+      utf8Bytes: fitted.bytes,
+      omissions: fitted.omissions,
+    };
+  }
+  return { ok: false, issues: [inputTooLarge(fitted.bytes, DESIGN_KICKOFF_MAX_BYTES)] };
 }
 
 function issuePayload(issue: DesignIssue): Record<string, unknown> {
@@ -532,7 +559,7 @@ function issuePayload(issue: DesignIssue): Record<string, unknown> {
     code: issue.code,
     severity: issue.severity,
     path: issue.path,
-    params: issue.params,
+    params: Object.fromEntries(Object.entries(issue.params).filter(([, value]) => isScalar(value))),
   };
 }
 

@@ -275,6 +275,7 @@ describe("designer prompt budgets", () => {
     expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
     expect(result.omissions).toEqual([]);
     expect(result.text).toContain(`"requestedMode":"economy"`);
+    expect(result.text).toContain(`"mode":"economy"`);
     expect(result.text).toContain(NONCE);
     expect(result.text).toContain("workspace-target");
     expect(result.text).toContain("不得修改文件");
@@ -308,7 +309,7 @@ describe("designer prompt budgets", () => {
     expect(notesOnly.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
 
     const clamped = kickoff({
-      request: "填充".repeat(8000),
+      request: "填充".repeat(2500),
       roles: [
         role(0, {
           mission: "使命".repeat(300),
@@ -477,7 +478,57 @@ describe("designer prompt budgets", () => {
     expect(JSON.stringify(TEAM_DESIGN_RECIPES)).not.toContain("agent_profile_");
   });
 
-  test("keeps a schema-valid new-role contract at every compression level", () => {
+  test("filters non-string array elements and non-scalar issue params", () => {
+    const marker = "OBJECT_ELEMENT_SENTINEL";
+    const markedRole = role(1, {
+      responsibilities: ["职责", { leak: marker }] as never,
+      preferredProfileIds: ["profile-1", { leak: marker }] as never,
+      fallbackProfileIds: [{ leak: marker }] as never,
+    });
+    const text = textOf(
+      kickoff({
+        roles: [markedRole],
+        occupiedRoleIds: ["role-1", { leak: marker }] as never,
+        occupiedRoleNames: ["角色1", { leak: marker }] as never,
+        expectedChoices: [
+          {
+            target: "coordinator",
+            roleId: "role-1",
+            expectedProfileIds: ["profile-1", { leak: marker }] as never,
+          },
+        ],
+      }),
+    );
+    expect(text).not.toContain(marker);
+    expect(text).toContain('"occupiedRoleIds":["role-1"]');
+    expect(text).toContain('"occupiedRoleNames":["角色1"]');
+    expect(text).toContain('"preferredProfileIds":["profile-1"]');
+    expect(text).toContain('"expectedProfileIds":["profile-1"]');
+
+    const correction = buildDesignCorrection({
+      jobId: JOB_ID,
+      attempt: 2,
+      nonce: NONCE,
+      issues: [
+        {
+          code: "DESIGN_PROFILE_CHOICE",
+          severity: "error",
+          path: ["profileChoices", 0],
+          params: { target: "coordinator", received: { secret: marker } } as never,
+          action: "repair",
+        },
+      ],
+      context: context(),
+      expectedChoices: [
+        { target: "coordinator", roleId: "role-1", expectedProfileIds: ["profile-1"] },
+      ],
+    });
+    const repaired = textOf(correction);
+    expect(repaired).not.toContain(marker);
+    expect(repaired).toContain('"target":"coordinator"');
+  });
+
+  test("keeps a schema-valid new-role contract in full and compressed kickoffs", () => {
     const fence = /```agent-team-design\n([\s\S]*?)\n```/u;
     const prompts = [
       textOf(kickoff()),
@@ -492,9 +543,30 @@ describe("designer prompt budgets", () => {
       expect(text).toContain("preferredProfiles");
       expect(text).toContain("executionPolicy");
       expect(text).toContain("collaboration");
-      const sample = JSON.parse(fence.exec(text)?.[1] ?? "{}") as Record<string, unknown>;
+      const sample = JSON.parse(fence.exec(text)?.[1] ?? "{}") as {
+        team: {
+          mode: string;
+          members: { roleId: string }[];
+          collaboration?: { judgeRoleId?: string };
+        };
+        reuse: { roleId: string }[];
+        profileChoices: { target: string }[];
+      };
       expect(DesignProposalSchema.safeParse(sample).success).toBe(true);
-      const broken = structuredClone(sample) as { newRoles: Record<string, unknown>[] };
+      expect(sample.team.mode).toBe("economy");
+      const sampledRoles = new Set([
+        ...sample.team.members.map((member) => member.roleId),
+        ...sample.reuse.map((entry) => entry.roleId),
+      ]);
+      expect(sampledRoles.has(sample.team.collaboration?.judgeRoleId ?? "")).toBe(true);
+      expect(sample.profileChoices.map((choice) => choice.target)).toEqual([
+        "coordinator",
+        "m1",
+        "m2",
+      ]);
+      const broken = structuredClone(sample) as unknown as {
+        newRoles: Record<string, unknown>[];
+      };
       delete broken.newRoles[0]?.mission;
       expect(DesignProposalSchema.safeParse(broken).success).toBe(false);
     }
@@ -565,6 +637,38 @@ describe("designer prompt budgets", () => {
     const repaired = textOf(correction);
     expect(repaired).not.toContain("CORRECTION_SENTINEL");
     expect(repaired.match(/"expectedProfileIds":\["profile-1"\]/gu)?.length).toBe(2);
+  });
+
+  test("accepts a fully compressed 30–60KiB kickoff after every step", () => {
+    const roles = Array.from({ length: 50 }, (_, index) =>
+      role(index, {
+        name: `角色${index}${"名".repeat(20)}`,
+        mission: index < 2 ? "任".repeat(2000) : `岗位${index}`,
+        responsibilities: [
+          ...Array.from({ length: 6 }, () => "责".repeat(22)),
+          ...(index === 0 ? ["长".repeat(81)] : []),
+        ],
+      }),
+    );
+    const result = kickoff({
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBeGreaterThan(DESIGN_KICKOFF_TARGET_BYTES);
+    expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_MAX_BYTES);
+    expect(result.omissions).toEqual([
+      "profile-notes",
+      "role-mission",
+      "role-responsibilities",
+      "recipe-notes",
+    ]);
+    expect(result.text).not.toContain("任".repeat(2000));
+    expect(result.text).toContain("任".repeat(200));
+    expect(result.text).not.toContain("批量开发 ×2–3");
   });
 
   test("compresses a valid request toward 30KiB and still accepts the hard cap", () => {
