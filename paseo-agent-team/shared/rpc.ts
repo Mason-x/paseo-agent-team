@@ -4,8 +4,10 @@ import {
   DefaultCatalogPreviewInputSchema,
   DefaultCatalogPreviewResultSchema,
 } from "./schemas/default-catalog";
+import { LaunchPreviewResultSchema } from "./schemas/launch-preview";
 import { RoleSchema } from "./schemas/role";
 import { TeamSchema } from "./schemas/team";
+import { TeamModeSchema } from "./schemas/team-mode";
 
 export const LaunchTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: z.string().min(1) }),
@@ -16,10 +18,23 @@ export const LaunchTargetSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export const LaunchStartInputSchema = z.object({
+const LaunchRequestShape = {
   teamId: z.string().min(1),
   task: z.string().trim().min(1).max(20000),
   target: LaunchTargetSchema,
+};
+
+export const LaunchStartInputSchema = z.object({
+  ...LaunchRequestShape,
+  /** Per-launch mode override; never persisted back to the Team. */
+  mode: TeamModeSchema.optional(),
+  /** Token from launch.preview. Omitted by legacy callers; new clients always send it. */
+  expectedPlanHash: z.string().min(1).max(128).optional(),
+});
+
+export const LaunchPreviewInputSchema = z.object({
+  ...LaunchRequestShape,
+  mode: TeamModeSchema.optional(),
 });
 
 const LaunchJobStepSchema = z.enum(["workspace", "coordinator", "member", "kickoff", "done"]);
@@ -48,11 +63,20 @@ export const LaunchJobSchema = z.object({
     .optional(),
   startedAt: z.string(),
   finishedAt: z.string().optional(),
+  mode: TeamModeSchema.optional(),
+  planHash: z.string().optional(),
 });
 
 export type LaunchTarget = z.infer<typeof LaunchTargetSchema>;
 export type LaunchStartInput = z.infer<typeof LaunchStartInputSchema>;
+export type LaunchPreviewInput = z.infer<typeof LaunchPreviewInputSchema>;
 export type LaunchJob = z.infer<typeof LaunchJobSchema>;
+export type {
+  CoordinatorPreview,
+  LaunchPreviewResult,
+  ModeLaunchPreview,
+  SeatPreview,
+} from "./schemas/launch-preview";
 
 /**
  * Validates and plans on the host, then creates the team in the background. Agent creation can
@@ -69,6 +93,16 @@ export const launchStartRpc = defineRpc({
       warnings: z.array(z.string()),
     }),
   ]),
+});
+
+/**
+ * Read-only mode/seat preview. It resolves the same settings, Team, Roles, Profiles, and economy
+ * policy as start, but never creates a workspace or an agent.
+ */
+export const launchPreviewRpc = defineRpc({
+  name: "agent-team.launch.preview",
+  input: LaunchPreviewInputSchema,
+  output: LaunchPreviewResultSchema,
 });
 
 /** `job` is null once the run is forgotten (finished long ago, or the plugin restarted). */

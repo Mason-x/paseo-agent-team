@@ -574,6 +574,48 @@ describe("resolveModeProfile", () => {
     }
   });
 
+  test("an unverified availability query blocks new modes but keeps legacy SOTA", () => {
+    const unverified: HostSnapshot = {
+      status: "ready",
+      profiles: allProfiles,
+      availability: [],
+      availabilityUnverified: true,
+    };
+    const economy = resolve("eng-fullstack", "economy", { host: unverified });
+    expect(economy.ok).toBe(false);
+    if (!economy.ok) {
+      expect(economy.issues).toEqual([
+        {
+          code: "MODE_CONTEXT_UNAVAILABLE",
+          severity: "blocker",
+          params: { reason: "availability-unverified", mode: "economy" },
+        },
+      ]);
+    }
+
+    const sota = resolve("eng-fullstack", "sota", { host: unverified });
+    expect(sota).toMatchObject({
+      ok: true,
+      value: { profile: { id: claude.id }, source: "role-preferred" },
+    });
+
+    const collaboration = selectCollaborationProfiles({
+      role: roleOf("eng-fullstack"),
+      host: unverified,
+      economy: policy,
+      requestedReplicas: 2,
+    });
+    expect(collaboration.ok).toBe(false);
+    if (!collaboration.ok) {
+      expect(collaboration.issues).toContainEqual(
+        expect.objectContaining({
+          code: "MODE_CONTEXT_UNAVAILABLE",
+          params: expect.objectContaining({ reason: "availability-unverified" }),
+        }),
+      );
+    }
+  });
+
   test("a failed Profile/availability query is a context blocker, never an empty pool or a selection", () => {
     const host: HostSnapshot = { status: "unavailable", reason: "query failed" };
     for (const mode of ["sota", "economy", "collaborative"] as const) {

@@ -62,6 +62,7 @@ describe("server entry", () => {
     const cleanup = contribute(server);
     expect(settings).toEqual(["agent-team-roles", "agent-team-teams", "agent-team-preferences"]);
     expect([...handlers.keys()].sort()).toEqual([
+      "agent-team.launch.preview",
       "agent-team.launch.start",
       "agent-team.launch.status",
       "agent-team.templates.defaults.preview",
@@ -118,6 +119,24 @@ describe("server entry", () => {
       if (previous === undefined) delete process.env.PASEO_HOME;
       else process.env.PASEO_HOME = previous;
     }
+  });
+
+  test("previews a launch through the same settings without creating agents", async () => {
+    const { server, handlers } = fakeServer();
+    contribute(server);
+    const { port, created } = fakePort();
+    const preview = (await handler(handlers, "agent-team.launch.preview")(
+      {
+        teamId: "coding-team",
+        task: "Add Stripe",
+        target: { kind: "workspace", workspaceId: "ws-1" },
+        mode: "sota",
+      },
+      { paseo: port },
+    )) as { ok: boolean; preview?: { planHash: string } };
+    expect(preview.ok).toBe(true);
+    expect(preview.preview?.planHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(created).toHaveLength(0);
   });
 
   test("starts a launch through the settings and Paseo it is given, then reports on it", async () => {

@@ -1,17 +1,28 @@
 import { buildLaunchPlan, type LaunchPlan } from "../shared/domain/launch-plan";
+import { toModeLaunchPreview } from "../shared/domain/launch-preview";
 import { isLaunchError, launchTeam } from "../shared/domain/launch-team";
+import {
+  type EconomyPolicy,
+  type HostSnapshot,
+  normalizeEconomyPolicy,
+} from "../shared/domain/mode-resolver";
+import type { ModeIssue } from "../shared/domain/role-execution";
+import type { RuntimeCapabilities } from "../shared/domain/seat-plan";
 import { createRunId } from "../shared/ids";
 import {
   createPaseoAdapter,
   type PaseoAdapter,
+  type PaseoProfile,
   type ProjectSummary,
   profilesFromConfig,
 } from "../shared/paseo/adapter";
 import type { PaseoPort } from "../shared/paseo/port";
-import type { LaunchJob, LaunchStartInput } from "../shared/rpc";
+import type { LaunchJob, LaunchPreviewInput, LaunchStartInput } from "../shared/rpc";
+import type { LaunchPreviewResult } from "../shared/schemas/launch-preview";
 import type { Preferences } from "../shared/schemas/preferences";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
+import { hashLaunchPlan } from "./launch-hash";
 
 type SettingsState<Values> =
   | { status: "ready"; values: Values }
@@ -23,6 +34,15 @@ export type LaunchStartResult =
   | { ok: true; job: LaunchJob }
   | { ok: false; blockers: string[]; warnings: string[] };
 
+/** 5A runtime: planning and eager creation only. T7 turns the deferred capabilities on. */
+export const LAUNCH_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
+  onDemand: false,
+  expansion: false,
+  collaboration: false,
+};
+
+const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
+
 const MAX_JOBS = 50;
 const FINISHED_JOB_TTL_MS = 60 * 60 * 1000;
 
@@ -30,6 +50,29 @@ function describeCause(cause: unknown): string | undefined {
   if (cause instanceof Error) return cause.message;
   if (typeof cause === "string") return cause;
   return undefined;
+}
+
+type PreparedLaunch = {
+  plan: LaunchPlan;
+  planHash: string;
+  workspace: { id: string } | null;
+  project: ProjectSummary | undefined;
+  preferences: Preferences;
+  economyIssues: ModeIssue[];
+};
+
+type PrepareResult =
+  | { ok: true; prepared: PreparedLaunch }
+  | { ok: false; blockers: string[]; warnings: string[]; issues: ModeIssue[] };
+
+function economyOf(preferences: Preferences, profiles: readonly PaseoProfile[]): EconomyPolicy {
+  const normalized = normalizeEconomyPolicy(preferences.economy, profiles);
+  return normalized.ok ? normalized.value : EMPTY_ECONOMY;
+}
+
+function economyIssuesOf(preferences: Preferences, profiles: readonly PaseoProfile[]): ModeIssue[] {
+  const normalized = normalizeEconomyPolicy(preferences.economy, profiles);
+  return normalized.issues ?? [];
 }
 
 /**
@@ -59,6 +102,120 @@ export function createLaunchService(deps: {
       if (jobs.size <= MAX_JOBS) break;
       jobs.delete(runId);
     }
+  }
+
+  /** One planning pipeline for preview and start: read settings, host facts, then plan + hash. */
+  async function prepare(
+    input: LaunchPreviewInput | LaunchStartInput,
+    adapter: PaseoAdapter,
+    runId: string,
+  ): Promise<PrepareResult> {
+    const [roles, teams, preferences] = await Promise.all([
+      deps.roles.read(),
+      deps.teams.read(),
+      deps.preferences.read(),
+    ]);
+    const invalid = [
+      roles.status === "invalid" ? zh.settingsInvalid(zh.catalogRoles) : null,
+      teams.status === "invalid" ? zh.settingsInvalid(zh.catalogTeams) : null,
+      preferences.status === "invalid" ? zh.settingsInvalid(zh.catalogPreferences) : null,
+    ].filter((message): message is string => message !== null);
+    if (roles.status !== "ready" || teams.status !== "ready" || preferences.status !== "ready") {
+      return { ok: false, blockers: invalid, warnings: [], issues: [] };
+    }
+
+    const target = input.target;
+    const [workspace, project, hostResult] = await Promise.all([
+      target.kind === "workspace" ? adapter.getWorkspace(target.workspaceId) : null,
+      target.kind === "new-workspace"
+        ? adapter
+            .listProjects()
+            .then((projects) => projects.find((entry) => entry.id === target.projectId))
+            .catch(() => undefined)
+        : undefined,
+      (async (): Promise<{ host: HostSnapshot; daemonConfig: unknown }> => {
+        let daemonConfig: unknown;
+        try {
+          daemonConfig = await adapter.readConfig();
+        } catch (cause) {
+          // Raw host errors may contain paths or tokens: log them, return a stable code only.
+          log("launch config read failed", cause);
+          return {
+            host: { status: "unavailable", reason: "config-read-failed" },
+            daemonConfig: undefined,
+          };
+        }
+        const profiles = profilesFromConfig(daemonConfig);
+        try {
+          const availability = await adapter.listProviderAvailability();
+          return {
+            host: { status: "ready", profiles, availability },
+            daemonConfig,
+          };
+        } catch (cause) {
+          log("launch availability read failed", cause);
+          // Profiles are still usable; SOTA keeps launching with an explicit warning, while the
+          // new modes refuse to treat an unverified pool as healthy.
+          return {
+            host: {
+              status: "ready",
+              profiles,
+              availability: [],
+              availabilityUnverified: true,
+            },
+            daemonConfig,
+          };
+        }
+      })(),
+    ]);
+    const { host, daemonConfig } = hostResult;
+    const readyHost = host.status === "ready" ? host : undefined;
+    const targetBlockers: string[] = [];
+    if (target.kind === "workspace" && !workspace) targetBlockers.push(zh.workspaceMissing);
+    if (target.kind === "new-workspace" && !project) targetBlockers.push(zh.projectMissing);
+
+    const team = teams.values.teams.find((entry) => entry.id === input.teamId);
+    const economy = economyOf(preferences.values, readyHost?.profiles ?? []);
+    const economyIssues = economyIssuesOf(preferences.values, readyHost?.profiles ?? []);
+    const plan = buildLaunchPlan({
+      team,
+      roles: roles.values.roles,
+      profiles: readyHost?.profiles ?? [],
+      availability: readyHost?.availability ?? [],
+      workspaceId: workspace?.id ?? "",
+      task: input.task,
+      runId,
+      maxMembers: preferences.values.maxMembers,
+      mode: input.mode,
+      host,
+      economy,
+      runtimeCapabilities: LAUNCH_RUNTIME_CAPABILITIES,
+      daemonConfig,
+    });
+    const issues = [...economyIssues, ...plan.seatIssues];
+    const blockers = [...targetBlockers, ...plan.blockers];
+    const prepared: PreparedLaunch = {
+      plan,
+      planHash: hashLaunchPlan({
+        team: plan.team,
+        roles: roles.values.roles,
+        plan,
+        host,
+        economy,
+        target,
+        task: input.task,
+        maxMembers: preferences.values.maxMembers,
+        runtimeCapabilities: LAUNCH_RUNTIME_CAPABILITIES,
+      }),
+      workspace,
+      project,
+      preferences: preferences.values,
+      economyIssues,
+    };
+    if (blockers.length > 0) {
+      return { ok: false, blockers, warnings: plan.warnings, issues };
+    }
+    return { ok: true, prepared };
   }
 
   async function run(
@@ -121,54 +278,47 @@ export function createLaunchService(deps: {
   }
 
   return {
+    async preview(input: LaunchPreviewInput, paseo: PaseoPort): Promise<LaunchPreviewResult> {
+      const adapter = createPaseoAdapter(paseo);
+      const prepared = await prepare(input, adapter, "preview");
+      if (!prepared.ok) {
+        return {
+          ok: false,
+          blockers: prepared.blockers,
+          warnings: prepared.warnings,
+          issues: prepared.issues,
+        };
+      }
+      return {
+        ok: true,
+        preview: toModeLaunchPreview(
+          prepared.prepared.plan,
+          prepared.prepared.planHash,
+          prepared.prepared.economyIssues,
+        ),
+      };
+    },
+
     async start(input: LaunchStartInput, paseo: PaseoPort): Promise<LaunchStartResult> {
       const adapter = createPaseoAdapter(paseo);
-      const [roles, teams, preferences] = await Promise.all([
-        deps.roles.read(),
-        deps.teams.read(),
-        deps.preferences.read(),
-      ]);
-      const invalid = [
-        roles.status === "invalid" ? zh.settingsInvalid(zh.catalogRoles) : null,
-        teams.status === "invalid" ? zh.settingsInvalid(zh.catalogTeams) : null,
-        preferences.status === "invalid" ? zh.settingsInvalid(zh.catalogPreferences) : null,
-      ].filter((message): message is string => message !== null);
-      if (roles.status !== "ready" || teams.status !== "ready" || preferences.status !== "ready") {
-        return { ok: false, blockers: invalid, warnings: [] };
+      const runId = nextRunId();
+      const prepared = await prepare(input, adapter, runId);
+      if (!prepared.ok) {
+        return { ok: false, blockers: prepared.blockers, warnings: prepared.warnings };
+      }
+      if (
+        input.expectedPlanHash !== undefined &&
+        input.expectedPlanHash !== prepared.prepared.planHash
+      ) {
+        return {
+          ok: false,
+          blockers: [zh.modes.planChanged],
+          warnings: prepared.prepared.plan.warnings,
+        };
       }
 
+      const { plan, workspace, project, preferences } = prepared.prepared;
       const target = input.target;
-      const [daemonConfig, availability, workspace, project] = await Promise.all([
-        adapter.readConfig().catch(() => undefined),
-        adapter.listProviderAvailability().catch(() => []),
-        target.kind === "workspace" ? adapter.getWorkspace(target.workspaceId) : null,
-        target.kind === "new-workspace"
-          ? adapter
-              .listProjects()
-              .then((projects) => projects.find((entry) => entry.id === target.projectId))
-              .catch(() => undefined)
-          : undefined,
-      ]);
-      const targetBlockers: string[] = [];
-      if (target.kind === "workspace" && !workspace) targetBlockers.push(zh.workspaceMissing);
-      if (target.kind === "new-workspace" && !project) targetBlockers.push(zh.projectMissing);
-
-      const team = teams.values.teams.find((entry) => entry.id === input.teamId);
-      const runId = nextRunId();
-      const plan = buildLaunchPlan({
-        team,
-        roles: roles.values.roles,
-        profiles: profilesFromConfig(daemonConfig),
-        availability,
-        workspaceId: workspace?.id ?? "",
-        task: input.task,
-        runId,
-        maxMembers: preferences.values.maxMembers,
-        daemonConfig,
-      });
-      const blockers = [...targetBlockers, ...plan.blockers];
-      if (blockers.length > 0) return { ok: false, blockers, warnings: plan.warnings };
-
       const job: LaunchJob = {
         runId,
         teamId: plan.team.id,
@@ -180,6 +330,8 @@ export function createLaunchService(deps: {
         memberIds: [],
         warnings: plan.warnings,
         startedAt: now().toISOString(),
+        mode: plan.mode,
+        planHash: prepared.prepared.planHash,
       };
       jobs.set(runId, job);
       prune();
@@ -187,7 +339,7 @@ export function createLaunchService(deps: {
         project: project ?? undefined,
         workspaceTitle:
           (target.kind === "new-workspace" ? target.title?.trim() : undefined) || plan.team.name,
-        archiveOnLaunchFailure: preferences.values.archiveOnLaunchFailure,
+        archiveOnLaunchFailure: preferences.archiveOnLaunchFailure,
       });
       return { ok: true, job: structuredClone(job) };
     },

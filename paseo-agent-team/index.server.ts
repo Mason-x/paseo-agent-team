@@ -8,6 +8,7 @@ import { createPaseoAdapter } from "./shared/paseo/adapter";
 import {
   defaultCatalogPreviewRpc,
   exampleCatalogRpc,
+  launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
 } from "./shared/rpc";
@@ -30,6 +31,7 @@ export default function contribute(server: PluginServerContext) {
   const bootId = randomUUID();
   const versions = createVersionService({ bootId });
 
+  server.handle(launchPreviewRpc, (input, { paseo }) => launches.preview(input, paseo));
   server.handle(launchStartRpc, (input, { paseo }) => launches.start(input, paseo));
   server.handle(launchStatusRpc, ({ runId }) => ({ job: launches.status(runId) }));
   server.handle(exampleCatalogRpc, async (_input, { paseo }) => {

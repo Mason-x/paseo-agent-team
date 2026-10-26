@@ -78,6 +78,8 @@ export type HostSnapshot =
       status: "ready";
       profiles: readonly PaseoProfile[];
       availability: readonly ProviderAvailability[];
+      /** True when the provider availability query failed but Profiles were readable. */
+      availabilityUnverified?: boolean;
     }
   | { status: "unavailable"; reason?: string };
 
@@ -554,6 +556,20 @@ export function resolveModeProfile(
   }
   const { profiles, availability } = input.host;
 
+  if (input.host.availabilityUnverified && input.mode !== "sota") {
+    // An unreadable availability query must not become an empty, healthy pool; SOTA keeps its
+    // legacy behavior (see seat planning), while the new modes refuse to plan.
+    return {
+      ok: false,
+      issues: [
+        blocker("MODE_CONTEXT_UNAVAILABLE", {
+          reason: "availability-unverified",
+          mode: input.mode,
+        }),
+      ],
+    };
+  }
+
   if (!input.role.enabled) {
     return {
       ok: false,
@@ -627,6 +643,19 @@ export function selectCollaborationProfiles(
     };
   }
   const { profiles, availability } = input.host;
+
+  if (input.host.availabilityUnverified) {
+    // Collaboration is a new-mode operation; an unreadable availability query must block it.
+    return {
+      ok: false,
+      issues: [
+        blocker("MODE_CONTEXT_UNAVAILABLE", {
+          reason: "availability-unverified",
+          mode: "collaborative",
+        }),
+      ],
+    };
+  }
 
   if (!input.role.enabled) {
     return {

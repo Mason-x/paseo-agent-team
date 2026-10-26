@@ -44,6 +44,7 @@
 - 启动前按 Team 模式规划席位：SOTA 模式与未设模式的旧 Team 保持原有的成员与 Profile；经济模式
   的执行席位在当前版本启动时全部创建并给出提示，升级席位待命、不创建；协作模式暂不可启动，
   需要后续版本
+- 启动前先预览席位与预算并冻结 `planHash`；配置或可用性变化后旧预览会被拒绝，避免按旧额度启动
 ### Bug Fixes
 
 - default preset sync compares the effective Role tier, so an existing pre-tier Role with the
@@ -71,6 +72,8 @@
 - the bundled Ruflo catalog is removed; previously imported Roles and Teams remain in host settings
 - downgrading can discard Profile binding hints, preset origins, or preset sync history on the
   next save; damaged hints, origins, or history are ignored, never fatal to the catalog
+- `scripts/launch-team.mjs` now calls `agent-team.launch.preview` before start; use the same
+  plugin version on the host
 
 ### Bug Fixes
 

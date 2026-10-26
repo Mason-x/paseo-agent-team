@@ -2,7 +2,9 @@ import { describe, expect, test } from "vitest";
 import {
   defaultCatalogPreviewRpc,
   exampleCatalogRpc,
+  LaunchPreviewInputSchema,
   LaunchStartInputSchema,
+  launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
 } from "../shared/rpc";
@@ -10,7 +12,17 @@ import {
 describe("plugin RPC contracts", () => {
   test("method names are part of the client/server protocol, so they stay fixed", () => {
     expect(launchStartRpc.name).toBe("agent-team.launch.start");
+    expect(launchPreviewRpc.name).toBe("agent-team.launch.preview");
     expect(launchStatusRpc.name).toBe("agent-team.launch.status");
+    for (const name of [
+      launchStartRpc.name,
+      launchPreviewRpc.name,
+      launchStatusRpc.name,
+      exampleCatalogRpc.name,
+      defaultCatalogPreviewRpc.name,
+    ]) {
+      expect(name).toMatch(/^[a-z][a-z0-9._-]*$/);
+    }
     expect(exampleCatalogRpc.name).toBe("agent-team.templates.examples");
     expect(defaultCatalogPreviewRpc.name).toBe("agent-team.templates.defaults.preview");
   });
@@ -30,6 +42,60 @@ describe("plugin RPC contracts", () => {
     ).toThrow();
     expect(() =>
       LaunchStartInputSchema.parse({ ...valid, target: { kind: "workspace", workspaceId: "" } }),
+    ).toThrow();
+  });
+
+  test("launch mode and preview hash are optional but validated", () => {
+    const valid = {
+      teamId: "coding-team",
+      task: "Add Stripe",
+      target: { kind: "workspace", workspaceId: "ws-1" },
+    };
+    expect(LaunchStartInputSchema.parse(valid)).toEqual(valid);
+    expect(LaunchStartInputSchema.parse({ ...valid, mode: "economy" }).mode).toBe("economy");
+    expect(
+      LaunchStartInputSchema.parse({ ...valid, expectedPlanHash: "a".repeat(64) }).expectedPlanHash,
+    ).toBe("a".repeat(64));
+    expect(() => LaunchStartInputSchema.parse({ ...valid, mode: "future" })).toThrow();
+    expect(() => LaunchStartInputSchema.parse({ ...valid, expectedPlanHash: "" })).toThrow();
+    expect(LaunchPreviewInputSchema.parse({ ...valid, mode: "collaborative" })).toMatchObject({
+      mode: "collaborative",
+    });
+    expect(LaunchPreviewInputSchema.parse({ ...valid }).teamId).toBe("coding-team");
+  });
+
+  test("preview answers with the DTO or readable blockers", () => {
+    const hash = "a".repeat(64);
+    const preview = {
+      requestedMode: "sota",
+      coordinator: {
+        roleId: "tech-lead",
+        roleName: "Tech Lead",
+        profile: { id: "p1", name: "Profile", provider: "claude" },
+        source: "role-preferred",
+        issues: [],
+      },
+      seats: [],
+      counts: { logical: 0, physical: 0, eager: 0, deferred: 0, escalation: 0, sotaPotential: 0 },
+      budget: { economy: 0, sota: 0, unknown: 0, deferredSota: 0 },
+      issues: [],
+      warnings: [],
+      planHash: hash,
+    };
+    expect(launchPreviewRpc.output.parse({ ok: true, preview })).toEqual({ ok: true, preview });
+    expect(
+      launchPreviewRpc.output.parse({
+        ok: false,
+        blockers: ["无法启动"],
+        warnings: [],
+        issues: [],
+      }),
+    ).toMatchObject({ ok: false });
+    expect(() =>
+      launchPreviewRpc.output.parse({ ok: true, preview: { ...preview, extra: true } }),
+    ).toThrow();
+    expect(() =>
+      launchPreviewRpc.output.parse({ ok: false, blockers: [], warnings: [] }),
     ).toThrow();
   });
 

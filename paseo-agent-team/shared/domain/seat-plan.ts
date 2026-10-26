@@ -159,6 +159,46 @@ export function buildSeatPlan(input: BuildSeatPlanInput): SeatPlan {
   }
 
   const enabledCount = input.team.members.filter((member) => member.enabled).length;
+  if (input.host.status === "unavailable") {
+    push(
+      issue("MODE_CONTEXT_UNAVAILABLE", "blocker", {
+        reason: input.host.reason ?? "context-unavailable",
+      }),
+    );
+    return {
+      mode,
+      seats: [],
+      counts: { ...EMPTY_COUNTS, logical: enabledCount },
+      budget: EMPTY_BUDGET,
+      issues,
+      blockers,
+    };
+  }
+  if (input.host.status === "ready" && input.host.availabilityUnverified) {
+    if (mode !== "sota") {
+      // New modes require a trustworthy availability query; SOTA keeps the legacy behavior.
+      push(
+        issue("MODE_CONTEXT_UNAVAILABLE", "blocker", {
+          reason: "availability-unverified",
+          mode,
+        }),
+      );
+      return {
+        mode,
+        seats: [],
+        counts: { ...EMPTY_COUNTS, logical: enabledCount },
+        budget: EMPTY_BUDGET,
+        issues,
+        blockers,
+      };
+    }
+    push(
+      issue("MODE_CONTEXT_UNAVAILABLE", "warning", {
+        reason: "availability-unverified",
+        mode,
+      }),
+    );
+  }
   const rawCreation = input.team.memberCreation?.trim();
   const explicitCreation =
     rawCreation === "eager" || rawCreation === "on-demand" ? rawCreation : undefined;

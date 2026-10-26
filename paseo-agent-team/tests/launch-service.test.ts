@@ -5,9 +5,11 @@ import {
   type SettingsReader,
 } from "../server/launch-service";
 import { LaunchJobSchema, type LaunchStartInput } from "../shared/rpc";
-import type { RolesDocument } from "../shared/settings";
+import { LaunchPreviewResultSchema } from "../shared/schemas/launch-preview";
+import type { RolesDocument, TeamsDocument } from "../shared/settings";
+import { zh } from "../shared/zh";
 import { fakePort, healthyConfig, invalid, preferences, ready } from "./fakes";
-import { architect, codingTeam, developer, techLead } from "./fixtures";
+import { architect, claudeOpus, codingTeam, developer, role, techLead } from "./fixtures";
 
 const onWorkspace: LaunchStartInput = {
   teamId: "coding-team",
@@ -22,13 +24,14 @@ function setup(
     runId?: () => string;
     now?: () => Date;
     roles?: SettingsReader<RolesDocument>;
+    teams?: SettingsReader<TeamsDocument>;
   } = {},
 ) {
   const fake = fakePort(options.config);
   const log = vi.fn();
   const service = createLaunchService({
     roles: options.roles ?? ready({ roles: [techLead, architect, developer] }),
-    teams: ready({ teams: [codingTeam] }),
+    teams: options.teams ?? ready({ teams: [codingTeam] }),
     preferences: ready(options.prefs ?? preferences),
     runId: options.runId ?? (() => "run-test"),
     now: options.now ?? (() => new Date("2026-10-01T10:00:00.000Z")),
@@ -167,8 +170,270 @@ describe("launch start", () => {
     port.config.get.mockRejectedValue(new Error("no config"));
     port.providers.listAvailable.mockRejectedValue(new Error("no providers"));
     const result = await service.start(onWorkspace, port);
-    // Without the config there are no Profiles, so this ends at the real blocker.
+    expect(result.ok === false && result.blockers).toContain(zh.modes.contextUnavailable);
+    // Without the config there are also no Profiles, so the coordinator blocker remains.
     expect(result.ok === false && result.blockers.join("\n")).toContain("Profile");
+  });
+});
+
+describe("launch preview and hash", () => {
+  test("previews without creating anything and returns a usable hash", async () => {
+    const { service, port, created, sent } = setup();
+    const result = await service.preview(onWorkspace, port);
+    expect(() => LaunchPreviewResultSchema.parse(result)).not.toThrow();
+    if (!result.ok) throw new Error(`unexpected blockers: ${result.blockers.join(", ")}`);
+    expect(result.preview.requestedMode).toBe("sota");
+    expect(result.preview.seats).toHaveLength(2);
+    expect(result.preview.counts.physical).toBe(2);
+    expect(result.preview.coordinator.profile?.id).toBe(claudeOpus.id);
+    expect(result.preview.planHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(result.preview)).not.toContain('"notes"');
+    expect(JSON.stringify(result.preview)).not.toContain("systemPrompt");
+    expect(created).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+    expect(port.workspaces.create).not.toHaveBeenCalled();
+    expect(service.status("run-test")).toBeNull();
+  });
+
+  test("accepts the preview hash and rejects a stale one before creating", async () => {
+    const { service, port, created } = setup();
+    const preview = await service.preview(onWorkspace, port);
+    if (!preview.ok) throw new Error("unexpected preview blockers");
+
+    const stale = await service.start(
+      { ...onWorkspace, task: "Changed task", expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(stale).toMatchObject({ ok: false, blockers: [zh.modes.planChanged] });
+    expect(created).toHaveLength(0);
+    expect(service.status("run-test")).toBeNull();
+
+    const started = await service.start(
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    expect(started.job.planHash).toBe(preview.preview.planHash);
+    expect(started.job.mode).toBe("sota");
+    await settled(service, started.job.runId);
+    expect(created).toHaveLength(3);
+  });
+
+  test("a mode override affects the preview and job without changing the Team", async () => {
+    const { service, port } = setup();
+    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
+    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+    expect(preview.preview.requestedMode).toBe("economy");
+    expect(preview.preview.issues).toContainEqual(
+      expect.objectContaining({ code: "MODE_ONDEMAND_FALLBACK_EAGER" }),
+    );
+    expect(
+      preview.preview.issues.filter((issue) => issue.code === "MODE_ONDEMAND_FALLBACK_EAGER"),
+    ).toHaveLength(1);
+
+    const started = await service.start(
+      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(started.ok).toBe(true);
+    if (started.ok) expect(started.job.mode).toBe("economy");
+  });
+
+  test("previewing a new workspace validates the project without creating it", async () => {
+    const { service, port } = setup();
+    const preview = await service.preview(
+      { ...onWorkspace, target: { kind: "new-workspace", projectId: "p1", title: "Billing" } },
+      port,
+    );
+    expect(preview.ok).toBe(true);
+    expect(port.projects.list).toHaveBeenCalled();
+    expect(port.workspaces.create).not.toHaveBeenCalled();
+  });
+
+  test("availability failure keeps SOTA launching like HEAD, with a warning", async () => {
+    const normal = setup();
+    const degraded = setup();
+    degraded.port.providers.listAvailable.mockRejectedValue(new Error("providers offline"));
+    const preview = await degraded.service.preview(onWorkspace, degraded.port);
+    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+    expect(preview.preview.warnings).toContain(zh.modes.availabilityUnverified);
+
+    await normal.service.start(onWorkspace, normal.port);
+    await settled(normal.service, "run-test");
+    const started = await degraded.service.start(
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
+      degraded.port,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await settled(degraded.service, "run-test");
+    expect(started.job.warnings).toContain(zh.modes.availabilityUnverified);
+    const pick = (agents: typeof normal.created) =>
+      agents.map((agent) => ({
+        title: agent.options.title,
+        labels: agent.options.labels,
+        parent: agent.options.parent,
+        config: agent.options.config,
+      }));
+    expect(pick(degraded.created)).toEqual(pick(normal.created));
+    expect(degraded.sent[0]?.text).toBe(normal.sent[0]?.text);
+  });
+
+  test("availability failure blocks economy and collaborative modes with one issue", async () => {
+    for (const mode of ["economy", "collaborative"] as const) {
+      const { service, port, created } = setup();
+      port.providers.listAvailable.mockRejectedValue(new Error("providers offline"));
+      const preview = await service.preview({ ...onWorkspace, mode }, port);
+      expect(preview.ok, mode).toBe(false);
+      if (preview.ok) continue;
+      expect(preview.blockers).toContain(zh.modes.contextUnavailable);
+      expect(
+        preview.issues.filter((issue) => issue.code === "MODE_CONTEXT_UNAVAILABLE"),
+        mode,
+      ).toHaveLength(1);
+      expect(created).toHaveLength(0);
+
+      const started = await service.start({ ...onWorkspace, mode }, port);
+      expect(started.ok, mode).toBe(false);
+      expect(created).toHaveLength(0);
+    }
+  });
+
+  test("raw host errors never reach the RPC result", async () => {
+    const secret = "connect ECONNREFUSED /secret/path token=ABC";
+    const { service, port, log, created } = setup();
+    port.config.get.mockRejectedValue(new Error(secret));
+    const configFailure = await service.preview(onWorkspace, port);
+    expect(configFailure.ok).toBe(false);
+    expect(JSON.stringify(configFailure)).not.toContain("/secret/path");
+    expect(JSON.stringify(configFailure)).not.toContain("token=ABC");
+    if (!configFailure.ok) {
+      expect(configFailure.issues).toContainEqual(
+        expect.objectContaining({
+          code: "MODE_CONTEXT_UNAVAILABLE",
+          params: expect.objectContaining({ reason: "config-read-failed" }),
+        }),
+      );
+    }
+    expect(log).toHaveBeenCalled();
+    expect(created).toHaveLength(0);
+
+    const availability = setup();
+    availability.port.providers.listAvailable.mockRejectedValue(new Error(secret));
+    const availabilityFailure = await availability.service.preview(
+      { ...onWorkspace, mode: "economy" },
+      availability.port,
+    );
+    expect(availabilityFailure.ok).toBe(false);
+    expect(JSON.stringify(availabilityFailure)).not.toContain("/secret/path");
+    expect(JSON.stringify(availabilityFailure)).not.toContain("token=ABC");
+    if (!availabilityFailure.ok) {
+      expect(availabilityFailure.issues).toContainEqual(
+        expect.objectContaining({
+          code: "MODE_CONTEXT_UNAVAILABLE",
+          params: expect.objectContaining({ reason: "availability-unverified" }),
+        }),
+      );
+    }
+  });
+
+  test("unrelated Role and Team edits do not invalidate a preview hash", async () => {
+    const rolesDoc = { roles: [techLead, architect, developer] };
+    const teamsDoc = { teams: [codingTeam] };
+    const rolesReader = {
+      read: async () => ({ status: "ready" as const, values: rolesDoc }),
+    };
+    const teamsReader = {
+      read: async () => ({ status: "ready" as const, values: teamsDoc }),
+    };
+    const { service, port } = setup({ roles: rolesReader, teams: teamsReader });
+    const preview = await service.preview(onWorkspace, port);
+    if (!preview.ok) throw new Error("unexpected preview blockers");
+
+    rolesDoc.roles.push(role({ id: "unrelated", name: "Unrelated" }));
+    teamsDoc.teams.push({ ...codingTeam, id: "unrelated-team", name: "Unrelated Team" });
+    const started = await service.start(
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(started.ok).toBe(true);
+  });
+
+  test("a referenced Role or Profile change rejects the old hash", async () => {
+    const rolesDoc = { roles: [techLead, architect, developer] };
+    const { service, port, created } = setup({
+      roles: { read: async () => ({ status: "ready" as const, values: rolesDoc }) },
+    });
+    const preview = await service.preview(onWorkspace, port);
+    if (!preview.ok) throw new Error("unexpected preview blockers");
+    rolesDoc.roles = rolesDoc.roles.map((entry) =>
+      entry.id === "architect" ? { ...entry, systemPrompt: "Changed prompt" } : entry,
+    );
+    const staleRole = await service.start(
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(staleRole).toMatchObject({ ok: false, blockers: [zh.modes.planChanged] });
+    expect(created).toHaveLength(0);
+
+    const profile = setup();
+    const profilePreview = await profile.service.preview(onWorkspace, profile.port);
+    if (!profilePreview.ok) throw new Error("unexpected preview blockers");
+    profile.port.config.get.mockResolvedValue({
+      config: {
+        ...healthyConfig,
+        agentProfiles: healthyConfig.agentProfiles.map((entry) =>
+          entry.id === claudeOpus.id ? { ...entry, modeId: "manual" } : entry,
+        ),
+      },
+    });
+    const staleProfile = await profile.service.start(
+      { ...onWorkspace, expectedPlanHash: profilePreview.preview.planHash },
+      profile.port,
+    );
+    expect(staleProfile).toMatchObject({ ok: false, blockers: [zh.modes.planChanged] });
+    expect(profile.created).toHaveLength(0);
+  });
+
+  test("an economy pool participates in the hash and accepts a matching start", async () => {
+    const { service, port } = setup({
+      prefs: {
+        ...preferences,
+        economy: {
+          pool: [
+            {
+              profileId: claudeOpus.id,
+              family: "claude",
+              enabled: true,
+              boundModel: { provider: "claude", model: "opus" },
+            },
+          ],
+        },
+      },
+    });
+    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
+    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+    const started = await service.start(
+      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
+      port,
+    );
+    expect(started.ok).toBe(true);
+  });
+
+  test("freezes the legacy SOTA creation output", async () => {
+    const { service, port, created, sent } = setup();
+    await service.start(onWorkspace, port);
+    await settled(service, "run-test");
+    expect(
+      created.map((agent) => ({
+        title: agent.options.title,
+        labels: agent.options.labels,
+        parent: agent.options.parent,
+        config: agent.options.config,
+      })),
+    ).toMatchSnapshot();
+    expect(sent[0]?.text).toMatchSnapshot();
   });
 });
 

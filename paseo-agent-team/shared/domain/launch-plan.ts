@@ -44,6 +44,7 @@ export type PlannedAgent = {
 
 export type LaunchPlan = {
   runId: string;
+  mode: TeamMode;
   team: Team;
   workspaceId: string;
   task: string;
@@ -98,33 +99,33 @@ function seatBlockerText(
       return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
     case "MODE_SEAT_DUPLICATE":
       if (typeof entry.params.instanceLabel === "string") {
-        return zh.idUsed("实例标签", entry.params.instanceLabel);
+        return zh.idUsed(zh.instanceLabel, entry.params.instanceLabel);
       }
       if (reason === "instance-label-required") return zh.duplicateNeedsLabel;
-      return zh.idUsed("成员", String(entry.params.seatId ?? ""));
+      return zh.idUsed(zh.member, String(entry.params.seatId ?? ""));
     case "MODE_PROFILE_UNRESOLVED":
       if (reason === "role-missing") return zh.memberMissing(entry.roleId ?? "");
       return zh.memberProfileFail(label, reason);
     case "MODE_ROLE_DISABLED":
-      return `Role「${label || "unknown"}」已禁用。`;
+      return zh.modes.roleDisabled(label);
     case "MODE_CONTEXT_UNAVAILABLE":
-      return "无法读取当前 host 的 Profile 或可用性，请刷新后重试。";
+      return zh.modes.contextUnavailable;
     case "MODE_UNKNOWN": {
       const detail = [field, value].filter(Boolean).join("=");
-      return `不支持的模式或策略${detail ? `（${detail}）` : ""}。`;
+      return zh.modes.unknown(detail);
     }
     case "MODE_ROLE_POLICY_UNKNOWN":
-      return `Role「${label || "unknown"}」的层级或任务类型不受支持。`;
+      return zh.modes.rolePolicyUnknown(label);
     case "MODE_ESCALATION_INVALID":
-      return `升级角色配置无效（${label || reason || "unknown"}）。`;
+      return zh.modes.escalationInvalid(label, reason);
     case "MODE_ESCALATION_UNAVAILABLE":
-      return `升级通道不可用（${label || "unknown"}：${reason || "unavailable"}）。`;
+      return zh.modes.escalationUnavailable(label, reason);
     case "MODE_JUDGE_REQUIRED":
-      return `协作需要独立的评审/测试席位（${reason || "judge-required"}）。`;
+      return zh.modes.judgeRequired(reason);
     case "MODE_ONDEMAND_UNAVAILABLE":
-      return "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。";
+      return zh.modes.onDemandUnavailable;
     default:
-      return `无法启动（${entry.code}）。`;
+      return zh.modes.unknownFallback(entry.code);
   }
 }
 
@@ -180,6 +181,7 @@ export function buildLaunchPlan(input: {
     blockers.push(zh.teamDoesNotExist);
     return {
       runId: input.runId,
+      mode: "sota",
       team: {
         id: "missing",
         name: zh.missing,
@@ -254,17 +256,22 @@ export function buildLaunchPlan(input: {
         )
       : (entry.roleId ?? "");
     if (entry.code === "MODE_ONDEMAND_FALLBACK_EAGER") {
-      warnings.push("按需创建尚未启用，本次经济模式启动时全部创建成员。");
+      warnings.push(zh.modes.onDemandFallbackEager);
     } else if (entry.code === "MODE_ROLE_DISABLED") {
-      warnings.push(`Role「${label}」已禁用，仍按原绑定启动。`);
+      warnings.push(zh.modes.roleDisabledWarning(label));
     } else if (entry.code === "MODE_ROLE_POLICY_UNKNOWN") {
-      warnings.push(`Role「${label}」的层级或任务类型无效，已按原绑定启动。`);
+      warnings.push(zh.modes.rolePolicyWarning(label));
     } else if (entry.code === "MODE_SEAT_DUPLICATE") {
-      warnings.push(`实例标签「${String(entry.params.instanceLabel ?? "")}」重复，已继续启动。`);
+      warnings.push(zh.modes.duplicateLabelWarning(String(entry.params.instanceLabel ?? "")));
+    } else if (
+      entry.code === "MODE_CONTEXT_UNAVAILABLE" &&
+      entry.params.reason === "availability-unverified"
+    ) {
+      warnings.push(zh.modes.availabilityUnverified);
     }
   }
   if (seatPlan.mode === "collaborative" && !capabilities.collaboration) {
-    blockers.push("协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。");
+    blockers.push(zh.modes.collaborationRuntimeUnavailable);
   }
 
   let enabledCount = 0;
@@ -389,9 +396,7 @@ export function buildLaunchPlan(input: {
     !capabilities.onDemand &&
     seatPlan.blockers.length === 0
   ) {
-    blockers.push(
-      "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
-    );
+    blockers.push(zh.modes.staleEscalationOnly);
   }
 
   const kickoffMessage = compileKickoffMessage({
@@ -414,6 +419,7 @@ export function buildLaunchPlan(input: {
 
   return {
     runId: input.runId,
+    mode: seatPlan.mode,
     team,
     workspaceId: input.workspaceId,
     task,
