@@ -24,6 +24,9 @@ export const modesZh = {
     collaborative: "执行层多路候选，测试与审查后择优；需要隔离工作区。",
   } satisfies Record<TeamModeDisplay, string>,
 
+  /** Budget basis of a seat chosen from an economy-all route (not the standard economy pool). */
+  budgetBasisRoute: "经济路由",
+
   standardPoolTitle: "标准：执行池",
   economyAllTitle: "经济：全席位",
   economyAllIntro:

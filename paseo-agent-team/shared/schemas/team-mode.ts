@@ -7,6 +7,9 @@ import { z } from "zod";
 // Mode values are stable (shared/domain/mode-contract.ts): `economy` keeps its original meaning,
 // shown as 标准; `economy-all` is the all-seats cheap mode, shown as 经济. No value is ever renamed.
 export const TeamModeSchema = z.enum(["sota", "economy", "economy-all", "collaborative"]);
+// Where a seat's budget label came from. `route` is an economy-all seat chosen from a verified
+// cheap route: it is neither the Role's host label nor the standard economy pool.
+export const BudgetBasisSchema = z.enum(["host", "pool", "route", "conservative-default"]);
 export const RoleTierSchema = z.enum(["decision", "execution", "escalation", "retain"]);
 export const TaskKindSchema = z.enum([
   "coding",
@@ -115,6 +118,7 @@ export const StoredQuotaRecoverySchema = z
   })
   .passthrough();
 
+export type BudgetBasis = z.infer<typeof BudgetBasisSchema>;
 export type TeamMode = z.infer<typeof TeamModeSchema>;
 export type RoleTier = z.infer<typeof RoleTierSchema>;
 export type TaskKind = z.infer<typeof TaskKindSchema>;

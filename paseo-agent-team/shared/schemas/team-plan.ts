@@ -3,6 +3,7 @@ import { utf8ByteLength } from "../domain/design-output";
 import { SlugSchema } from "./common";
 import { ModeIssueSchema, SeatProfileSchema } from "./launch-preview";
 import {
+  BudgetBasisSchema,
   RoleTierSchema,
   StoredCollaborationSchema,
   TaskKindSchema,
@@ -113,7 +114,7 @@ export const TeamPlanRowSchema = z.strictObject({
   /** Open string: a newer planner may add sources without breaking this contract. */
   source: z.string().min(1).max(64),
   budget: z.enum(["economy", "sota", "unknown"]),
-  budgetBasis: z.enum(["host", "pool", "conservative-default"]),
+  budgetBasis: BudgetBasisSchema,
   availability: z.enum(["available", "unavailable", "unverified"]),
   /** Diagnostic bindings only; never read as "the model this seat will run". */
   configuredProfiles: z.array(SeatProfileSchema).max(10),

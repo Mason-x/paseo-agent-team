@@ -5,6 +5,17 @@ function value(params: ModeIssue["params"], key: string): string {
   return found === undefined ? "" : String(found);
 }
 
+const ROUTE_REASON_TEXT: Readonly<Record<string, string>> = {
+  "list-empty": "经济名单为空",
+  "route-empty": "该层没有配置候选",
+  "all-disabled": "候选全部已停用",
+  "profile-missing": "候选 Profile 已不存在",
+  "provider-unavailable": "候选的 provider 不可用",
+  "availability-unverified": "候选的 provider 可用性未核实",
+  "model-unverified": "候选的 live model 未通过廉价核实",
+  "no-eligible": "候选均不合格",
+};
+
 /** User-facing text for the cheap-routing codes; every code has a real sentence, not a fallback. */
 export function cheapIssueText(entry: ModeIssue): string {
   const route = value(entry.params, "route");
@@ -29,7 +40,9 @@ export function cheapIssueText(entry: ModeIssue): string {
       ]
         .map((key) => `${key} ${value(entry.params, key) || "0"}`)
         .join("、");
-      return `${route || "all"} 路由没有可用廉价 Profile（${counts}）。`;
+      const reason = value(entry.params, "reason");
+      const reasonText = ROUTE_REASON_TEXT[reason] ?? reason;
+      return `${route || "all"} 路由没有可用廉价 Profile${reasonText ? `：${reasonText}` : ""}（${counts}）。`;
     }
     default:
       return "";

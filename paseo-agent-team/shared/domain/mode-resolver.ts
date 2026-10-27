@@ -4,6 +4,7 @@ import type { Role } from "../schemas/role";
 import {
   ALL_SEATS_POLICY_VERSION,
   ALL_SEATS_WRITER_LIMIT,
+  type BudgetBasis,
   type RoleTier,
   StoredAllSeatsEntrySchema,
   StoredAllSeatsPolicySchema,
@@ -76,7 +77,7 @@ export type AllSeatsPolicy =
 
 type ProfileSelectionBase = {
   budget: EconomyBudget;
-  budgetBasis: "host" | "pool" | "conservative-default";
+  budgetBasis: BudgetBasis;
   family?: string;
   /** Cheap-route identity for economy-all; omitted for legacy modes. */
   route?: AllSeatsRoute;
@@ -620,7 +621,7 @@ function availabilityOf(
 export function budgetOf(
   profileId: string,
   economy: EconomyPolicy,
-): { budget: EconomyBudget; basis: "host" | "pool" | "conservative-default" } {
+): { budget: EconomyBudget; basis: BudgetBasis } {
   // A Profile that sits in the economy pool consumes pool budget even when reached through the
   // Role's original binding (fallback must not relabel it as host/SOTA).
   if (economy.pool.some((entry) => entry.profileId === profileId)) {
@@ -800,6 +801,37 @@ function originalSelection(
   };
 }
 
+type RouteFailureCounts = {
+  candidates: number;
+  disabled: number;
+  missing: number;
+  unavailable: number;
+  unverified: number;
+  invalid: number;
+  outsideList: number;
+  excluded: number;
+};
+
+/**
+ * One stable reason for a route that produced no seat: nothing configured (list or route empty),
+ * or every candidate failed for the same cause. Mixed causes are `no-eligible`; the per-candidate
+ * issues and the counts keep the detail.
+ */
+export function routeFailureReason(counts: RouteFailureCounts, listSize: number): string {
+  if (listSize === 0) return "list-empty";
+  if (counts.candidates === 0) return "route-empty";
+  const causes: [number, string][] = [
+    [counts.disabled, "all-disabled"],
+    [counts.missing, "profile-missing"],
+    [counts.unavailable, "provider-unavailable"],
+    [counts.unverified, "availability-unverified"],
+    [counts.invalid, "model-unverified"],
+  ];
+  const only = causes.filter(([count]) => count > 0);
+  if (only.length === 1 && only[0]?.[0] === counts.candidates) return only[0][1];
+  return "no-eligible";
+}
+
 function resolveCheapSeat(input: {
   role: Role;
   kind: "coordinator" | "member";
@@ -808,8 +840,11 @@ function resolveCheapSeat(input: {
   host: Extract<HostSnapshot, { status: "ready" }>;
   economy: EconomyPolicy;
   excludedProfileIds?: ReadonlySet<string>;
+  /** Role-policy warnings (e.g. an unreadable stored tier); legacy selections report them too. */
+  policyIssues?: readonly ModeIssue[];
 }): Result<ProfileSelection, ModeIssue[]> {
   const route = routeOf(input.kind, input.tier);
+  const policyIssues = [...(input.policyIssues ?? [])];
   const policy = input.economy.allSeats;
   if (!policy || policy.status === "absent") {
     return {
@@ -896,14 +931,14 @@ function resolveCheapSeat(input: {
           profile: live,
           source: "economy-pool",
           budget: "economy",
-          budgetBasis: "pool",
+          budgetBasis: "route",
           family: check.family,
           route,
           standby: input.tier === "escalation",
           unavailable: false,
-          issues: [],
+          issues: policyIssues,
         },
-        issues: [],
+        issues: policyIssues,
       };
     }
     if (check.reason === "disabled") counts.disabled += 1;
@@ -925,6 +960,7 @@ function resolveCheapSeat(input: {
       "MODE_CHEAP_ROUTE_UNAVAILABLE",
       {
         route,
+        reason: routeFailureReason(counts, policy.profiles.length),
         candidates: counts.candidates,
         disabled: counts.disabled,
         missing: counts.missing,
@@ -948,9 +984,9 @@ function resolveCheapSeat(input: {
         budgetBasis: "conservative-default",
         standby: true,
         unavailable: true,
-        issues: failureIssues,
+        issues: [...policyIssues, ...failureIssues],
       },
-      issues: failureIssues,
+      issues: [...policyIssues, ...failureIssues],
     };
   }
   return { ok: false, issues: failureIssues };
@@ -1018,6 +1054,7 @@ export function resolveModeProfile(
       taskKind: policy.taskKind,
       host: input.host,
       economy: input.economy,
+      policyIssues,
       ...(input.excludedProfileIds === undefined
         ? {}
         : { excludedProfileIds: input.excludedProfileIds }),
@@ -1059,7 +1096,13 @@ export function resolveModeProfile(
 }
 
 export type CoordinatorResolution =
-  | { ok: true; selection: AvailableProfileSelection; warnings: string[] }
+  | {
+      ok: true;
+      selection: AvailableProfileSelection;
+      warnings: string[];
+      /** Role-policy warnings of the cheap route; legacy selections report none here. */
+      issues: ModeIssue[];
+    }
   | { ok: false; legacyReason?: string; issues: ModeIssue[] };
 
 /**
@@ -1088,7 +1131,7 @@ export function resolveCoordinatorProfile(input: {
     if (resolved.value.unavailable) {
       return { ok: false, issues: resolved.issues ?? [] };
     }
-    return { ok: true, selection: resolved.value, warnings: [] };
+    return { ok: true, selection: resolved.value, warnings: [], issues: resolved.issues ?? [] };
   }
   const profiles = input.host.status === "ready" ? input.host.profiles : [];
   const availability = input.host.status === "ready" ? input.host.availability : [];
@@ -1107,6 +1150,7 @@ export function resolveCoordinatorProfile(input: {
       issues: [],
     },
     warnings: resolved.warnings,
+    issues: [],
   };
 }
 
