@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import type { DesignModeRouting } from "../server/designer/context";
 import {
   bindDesignerProfile,
   DESIGNER_PROFILE_HINTS,
@@ -304,6 +305,356 @@ describe("team design recipes", () => {
     }
     expect(TEAM_DESIGN_RECIPES[2]?.notes).toBe("批量开发 ×2–3，用实例标签区分，如 A / B");
     expect(TEAM_DESIGN_RECIPES[8]?.notes).toBe("调研→开发→发布文案");
+  });
+});
+
+describe("design output contract", () => {
+  function correction(
+    overrides: Partial<DesignPromptContext> = {},
+    previousOutputKind?: "team" | "role-gap",
+  ) {
+    return buildDesignCorrection({
+      jobId: JOB_ID,
+      attempt: 2,
+      nonce: NONCE,
+      issues: [],
+      context: context(overrides),
+      expectedChoices: [],
+      ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
+    });
+  }
+
+  function jsonBlockAt(text: string, title: string): unknown {
+    const marker = `## ${title}\n`;
+    const at = text.indexOf(marker);
+    if (at < 0) throw new Error(`missing ${title}`);
+    const rest = text.slice(at + marker.length);
+    const end = rest.indexOf("\n");
+    return JSON.parse(end < 0 ? rest : rest.slice(0, end));
+  }
+
+  const ROUTING: DesignModeRouting = {
+    status: "ready",
+    routes: [
+      {
+        route: "coordinator",
+        taskKind: null,
+        candidates: [{ profileId: "profile-1", family: "claude", eligible: true, reported: false }],
+      },
+      {
+        route: "execution",
+        taskKind: "coding",
+        candidates: [
+          { profileId: "profile-1", family: "claude", eligible: true, reported: false },
+          {
+            profileId: "profile-2",
+            family: "deepseek",
+            eligible: false,
+            reason: "unverified",
+            reported: true,
+          },
+          {
+            profileId: "profile-3",
+            family: "grok",
+            eligible: false,
+            reason: "high-cost-family",
+            reported: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  test("v1 text ignores every v2 field and stays byte-identical", () => {
+    const enriched = kickoff({
+      outputContractVersion: 1,
+      existingRolesOnly: true,
+      modeRouting: ROUTING,
+      roles: [
+        role(1, {
+          coordinatorLaunchable: false,
+          launchVerified: false,
+          coordinatorLaunchVerified: true,
+        }),
+      ],
+    });
+    const text = textOf(enriched);
+    expect(goldenSha(text)).toBe(
+      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+    );
+  });
+
+  test("v2 with the switch off keeps the team contract and the 3-Role limit", () => {
+    const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false }));
+    expect(text).toContain('"固定 2"');
+    expect(text).toContain('"kind":"team"');
+    expect(text).toContain('"newRole":{');
+    expect(text).toContain('"newRoles":3');
+    expect(text).toContain('"newRoleLimit":3');
+    expect(text).not.toContain("role-gap");
+  });
+
+  test("v2 with the switch on leads with a gap sample and never teaches new Roles", () => {
+    const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: true }));
+    expect(text).toContain('"kind":"role-gap"');
+    expect(text).toContain('"newRoles":[]');
+    expect(text).toContain("复用-only 团队示例");
+    expect(text).toContain('"newRoles":0');
+    expect(text).toContain('"newRoleLimit":0');
+    expect(text).toContain("覆盖不了就报 role-gap");
+    expect(text).toContain("reason 必须说明该 Role 承担的职责");
+    expect(text).not.toContain('"newRole":{');
+  });
+
+  test("correction follows the record contract", () => {
+    const v1 = textOf(correction());
+    expect(v1).toContain('"固定 1"');
+    expect(v1).not.toContain('"kind":"team"');
+    const off = textOf(correction({ outputContractVersion: 2, existingRolesOnly: false }));
+    expect(off).toContain('"kind":"team"');
+    expect(off).not.toContain("role-gap");
+    const on = textOf(correction({ outputContractVersion: 2, existingRolesOnly: true }));
+    expect(on).toContain('"kind":"role-gap"');
+    expect(on).toContain("复用-only 团队示例");
+  });
+
+  test("a failed gap correction carries only the gap template", () => {
+    const gapOnly = textOf(
+      correction({ outputContractVersion: 2, existingRolesOnly: true }, "role-gap"),
+    );
+    expect(gapOnly).toContain("上一轮是角色缺口");
+    expect(gapOnly).toContain('"kind":"role-gap"');
+    expect(gapOnly).not.toContain("复用-only 团队示例");
+    const afterTeam = textOf(
+      correction({ outputContractVersion: 2, existingRolesOnly: true }, "team"),
+    );
+    expect(afterTeam).toContain("复用-only 团队示例");
+    expect(afterTeam).not.toContain("上一轮是角色缺口");
+  });
+
+  test("switching the flag never leaves the other template behind", () => {
+    const shared = context({ outputContractVersion: 2, existingRolesOnly: true });
+    const on = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: shared,
+    });
+    const off = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: { ...shared, existingRolesOnly: false },
+    });
+    const onText = textOf(on);
+    const offText = textOf(off);
+    expect(onText).toContain('"kind":"role-gap"');
+    expect(onText).not.toContain('"newRole":{');
+    expect(offText).toContain('"newRole":{');
+    expect(offText).not.toContain("role-gap");
+  });
+
+  test("v2 carries both launch uses separately and v1 hides them", () => {
+    const roles = [
+      role(1, {
+        launchable: true,
+        coordinatorLaunchable: false,
+        launchVerified: true,
+        coordinatorLaunchVerified: true,
+      }),
+      role(2, {
+        launchable: false,
+        coordinatorLaunchable: true,
+        launchVerified: true,
+        coordinatorLaunchVerified: false,
+      }),
+    ];
+    const v2 = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false, roles }));
+    const index = jsonBlockAt(v2, "Role 索引") as Array<Record<string, unknown>>;
+    expect(index[0]).toMatchObject({
+      launchable: true,
+      coordinatorLaunchable: false,
+      launchVerified: true,
+      coordinatorLaunchVerified: true,
+    });
+    expect(index[1]).toMatchObject({
+      launchable: false,
+      coordinatorLaunchable: true,
+      coordinatorLaunchVerified: false,
+    });
+    const v1Index = jsonBlockAt(
+      textOf(kickoff({ outputContractVersion: 1, roles })),
+      "Role 索引",
+    ) as Array<Record<string, unknown>>;
+    expect(v1Index[0]).not.toHaveProperty("coordinatorLaunchable");
+    expect(v1Index[0]).not.toHaveProperty("launchVerified");
+  });
+
+  test("economy-all v2 renders the route summary and explains the remedy", () => {
+    const text = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        requestedMode: "economy-all",
+        modeRouting: ROUTING,
+      }),
+    );
+    expect(text).toContain("## 经济：全席位路由");
+    expect(text).toContain("不是 Role 绑定");
+    expect(text).toContain('"route":"execution"');
+    expect(text).toContain('"failedReasons":["unverified","high-cost-family"]');
+    expect(text).toContain('"failedIds":["profile-2","profile-3"]');
+    const v1 = textOf(kickoff({ outputContractVersion: 1, modeRouting: ROUTING }));
+    expect(v1).not.toContain("## 经济：全席位路由");
+  });
+
+  test("a missing or invalid cheap policy tells the model not to suggest Profiles", () => {
+    for (const modeRouting of [
+      { status: "absent" as const },
+      { status: "invalid" as const, reason: "unknown-version" },
+    ]) {
+      const text = textOf(
+        kickoff({
+          outputContractVersion: 2,
+          existingRolesOnly: true,
+          requestedMode: "economy-all",
+          modeRouting,
+        }),
+      );
+      expect(text).toContain("策略缺失或非法");
+      expect(text).toContain("只能 kind:none");
+      expect(text).toContain(`"status":"${modeRouting.status}"`);
+    }
+  });
+
+  test("route summary caps eligible and failed ids", () => {
+    const many: DesignModeRouting = {
+      status: "ready",
+      routes: [
+        {
+          route: "retain",
+          taskKind: null,
+          candidates: [
+            ...Array.from({ length: 10 }, (_, index) => ({
+              profileId: `ok-${index}`,
+              family: "deepseek",
+              eligible: true,
+              reported: false,
+            })),
+            ...Array.from({ length: 6 }, (_, index) => ({
+              profileId: `bad-${index}`,
+              family: "grok",
+              eligible: false,
+              reason: "unverified" as const,
+              reported: true,
+            })),
+          ],
+        },
+      ],
+    };
+    const text = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        requestedMode: "economy-all",
+        modeRouting: many,
+      }),
+    );
+    const payload = jsonBlockAt(text, "route 摘要") as {
+      routes: Array<Record<string, unknown>>;
+    };
+    expect(payload.routes[0]).toMatchObject({ failedCount: 6, omittedEligible: 2 });
+    expect(payload.routes[0]?.eligible).toHaveLength(8);
+    expect(payload.routes[0]?.failedIds).toHaveLength(5);
+  });
+
+  function realScaleContext(overrides: Partial<DesignPromptContext> = {}): DesignPromptContext {
+    const roles = expectedRoleContent.map((item, index) =>
+      role(index, {
+        id: item.id,
+        name: item.name,
+        mission: item.mission,
+        responsibilities: item.responsibilities,
+      }),
+    );
+    return context({
+      request: "设计一个功能开发团队",
+      roles,
+      profiles: sourceProfiles.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        provider: entry.provider,
+        model: entry.model,
+        available: true,
+        notes: entry.notes,
+      })),
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+      ...overrides,
+    });
+  }
+
+  test("both switches stay within the 30KiB target at the real catalog size", () => {
+    const report: Record<string, unknown> = {};
+    const cases = [
+      ["catalog", {}, true],
+      ["economy-all", { requestedMode: "economy-all" as const, modeRouting: ROUTING }, true],
+      [
+        "stress",
+        {
+          roles: realScaleRoles(),
+          profiles: [profile(1, "说明".repeat(3000))],
+        },
+        false,
+      ],
+    ] as const;
+    for (const [label, overrides, withinTarget] of cases) {
+      for (const on of [false, true]) {
+        const ctx: DesignPromptContext = {
+          ...realScaleContext(overrides),
+          outputContractVersion: 2,
+          existingRolesOnly: on,
+        };
+        const result = buildDesignKickoff({
+          jobId: JOB_ID,
+          attempt: 1,
+          nonce: NONCE,
+          context: ctx,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) continue;
+        expect(result.utf8Bytes).toBe(utf8ByteLength(result.text));
+        expect(result.utf8Bytes).toBeLessThanOrEqual(
+          withinTarget ? DESIGN_KICKOFF_TARGET_BYTES : DESIGN_KICKOFF_MAX_BYTES,
+        );
+        expect(result.text).toContain(NONCE);
+        expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
+        expect(result.text).toContain("## 字段合同");
+        const repaired = buildDesignCorrection({
+          jobId: JOB_ID,
+          attempt: 2,
+          nonce: NONCE,
+          issues: [],
+          context: ctx,
+          expectedChoices: [],
+        });
+        expect(repaired.ok).toBe(true);
+        if (!repaired.ok) continue;
+        expect(repaired.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
+        report[`${label}:${on ? "on" : "off"}`] = {
+          kickoff: result.utf8Bytes,
+          compression: result.compression,
+          omissions: result.omissions,
+          correction: repaired.utf8Bytes,
+        };
+      }
+    }
+    // Measured 2026-10-28 on the slim catalog (13 Roles, 7 Profiles, outputContractVersion 2):
+    //   catalog      off 24737 / on 25129 bytes, compression full, no omissions
+    //   economy-all  off 25244 / on 25636 bytes, compression full, no omissions
+    //   stress (21 Roles + 6000-char notes) off 31000 / on 31392, compression recipe-notes-off
+    // The stress case is intentionally above the 30KiB target but below the 60KiB hard cap.
+    expect(report["catalog:on"]).toBeDefined();
   });
 });
 

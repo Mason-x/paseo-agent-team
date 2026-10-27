@@ -1,13 +1,19 @@
 import { utf8ByteLength } from "../../shared/domain/design-output";
+import { designNewRoleLimit } from "../../shared/domain/design-planning";
 import type { EconomyBudget, EconomyPolicy } from "../../shared/domain/mode-resolver";
 import type {
   PaseoProfile,
   ProviderAvailability,
   WorkspaceSummary,
 } from "../../shared/paseo/adapter";
-import type { DesignChoiceTarget, DesignIssue } from "../../shared/schemas/design";
+import type {
+  DesignChoiceTarget,
+  DesignIssue,
+  DesignOutputContractVersion,
+} from "../../shared/schemas/design";
 import type { TeamMode } from "../../shared/schemas/team-mode";
 import { TEAM_DESIGN_RECIPES, type TeamDesignRecipe } from "../templates/recipes";
+import type { DesignModeRouting } from "./context";
 
 /** Kickoff aims for this and may grow through the hard cap before failing. */
 export const DESIGN_KICKOFF_TARGET_BYTES = 30 * 1024;
@@ -45,6 +51,14 @@ export type DesignPromptRoleSummary = {
   launchable: boolean;
   /** Bound Profile ids that are missing or provider-unavailable; bounded for the required index. */
   unavailableProfileIds: readonly string[];
+  /**
+   * v2 only. The coordinator verdict is a separate planner call: a Role can launch as a member
+   * and fail as coordinator. Absent means the server did not supply one; never infer it.
+   */
+  coordinatorLaunchable?: boolean;
+  /** v2 only. False when availability could not be verified, so no gap may be claimed. */
+  launchVerified?: boolean;
+  coordinatorLaunchVerified?: boolean;
   tier?: string;
   taskKind?: string;
 };
@@ -102,6 +116,14 @@ export type DesignPromptContext = {
   /** Roles whose mission and responsibilities are relevant. Omitted means every Role is relevant. */
   relevantRoleIds?: readonly string[];
   expectedChoices: readonly ExpectedDesignChoice[];
+  /**
+   * The record's output contract, normalized exactly once by `promptRules`. Omitted means the
+   * legacy contract (1); a v2 record without the switch is treated as existing-roles-only.
+   */
+  outputContractVersion?: DesignOutputContractVersion;
+  existingRolesOnly?: boolean;
+  /** economy-all route evidence; copied from the context snapshot, never recomputed here. */
+  modeRouting?: DesignModeRouting;
 };
 
 export type DesignPromptInput = {
@@ -111,8 +133,22 @@ export type DesignPromptInput = {
   context: DesignPromptContext;
 };
 
+export type PromptCompression =
+  | "full"
+  | "notes-off"
+  | "role-text-clamped"
+  | "recipe-notes-off"
+  | "relevant-only";
+
 export type PromptBuildResult =
-  | { ok: true; text: string; utf8Bytes: number; omissions: string[] }
+  | {
+      ok: true;
+      text: string;
+      utf8Bytes: number;
+      omissions: string[];
+      /** The last compression step applied; `full` means the text was never shrunk. */
+      compression: PromptCompression;
+    }
   | { ok: false; issues: DesignIssue[] };
 
 function codePointLength(value: string): number {
@@ -138,115 +174,291 @@ function jsonBlock(title: string, value: unknown): string {
   return `## ${title}\n${JSON.stringify(value)}`;
 }
 
-const OUTPUT_CONTRACT = {
-  required: {
-    version: "固定 1",
-    jobId: "本次 UUID，原样",
-    attempt: "本次 1|2|3，原样",
-    nonce: "本次 32 hex，原样",
-    summary: "1–1000",
-    team: "见 team",
-    reuse: "0–65；每项 roleId + reason(1–600)",
-    newRoles: "0–3；见 newRole",
-    profileChoices: "2–65；coordinator 与每个逻辑成员各恰好一项",
+const CONTRACT_TEAM = {
+  required: ["id≤48 slug", "name 1–40", "mode=请求模式", "coordinatorRoleId", "members 1–64"],
+  optional: ["description≤160", "collaboration", "operatingRules≤4000"],
+  members: "key 必须按数组顺序为连续的 m1..mN；roleId 必填；重复 Role 的 instanceLabel(1–40) 必填",
+  collaboration: "可选。replicas 只能是 2 或 3；judgeRoleId、escalationRoleId 可选 slug",
+} as const;
+
+const CONTRACT_NEW_ROLE = {
+  required: [
+    "id≤48 slug",
+    "name 1–40",
+    "mission 1–2000",
+    "responsibilities 1–30 项、每项 1–500",
+    "restrictions 0–30 项、每项 1–500",
+    "systemPrompt 1–20000",
+    "outputContract 0–30 项、每项 1–500",
+    "preferredProfiles 1–5",
+    "fallbackProfiles 0–5",
+    "executionPolicy",
+    "noveltyReason 1–600",
+  ],
+  optional: ["description≤160", "color≤32", "icon≤64"],
+  profileRef: "{ profileId }，profileId 取白名单真实 id，1–256",
+  executionPolicy: {
+    tier: ["decision", "execution", "escalation", "retain"],
+    taskKind: ["coding", "testing", "acceptance", "codebase", "ops", "general"],
   },
-  team: {
-    required: ["id≤48 slug", "name 1–40", "mode=请求模式", "coordinatorRoleId", "members 1–64"],
-    optional: ["description≤160", "collaboration", "operatingRules≤4000"],
-    members:
-      "key 必须按数组顺序为连续的 m1..mN；roleId 必填；重复 Role 的 instanceLabel(1–40) 必填",
-    collaboration: "可选。replicas 只能是 2 或 3；judgeRoleId、escalationRoleId 可选 slug",
-  },
-  newRole: {
-    required: [
-      "id≤48 slug",
-      "name 1–40",
-      "mission 1–2000",
-      "responsibilities 1–30 项、每项 1–500",
-      "restrictions 0–30 项、每项 1–500",
-      "systemPrompt 1–20000",
-      "outputContract 0–30 项、每项 1–500",
-      "preferredProfiles 1–5",
-      "fallbackProfiles 0–5",
-      "executionPolicy",
-      "noveltyReason 1–600",
-    ],
-    optional: ["description≤160", "color≤32", "icon≤64"],
-    profileRef: "{ profileId }，profileId 取白名单真实 id，1–256",
+} as const;
+
+const CONTRACT_PROFILE_CHOICE = {
+  target: "coordinator 或 m1..m64",
+  profileIds: "0–3 个有序真实 id；空数组只允许规划器判定不可用的待命升级位",
+  reason: "1–600，只解释职责",
+} as const;
+
+const CONTRACT_FORBIDDEN = [
+  "mcpServers",
+  "env",
+  "commands",
+  "timestamps",
+  "source",
+  "designer",
+  "enabled",
+  "seatId",
+  "memberCreation",
+] as const;
+
+/** The compact gap shape; it replaces the new-Role block so the budget does not grow. */
+const CONTRACT_GAP = {
+  required: [
+    "kind",
+    "responsibility 1–600",
+    "reason 1–600",
+    "use",
+    "profiles",
+    "roleId（unlaunchable-role）或 suggestedRole（missing-role）",
+  ],
+  kind: ["missing-role", "unlaunchable-role"],
+  use: ["coordinator", "member"],
+  profiles:
+    "existing：{ profileIds: 1–3 }，每个 id 必须是该用途 route 内的合格 Profile；none：{ reason: 1–600 }",
+  suggestedRole: {
+    id: "≤48 slug",
+    name: "1–40，前缀按目录",
+    responsibilities: "1–8 项，每项 1–500",
     executionPolicy: {
       tier: ["decision", "execution", "escalation", "retain"],
       taskKind: ["coding", "testing", "acceptance", "codebase", "ops", "general"],
     },
   },
-  profileChoice: {
-    target: "coordinator 或 m1..m64",
-    profileIds: "0–3 个有序真实 id；空数组只允许规划器判定不可用的待命升级位",
-    reason: "1–600，只解释职责",
-  },
-  limits: { jsonBlockBytes: 32 * 1024, newRoles: 3, members: 64 },
-  forbidden: [
-    "mcpServers",
-    "env",
-    "commands",
-    "timestamps",
-    "source",
-    "designer",
-    "enabled",
-    "seatId",
-    "memberCreation",
-  ],
+  bounds: "gaps 1–8；profileIds 去重",
+  forbidden: ["team", "newRoles", "profileChoices"],
 } as const;
 
-function outputTemplate(input: DesignPromptInput): string {
-  const sample = {
-    version: 1,
+type PromptRules = {
+  version: DesignOutputContractVersion;
+  /** A v1 record is always legacy (3 new Roles); only a v2 record can be reuse-only. */
+  rolesOnly: boolean;
+  limit: 0 | 3;
+};
+
+/** The one normalization: every template, limit, and sentence reads this result. */
+function promptRules(context: DesignPromptContext): PromptRules {
+  const version = context.outputContractVersion ?? 1;
+  const rolesOnly = version === 2 ? (context.existingRolesOnly ?? true) : false;
+  return { version, rolesOnly, limit: designNewRoleLimit({ existingRolesOnly: rolesOnly }) };
+}
+
+type TemplateKind = "v1" | "team" | "gap";
+type PreviousOutputKind = "team" | "role-gap";
+
+function templateKind(rules: PromptRules): TemplateKind {
+  if (rules.version === 1) return "v1";
+  return rules.rolesOnly ? "gap" : "team";
+}
+
+function outputContract(rules: PromptRules): Record<string, unknown> {
+  if (rules.version === 1) {
+    return {
+      required: {
+        version: "固定 1",
+        jobId: "本次 UUID，原样",
+        attempt: "本次 1|2|3，原样",
+        nonce: "本次 32 hex，原样",
+        summary: "1–1000",
+        team: "见 team",
+        reuse: "0–65；每项 roleId + reason(1–600)",
+        newRoles: `0–${rules.limit}；见 newRole`,
+        profileChoices: "2–65；coordinator 与每个逻辑成员各恰好一项",
+      },
+      team: CONTRACT_TEAM,
+      newRole: CONTRACT_NEW_ROLE,
+      profileChoice: CONTRACT_PROFILE_CHOICE,
+      limits: { jsonBlockBytes: 32 * 1024, newRoles: rules.limit, members: 64 },
+      forbidden: CONTRACT_FORBIDDEN,
+    };
+  }
+  if (rules.rolesOnly) {
+    return {
+      required: {
+        version: "固定 2",
+        kind: '"role-gap"，或复用-only 的 "team"（newRoles 必须为 []）',
+        jobId: "本次 UUID，原样",
+        attempt: "本次 1|2|3，原样",
+        nonce: "本次 32 hex，原样",
+        summary: "1–1000",
+        team: "见 team；newRoles 必须为 []",
+        reuse: "0–65；每项 roleId + reason(1–600)，reason 必须说明该 Role 承担的职责",
+        newRoles: "必须为 []",
+        profileChoices: "2–65；coordinator 与每个逻辑成员各恰好一项",
+      },
+      team: CONTRACT_TEAM,
+      gap: CONTRACT_GAP,
+      profileChoice: CONTRACT_PROFILE_CHOICE,
+      limits: { jsonBlockBytes: 32 * 1024, newRoles: 0, members: 64 },
+      forbidden: CONTRACT_FORBIDDEN,
+    };
+  }
+  return {
+    required: {
+      version: "固定 2",
+      kind: '"team"',
+      jobId: "本次 UUID，原样",
+      attempt: "本次 1|2|3，原样",
+      nonce: "本次 32 hex，原样",
+      summary: "1–1000",
+      team: "见 team",
+      reuse: "0–65；每项 roleId + reason(1–600)，reason 必须说明该 Role 承担的职责",
+      newRoles: `0–${rules.limit}；见 newRole`,
+      profileChoices: "2–65；coordinator 与每个逻辑成员各恰好一项",
+    },
+    team: CONTRACT_TEAM,
+    newRole: CONTRACT_NEW_ROLE,
+    profileChoice: CONTRACT_PROFILE_CHOICE,
+    limits: { jsonBlockBytes: 32 * 1024, newRoles: rules.limit, members: 64 },
+    forbidden: CONTRACT_FORBIDDEN,
+  };
+}
+
+function sampleIdentity(input: DesignPromptInput, version: DesignOutputContractVersion) {
+  return {
+    version,
+    ...(version === 2 ? { kind: "team" } : {}),
     jobId: input.jobId,
     attempt: input.attempt,
     nonce: input.nonce,
-    summary: "复用统筹并新增一个专职 Role",
+  };
+}
+
+function teamSample(
+  input: DesignPromptInput,
+  rules: PromptRules,
+  withNewRole: boolean,
+): Record<string, unknown> {
+  const newRole = {
+    id: "eng-rework",
+    name: "【工程】改版专员",
+    mission: "完成指定改版",
+    responsibilities: ["实现指定模块"],
+    restrictions: ["不修改无关模块"],
+    systemPrompt: "按协调者范围实现并报告验证",
+    outputContract: ["改动清单"],
+    preferredProfiles: [{ profileId: "profile-1" }],
+    fallbackProfiles: [],
+    executionPolicy: { tier: "execution", taskKind: "coding" },
+    noveltyReason: "现有 Role 不覆盖这次专职改版",
+  };
+  return {
+    ...sampleIdentity(input, rules.version),
+    summary: withNewRole ? "复用统筹并新增一个专职 Role" : "只复用现有 Role 完成改版",
     team: {
       id: "rework-team",
       name: "改版团队",
       mode: input.context.requestedMode,
       coordinatorRoleId: "lead-tech",
-      members: [
-        { key: "m1", roleId: "eng-rework" },
-        { key: "m2", roleId: "qa-review" },
-      ],
+      members: withNewRole
+        ? [
+            { key: "m1", roleId: "eng-rework" },
+            { key: "m2", roleId: "qa-review" },
+          ]
+        : [
+            { key: "m1", roleId: "eng-fullstack" },
+            { key: "m2", roleId: "qa-review" },
+          ],
       collaboration: { replicas: 2, judgeRoleId: "qa-review" },
     },
-    reuse: [
-      { roleId: "lead-tech", reason: "负责统筹与验收" },
-      { roleId: "qa-review", reason: "负责独立审查" },
-    ],
-    newRoles: [
+    reuse: withNewRole
+      ? [
+          { roleId: "lead-tech", reason: "负责统筹与验收" },
+          { roleId: "qa-review", reason: "负责独立审查" },
+        ]
+      : [
+          { roleId: "lead-tech", reason: "负责统筹与验收" },
+          { roleId: "eng-fullstack", reason: "负责实现改版" },
+          { roleId: "qa-review", reason: "负责独立审查" },
+        ],
+    newRoles: withNewRole ? [newRole] : [],
+    profileChoices: withNewRole
+      ? [
+          { target: "coordinator", profileIds: ["profile-1"], reason: "负责决策" },
+          { target: "m1", profileIds: ["profile-1"], reason: "覆盖执行职责" },
+          { target: "m2", profileIds: ["profile-1"], reason: "覆盖独立审查" },
+        ]
+      : [
+          { target: "coordinator", profileIds: ["profile-1"], reason: "负责决策" },
+          { target: "m1", profileIds: ["profile-1"], reason: "负责实现改版" },
+          { target: "m2", profileIds: ["profile-1"], reason: "负责独立审查" },
+        ],
+  };
+}
+
+function gapSample(input: DesignPromptInput): Record<string, unknown> {
+  return {
+    version: 2,
+    kind: "role-gap",
+    jobId: input.jobId,
+    attempt: input.attempt,
+    nonce: input.nonce,
+    summary: "现有 Role 覆盖不了这次数据迁移",
+    gaps: [
       {
-        id: "eng-rework",
-        name: "【工程】改版专员",
-        mission: "完成指定改版",
-        responsibilities: ["实现指定模块"],
-        restrictions: ["不修改无关模块"],
-        systemPrompt: "按协调者范围实现并报告验证",
-        outputContract: ["改动清单"],
-        preferredProfiles: [{ profileId: "profile-1" }],
-        fallbackProfiles: [],
-        executionPolicy: { tier: "execution", taskKind: "coding" },
-        noveltyReason: "现有 Role 不覆盖这次专职改版",
+        kind: "missing-role",
+        responsibility: "负责数据库迁移与回滚脚本",
+        reason: "目录没有承担迁移的 Role",
+        use: "member",
+        profiles: { kind: "existing", profileIds: ["profile-1"] },
+        suggestedRole: {
+          id: "eng-data",
+          name: "【工程】数据迁移",
+          responsibilities: ["编写可回滚的迁移脚本"],
+          executionPolicy: { tier: "execution", taskKind: "coding" },
+        },
       },
     ],
-    profileChoices: [
-      { target: "coordinator", profileIds: ["profile-1"], reason: "负责决策" },
-      { target: "m1", profileIds: ["profile-1"], reason: "覆盖执行职责" },
-      { target: "m2", profileIds: ["profile-1"], reason: "覆盖独立审查" },
-    ],
   };
-  return [
+}
+
+function outputTemplate(
+  input: DesignPromptInput,
+  rules: PromptRules,
+  previous?: PreviousOutputKind,
+): string {
+  const kind = templateKind(rules);
+  const parts = [
     "## 输出合同",
     "只输出一个 agent-team-design fenced JSON 块。示例展示必填形状，不是可提交的空方案；身份字段换成本次原样值，Profile id 换成白名单真实 id。",
-    jsonBlock("字段合同", OUTPUT_CONTRACT),
-    `\`\`\`agent-team-design\n${JSON.stringify(sample)}\n\`\`\``,
+    jsonBlock("字段合同", outputContract(rules)),
+  ];
+  if (kind === "gap") {
+    parts.push(`\`\`\`agent-team-design\n${JSON.stringify(gapSample(input))}\n\`\`\``);
+    if (previous !== "role-gap") {
+      parts.push("复用-only 团队示例（newRoles 必须为空）：");
+      parts.push(
+        `\`\`\`agent-team-design\n${JSON.stringify(teamSample(input, rules, false))}\n\`\`\``,
+      );
+    }
+  } else {
+    parts.push(
+      `\`\`\`agent-team-design\n${JSON.stringify(teamSample(input, rules, true))}\n\`\`\``,
+    );
+  }
+  parts.push(
     "完整 JSON 块不超过 32KiB UTF-8。不要输出 mcpServers、env、命令、时间戳、source、designer、enabled、seatId 或 memberCreation。",
-  ].join("\n");
+  );
+  return parts.join("\n");
 }
 
 const SUPPORTED_TASK_KINDS = [
@@ -430,8 +642,89 @@ function identityRequirement(
   return `jobId=${input.jobId} attempt=${input.attempt} nonce=${input.nonce}。identity 必须逐字复制：jobId、attempt、nonce 与本节完全一致，不得自行生成或改写。`;
 }
 
+const ROUTE_ELIGIBLE_LIMIT = 8;
+const ROUTE_FAILED_IDS_LIMIT = 5;
+
+function routingPayload(routing: DesignModeRouting): Record<string, unknown> {
+  if (routing.status !== "ready") {
+    return {
+      status: routing.status,
+      ...(routing.status === "invalid" ? { reason: routing.reason } : {}),
+    };
+  }
+  return {
+    routes: routing.routes.map((row) => {
+      const eligible = row.candidates.filter((entry) => entry.eligible);
+      const failed = row.candidates.filter((entry) => !entry.eligible);
+      const reasons = [
+        ...new Set(failed.flatMap((entry) => (entry.reason === undefined ? [] : [entry.reason]))),
+      ].slice(0, ROUTE_FAILED_IDS_LIMIT);
+      return {
+        route: row.route,
+        ...(row.taskKind === null ? {} : { taskKind: row.taskKind }),
+        eligible: eligible.slice(0, ROUTE_ELIGIBLE_LIMIT).map((entry) => entry.profileId),
+        ...(eligible.length > ROUTE_ELIGIBLE_LIMIT
+          ? { omittedEligible: eligible.length - ROUTE_ELIGIBLE_LIMIT }
+          : {}),
+        failedCount: failed.length,
+        ...(failed.length === 0
+          ? {}
+          : {
+              failedIds: failed.slice(0, ROUTE_FAILED_IDS_LIMIT).map((entry) => entry.profileId),
+            }),
+        ...(reasons.length === 0 ? {} : { failedReasons: reasons }),
+      };
+    }),
+  };
+}
+
+function roleIndexEntry(
+  role: DesignPromptRoleSummary,
+  rules: PromptRules,
+): Record<string, unknown> {
+  return {
+    id: role.id,
+    name: role.name,
+    enabled: role.enabled,
+    tier: role.tier ?? null,
+    preferredProfileIds: stringIds(role.preferredProfileIds),
+    fallbackProfileIds: stringIds(role.fallbackProfileIds),
+    launchable: role.launchable,
+    unavailableProfileIds: stringIds(role.unavailableProfileIds),
+    ...(rules.version === 2
+      ? {
+          coordinatorLaunchable: role.coordinatorLaunchable ?? null,
+          launchVerified: role.launchVerified ?? null,
+          coordinatorLaunchVerified: role.coordinatorLaunchVerified ?? null,
+        }
+      : {}),
+  };
+}
+
+function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undefined): string {
+  if (rules.version === 1) {
+    return "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
+  }
+  if (routing !== undefined) {
+    return "Role 索引的 launchable/verified 是该 Role 作为成员的 route 判定；unavailableProfileIds 是这条 route 内不合格的候选 Profile（不是 Role 绑定），补救是调整「经济：全席位」路由。coordinatorLaunchable/coordinatorLaunchVerified 是协调者 route 的判定，两种用途不可互推；verified=false 表示无法核实，不得据此报 unlaunchable-role。";
+  }
+  return "Role 索引的 launchable/verified 表示成员用途；coordinatorLaunchable/coordinatorLaunchVerified 表示协调者用途，两种用途不可互推；verified=false 表示无法核实，不得据此报 unlaunchable-role。优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 是不可用绑定，最多 5 个。";
+}
+
+function recipeInstruction(rules: PromptRules): string {
+  if (rules.version === 1) {
+    return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+  }
+  if (rules.rolesOnly) {
+    return "配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；覆盖不了就报 role-gap，不要用职责不符的 Role 凑数。复用 Role 时 reason 必须说明它承担的职责；不要新建 Role。";
+  }
+  return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。覆盖不了就报缺口，不要用职责不符的 Role 凑数；复用 Role 时 reason 必须说明它承担的职责。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+}
+
 function compose(input: DesignPromptInput, detail: PromptDetail): string {
   const { context } = input;
+  const rules = promptRules(context);
+  const routing = rules.version === 2 ? context.modeRouting : undefined;
   const target = context.target
     ? { id: context.target.id, name: context.target.name, path: context.target.path ?? null }
     : null;
@@ -464,12 +757,22 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
       taskOrder: projectedTaskOrder(context.economy.taskOrder),
     }),
     "",
+    ...(routing === undefined
+      ? []
+      : [
+          "## 经济：全席位路由",
+          routing.status === "ready"
+            ? "不使用 Role 原绑定；每个席位按用途走 route，route 内没有合格候选即阻断且不回退，profileChoices 必须与规划一致。补救是调整设置中的「经济：全席位」路由。"
+            : "「经济：全席位」策略缺失或非法，无法给出合格候选；不要建议 existing Profile，只能 kind:none 并说明原因。",
+          jsonBlock("route 摘要", routingPayload(routing)),
+          "",
+        ]),
     "## 目录与 Profile 白名单",
     jsonBlock("目录约束", {
       occupiedRoleIds: stringIds(context.occupiedRoleIds),
       occupiedRoleNames: stringIds(context.occupiedRoleNames),
       occupiedTeams: projectedTeams(context.occupiedTeams),
-      newRoleLimit: 3,
+      newRoleLimit: rules.limit,
       namePrefixes: NAME_PREFIXES.map(([prefix, label]) => ({ prefix, label })),
       coordinatorCannotBeMember: true,
       duplicateRoleNeedsInstanceLabel: true,
@@ -477,18 +780,9 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     }),
     jsonBlock(
       "Role 索引",
-      context.roles.map((role) => ({
-        id: role.id,
-        name: role.name,
-        enabled: role.enabled,
-        tier: role.tier ?? null,
-        preferredProfileIds: stringIds(role.preferredProfileIds),
-        fallbackProfileIds: stringIds(role.fallbackProfileIds),
-        launchable: role.launchable,
-        unavailableProfileIds: stringIds(role.unavailableProfileIds),
-      })),
+      context.roles.map((role) => roleIndexEntry(role, rules)),
     ),
-    "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。",
+    indexRequirement(rules, routing),
     jsonBlock(
       "Role 摘要",
       detailedRoles(context, detail).map((role) => rolePayload(role, detail)),
@@ -500,35 +794,40 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     jsonBlock("期望选择", projectedChoices(context.expectedChoices)),
     "",
     "## 九配方",
-    "配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 3 个 Role。",
+    recipeInstruction(rules),
     jsonBlock(
       "配方",
       TEAM_DESIGN_RECIPES.map((recipe) => recipePayload(recipe, detail)),
     ),
     "",
-    outputTemplate(input),
+    outputTemplate(input, rules),
     "",
     "## 身份复核",
     `${identityRequirement(input)} nonce 只用于本轮身份核对，不是执行许可。`,
   ].join("\n");
 }
 
-function compressed(input: DesignPromptInput, detail: PromptDetail): PromptDetail | null {
+type CompressionStep = { detail: PromptDetail; compression: PromptCompression };
+
+function compressed(input: DesignPromptInput, detail: PromptDetail): CompressionStep | null {
   const { context } = input;
   if (detail.notes === "full" && context.profiles.some((profile) => profile.notes)) {
-    return { ...detail, notes: "none" };
+    return { detail: { ...detail, notes: "none" }, compression: "notes-off" };
   }
   if (detail.roleText === "full" && roleTextOmitted(detailedRoles(context, detail)).length > 0) {
-    return { ...detail, roleText: "clamped" };
+    return { detail: { ...detail, roleText: "clamped" }, compression: "role-text-clamped" };
   }
   if (
     detail.recipeNotes &&
     TEAM_DESIGN_RECIPES.some((recipe) => recipeNote(recipe) !== undefined)
   ) {
-    return { ...detail, recipeNotes: false };
+    return { detail: { ...detail, recipeNotes: false }, compression: "recipe-notes-off" };
   }
   if (!detail.relevantOnly && context.relevantRoleIds !== undefined) {
-    return { ...detail, relevantOnly: true, roleText: "full" };
+    return {
+      detail: { ...detail, relevantOnly: true, roleText: "full" },
+      compression: "relevant-only",
+    };
   }
   return null;
 }
@@ -538,20 +837,21 @@ type BudgetFit = {
   text: string;
   bytes: number;
   omissions: string[];
+  compression: PromptCompression;
 };
 
 function withinBudget(input: DesignPromptInput, limit: number): BudgetFit {
   let detail = FULL_DETAIL;
-  let text = "";
-  let bytes = 0;
+  let compression: PromptCompression = "full";
   for (;;) {
-    text = compose(input, detail);
-    bytes = utf8ByteLength(text);
+    const text = compose(input, detail);
+    const bytes = utf8ByteLength(text);
     const omissions = omissionsFor(input.context, detail);
-    if (bytes <= limit) return { ok: true, text, bytes, omissions };
+    if (bytes <= limit) return { ok: true, text, bytes, omissions, compression };
     const next = compressed(input, detail);
-    if (!next) return { ok: false, text, bytes, omissions };
-    detail = next;
+    if (!next) return { ok: false, text, bytes, omissions, compression };
+    detail = next.detail;
+    compression = next.compression;
   }
 }
 
@@ -567,6 +867,7 @@ export function buildDesignKickoff(input: DesignPromptInput): PromptBuildResult 
       text: fitted.text,
       utf8Bytes: fitted.bytes,
       omissions: fitted.omissions,
+      compression: fitted.compression,
     };
   }
   return { ok: false, issues: [inputTooLarge(fitted.bytes, DESIGN_KICKOFF_MAX_BYTES)] };
@@ -594,25 +895,37 @@ export function buildDesignCorrection(input: {
   issues: readonly DesignIssue[];
   context: DesignPromptContext;
   expectedChoices: readonly ExpectedDesignChoice[];
+  /** The kind the previous attempt produced; a failed gap is rewritten as a gap. */
+  previousOutputKind?: PreviousOutputKind;
 }): PromptBuildResult {
+  const rules = promptRules(input.context);
   const shown = input.issues.slice(0, MAX_CORRECTION_ISSUES);
   const hidden = input.issues.length - shown.length;
   const text = [
     "## 修正",
     identityRequirement(input),
     "上一轮输出未通过校验。按下列聚合错误重写完整方案，只输出一个 agent-team-design fenced JSON 块，身份字段原样。不要复述上一轮全文，也不要重新列举 Role/Profile 上下文。",
+    ...(input.previousOutputKind === "role-gap"
+      ? [
+          "上一轮是角色缺口（role-gap）：只重写 role-gap，或改为复用-only 的 team（newRoles 为空）；不要新增 Role。",
+        ]
+      : []),
     jsonBlock("聚合错误", {
       issues: shown.map(issuePayload),
       omittedIssueCount: hidden,
     }),
     jsonBlock("准确期望", projectedChoices(input.expectedChoices)),
     "",
-    outputTemplate({
-      jobId: input.jobId,
-      attempt: input.attempt,
-      nonce: input.nonce,
-      context: input.context,
-    }),
+    outputTemplate(
+      {
+        jobId: input.jobId,
+        attempt: input.attempt,
+        nonce: input.nonce,
+        context: input.context,
+      },
+      rules,
+      input.previousOutputKind,
+    ),
     "",
     "## 身份复核",
     `${identityRequirement(input)} nonce 只用于本轮身份核对，不是执行许可。`,
@@ -621,7 +934,7 @@ export function buildDesignCorrection(input: {
   if (bytes > DESIGN_CORRECTION_MAX_BYTES) {
     return { ok: false, issues: [inputTooLarge(bytes, DESIGN_CORRECTION_MAX_BYTES)] };
   }
-  return { ok: true, text, utf8Bytes: bytes, omissions: [] };
+  return { ok: true, text, utf8Bytes: bytes, omissions: [], compression: "full" };
 }
 
 /** Live availability is a host fact. Notes stay on the summary; feature values do not. */
