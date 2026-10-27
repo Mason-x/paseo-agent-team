@@ -488,7 +488,6 @@ export type DesignLaunchPrefill = {
   lockTeam: true;
   initialTask: string;
   initialWorkspaceId?: string;
-  initialMode: TeamMode;
 };
 
 export type DesignPermissionRow = {
@@ -648,7 +647,7 @@ function launchPreviewOf(preview: DesignResultViewInput["preview"]): LaunchPrevi
 
 /** The launch dialog gets a replaceable target preselect; the carrier is never a business target. */
 export function planDesignLaunch(
-  result: Pick<DesignResult, "request" | "targetWorkspaceId" | "mode">,
+  result: Pick<DesignResult, "request" | "targetWorkspaceId">,
   savedTeamId: string | null | undefined,
 ): DesignLaunchPrefill | null {
   if (!savedTeamId) return null;
@@ -657,7 +656,6 @@ export function planDesignLaunch(
     lockTeam: true,
     initialTask: result.request,
     ...(result.targetWorkspaceId ? { initialWorkspaceId: result.targetWorkspaceId } : {}),
-    initialMode: result.mode,
   };
 }
 

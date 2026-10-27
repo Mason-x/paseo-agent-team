@@ -31,7 +31,10 @@ const { values, positionals } = parseArgs({
 
 const usage = `Usage: node scripts/launch-team.mjs --host <host:port> --team <teamId> \\
          (--workspace <workspaceId> | --project <projectId> [--title <name>]) \\
-         [--mode sota|economy|collaborative] [--no-wait] [--timeout <seconds>] [--json] "<task>"`;
+         [--no-wait] [--timeout <seconds>] [--json] "<task>"
+
+The Team's saved mode is used. --mode sota|economy|collaborative is an advanced override for
+scripts and tests only; it is never written back to the Team.`;
 
 function fail(message, code = 1) {
   console.error(message);

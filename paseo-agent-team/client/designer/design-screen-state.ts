@@ -27,7 +27,6 @@ export type DesignLaunchSeed = {
   teamId: string;
   lockTeam: true;
   initialTask: string;
-  initialMode: TeamMode;
   initialWorkspaceId?: string;
 };
 
@@ -38,7 +37,6 @@ export function designLaunchSeed(prefill: DesignLaunchPrefill, key: string): Des
     teamId: prefill.initialTeamId,
     lockTeam: true,
     initialTask: prefill.initialTask,
-    initialMode: prefill.initialMode,
     ...(prefill.initialWorkspaceId ? { initialWorkspaceId: prefill.initialWorkspaceId } : {}),
   };
 }

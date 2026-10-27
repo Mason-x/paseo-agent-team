@@ -728,10 +728,10 @@ export const zh = {
     purposeCandidate: "候选",
     purposeJudge: "裁判",
     purposeEscalation: "升级",
-    launchMode: "本次运行模式",
-    launchModeHint: "仅本次启动生效，不修改 Team 设置。",
-    launchModeUnknown: (value: string) =>
-      `Team 保存的模式「${value || "unknown"}」无法识别，本次按旗舰（SOTA）预览；不会修改 Team 设置。`,
+    launchTeamMode: (mode: string) => `组队模式：${mode}（在 Team 中设置）`,
+    launchTeamModeUnknown: (value: string) =>
+      `组队模式「${value || "unknown"}」无法识别；请编辑 Team 修改。`,
+    launchTeamModeEditHint: "在侧栏 Agent Teams › Teams 中编辑此 Team。",
     previewNoTask: "输入任务后生成启动预览。",
     previewDebouncing: "正在等待输入完成，随后会更新预览。",
     previewNoTarget: "选择目标工作区后显示启动预览。",

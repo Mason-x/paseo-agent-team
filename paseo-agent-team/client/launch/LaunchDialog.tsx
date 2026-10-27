@@ -14,16 +14,14 @@ import {
 import type { LaunchPreviewResult } from "../../shared/schemas/launch-preview";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 import { ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
 import { TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
-import { TeamModePicker } from "../shared/TeamModePicker";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
-import { readStoredTeamMode } from "../teams/team-mode-edit";
 import { LaunchPreview } from "./LaunchPreview";
+import { launchModeDisplay, launchPreviewRequest, launchStartRequest } from "./launch-args";
 import {
   launchGate,
   launchPreviewIdentity,
@@ -134,11 +132,11 @@ export function LaunchDialog({
   initialTeamId,
   lockTeam,
   initialTask,
-  initialMode,
   initialWorkspaceId,
   workspaceId: fixedWorkspaceId,
   onClose,
   onLaunched,
+  onEditTeam,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -151,14 +149,14 @@ export function LaunchDialog({
   /** Hide the Team picker: the caller already chose the Team. */
   lockTeam?: boolean;
   initialTask?: string;
-  /** One launch only; defaults to the selected Team's saved mode. */
-  initialMode?: TeamMode;
   /** Preselected, still-editable workspace target; unlike `workspaceId`, it never locks the target. */
   initialWorkspaceId?: string;
   /** Launch into this workspace; otherwise the user picks or creates one. */
   workspaceId?: string;
   onClose: () => void;
   onLaunched: (runId: string, workspaceId: string | undefined) => void;
+  /** Hosts that can navigate to the Team editor pass this; the saved mode is edited there. */
+  onEditTeam?: (team: Team) => void;
 }) {
   const toast = useToast();
   const start = useRpc(launchStartRpc);
@@ -179,11 +177,6 @@ export function LaunchDialog({
   const [task, setTask] = useState(initialTask ?? "");
   const [composing, setComposing] = useState(false);
   const [debouncedTask, setDebouncedTask] = useState(() => (initialTask ?? "").trim());
-  const storedMode = readStoredTeamMode(teams.find((entry) => entry.id === defaultTeamId)?.mode);
-  const [mode, setMode] = useState<TeamMode>(initialMode ?? storedMode.mode);
-  const [modeUnknown, setModeUnknown] = useState<string | null>(
-    initialMode ? null : storedMode.unknown,
-  );
   const [starting, setStarting] = useState(false);
   const [job, setJob] = useState<LaunchJob | null>(null);
   const [serverBlockers, setServerBlockers] = useState<string[]>([]);
@@ -235,6 +228,8 @@ export function LaunchDialog({
   }, [job, onLaunched, toast]);
 
   const team = teams.find((entry) => entry.id === teamId);
+  const modeDisplay = launchModeDisplay(team);
+  const savedMode = team?.mode ?? "";
   const target: LaunchTarget | null = fixedWorkspaceId
     ? { kind: "workspace", workspaceId: fixedWorkspaceId }
     : targetKind === "workspace"
@@ -267,14 +262,14 @@ export function LaunchDialog({
     teamId,
     task: previewTask,
     target,
-    mode,
+    savedMode,
   });
   const previewQuery = useQuery({
-    queryKey: launchPreviewQueryKey({ hostId, teamId, task: previewTask, target, mode }),
+    queryKey: launchPreviewQueryKey({ hostId, teamId, task: previewTask, target, savedMode }),
     enabled: open && Boolean(teamId) && previewTask.length > 0 && target !== null && !running,
     queryFn: async () => {
       if (!target) throw new Error(zh.modes.previewNoTarget);
-      return preview({ teamId, task: previewTask, target, mode });
+      return preview(launchPreviewRequest({ teamId, task: previewTask, target }));
     },
     staleTime: 0,
     retry: false,
@@ -318,11 +313,7 @@ export function LaunchDialog({
   }, [currentIdentity]);
 
   function chooseTeam(nextId: string) {
-    const next = teams.find((entry) => entry.id === nextId);
-    const nextMode = readStoredTeamMode(next?.mode);
     setTeamId(nextId);
-    setMode(nextMode.mode);
-    setModeUnknown(nextMode.unknown);
   }
 
   async function launch() {
@@ -344,13 +335,14 @@ export function LaunchDialog({
     setNotice(null);
     setJob(null);
     try {
-      const result = await start({
-        teamId,
-        task: previewTask,
-        target,
-        mode,
-        expectedPlanHash: shown.planHash,
-      });
+      const result = await start(
+        launchStartRequest({
+          teamId,
+          task: previewTask,
+          target,
+          expectedPlanHash: shown.planHash,
+        }),
+      );
       if (result.ok) {
         setJob(result.job);
       } else if (startFailureAction(result.blockers) === "refresh-preview") {
@@ -376,6 +368,7 @@ export function LaunchDialog({
   const failure = job?.state === "failed" ? jobErrorText(job) : null;
   const kickoffCopy = job?.state === "failed" ? job.error?.kickoffMessage : undefined;
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
+  const editTeam = team && onEditTeam ? () => onEditTeam(team) : null;
 
   return (
     <Modal
@@ -411,25 +404,43 @@ export function LaunchDialog({
               onChange={chooseTeam}
             />
           ) : null}
-          <View style={{ gap: 4 }}>
-            <TeamModePicker
-              theme={theme}
-              layout={layout}
-              value={mode}
-              label={zh.modes.launchMode}
-              disabled={starting || running}
-              onChange={(next) => {
-                setMode(next);
-                setModeUnknown(null);
-              }}
-            />
-            <Text style={muted}>{zh.modes.launchModeHint}</Text>
-            {modeUnknown ? (
-              <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
-                {zh.modes.launchModeUnknown(modeUnknown)}
+          {modeDisplay.kind !== "none" ? (
+            <View style={{ gap: 4 }}>
+              <Text
+                style={
+                  modeDisplay.kind === "unknown"
+                    ? { color: theme.colors.statusWarning, fontSize: 12 }
+                    : muted
+                }
+              >
+                {modeDisplay.kind === "unknown"
+                  ? zh.modes.launchTeamModeUnknown(modeDisplay.value)
+                  : zh.modes.launchTeamMode(modeDisplay.label)}
               </Text>
-            ) : null}
-          </View>
+              {editTeam ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={zh.editTeam}
+                  accessibilityState={{ disabled: starting || running }}
+                  disabled={starting || running}
+                  onPress={editTeam}
+                >
+                  <Text
+                    style={{
+                      color: theme.colors.accent,
+                      fontWeight: "600",
+                      fontSize: 12,
+                      opacity: starting || running ? 0.5 : 1,
+                    }}
+                  >
+                    {zh.editTeam}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Text style={muted}>{zh.modes.launchTeamModeEditHint}</Text>
+              )}
+            </View>
+          ) : null}
           {!fixedWorkspaceId ? (
             <View style={{ gap: 8 }}>
               <SegmentedTarget theme={theme} value={targetKind} onChange={setTargetKind} />

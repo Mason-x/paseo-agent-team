@@ -26,7 +26,10 @@ const LaunchRequestShape = {
 
 export const LaunchStartInputSchema = z.object({
   ...LaunchRequestShape,
-  /** Per-launch mode override; never persisted back to the Team. */
+  /**
+   * Advanced override for scripts and tests only; the App never sends it. Normal launches plan
+   * from the saved Team.mode and never persist an override.
+   */
   mode: TeamModeSchema.optional(),
   /** Token from launch.preview. Omitted by legacy callers; new clients always send it. */
   expectedPlanHash: z.string().min(1).max(128).optional(),
@@ -34,6 +37,7 @@ export const LaunchStartInputSchema = z.object({
 
 export const LaunchPreviewInputSchema = z.object({
   ...LaunchRequestShape,
+  /** Advanced override for scripts and tests only; the App never sends it. */
   mode: TeamModeSchema.optional(),
 });
 

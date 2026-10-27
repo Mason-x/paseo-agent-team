@@ -57,18 +57,18 @@ describe("launch seed", () => {
     lockTeam: true,
     initialTask: "改版",
     initialWorkspaceId: "ws-target",
-    initialMode: "economy",
   };
 
-  test("passes the saved Team, mode, and editable target preselect", () => {
-    expect(designLaunchSeed(prefill, "result-1")).toEqual({
+  test("passes the saved Team and editable target preselect, never a mode", () => {
+    const seed = designLaunchSeed(prefill, "result-1");
+    expect(seed).toEqual({
       key: "result-1",
       teamId: "saved-team",
       lockTeam: true,
       initialTask: "改版",
-      initialMode: "economy",
       initialWorkspaceId: "ws-target",
     });
+    expect(seed).not.toHaveProperty("initialMode");
   });
 
   test("omits a missing target instead of falling back to a carrier", () => {
