@@ -1,8 +1,23 @@
 import type { EconomyBudget } from "../../shared/domain/mode-resolver";
+import {
+  identifyModelFamily,
+  MODEL_FAMILIES,
+  type ModelFamily,
+  namesHighCostFamily,
+  sameModelTuple,
+  storedModelFamily,
+} from "../../shared/domain/model-family";
 import { isTaskKind } from "../../shared/domain/role-execution";
-import type { PaseoProfile } from "../../shared/paseo/adapter";
+import type { PaseoProfile, ProviderAvailability } from "../../shared/paseo/adapter";
 import { type Preferences, PreferencesSchema } from "../../shared/schemas/preferences";
-import type { StoredEconomyPolicy, TaskKind } from "../../shared/schemas/team-mode";
+import {
+  ALL_SEATS_POLICY_VERSION,
+  ALL_SEATS_WRITER_LIMIT,
+  type AllSeatsRoute,
+  StoredAllSeatsEntrySchema,
+  type StoredEconomyPolicy,
+  type TaskKind,
+} from "../../shared/schemas/team-mode";
 
 const FAMILY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const TASK_KINDS: readonly TaskKind[] = [
@@ -39,7 +54,58 @@ export type EconomyDraft = {
   /** User removals, so unknown raw siblings can stay while the requested id goes away. */
   removed: string[];
   removedBudgets: string[];
+  /** The economy-all allowlist and its five routes. Untouched, the stored block is preserved. */
+  allSeats: AllSeatsDraft;
 };
+
+/** Every route the economy-all policy plans: coordinator, decision, execution, escalation, retain. */
+export const ALL_SEATS_ROUTES = [
+  "coordinator",
+  "decision",
+  "execution",
+  "escalation",
+  "retain",
+] as const satisfies readonly AllSeatsRoute[];
+
+export type AllSeatsEntryDraft = {
+  profileId: string;
+  /** The family key verified against the live provider/model, written with the tuple. */
+  family: string;
+  enabled: boolean;
+  originalFamily: string;
+  originalBoundModel: unknown | null;
+  /** A new or explicitly re-confirmed entry re-reads the live family and tuple on save. */
+  familyTouched: boolean;
+};
+
+export type AllSeatsDraft = {
+  /** The stored block version, kept only for the warning; an explicit edit writes v1. */
+  storedVersion: unknown;
+  profiles: AllSeatsEntryDraft[];
+  routes: Record<AllSeatsRoute, string[]>;
+  executionTaskOrder: Partial<Record<TaskKind, string[]>>;
+  removed: string[];
+  /** Nothing in this block was edited: the stored block survives the save byte for byte. */
+  touched: boolean;
+};
+
+export function emptyAllSeatsDraft(): AllSeatsDraft {
+  return {
+    storedVersion: undefined,
+    profiles: [],
+    routes: { coordinator: [], decision: [], execution: [], escalation: [], retain: [] },
+    executionTaskOrder: {},
+    removed: [],
+    touched: false,
+  };
+}
+
+/** The stored version when this version cannot read it, or null when there is nothing to warn about. */
+export function allSeatsStoredVersion(draft: AllSeatsDraft): string | null {
+  const version = draft.storedVersion;
+  if (version === undefined || version === ALL_SEATS_POLICY_VERSION) return null;
+  return typeof version === "string" ? version : (JSON.stringify(version) ?? String(version));
+}
 
 export type EconomyEditorState = EconomyDraft & { maxMembers: number };
 
@@ -130,7 +196,65 @@ export function draftFromStored(raw: unknown): EconomyDraft {
       profileBudget[profileId] = budget as EconomyBudget;
     }
   }
-  return { pool, taskOrder, profileBudget, removed: [], removedBudgets: [] };
+  return {
+    pool,
+    taskOrder,
+    profileBudget,
+    removed: [],
+    removedBudgets: [],
+    allSeats: readAllSeats(base?.allSeats),
+  };
+}
+
+/** Ids kept in order: strings only, inside the allowlist, first occurrence wins. */
+function uniqueKnownIds(value: unknown, allowed: ReadonlySet<string>): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const id of value) {
+    if (typeof id !== "string" || !allowed.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    kept.push(id);
+  }
+  return kept;
+}
+
+/**
+ * Read the economy-all policy leniently: an unreadable entry, route, or task order entry is
+ * skipped individually and reported by planning, never by failing the whole block. The stored
+ * version is remembered so the editor can warn before an explicit edit rewrites the block.
+ */
+function readAllSeats(raw: unknown): AllSeatsDraft {
+  const draft = emptyAllSeatsDraft();
+  const base = asRecord(raw);
+  if (!base) return draft;
+  draft.storedVersion = base.version;
+  const seen = new Set<string>();
+  for (const item of Array.isArray(base.profiles) ? base.profiles : []) {
+    const entry = asRecord(item);
+    if (!entry || typeof entry.profileId !== "string" || entry.profileId === "") continue;
+    if (seen.has(entry.profileId)) continue;
+    seen.add(entry.profileId);
+    const family = typeof entry.family === "string" ? entry.family : "";
+    draft.profiles.push({
+      profileId: entry.profileId,
+      family,
+      enabled: entry.enabled !== false,
+      originalFamily: family,
+      originalBoundModel: entry.boundModel === undefined ? null : entry.boundModel,
+      familyTouched: false,
+    });
+  }
+  const rawRoutes = asRecord(base.routes) ?? {};
+  for (const route of ALL_SEATS_ROUTES) {
+    draft.routes[route] = uniqueKnownIds(rawRoutes[route], seen);
+  }
+  for (const [kind, ids] of Object.entries(asRecord(base.executionTaskOrder) ?? {})) {
+    if (!isTaskKind(kind)) continue;
+    const kept = uniqueKnownIds(ids, seen);
+    if (kept.length > 0) draft.executionTaskOrder[kind] = kept;
+  }
+  return draft;
 }
 
 export function moveInList<T>(items: readonly T[], index: number, direction: -1 | 1): T[] {
@@ -275,6 +399,312 @@ export function removeProfileBudget(draft: EconomyDraft, profileId: string): Eco
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Economy-all ("全席位") policy: allowlist, five routes, and the execution task order.
+// Nothing here decides eligibility at launch time — planning re-verifies every tuple. The editor
+// derives the family from the live model, never from a Profile name, and only writes a family it
+// has seen as a supported low-cost one.
+// ---------------------------------------------------------------------------------------------
+
+export const SUGGESTED_DECISION_FAMILIES: readonly ModelFamily[] = ["sonnet"];
+export const SUGGESTED_EXECUTION_FAMILIES: readonly ModelFamily[] = ["deepseek", "grok"];
+
+/** The supported low-cost family of a live Profile, or null when the model id does not resolve. */
+export function cheapFamilyOf(profile: { model?: string }): ModelFamily | null {
+  const match = identifyModelFamily({ model: profile.model });
+  return match.status === "identified" && match.cost === "low" ? match.family : null;
+}
+
+export type AllSeatsExclusionReason =
+  | "profile-missing"
+  | "model-unresolved"
+  | "family-high-cost"
+  | "needs-rebind"
+  | "provider-unavailable"
+  | "provider-unverified";
+
+export type AllSeatsEntryCheck = {
+  liveFamily: ModelFamily | null;
+  exclusion: AllSeatsExclusionReason | null;
+  providerReason?: string;
+};
+
+/** A saved family and tuple still describe the live Profile (the pool's existing rule). */
+function allSeatsBindingVerified(entry: AllSeatsEntryDraft, profile: PaseoProfile): boolean {
+  if (entry.familyTouched) return true;
+  if (!entry.originalFamily) return false;
+  const storedFamily = storedModelFamily(entry.originalFamily);
+  if (!storedFamily || MODEL_FAMILIES[storedFamily].cost !== "low") return false;
+  const saved = savedBinding(entry.originalBoundModel);
+  return saved !== null && sameModelTuple(saved, liveBinding(profile));
+}
+
+/**
+ * Display-side eligibility: allowlist ∩ resolved low-cost live model ∩ verified tuple ∩ provider
+ * available. `availability` null means the query has not answered, which is never treated as
+ * available. Disabled entries keep their reason; the editor labels them separately.
+ */
+export function checkAllSeatsEntry(
+  entry: AllSeatsEntryDraft,
+  profiles: readonly PaseoProfile[],
+  availability?: readonly ProviderAvailability[] | null,
+): AllSeatsEntryCheck {
+  const profile = profiles.find((item) => item.id === entry.profileId);
+  if (!profile) return { liveFamily: null, exclusion: "profile-missing" };
+  const match = identifyModelFamily({ model: profile.model });
+  if (match.status !== "identified") {
+    return {
+      liveFamily: null,
+      exclusion: namesHighCostFamily(match) ? "family-high-cost" : "model-unresolved",
+    };
+  }
+  if (match.cost === "high") return { liveFamily: match.family, exclusion: "family-high-cost" };
+  if (match.cost === "unknown") {
+    return { liveFamily: match.family, exclusion: "model-unresolved" };
+  }
+  if (!allSeatsBindingVerified(entry, profile)) {
+    return { liveFamily: match.family, exclusion: "needs-rebind" };
+  }
+  if (!availability) return { liveFamily: match.family, exclusion: "provider-unverified" };
+  const provider = availability.find((item) => item.provider === profile.provider);
+  if (!provider) return { liveFamily: match.family, exclusion: "provider-unavailable" };
+  if (!provider.available) {
+    return {
+      liveFamily: match.family,
+      exclusion: "provider-unavailable",
+      ...(provider.reason === undefined ? {} : { providerReason: provider.reason }),
+    };
+  }
+  return { liveFamily: match.family, exclusion: null };
+}
+
+/** A new or re-confirmed entry can only be written with a live, resolved low-cost Profile. */
+export function allSeatsEntryNeedsLiveProfile(
+  entry: AllSeatsEntryDraft,
+  live: ReadonlyMap<string, PaseoProfile>,
+): boolean {
+  if (!entry.familyTouched && entry.originalFamily) return false;
+  const profile = live.get(entry.profileId);
+  return !profile || cheapFamilyOf(profile) === null;
+}
+
+function editAllSeats(draft: EconomyDraft, allSeats: AllSeatsDraft): EconomyDraft {
+  return { ...draft, allSeats: { ...allSeats, touched: true } };
+}
+
+/** Add a live Profile whose model resolves to a supported low-cost family. */
+export function addAllSeatsProfile(draft: EconomyDraft, profile: PaseoProfile): EconomyDraft {
+  const { allSeats } = draft;
+  if (allSeats.profiles.length >= ALL_SEATS_WRITER_LIMIT) return draft;
+  if (allSeats.profiles.some((entry) => entry.profileId === profile.id)) return draft;
+  const family = cheapFamilyOf(profile);
+  if (!family) return draft;
+  return editAllSeats(draft, {
+    ...allSeats,
+    profiles: [
+      ...allSeats.profiles,
+      {
+        profileId: profile.id,
+        family,
+        enabled: true,
+        originalFamily: "",
+        originalBoundModel: null,
+        familyTouched: true,
+      },
+    ],
+    removed: allSeats.removed.filter((id) => id !== profile.id),
+  });
+}
+
+export function removeAllSeatsProfile(draft: EconomyDraft, profileId: string): EconomyDraft {
+  const { allSeats } = draft;
+  if (!allSeats.profiles.some((entry) => entry.profileId === profileId)) return draft;
+  const routes = { ...allSeats.routes };
+  for (const route of ALL_SEATS_ROUTES) {
+    routes[route] = routes[route].filter((id) => id !== profileId);
+  }
+  const executionTaskOrder: Partial<Record<TaskKind, string[]>> = {};
+  for (const [kind, ids] of Object.entries(allSeats.executionTaskOrder)) {
+    const kept = (ids ?? []).filter((id) => id !== profileId);
+    if (kept.length > 0) executionTaskOrder[kind as TaskKind] = kept;
+  }
+  return editAllSeats(draft, {
+    ...allSeats,
+    profiles: allSeats.profiles.filter((entry) => entry.profileId !== profileId),
+    routes,
+    executionTaskOrder,
+    removed: allSeats.removed.includes(profileId)
+      ? allSeats.removed
+      : [...allSeats.removed, profileId],
+  });
+}
+
+export function setAllSeatsEnabled(
+  draft: EconomyDraft,
+  profileId: string,
+  enabled: boolean,
+): EconomyDraft {
+  const { allSeats } = draft;
+  if (!allSeats.profiles.some((entry) => entry.profileId === profileId)) return draft;
+  return editAllSeats(draft, {
+    ...allSeats,
+    profiles: allSeats.profiles.map((entry) =>
+      entry.profileId === profileId ? { ...entry, enabled } : entry,
+    ),
+  });
+}
+
+/** Accept the live family and provider/model tuple after a Profile was re-pointed. */
+export function rebindAllSeatsProfile(
+  draft: EconomyDraft,
+  profileId: string,
+  profile: PaseoProfile,
+): EconomyDraft {
+  const family = cheapFamilyOf(profile);
+  if (!family) return draft;
+  const { allSeats } = draft;
+  if (!allSeats.profiles.some((entry) => entry.profileId === profileId)) return draft;
+  return editAllSeats(draft, {
+    ...allSeats,
+    profiles: allSeats.profiles.map((entry) =>
+      entry.profileId === profileId ? { ...entry, family, familyTouched: true } : entry,
+    ),
+  });
+}
+
+export function addAllSeatsRouteEntry(
+  draft: EconomyDraft,
+  route: AllSeatsRoute,
+  profileId: string,
+): EconomyDraft {
+  const { allSeats } = draft;
+  if (!allSeats.profiles.some((entry) => entry.profileId === profileId)) return draft;
+  const current = allSeats.routes[route];
+  if (current.includes(profileId) || current.length >= ALL_SEATS_WRITER_LIMIT) return draft;
+  const routes = { ...allSeats.routes };
+  routes[route] = [...current, profileId];
+  return editAllSeats(draft, { ...allSeats, routes });
+}
+
+export function removeAllSeatsRouteEntry(
+  draft: EconomyDraft,
+  route: AllSeatsRoute,
+  profileId: string,
+): EconomyDraft {
+  const { allSeats } = draft;
+  if (!allSeats.routes[route].includes(profileId)) return draft;
+  const routes = { ...allSeats.routes };
+  routes[route] = allSeats.routes[route].filter((id) => id !== profileId);
+  const executionTaskOrder = { ...allSeats.executionTaskOrder };
+  for (const [kind, ids] of Object.entries(executionTaskOrder)) {
+    const kept = (ids ?? []).filter((id) => id !== profileId);
+    if (kept.length > 0) executionTaskOrder[kind as TaskKind] = kept;
+    else delete executionTaskOrder[kind as TaskKind];
+  }
+  return editAllSeats(draft, { ...allSeats, routes, executionTaskOrder });
+}
+
+export function moveAllSeatsRouteEntry(
+  draft: EconomyDraft,
+  route: AllSeatsRoute,
+  index: number,
+  direction: -1 | 1,
+): EconomyDraft {
+  const { allSeats } = draft;
+  const routes = { ...allSeats.routes };
+  routes[route] = moveInList(allSeats.routes[route], index, direction);
+  return editAllSeats(draft, { ...allSeats, routes });
+}
+
+/** The execution route order with the task-kind override in front, filtered inside the route. */
+export function effectiveAllSeatsTaskOrder(draft: EconomyDraft, kind: TaskKind): string[] {
+  const route = draft.allSeats.routes.execution;
+  const inRoute = new Set(route);
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const profileId of [...(draft.allSeats.executionTaskOrder[kind] ?? []), ...route]) {
+    if (seen.has(profileId) || !inRoute.has(profileId)) continue;
+    seen.add(profileId);
+    ordered.push(profileId);
+  }
+  return ordered;
+}
+
+export function moveAllSeatsTaskOrder(
+  draft: EconomyDraft,
+  kind: TaskKind,
+  index: number,
+  direction: -1 | 1,
+): EconomyDraft {
+  const order = moveInList(effectiveAllSeatsTaskOrder(draft, kind), index, direction);
+  const { allSeats } = draft;
+  return editAllSeats(draft, {
+    ...allSeats,
+    executionTaskOrder: { ...allSeats.executionTaskOrder, [kind]: order },
+  });
+}
+
+export function resetAllSeatsTaskOrder(draft: EconomyDraft, kind: TaskKind): EconomyDraft {
+  const { allSeats } = draft;
+  const executionTaskOrder = { ...allSeats.executionTaskOrder };
+  delete executionTaskOrder[kind];
+  return editAllSeats(draft, { ...allSeats, executionTaskOrder });
+}
+
+/**
+ * Fill the allowlist and routes from the live low-cost Profiles: Sonnet for coordinator, decision,
+ * escalation, and retain; DeepSeek then Grok for execution, with ops/acceptance preferring Grok.
+ * Advice only: it edits the draft and never saves, and it never removes an existing entry.
+ */
+export function applySuggestedAllSeats(
+  draft: EconomyDraft,
+  profiles: readonly PaseoProfile[],
+): EconomyDraft {
+  const suggested = profiles.flatMap((profile) => {
+    const family = cheapFamilyOf(profile);
+    if (!family) return [];
+    if (!SUGGESTED_DECISION_FAMILIES.includes(family)) {
+      if (!SUGGESTED_EXECUTION_FAMILIES.includes(family)) return [];
+    }
+    return [{ profile, family }];
+  });
+  if (suggested.length === 0) return draft;
+  let next = draft;
+  for (const { profile } of suggested) next = addAllSeatsProfile(next, profile);
+  const familyById = new Map(suggested.map(({ profile, family }) => [profile.id, family]));
+  const idsFor = (families: readonly ModelFamily[]): string[] =>
+    next.allSeats.profiles
+      .map((entry) => entry.profileId)
+      .filter((id) => {
+        const family = familyById.get(id);
+        return family !== undefined && families.includes(family);
+      })
+      .slice(0, ALL_SEATS_WRITER_LIMIT);
+  const decision = idsFor(SUGGESTED_DECISION_FAMILIES);
+  const execution = idsFor(SUGGESTED_EXECUTION_FAMILIES);
+  const deepseek = execution.filter((id) => familyById.get(id) === "deepseek");
+  const grok = execution.filter((id) => familyById.get(id) === "grok");
+  const executionOrder = [...deepseek, ...grok].slice(0, ALL_SEATS_WRITER_LIMIT);
+  return editAllSeats(next, {
+    ...next.allSeats,
+    routes: {
+      coordinator: decision,
+      decision,
+      execution,
+      escalation: decision,
+      retain: decision,
+    },
+    executionTaskOrder: {
+      coding: executionOrder,
+      testing: executionOrder,
+      codebase: executionOrder,
+      general: executionOrder,
+      ops: [...grok, ...deepseek].slice(0, ALL_SEATS_WRITER_LIMIT),
+      acceptance: [...grok, ...deepseek].slice(0, ALL_SEATS_WRITER_LIMIT),
+    },
+  });
+}
+
 export type EconomySuggestion = { name: string; family: string };
 
 /** Local advice only. A missing, ambiguous, or non-omp name never becomes a guessed Profile id. */
@@ -391,7 +821,7 @@ export function needsLiveProfilesForSave(
   profiles: readonly PaseoProfile[],
 ): boolean {
   const live = new Set(profiles.map((profile) => profile.id));
-  return draft.pool.some((entry) => {
+  const poolNeedsProfiles = draft.pool.some((entry) => {
     if (!normalizeFamily(entry.family)) return false;
     // Only a new entry or one whose family the user touched requires a live Profile. An untouched
     // legacy unbound entry is preserved as-is, so editing only maxMembers must not be blocked.
@@ -399,6 +829,9 @@ export function needsLiveProfilesForSave(
       entry.familyTouched || (!entry.originalFamily && entry.originalBoundModel === null);
     return needsBinding && !live.has(entry.profileId);
   });
+  if (poolNeedsProfiles) return true;
+  const liveById = new Map(profiles.map((profile) => [profile.id, profile]));
+  return draft.allSeats.profiles.some((entry) => allSeatsEntryNeedsLiveProfile(entry, liveById));
 }
 
 function buildPoolEntry(
@@ -500,7 +933,123 @@ export function buildStoredEconomy(
   for (const [profileId, budget] of Object.entries(draft.profileBudget)) {
     if (!poolIds.has(profileId) && BUDGETS[budget] === true) profileBudget[profileId] = budget;
   }
-  return { ...base, pool, taskOrder, profileBudget };
+  return {
+    ...base,
+    pool,
+    taskOrder,
+    profileBudget,
+    // An untouched block (including a future version) is left exactly as stored by the spread.
+    ...(draft.allSeats.touched
+      ? { allSeats: buildStoredAllSeats(base.allSeats, draft.allSeats, profilesById) }
+      : {}),
+  };
+}
+
+/**
+ * Write one allowlist entry. Sibling fields of the stored entry survive; a re-confirmed entry
+ * writes the live low-cost family and tuple it was verified against, never a typed-in claim.
+ */
+function buildAllSeatsEntry(
+  entry: AllSeatsEntryDraft,
+  raw: Record<string, unknown> | undefined,
+  profile: PaseoProfile | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    ...(raw ?? {}),
+    profileId: entry.profileId,
+    enabled: entry.enabled,
+    costClass: "low",
+  };
+  if (entry.familyTouched) {
+    const family = profile ? cheapFamilyOf(profile) : null;
+    if (family) {
+      out.family = family;
+      if (profile) out.boundModel = liveBinding(profile);
+    } else if (entry.family) {
+      out.family = entry.family;
+    }
+    // Writer shape: a re-confirmed entry must carry the family and the verified live tuple.
+    StoredAllSeatsEntrySchema.parse(out);
+  } else if (profile && entry.originalBoundModel === null && entry.originalFamily) {
+    // The family is unchanged; record the tuple it was accepted with for the next verification.
+    out.boundModel = liveBinding(profile);
+  }
+  if (profile?.name) out.nameSnapshot = profile.name;
+  return out;
+}
+
+/** Build the economy-all block for an explicitly edited draft, keeping unknown raw siblings. */
+function buildStoredAllSeats(
+  raw: unknown,
+  draft: AllSeatsDraft,
+  profilesById: ReadonlyMap<string, PaseoProfile>,
+): Record<string, unknown> {
+  const base = asRecord(raw) ?? {};
+  const rawProfiles = Array.isArray(base.profiles) ? base.profiles : [];
+  const rawById = new Map<string, Record<string, unknown>>();
+  for (const item of rawProfiles) {
+    const entry = asRecord(item);
+    if (entry && typeof entry.profileId === "string" && !rawById.has(entry.profileId)) {
+      rawById.set(entry.profileId, entry);
+    }
+  }
+  const draftById = new Map(draft.profiles.map((entry) => [entry.profileId, entry]));
+  const removed = new Set(draft.removed);
+  const consumed = new Set<string>();
+  const profiles: unknown[] = [];
+  for (const item of rawProfiles) {
+    const entry = asRecord(item);
+    const profileId = entry && typeof entry.profileId === "string" ? entry.profileId : null;
+    if (!profileId) {
+      profiles.push(item);
+      continue;
+    }
+    if (removed.has(profileId)) continue;
+    const wanted = draftById.get(profileId);
+    if (!wanted) {
+      // An id this version cannot read (removed by a newer writer): preserve the stored entry.
+      profiles.push(item);
+      continue;
+    }
+    // A duplicate of an allowlisted id is not a second allowlist entry: keep the first only.
+    if (consumed.has(profileId)) continue;
+    profiles.push(buildAllSeatsEntry(wanted, entry ?? undefined, profilesById.get(profileId)));
+    consumed.add(profileId);
+  }
+  for (const entry of draft.profiles) {
+    if (consumed.has(entry.profileId)) continue;
+    profiles.push(
+      buildAllSeatsEntry(entry, rawById.get(entry.profileId), profilesById.get(entry.profileId)),
+    );
+  }
+  const allow = new Set(
+    profiles.flatMap((entry) => {
+      const record = asRecord(entry);
+      return record && typeof record.profileId === "string" ? [record.profileId] : [];
+    }),
+  );
+  const rawRoutes = asRecord(base.routes) ?? {};
+  const routes: Record<string, unknown> = { ...rawRoutes };
+  for (const route of ALL_SEATS_ROUTES) {
+    const ids = draft.routes[route].filter((id) => allow.has(id));
+    if (ids.length > 0) routes[route] = ids;
+    else delete routes[route];
+  }
+  const rawOrder = asRecord(base.executionTaskOrder) ?? {};
+  const executionTaskOrder: Record<string, unknown> = { ...rawOrder };
+  const execution = new Set(draft.routes.execution.filter((id) => allow.has(id)));
+  for (const kind of TASK_KINDS) {
+    const ids = (draft.executionTaskOrder[kind] ?? []).filter((id) => execution.has(id));
+    if (ids.length > 0) executionTaskOrder[kind] = ids;
+    else delete executionTaskOrder[kind];
+  }
+  return {
+    ...base,
+    version: ALL_SEATS_POLICY_VERSION,
+    profiles,
+    routes,
+    executionTaskOrder,
+  };
 }
 
 export type EconomyMergeOptions = {

@@ -6,6 +6,7 @@ import {
   resolveLaunchPrefill,
 } from "../client/launch/launch-args";
 import { zh } from "../shared/zh";
+import { modesZh } from "../shared/zh/modes";
 import { codingTeam } from "./fixtures";
 
 const teams = [codingTeam, { ...codingTeam, id: "research-team", name: "Research Team" }];
@@ -71,7 +72,7 @@ describe("launchModeDisplay", () => {
     expect(launchModeDisplay({ ...codingTeam, mode: "economy" })).toEqual({
       kind: "known",
       mode: "economy",
-      label: zh.teamModeEconomy,
+      label: modesZh.modeLabels.standard,
     });
     expect(launchModeDisplay({ ...codingTeam, mode: "collaborative" })).toEqual({
       kind: "known",

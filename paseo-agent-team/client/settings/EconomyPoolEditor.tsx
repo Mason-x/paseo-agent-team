@@ -9,9 +9,14 @@ import type { EconomyBudget } from "../../shared/domain/mode-resolver";
 import { toJsonValue } from "../../shared/json";
 import type { PaseoAdapter, PaseoProfile } from "../../shared/paseo/adapter";
 import { PreferencesSchema } from "../../shared/schemas/preferences";
-import type { TaskKind } from "../../shared/schemas/team-mode";
+import {
+  ALL_SEATS_WRITER_LIMIT,
+  type AllSeatsRoute,
+  type TaskKind,
+} from "../../shared/schemas/team-mode";
 import { preferencesSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import { modesZh } from "../../shared/zh/modes";
 import { GhostIconButton, ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
 import { Field, inputStyle } from "../shared/Field";
@@ -19,29 +24,47 @@ import { ImeTextInput } from "../shared/ImeTextInput";
 import { TASK_KIND_OPTIONS } from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import {
+  ALL_SEATS_ROUTES,
+  type AllSeatsEntryCheck,
+  addAllSeatsProfile,
+  addAllSeatsRouteEntry,
   addPoolEntry,
+  allSeatsStoredVersion,
+  applySuggestedAllSeats,
   applySuggestedPool,
+  cheapFamilyOf,
+  checkAllSeatsEntry,
   DEFAULT_MAX_MEMBERS,
   decideEconomySave,
   draftFromStored,
   type EconomyEditorState,
   type EconomyOpenedSnapshot,
+  effectiveAllSeatsTaskOrder,
   effectiveTaskOrder,
+  emptyAllSeatsDraft,
   familyIsInvalid,
   familyNeedsRebind,
   MAX_MAX_MEMBERS,
   mergeEconomyPreferences,
+  moveAllSeatsRouteEntry,
+  moveAllSeatsTaskOrder,
   movePoolEntry,
   moveTaskOrder,
   needsLiveProfilesForSave,
+  rebindAllSeatsProfile,
   rebindPoolFamily,
+  removeAllSeatsProfile,
+  removeAllSeatsRouteEntry,
   removePoolEntry,
   removeProfileBudget,
+  resetAllSeatsTaskOrder,
   resetTaskOrder,
   resolveMaxMembersForSave,
+  setAllSeatsEnabled,
   setPoolEnabled,
   setPoolFamily,
   setProfileBudget,
+  stableJson,
 } from "./economy-pool";
 
 const preferencesRead = settingsRpc(preferencesSettings.id).read;
@@ -60,8 +83,48 @@ function emptyState(): EconomyEditorState {
     profileBudget: {},
     removed: [],
     removedBudgets: [],
+    allSeats: emptyAllSeatsDraft(),
     maxMembers: DEFAULT_MAX_MEMBERS,
   };
+}
+
+/**
+ * One line for an allowlist entry: what blocks it, or that it is ready. A disabled entry is
+ * labelled as such but still shows why it is otherwise ineligible.
+ */
+function allSeatsStatus(
+  check: AllSeatsEntryCheck,
+  profile: PaseoProfile | undefined,
+  enabled: boolean,
+  profileId: string,
+): { text: string; warning: boolean } {
+  if (check.exclusion === "profile-missing") {
+    return { text: modesZh.economyAllExcludedProfileMissing(profileId), warning: true };
+  }
+  if (check.exclusion === "model-unresolved") {
+    return { text: modesZh.economyAllExcludedModel, warning: true };
+  }
+  if (check.exclusion === "family-high-cost") {
+    return { text: modesZh.economyAllExcludedHighCost, warning: true };
+  }
+  if (check.exclusion === "needs-rebind") {
+    return { text: modesZh.economyAllExcludedRebind, warning: true };
+  }
+  if (check.exclusion === "provider-unavailable") {
+    return {
+      text: modesZh.economyAllProviderUnavailable(profile?.provider ?? "", check.providerReason),
+      warning: true,
+    };
+  }
+  if (check.exclusion === "provider-unverified") {
+    return {
+      text: modesZh.economyAllProviderUnverified(profile?.provider ?? ""),
+      warning: true,
+    };
+  }
+  return enabled
+    ? { text: modesZh.economyAllEntryReady, warning: false }
+    : { text: modesZh.economyAllEntryDisabled, warning: false };
 }
 
 export function EconomyPoolEditor({
@@ -92,6 +155,7 @@ export function EconomyPoolEditor({
   const [state, setState] = useState<EconomyEditorState>(emptyState);
   const [maxText, setMaxText] = useState(String(DEFAULT_MAX_MEMBERS));
   const [taskKind, setTaskKind] = useState<TaskKind>("coding");
+  const [allSeatsTaskKind, setAllSeatsTaskKind] = useState<TaskKind>("coding");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -273,6 +337,84 @@ export function EconomyPoolEditor({
     }));
   }
 
+  function addAllSeats(profileId: string) {
+    const profile = profiles.find((entry) => entry.id === profileId);
+    if (!profile) return;
+    update((current) => ({
+      ...addAllSeatsProfile(current, profile),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function removeAllSeats(profileId: string) {
+    update((current) => ({
+      ...removeAllSeatsProfile(current, profileId),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function toggleAllSeats(profileId: string, enabled: boolean) {
+    update((current) => ({
+      ...setAllSeatsEnabled(current, profileId, enabled),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function rebindAllSeats(profileId: string) {
+    const profile = profiles.find((entry) => entry.id === profileId);
+    if (!profile) return;
+    update((current) => ({
+      ...rebindAllSeatsProfile(current, profileId, profile),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function addRouteEntry(route: AllSeatsRoute, profileId: string) {
+    if (!profileId) return;
+    update((current) => ({
+      ...addAllSeatsRouteEntry(current, route, profileId),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function removeRouteEntry(route: AllSeatsRoute, profileId: string) {
+    update((current) => ({
+      ...removeAllSeatsRouteEntry(current, route, profileId),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function moveRouteEntry(route: AllSeatsRoute, index: number, direction: -1 | 1) {
+    update((current) => ({
+      ...moveAllSeatsRouteEntry(current, route, index, direction),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function moveAllSeatsTask(kind: TaskKind, index: number, direction: -1 | 1) {
+    update((current) => ({
+      ...moveAllSeatsTaskOrder(current, kind, index, direction),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function resetAllSeatsOrder(kind: TaskKind) {
+    update((current) => ({
+      ...resetAllSeatsTaskOrder(current, kind),
+      maxMembers: current.maxMembers,
+    }));
+  }
+
+  function applyAllSeatsSuggestions() {
+    const next = applySuggestedAllSeats(state, profiles);
+    if (stableJson(next) === stableJson(state)) {
+      setNotice(modesZh.economyAllSuggestedNone);
+      return;
+    }
+    setNotice(null);
+    setState({ ...next, maxMembers: state.maxMembers });
+  }
+
   async function save(forceOverwrite = false) {
     setSaving(true);
     setError(null);
@@ -347,6 +489,13 @@ export function EconomyPoolEditor({
     : null;
   const legacyMax =
     opened.maxMembers > MAX_MAX_MEMBERS && maxText.trim() === String(opened.maxMembers);
+  const allSeats = state.allSeats;
+  const allSeatsIds = new Set(allSeats.profiles.map((entry) => entry.profileId));
+  const eligibleAllSeats = profiles.filter(
+    (profile) => cheapFamilyOf(profile) !== null && !allSeatsIds.has(profile.id),
+  );
+  const allSeatsVersion = allSeatsStoredVersion(allSeats);
+  const allSeatsOrder = effectiveAllSeatsTaskOrder(state, allSeatsTaskKind);
 
   return (
     <Modal title={zh.economyPoolTitle} open={open} onOpenChange={(next) => !next && onClose()}>
@@ -372,7 +521,7 @@ export function EconomyPoolEditor({
           {!loading && !loadError ? (
             <>
               <View style={styles.section}>
-                <Text style={styles.sectionTitle}>{zh.economyPool}</Text>
+                <Text style={styles.sectionTitle}>{modesZh.standardPoolTitle}</Text>
                 {state.pool.length === 0 ? (
                   <Text style={styles.muted}>{zh.economyPoolEmpty}</Text>
                 ) : null}
@@ -489,7 +638,6 @@ export function EconomyPoolEditor({
                     <Text style={styles.link}>{zh.economyPoolSuggest}</Text>
                   </Pressable>
                 ) : null}
-                {notice ? <Text style={styles.warning}>{notice}</Text> : null}
               </View>
 
               <View style={styles.section}>
@@ -586,6 +734,226 @@ export function EconomyPoolEditor({
                   />
                 ) : null}
               </View>
+
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>{modesZh.economyAllTitle}</Text>
+                <Text style={styles.muted}>{modesZh.economyAllIntro}</Text>
+                {allSeatsVersion ? (
+                  <Text style={styles.warning}>
+                    {modesZh.economyAllVersionUnknown(allSeatsVersion)}
+                  </Text>
+                ) : null}
+                <Text style={styles.muted}>{modesZh.economyAllLimit(ALL_SEATS_WRITER_LIMIT)}</Text>
+                {allSeats.profiles.length === 0 ? (
+                  <Text style={styles.muted}>{modesZh.economyAllEmpty}</Text>
+                ) : null}
+                {allSeats.profiles.map((entry) => {
+                  const profile = profilesById.get(entry.profileId);
+                  const displayName = profile?.name ?? entry.profileId;
+                  const check = checkAllSeatsEntry(entry, profiles, availability.data ?? null);
+                  const status = allSeatsStatus(check, profile, entry.enabled, entry.profileId);
+                  const binding = profile
+                    ? `${profile.provider}${profile.model ? `/${profile.model}` : ""}`
+                    : entry.profileId;
+                  const family = check.liveFamily ?? entry.family;
+                  return (
+                    <View key={entry.profileId} style={styles.row}>
+                      <View style={styles.rowHead}>
+                        <View style={styles.grow}>
+                          <Text style={styles.name} numberOfLines={1}>
+                            {profile?.name ?? zh.economyPoolProfileMissing(entry.profileId)}
+                          </Text>
+                          <Text style={styles.profileMeta}>
+                            {binding}
+                            {family ? ` · ${family}` : ""}
+                          </Text>
+                        </View>
+                        <GhostIconButton
+                          theme={theme}
+                          icon="Trash2"
+                          danger
+                          accessibilityLabel={modesZh.economyAllRemoveFor(displayName)}
+                          onPress={() => removeAllSeats(entry.profileId)}
+                        />
+                      </View>
+                      <Text style={status.warning ? styles.warning : styles.muted}>
+                        {status.text}
+                      </Text>
+                      <View style={styles.rowHead}>
+                        <Text style={[styles.muted, styles.grow]}>{displayName}</Text>
+                        <Switch
+                          accessibilityLabel={modesZh.economyAllToggleFor(displayName)}
+                          value={entry.enabled}
+                          onValueChange={(enabled) => toggleAllSeats(entry.profileId, enabled)}
+                        />
+                      </View>
+                      {check.exclusion === "needs-rebind" && profile ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={modesZh.economyAllRebind}
+                          onPress={() => rebindAllSeats(entry.profileId)}
+                        >
+                          <Text style={styles.link}>{modesZh.economyAllRebind}</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  );
+                })}
+                {profilesLoading ? <Text style={styles.muted}>{zh.loadingProfiles}</Text> : null}
+                {profilesError ? (
+                  <Text style={styles.warning}>{zh.economyPoolProfilesUnavailable}</Text>
+                ) : null}
+                {profiles.length === 0 && !profilesLoading ? (
+                  <Text style={styles.muted}>{zh.economyPoolNoProfiles}</Text>
+                ) : eligibleAllSeats.length === 0 ? (
+                  <Text style={styles.muted}>{modesZh.economyAllNoEligible}</Text>
+                ) : (
+                  <CompactPicker
+                    theme={theme}
+                    label={modesZh.economyAllAddProfile}
+                    items={eligibleAllSeats.map((profile) => ({
+                      id: profile.id,
+                      name: profile.name,
+                    }))}
+                    selectedId=""
+                    placeholder={modesZh.economyAllAddProfile}
+                    searchPlaceholder={zh.searchProfiles}
+                    emptyLabel={modesZh.economyAllNoEligible}
+                    subtitle={(item) => {
+                      const profile = profilesById.get(item.id);
+                      return profile?.model
+                        ? `${profile.provider}/${profile.model}`
+                        : profile?.provider;
+                    }}
+                    onChange={addAllSeats}
+                  />
+                )}
+                {profiles.length > 0 ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={modesZh.economyAllSuggest}
+                    onPress={applyAllSeatsSuggestions}
+                  >
+                    <Text style={styles.link}>{modesZh.economyAllSuggest}</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>{modesZh.economyAllRoutesTitle}</Text>
+                <Text style={styles.muted}>{modesZh.economyAllRoutesHint}</Text>
+                {ALL_SEATS_ROUTES.map((route) => {
+                  const routeIds = allSeats.routes[route];
+                  const routeCandidates = allSeats.profiles.filter(
+                    (entry) => !routeIds.includes(entry.profileId),
+                  );
+                  return (
+                    <View key={route} style={styles.row}>
+                      <Text style={styles.name}>{modesZh.economyAllRouteLabels[route]}</Text>
+                      {routeIds.length === 0 ? (
+                        <Text style={styles.muted}>{modesZh.economyAllRouteEmpty}</Text>
+                      ) : (
+                        routeIds.map((profileId, index) => {
+                          const name = profilesById.get(profileId)?.name ?? profileId;
+                          return (
+                            <View key={profileId} style={styles.orderRow}>
+                              <Text style={styles.orderName} numberOfLines={1}>
+                                {name}
+                              </Text>
+                              <GhostIconButton
+                                theme={theme}
+                                icon="ChevronUp"
+                                accessibilityLabel={zh.economyPoolMoveUpFor(name)}
+                                onPress={() => moveRouteEntry(route, index, -1)}
+                              />
+                              <GhostIconButton
+                                theme={theme}
+                                icon="ChevronDown"
+                                accessibilityLabel={zh.economyPoolMoveDownFor(name)}
+                                onPress={() => moveRouteEntry(route, index, 1)}
+                              />
+                              <GhostIconButton
+                                theme={theme}
+                                icon="X"
+                                accessibilityLabel={modesZh.economyAllRouteRemoveFor(name)}
+                                onPress={() => removeRouteEntry(route, profileId)}
+                              />
+                            </View>
+                          );
+                        })
+                      )}
+                      {routeCandidates.length > 0 && routeIds.length < ALL_SEATS_WRITER_LIMIT ? (
+                        <CompactPicker
+                          theme={theme}
+                          label={modesZh.economyAllRouteAdd}
+                          items={routeCandidates.map((entry) => ({
+                            id: entry.profileId,
+                            name: profilesById.get(entry.profileId)?.name ?? entry.profileId,
+                          }))}
+                          selectedId=""
+                          placeholder={modesZh.economyAllRouteAdd}
+                          searchPlaceholder={zh.searchProfiles}
+                          emptyLabel={zh.noMatches}
+                          onChange={(id) => addRouteEntry(route, id)}
+                        />
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>{modesZh.economyAllTaskOrderTitle}</Text>
+                <Text style={styles.muted}>{modesZh.economyAllTaskOrderHint}</Text>
+                <CompactPicker
+                  theme={theme}
+                  label={zh.economyPoolTaskKind}
+                  items={TASK_KIND_OPTIONS.map((option) => ({
+                    id: option.value,
+                    name: option.label,
+                  }))}
+                  selectedId={allSeatsTaskKind}
+                  placeholder={zh.economyPoolTaskKind}
+                  searchPlaceholder={zh.searchTaskKinds}
+                  emptyLabel={zh.noMatches}
+                  onChange={(id) => setAllSeatsTaskKind(id as TaskKind)}
+                />
+                {allSeatsOrder.length === 0 ? (
+                  <Text style={styles.muted}>{modesZh.economyAllRouteEmpty}</Text>
+                ) : (
+                  allSeatsOrder.map((profileId, index) => {
+                    const name = profilesById.get(profileId)?.name ?? profileId;
+                    return (
+                      <View key={profileId} style={styles.orderRow}>
+                        <Text style={styles.orderName} numberOfLines={1}>
+                          {name}
+                        </Text>
+                        <GhostIconButton
+                          theme={theme}
+                          icon="ChevronUp"
+                          accessibilityLabel={zh.economyPoolMoveUpFor(name)}
+                          onPress={() => moveAllSeatsTask(allSeatsTaskKind, index, -1)}
+                        />
+                        <GhostIconButton
+                          theme={theme}
+                          icon="ChevronDown"
+                          accessibilityLabel={zh.economyPoolMoveDownFor(name)}
+                          onPress={() => moveAllSeatsTask(allSeatsTaskKind, index, 1)}
+                        />
+                      </View>
+                    );
+                  })
+                )}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={modesZh.economyAllTaskOrderReset}
+                  onPress={() => resetAllSeatsOrder(allSeatsTaskKind)}
+                >
+                  <Text style={styles.link}>{modesZh.economyAllTaskOrderReset}</Text>
+                </Pressable>
+              </View>
+
+              {notice ? <Text style={styles.warning}>{notice}</Text> : null}
 
               <Field theme={theme} label={zh.economyPoolMaxMembers}>
                 <ImeTextInput
