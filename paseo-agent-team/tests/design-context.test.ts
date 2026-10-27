@@ -4,11 +4,20 @@ import {
   type DesignContextJob,
   type DesignSettingsReader,
   type DesignSettingsSnapshot,
+  describeModeRouting,
   readDesignContext,
 } from "../server/designer/context";
+import {
+  type EconomyPolicy,
+  normalizeEconomyPolicy,
+  resolveCoordinatorProfile,
+  resolveModeProfile,
+} from "../shared/domain/mode-resolver";
+import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type { DesignAdapter, DesignWorkspaceSummary } from "../shared/paseo/design-port";
 import type { Preferences } from "../shared/schemas/preferences";
 import { PreferencesSchema } from "../shared/schemas/preferences";
+import { type Role, RoleSchema } from "../shared/schemas/role";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
@@ -22,6 +31,45 @@ const CAPABILITIES: DesignContextCapabilities = {
 const PREFERENCES: Preferences = PreferencesSchema.parse({});
 const ROLES: RolesDocument = { roles: [] };
 const TEAMS: TeamsDocument = { teams: [] };
+
+const CHEAP_PROFILE: PaseoProfile = {
+  id: "cheap-deepseek",
+  name: "DeepSeek",
+  provider: "omp",
+  model: "opencode-go/deepseek-v4.1-flash",
+};
+
+const CHEAP_ROLE: Role = RoleSchema.parse({
+  id: "eng-cheap",
+  name: "Cheap Eng",
+  mission: "实现指定模块",
+  responsibilities: ["实现"],
+  systemPrompt: "按范围实现",
+  preferredProfiles: [{ profileId: "missing-profile" }],
+  fallbackProfiles: [],
+  executionPolicy: { tier: "execution", taskKind: "coding" },
+  enabled: true,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+});
+
+const CHEAP_PREFERENCES: Preferences = PreferencesSchema.parse({
+  economy: {
+    allSeats: {
+      version: 1,
+      profiles: [
+        {
+          profileId: CHEAP_PROFILE.id,
+          enabled: true,
+          costClass: "low",
+          family: "deepseek",
+          boundModel: { provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+        },
+      ],
+      routes: { execution: [CHEAP_PROFILE.id], coordinator: [CHEAP_PROFILE.id] },
+    },
+  },
+});
 const EMPTY_TIMELINE = {
   epoch: "epoch-1",
   direction: "tail" as const,
@@ -90,7 +138,10 @@ type ReaderCalls = {
   preferences: ReturnType<typeof vi.fn>;
 };
 
-function readers(invalid?: "roles" | "teams" | "preferences"): {
+function readers(
+  invalid?: "roles" | "teams" | "preferences",
+  settings: { roles?: RolesDocument; preferences?: Preferences } = {},
+): {
   readers: {
     roles: DesignSettingsReader<RolesDocument>;
     teams: DesignSettingsReader<TeamsDocument>;
@@ -109,9 +160,9 @@ function readers(invalid?: "roles" | "teams" | "preferences"): {
     );
   }
   const calls = {
-    roles: vi.fn(() => read("roles", ROLES)),
+    roles: vi.fn(() => read("roles", settings.roles ?? ROLES)),
     teams: vi.fn(() => read("teams", TEAMS)),
-    preferences: vi.fn(() => read("preferences", PREFERENCES)),
+    preferences: vi.fn(() => read("preferences", settings.preferences ?? PREFERENCES)),
   };
   return {
     readers: {
@@ -560,5 +611,317 @@ describe("design context", () => {
       agentProfiles: [],
       mcp: { enabled: false, injectIntoAgents: false },
     });
+  });
+
+  test("economy-all computes one route table and per-use verdicts", async () => {
+    const result = await readDesignContext(
+      job({ mode: "economy-all" }),
+      readers(undefined, {
+        roles: { roles: [CHEAP_ROLE] },
+        preferences: CHEAP_PREFERENCES,
+      }).readers,
+      adapter({
+        readConfig: async () => ({ agentProfiles: [CHEAP_PROFILE] }),
+        listProviderAvailability: async () => [{ provider: "omp", available: true }],
+        getDesignWorkspace: async () => CARRIER,
+      }),
+      CAPABILITIES,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const routing = result.context.modeRouting;
+    expect(routing?.status).toBe("ready");
+    if (routing?.status !== "ready") return;
+    const execution = routing.routes.find(
+      (row) => row.route === "execution" && row.taskKind === "coding",
+    );
+    expect(execution?.candidates).toEqual([
+      { profileId: CHEAP_PROFILE.id, family: "deepseek", eligible: true, reported: false },
+    ]);
+    expect(result.context.roleLaunchTables.member[CHEAP_ROLE.id]?.launchable).toBe(true);
+    expect(result.context.roleLaunchTables.coordinator[CHEAP_ROLE.id]?.launchable).toBe(true);
+    // The legacy projection is the member table, not a second computation.
+    expect(result.context.roleLaunch[CHEAP_ROLE.id]).toEqual(
+      result.context.roleLaunchTables.member[CHEAP_ROLE.id],
+    );
+  });
+
+  test("legacy modes carry no economy-all route table", async () => {
+    const result = await readDesignContext(
+      job({ mode: "economy" }),
+      readers(undefined, {
+        roles: { roles: [CHEAP_ROLE] },
+        preferences: CHEAP_PREFERENCES,
+      }).readers,
+      adapter({
+        readConfig: async () => ({ agentProfiles: [CHEAP_PROFILE] }),
+        listProviderAvailability: async () => [{ provider: "omp", available: true }],
+        getDesignWorkspace: async () => CARRIER,
+      }),
+      CAPABILITIES,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect("modeRouting" in result.context).toBe(false);
+    expect(result.context.roleLaunchTables.member[CHEAP_ROLE.id]).toEqual(
+      result.context.roleLaunch[CHEAP_ROLE.id],
+    );
+  });
+
+  test("an unreadable all-seats policy keeps the routing invalid, not empty", async () => {
+    const result = await readDesignContext(
+      job({ mode: "economy-all" }),
+      readers(undefined, {
+        roles: { roles: [CHEAP_ROLE] },
+        preferences: PreferencesSchema.parse({
+          economy: { allSeats: { version: 99 } },
+        }),
+      }).readers,
+      adapter({
+        readConfig: async () => ({ agentProfiles: [CHEAP_PROFILE] }),
+        listProviderAvailability: async () => [{ provider: "omp", available: true }],
+        getDesignWorkspace: async () => CARRIER,
+      }),
+      CAPABILITIES,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.context.modeRouting).toEqual({
+      status: "invalid",
+      reason: "unknown-version",
+    });
+  });
+});
+
+const ROUTES = ["coordinator", "decision", "execution", "escalation", "retain"] as const;
+const ROUTE_TASK_KINDS = ["coding", "testing", "acceptance", "codebase", "ops", "general"] as const;
+
+const ROUTE_PROFILES: PaseoProfile[] = [
+  { id: "haiku", name: "Haiku", provider: "claude", model: "claude-haiku-4-5" },
+  { id: "deepseek", name: "DeepSeek", provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+  { id: "sonnet", name: "Sonnet", provider: "claude", model: "claude-sonnet-5" },
+];
+
+const HAIKU_ENTRY = {
+  profileId: "haiku",
+  enabled: true,
+  costClass: "low",
+  family: "haiku",
+  boundModel: { provider: "claude", model: "claude-haiku-4-5" },
+};
+const DEEPSEEK_ENTRY = {
+  profileId: "deepseek",
+  enabled: true,
+  costClass: "low",
+  family: "deepseek",
+  boundModel: { provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+};
+const SONNET_ENTRY = {
+  profileId: "sonnet",
+  enabled: true,
+  costClass: "low",
+  family: "sonnet",
+  boundModel: { provider: "claude", model: "claude-sonnet-5" },
+};
+const MISSING_ENTRY = {
+  profileId: "missing",
+  enabled: true,
+  costClass: "low",
+  family: "deepseek",
+  boundModel: { provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+};
+
+function routePolicy(input: {
+  profiles: unknown[];
+  routes: Record<string, string[]>;
+  executionTaskOrder?: Record<string, string[]>;
+  profileBudget?: Record<string, string>;
+}): EconomyPolicy {
+  const normalized = normalizeEconomyPolicy(
+    {
+      pool: [],
+      taskOrder: {},
+      profileBudget: input.profileBudget ?? {},
+      allSeats: {
+        version: 1,
+        profiles: input.profiles,
+        routes: input.routes,
+        ...(input.executionTaskOrder === undefined
+          ? {}
+          : { executionTaskOrder: input.executionTaskOrder }),
+      },
+    },
+    ROUTE_PROFILES,
+  );
+  if (!normalized.ok) throw new Error("unexpected policy failure");
+  return normalized.value;
+}
+
+function routeRole(
+  route: (typeof ROUTES)[number],
+  taskKind: (typeof ROUTE_TASK_KINDS)[number],
+): Role {
+  return RoleSchema.parse({
+    id: `role-${route}`,
+    name: `role ${route}`,
+    mission: "使命",
+    responsibilities: ["职责"],
+    systemPrompt: "系统提示",
+    preferredProfiles: [{ profileId: "missing-binding" }],
+    fallbackProfiles: [],
+    executionPolicy: { tier: route === "coordinator" ? "decision" : route, taskKind },
+    enabled: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+}
+
+function reportedRejections(row: {
+  candidates: readonly { profileId: string; reported: boolean; reason?: string }[];
+}): { profileId: string; reason: unknown }[] {
+  return row.candidates
+    .filter((entry) => entry.reported)
+    .map((entry) => ({ profileId: entry.profileId, reason: entry.reason }));
+}
+
+function plannerRejections(
+  issues: readonly { code: string; profileId?: string; params: Record<string, unknown> }[],
+): { profileId: string | undefined; reason: unknown }[] {
+  return issues
+    .filter((issue) => issue.code === "MODE_CHEAP_PROFILE_INVALID")
+    .map((issue) => ({ profileId: issue.profileId, reason: issue.params.reason }));
+}
+
+describe("economy-all route table witness", () => {
+  test("the first eligible candidate is the planner's pick on every route and task kind", () => {
+    const economy = routePolicy({
+      profiles: [HAIKU_ENTRY, DEEPSEEK_ENTRY],
+      routes: {
+        coordinator: ["deepseek", "haiku"],
+        decision: ["haiku"],
+        execution: ["haiku", "deepseek"],
+        escalation: ["haiku"],
+        retain: ["haiku"],
+      },
+      executionTaskOrder: { coding: ["deepseek", "haiku"] },
+    });
+    const availability: ProviderAvailability[] = [
+      { provider: "claude", available: true },
+      { provider: "omp", available: true },
+    ];
+    const routing = describeModeRouting({ profiles: ROUTE_PROFILES, availability, economy });
+    if (routing.status !== "ready") throw new Error("expected a ready routing");
+    const host = { status: "ready" as const, profiles: ROUTE_PROFILES, availability };
+    for (const route of ROUTES) {
+      for (const taskKind of route === "execution" ? ROUTE_TASK_KINDS : [null]) {
+        const resolved =
+          route === "coordinator"
+            ? resolveCoordinatorProfile({
+                mode: "economy-all",
+                role: routeRole(route, "coding"),
+                host,
+                economy,
+              })
+            : resolveModeProfile({
+                mode: "economy-all",
+                role: routeRole(route, taskKind ?? "coding"),
+                kind: "member",
+                host,
+                economy,
+              });
+        const row = routing.routes.find(
+          (entry) => entry.route === route && entry.taskKind === taskKind,
+        );
+        expect(row).toBeDefined();
+        const eligible = row?.candidates.filter((entry) => entry.eligible) ?? [];
+        expect(eligible.length).toBeGreaterThan(0);
+        const picked = resolved.ok
+          ? "selection" in resolved
+            ? resolved.selection.profile.id
+            : resolved.value.profile?.id
+          : undefined;
+        expect(picked).toBe(eligible[0]?.profileId);
+      }
+    }
+  });
+
+  test("a failing route reports exactly the planner's rejections", () => {
+    const economy = routePolicy({
+      profiles: [SONNET_ENTRY, MISSING_ENTRY, DEEPSEEK_ENTRY],
+      routes: {
+        execution: ["sonnet", "missing", "deepseek"],
+        escalation: ["sonnet", "missing", "deepseek"],
+      },
+      profileBudget: { sonnet: "sota" },
+    });
+    const availability: ProviderAvailability[] = [{ provider: "claude", available: true }];
+    const routing = describeModeRouting({ profiles: ROUTE_PROFILES, availability, economy });
+    if (routing.status !== "ready") throw new Error("expected a ready routing");
+    const host = { status: "ready" as const, profiles: ROUTE_PROFILES, availability };
+    const resolved = resolveModeProfile({
+      mode: "economy-all",
+      role: routeRole("execution", "coding"),
+      kind: "member",
+      host,
+      economy,
+    });
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    const row = routing.routes.find(
+      (entry) => entry.route === "execution" && entry.taskKind === "coding",
+    );
+    expect(row).toBeDefined();
+    if (row === undefined) return;
+    expect(reportedRejections(row)).toEqual(plannerRejections(resolved.issues));
+
+    // A standby escalation seat stays blocked with the same evidence.
+    const standby = resolveModeProfile({
+      mode: "economy-all",
+      role: routeRole("escalation", "coding"),
+      kind: "member",
+      host,
+      economy,
+    });
+    expect(standby.ok && standby.value.unavailable).toBe(true);
+    const standbyRow = routing.routes.find(
+      (entry) => entry.route === "escalation" && entry.taskKind === null,
+    );
+    expect(standbyRow).toBeDefined();
+    if (standbyRow === undefined) return;
+    expect(reportedRejections(standbyRow)).toEqual(plannerRejections(standby.issues ?? []));
+  });
+
+  test("a route id outside the allowlist is only counted, never reported", () => {
+    const base = routePolicy({ profiles: [DEEPSEEK_ENTRY], routes: {} });
+    if (base.allSeats?.status !== "ready") throw new Error("expected a ready policy");
+    const economy: EconomyPolicy = {
+      ...base,
+      allSeats: { ...base.allSeats, routes: { execution: ["ghost"] }, executionTaskOrder: {} },
+    };
+    const availability: ProviderAvailability[] = [{ provider: "omp", available: true }];
+    const routing = describeModeRouting({ profiles: ROUTE_PROFILES, availability, economy });
+    if (routing.status !== "ready") throw new Error("expected a ready routing");
+    const row = routing.routes.find(
+      (entry) => entry.route === "execution" && entry.taskKind === "coding",
+    );
+    expect(row?.candidates).toEqual([
+      {
+        profileId: "ghost",
+        family: null,
+        eligible: false,
+        reason: "outside-list",
+        reported: false,
+      },
+    ]);
+    const resolved = resolveModeProfile({
+      mode: "economy-all",
+      role: routeRole("execution", "coding"),
+      kind: "member",
+      host: { status: "ready", profiles: ROUTE_PROFILES, availability },
+      economy,
+    });
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(plannerRejections(resolved.issues)).toEqual([]);
   });
 });
