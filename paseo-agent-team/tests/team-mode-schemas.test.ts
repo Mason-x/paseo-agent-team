@@ -1,8 +1,20 @@
 import { describe, expect, test } from "vitest";
+import { draftFromStored, mergeEconomyPreferences } from "../client/settings/economy-pool";
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
-import { RoleTierSchema, TaskKindSchema, TeamModeSchema } from "../shared/schemas/team-mode";
+import {
+  ALL_SEATS_POLICY_VERSION,
+  ALL_SEATS_WRITER_LIMIT,
+  AllSeatsRouteSchema,
+  RoleTierSchema,
+  StoredAllSeatsEntrySchema,
+  StoredAllSeatsPolicySchema,
+  StoredEconomyPolicySchema,
+  TaskKindSchema,
+  TeamModeSchema,
+} from "../shared/schemas/team-mode";
+import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
 import { architect, codingTeam, NOW } from "./fixtures";
 
 const baseTeam = {
@@ -24,7 +36,9 @@ function manyMembers(count: number) {
 
 describe("team mode storage schemas", () => {
   test("command enums stay strict while stored documents are tolerant", () => {
-    expect(TeamModeSchema.options).toEqual(["sota", "economy", "collaborative"]);
+    // H4=A adds economy-all; existing values keep their meaning and "standard" is never a value.
+    expect(TeamModeSchema.options).toEqual(["sota", "economy", "economy-all", "collaborative"]);
+    expect(TeamModeSchema.safeParse("standard").success).toBe(false);
     expect(RoleTierSchema.options).toEqual(["decision", "execution", "escalation", "retain"]);
     expect(TaskKindSchema.options).toEqual([
       "coding",
@@ -207,5 +221,124 @@ describe("team mode storage schemas", () => {
     expect(PreferencesSchema.parse({ maxMembers: 200 }).maxMembers).toBe(200);
     expect(PreferencesSchema.safeParse({ maxMembers: 0 }).success).toBe(false);
     expect(PreferencesSchema.safeParse({ maxMembers: 2.5 }).success).toBe(false);
+  });
+});
+
+describe("economy-all storage (H4=A: stable values, no migration)", () => {
+  const allSeats = {
+    version: ALL_SEATS_POLICY_VERSION,
+    profiles: [
+      {
+        profileId: "sonnet",
+        nameSnapshot: "Sonnet",
+        enabled: true,
+        costClass: "low",
+        family: "sonnet",
+        boundModel: { provider: "claude", model: "claude-sonnet-5-5" },
+      },
+    ],
+    routes: {
+      coordinator: ["sonnet"],
+      decision: ["sonnet"],
+      execution: [],
+      escalation: ["sonnet"],
+      retain: ["sonnet"],
+    },
+    executionTaskOrder: { coding: [] },
+  };
+
+  test("a Team keeps the exact stored mode: legacy economy, economy-all, unknown, and absent", () => {
+    for (const mode of ["economy", "economy-all", "standard", " Economy ", "quantum"]) {
+      expect(TeamSchema.parse({ ...baseTeam, mode, members: manyMembers(1) }).mode).toBe(mode);
+    }
+    expect(TeamSchema.parse({ ...baseTeam, members: manyMembers(1) })).not.toHaveProperty("mode");
+  });
+
+  test("allSeats round-trips unchanged, including future versions and unreadable shapes", () => {
+    const future = {
+      version: 2,
+      profiles: { sonnet: { costClass: "low", futureTier: "s" } },
+      routes: "all",
+      executionTaskOrder: [1, 2],
+      futureRouting: { review: ["sonnet"] },
+    };
+    for (const value of [allSeats, future, null, "broken", [allSeats], 7]) {
+      const preferences = PreferencesSchema.parse({
+        maxMembers: 12,
+        recentRuns: [],
+        economy: { pool: [], allSeats: value, futurePolicy: true },
+      });
+      // Only economy-all reads allSeats: a damaged block never invalidates Preferences.
+      expect(preferences.maxMembers).toBe(12);
+      expect(preferences.economy).toEqual({ pool: [], allSeats: value, futurePolicy: true });
+    }
+  });
+
+  test("the reader shape keeps unknown fields and leaves validation to planning", () => {
+    expect(StoredAllSeatsPolicySchema.parse({ version: 9, extra: { kept: true } })).toEqual({
+      version: 9,
+      extra: { kept: true },
+    });
+    expect(StoredAllSeatsPolicySchema.safeParse("broken").success).toBe(false);
+    expect(StoredEconomyPolicySchema.parse({ allSeats: "broken" })).toEqual({
+      allSeats: "broken",
+    });
+  });
+
+  test("the writer entry is strictly cheap with a verified provider/model tuple", () => {
+    const entry = allSeats.profiles[0];
+    expect(StoredAllSeatsEntrySchema.parse({ ...entry, future: 1 })).toEqual({
+      ...entry,
+      future: 1,
+    });
+    for (const invalid of [
+      { ...entry, costClass: "economy" },
+      { ...entry, costClass: undefined },
+      { ...entry, enabled: "yes" },
+      { ...entry, family: "" },
+      { ...entry, boundModel: { provider: "claude" } },
+      { ...entry, boundModel: { provider: "claude", model: "" } },
+      { ...entry, profileId: "" },
+    ]) {
+      expect(StoredAllSeatsEntrySchema.safeParse(invalid).success).toBe(false);
+    }
+    expect(AllSeatsRouteSchema.options).toEqual([
+      "coordinator",
+      "decision",
+      "execution",
+      "escalation",
+      "retain",
+    ]);
+    expect(AllSeatsRouteSchema.safeParse("review").success).toBe(false);
+    expect(ALL_SEATS_POLICY_VERSION).toBe(1);
+    expect(ALL_SEATS_WRITER_LIMIT).toBe(32);
+  });
+
+  test("a standard-pool save keeps allSeats and every other economy field verbatim", () => {
+    const stored = {
+      pool: [{ profileId: "deepseek", family: "deepseek", enabled: true }],
+      taskOrder: { coding: ["deepseek"] },
+      profileBudget: { opus: "sota" },
+      allSeats: { ...allSeats, futureField: 1 },
+      futurePolicy: { kept: true },
+    };
+    const current = PreferencesSchema.parse({
+      maxMembers: 8,
+      designerProfile: { profileId: "designer" },
+      economy: stored,
+    });
+    const saved = mergeEconomyPreferences(current, draftFromStored(current.economy), []);
+    expect(saved.economy?.allSeats).toEqual(stored.allSeats);
+    expect(saved.economy).toMatchObject({ futurePolicy: { kept: true } });
+    expect(saved.designerProfile).toEqual({ profileId: "designer" });
+  });
+
+  test("no settings document changes version: nothing migrates on read", () => {
+    expect([rolesSettings, teamsSettings, preferencesSettings].map((s) => s.version)).toEqual([
+      1, 1, 1,
+    ]);
+    expect(
+      [rolesSettings, teamsSettings, preferencesSettings].some((s) => s.migrate !== undefined),
+    ).toBe(false);
   });
 });
