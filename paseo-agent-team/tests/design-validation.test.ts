@@ -7,6 +7,12 @@ import {
   roleBehaviorContent,
 } from "../shared/domain/design-content";
 import type { DesignPlanningInput, DesignPlanningPort } from "../shared/domain/design-planning";
+import {
+  designContractVersionForNewJob,
+  designModeAccess,
+  designNewRoleLimit,
+  normalizeExistingRolesOnly,
+} from "../shared/domain/design-planning";
 import type {
   DesignValidationContext,
   MaterializationIdentity,
@@ -25,6 +31,7 @@ import type {
   DesignIssue,
   DesignProposal,
   DesignResult,
+  DesignTeamProposal,
   NewDesignRole,
 } from "../shared/schemas/design";
 import { DesignResultSchema } from "../shared/schemas/design";
@@ -1089,7 +1096,7 @@ test("aggregates profileChoices structure before calling the planner and exposes
   const valid = run();
   expect(valid.ok).toBe(true);
   if (!valid.ok) return;
-  const mismatched: DesignProposal = {
+  const mismatched: DesignTeamProposal = {
     ...valid.value.proposal,
     profileChoices: valid.value.proposal.profileChoices.map((choice) =>
       choice.target === "m1" ? { ...choice, profileIds: ["claude-opus-high"] } : choice,
@@ -1411,5 +1418,136 @@ describe("validateMaterializedDesign", () => {
     const checked = validateMaterializedDesign(oversized, context, fakePlanner());
     expect(checked.ok).toBe(false);
     if (!checked.ok) expect(codes(checked.issues)).toContain("DESIGN_OUTPUT_TOO_LARGE");
+  });
+});
+
+describe("record rule and the 0/3 new-Role limit", () => {
+  const seats = { m1: "seat-m1", m2: "seat-m2", m3: "seat-m3" };
+  const zeroRules = { existingRolesOnly: true };
+  const threeRules = { existingRolesOnly: false };
+
+  function limitIssue(result: ValidationResult<unknown>): DesignIssue | undefined {
+    return result.ok
+      ? undefined
+      : result.issues.find((issue) => issue.code === "DESIGN_NEW_ROLE_LIMIT");
+  }
+
+  test("a v2 team needs the record rule; a v1 team keeps the legacy rule", () => {
+    const v2 = {
+      ...designProposal(),
+      version: 2 as const,
+      kind: "team" as const,
+    } satisfies DesignTeamProposal;
+    const missing = validateDesign(v2, makeContext(), fakePlanner(), makeIdentity());
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(codes(missing.issues)).toEqual(["DESIGN_INPUT_INVALID"]);
+      expect(missing.issues[0]?.params.reason).toBe("record-rule-required");
+    }
+    const emptyRules = validateDesign(v2, makeContext(), fakePlanner(), makeIdentity(), {});
+    expect(emptyRules.ok).toBe(false);
+    if (!emptyRules.ok) expect(codes(emptyRules.issues)).toEqual(["DESIGN_INPUT_INVALID"]);
+    expect(validateDesign(v2, makeContext(), fakePlanner(), makeIdentity(), threeRules).ok).toBe(
+      true,
+    );
+    expect(validateDesign(v2, makeContext(), fakePlanner(), makeIdentity(), zeroRules).ok).toBe(
+      true,
+    );
+    expect(run().ok).toBe(true);
+  });
+
+  test("existing-roles-only rejects one new Role with limit 0, and both validators agree", () => {
+    const role = validNewRole();
+    const built = withNewRoles([role], { m3: "codex-xhigh" });
+    const identity = makeIdentity({ logicalSeatIds: seats });
+    const zero = validateDesign(built.proposal, makeContext(), built.planner, identity, zeroRules);
+    expect(zero.ok).toBe(false);
+    expect(limitIssue(zero)).toMatchObject({ params: { count: 1, limit: 0 } });
+
+    const three = validateDesign(
+      built.proposal,
+      makeContext(),
+      built.planner,
+      identity,
+      threeRules,
+    );
+    expect(three.ok).toBe(true);
+    const full = materialized(three, makeContext(), identity);
+    expect(
+      validateMaterializedDesign(full.result, makeContext(), built.planner, zeroRules),
+    ).toMatchObject({ ok: false });
+    const revalidatedZero = validateMaterializedDesign(
+      full.result,
+      makeContext(),
+      built.planner,
+      zeroRules,
+    );
+    expect(limitIssue(revalidatedZero)).toMatchObject({ params: { count: 1, limit: 0 } });
+    expect(
+      validateMaterializedDesign(full.result, makeContext(), built.planner, threeRules).ok,
+    ).toBe(true);
+  });
+
+  test("three new Roles pass and a fourth is rejected with limit 3", () => {
+    const roles = ["a", "b", "c"].map((suffix, index) =>
+      validNewRole({ id: `eng-extra-${suffix}`, name: `【工程】扩展${index + 1}` }),
+    );
+    const built = withNewRoles(roles, { m3: "codex-xhigh", m4: "codex-xhigh", m5: "codex-xhigh" });
+    const identity = makeIdentity({
+      logicalSeatIds: { m1: "seat-m1", m2: "seat-m2", m3: "seat-m3", m4: "seat-m4", m5: "seat-m5" },
+    });
+    expect(
+      validateDesign(built.proposal, makeContext(), built.planner, identity, threeRules).ok,
+    ).toBe(true);
+
+    const fourth = [...roles, validNewRole({ id: "eng-extra-d", name: "【工程】扩展4" })];
+    const four = withNewRoles(fourth, {
+      m3: "codex-xhigh",
+      m4: "codex-xhigh",
+      m5: "codex-xhigh",
+      m6: "codex-xhigh",
+    });
+    const rejected = validateDesign(
+      four.proposal,
+      makeContext(),
+      four.planner,
+      makeIdentity({
+        logicalSeatIds: { ...seats, m4: "seat-m4", m5: "seat-m5", m6: "seat-m6" },
+      }),
+      threeRules,
+    );
+    expect(limitIssue(rejected)).toMatchObject({ params: { count: 4, limit: 3 } });
+  });
+});
+
+describe("design contract policy", () => {
+  test("the mode access decision is a pure contract check", () => {
+    expect(designModeAccess({ mode: "sota" })).toEqual({ ok: true });
+    expect(designModeAccess({ mode: "economy" })).toEqual({ ok: true });
+    expect(designModeAccess({ mode: "economy-all", contractVersion: 2 })).toEqual({ ok: true });
+    expect(designModeAccess({ mode: "economy-all" })).toEqual({
+      ok: false,
+      reason: "contract-required",
+      value: "economy-all",
+      contractVersion: 2,
+    });
+    expect(designModeAccess({ mode: "economy-all", contractVersion: 1 })).toMatchObject({
+      ok: false,
+      reason: "contract-required",
+    });
+    expect(designModeAccess({ mode: "economy-all", contractVersion: 3 })).toMatchObject({
+      ok: false,
+      reason: "contract-required",
+    });
+  });
+
+  test("rules derive the single 0/3 limit and the new-job defaults", () => {
+    expect(normalizeExistingRolesOnly(undefined)).toBe(true);
+    expect(normalizeExistingRolesOnly(false)).toBe(false);
+    expect(designNewRoleLimit(undefined)).toBe(3);
+    expect(designNewRoleLimit({})).toBe(3);
+    expect(designNewRoleLimit({ existingRolesOnly: false })).toBe(3);
+    expect(designNewRoleLimit({ existingRolesOnly: true })).toBe(0);
+    expect(designContractVersionForNewJob()).toBe(2);
   });
 });
