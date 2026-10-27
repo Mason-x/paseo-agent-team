@@ -1,6 +1,10 @@
 import { describe, expect, test, vi } from "vitest";
 import type { DesignDiscoveryPort } from "../server/designer/recovery";
-import { DESIGN_RECORD_VERSION, type StoredDesignJob } from "../server/designer/store";
+import {
+  DESIGN_RECORD_VERSION,
+  LEGACY_RECORD_RULES,
+  type StoredDesignJob,
+} from "../server/designer/store";
 import { type DesignTimelinePort, readAttemptText } from "../server/designer/timeline";
 import {
   BRIDGE_DISCOVERY_PAGE_LIMIT,
@@ -260,6 +264,7 @@ describe("design bridge", () => {
     const messageId = "55555555-5555-4555-8555-555555555555";
     const stored: StoredDesignJob = {
       schemaVersion: DESIGN_RECORD_VERSION,
+      ...LEGACY_RECORD_RULES,
       job: designJob({ attempt: 1, agentCreated: true }),
       request: "给后台做一次改版",
       requestHash: DESIGN_HASH,

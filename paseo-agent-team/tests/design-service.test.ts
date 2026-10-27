@@ -6,7 +6,11 @@ import type { DesignSettingsReaders } from "../server/designer/context";
 import { createDesignHooks } from "../server/designer/hooks";
 import { createDesignService, type DesignServiceDeps } from "../server/designer/service";
 import type { DesignJobStore, StoredDesignJob } from "../server/designer/store";
-import { createDesignJobStore, DESIGN_RECORD_VERSION } from "../server/designer/store";
+import {
+  createDesignJobStore,
+  DESIGN_RECORD_VERSION,
+  LEGACY_RECORD_RULES,
+} from "../server/designer/store";
 import type { DesignPlanningPort } from "../shared/domain/design-planning";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type {
@@ -366,11 +370,13 @@ function retryRequestFor(jobId: string) {
 
 function proposalFor(record: StoredDesignJob, attempt = 1) {
   const attemptRecord = record.attempts.find((item) => item.attempt === attempt);
-  return designProposal({
+  const proposal = designProposal({
     jobId: record.job.jobId,
     attempt: attempt as 1 | 2 | 3,
     nonce: attemptRecord?.nonce,
   });
+  // The record chooses the output contract: a job started by this build answers in contract 2.
+  return record.outputContractVersion === 2 ? { ...proposal, version: 2, kind: "team" } : proposal;
 }
 
 function answerFor(record: StoredDesignJob, proposal: unknown, attempt = 1) {
@@ -394,6 +400,7 @@ function seededJob(
 ): StoredDesignJob {
   return {
     schemaVersion: DESIGN_RECORD_VERSION,
+    ...LEGACY_RECORD_RULES,
     job: designJob({
       jobId,
       clientRequestId: "44444444-4444-4444-8444-444444444444",
@@ -678,6 +685,11 @@ describe("design service", () => {
     const started = await service.start(input());
     if (!started.ok) throw new Error("start failed");
     await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    // The answer is in place before the first status call: a status-triggered reconcile must see a
+    // complete timeline instead of racing the test's own setup.
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    adapter.entries = answerFor(stored, proposalFor(stored));
     const list = await service.status({});
     expect(list).toMatchObject({ ok: true, scopeId: expect.any(String) });
     if (list.ok) expect(list.jobs.map((job) => job.jobId)).toContain(started.job.jobId);
@@ -685,9 +697,6 @@ describe("design service", () => {
       ok: false,
       issues: [{ code: "DESIGN_JOB_NOT_FOUND" }],
     });
-    const stored = await store.get(started.job.jobId);
-    if (!stored) throw new Error("missing");
-    adapter.entries = answerFor(stored, proposalFor(stored));
     await service.onTurnEnded({
       agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
       outcome: { kind: "completed" },
@@ -2495,7 +2504,7 @@ describe("design service", () => {
     const store = new FakeStore();
     const adapter = new FakeAdapter();
     const service = createDesignService(serviceDeps(store, adapter));
-    const started = await service.start(input());
+    const started = await service.start({ ...input(), existingRolesOnly: false });
     if (!started.ok) throw new Error("start failed");
     await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
     const stored = await store.get(started.job.jobId);
@@ -2670,7 +2679,7 @@ describe("design service", () => {
     try {
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
-      const started = await service.start(input());
+      const started = await service.start({ ...input(), existingRolesOnly: false });
       if (!started.ok) throw new Error("start failed");
       await untilAsync(async () => {
         const record = await store.get(started.job.jobId);
