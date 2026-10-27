@@ -24,6 +24,7 @@ import {
   IRREVERSIBLE_UNAPPROVED_LEDGER,
   LOCK_CONFLICT_RUN_A,
   LOCK_CONFLICT_RUN_B,
+  NON_ASSIGNEE_REPORT,
   NORMAL_RUN_LEDGER,
   OUTCOME_UNKNOWN_LEDGER,
   OVERLONG_FIELDS_LEDGER,
@@ -87,11 +88,32 @@ const INVARIANT_LEDGERS: { id: string; ledger: LedgerFixture }[] = INVARIANT_CAS
 
 const LEGAL_LEDGERS = [...NAMED_LEDGERS, ...INVARIANT_LEDGERS];
 
-const INVALID: { id: string; value: unknown }[] = [
-  { id: "unknown-schema-version", value: UNKNOWN_SCHEMA_VERSION_RECORD },
-  { id: "overlong-fields", value: OVERLONG_FIELDS_LEDGER },
-  { id: "unknown-task-status", value: UNKNOWN_TASK_STATUS_RECORD },
-  ...CORRUPT_MISSING_FIELDS.map((entry) => ({ id: entry.id, value: entry.value })),
+const INVALID: { id: string; value: unknown; paths: readonly string[] }[] = [
+  {
+    id: "unknown-schema-version",
+    value: UNKNOWN_SCHEMA_VERSION_RECORD,
+    paths: ["schemaVersion"],
+  },
+  {
+    id: "overlong-fields",
+    value: OVERLONG_FIELDS_LEDGER,
+    paths: [
+      "tasks.0.spec.title",
+      "tasks.0.spec.goal",
+      "tasks.0.spec.scopes.0.path",
+      "tasks.0.spec.acceptance.0",
+    ],
+  },
+  {
+    id: "unknown-task-status",
+    value: UNKNOWN_TASK_STATUS_RECORD,
+    paths: ["tasks.0.state"],
+  },
+  ...CORRUPT_MISSING_FIELDS.map((entry) => ({
+    id: entry.id,
+    value: entry.value,
+    paths: entry.missing,
+  })),
 ];
 
 const VALID_REPORTS: { id: string; report: unknown }[] = [
@@ -102,12 +124,25 @@ const VALID_REPORTS: { id: string; report: unknown }[] = [
   })),
 ];
 
-const INVALID_REPORTS: { id: string; report: unknown }[] = [
+const INVALID_REPORTS: { id: string; report: unknown; paths: readonly string[] }[] = [
+  { id: "missing-evidence", report: EMPTY_EVIDENCE_REPORT, paths: ["evidence"] },
+];
+
+/**
+ * Schema-valid samples rejected by a later layer. `non-assignee` cannot be expressed by R01 (no
+ * reporter field), so it must not be forced into the illegal group with extra keys.
+ */
+const BOUNDARIES: { id: string; rejectedBy: string; accepted: () => boolean }[] = [
   {
-    id: "non-assignee",
-    report: PROTOCOL_IDENTITY_CASES.find((entry) => entry.id === "non-assignee")?.report,
+    id: "oversized-ledger",
+    rejectedBy: "R05 store byte cap (AC-RE1.12)",
+    accepted: () => RunRecordSchema.safeParse(buildOversizedLedger()).success,
   },
-  { id: "missing-evidence", report: EMPTY_EVIDENCE_REPORT },
+  {
+    id: "non-assignee-report",
+    rejectedBy: "R05/R06 assignment+nounce ownership",
+    accepted: () => RunTaskReportBlockSchema.safeParse(NON_ASSIGNEE_REPORT).success,
+  },
 ];
 
 type ParseResult =
@@ -120,17 +155,29 @@ function rejectionDetail(result: ParseResult): string {
   return issue ? `${issue.path.join(".") || "<root>"}: ${issue.message}` : "rejected";
 }
 
+/** Each negative sample declares every zod issue path it must produce, in any order. */
+function issuePathMismatch(
+  id: string,
+  result: ParseResult,
+  expected: readonly string[],
+): string | null {
+  if (result.success) return `${id}: accepted, expected rejection at [${expected.join(", ")}]`;
+  const actual = result.error.issues.map((issue) => issue.path.join(".")).sort();
+  const wanted = [...expected].sort();
+  if (actual.length !== wanted.length || actual.some((path, index) => path !== wanted[index])) {
+    return `${id}: expected [${wanted.join(", ")}], got [${actual.join(", ")}]`;
+  }
+  return null;
+}
+
 describe("run engine fixtures against R01 schemas", () => {
-  test("legal samples parse and illegal samples are rejected (real safeParse, counted)", () => {
+  test("legal samples parse and negative samples reject for their declared cause", () => {
     expect(NAMED_LEDGERS.length, "named ledger count").toBe(27);
     expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(40);
     expect(INVALID.length, "illegal ledger count").toBe(8);
     expect(VALID_REPORTS.length, "legal report count").toBe(5);
-    expect(INVALID_REPORTS.length, "illegal report count").toBe(2);
-    expect(
-      PROTOCOL_IDENTITY_CASES.some((entry) => entry.id === "non-assignee"),
-      "non-assignee fixture present",
-    ).toBe(true);
+    expect(INVALID_REPORTS.length, "illegal report count").toBe(1);
+    expect(BOUNDARIES.length, "later-layer boundary count").toBe(2);
 
     const rejectedLegalLedgers = LEGAL_LEDGERS.flatMap(({ id, ledger }) => {
       const parsed = RunRecordSchema.safeParse(ledger);
@@ -138,10 +185,14 @@ describe("run engine fixtures against R01 schemas", () => {
     });
     expect(rejectedLegalLedgers, "legal ledgers must parse").toEqual([]);
 
-    const acceptedIllegalLedgers = INVALID.filter(
-      ({ value }) => RunRecordSchema.safeParse(value).success,
-    ).map(({ id }) => id);
-    expect(acceptedIllegalLedgers, "illegal ledgers must be rejected").toEqual([]);
+    const illegalLedgerFailures = INVALID.flatMap(({ id, value, paths }) => {
+      const detail = issuePathMismatch(id, RunRecordSchema.safeParse(value), paths);
+      return detail ? [detail] : [];
+    });
+    expect(
+      illegalLedgerFailures,
+      "each illegal ledger has exactly its declared issue paths",
+    ).toEqual([]);
 
     const rejectedLegalReports = VALID_REPORTS.flatMap(({ id, report }) => {
       const parsed = RunTaskReportBlockSchema.safeParse(report);
@@ -149,14 +200,20 @@ describe("run engine fixtures against R01 schemas", () => {
     });
     expect(rejectedLegalReports, "legal reports must parse").toEqual([]);
 
-    const acceptedIllegalReports = INVALID_REPORTS.filter(
-      ({ report }) => RunTaskReportBlockSchema.safeParse(report).success,
-    ).map(({ id }) => id);
-    // `missing-evidence` is classified illegal here: AC-RE2.3 rejects a done report with no evidence.
-    expect(acceptedIllegalReports, "illegal reports must be rejected").toEqual([]);
+    // `missing-evidence` is illegal: AC-RE2.3 rejects a done report with no evidence.
+    const illegalReportFailures = INVALID_REPORTS.flatMap(({ id, report, paths }) => {
+      const detail = issuePathMismatch(id, RunTaskReportBlockSchema.safeParse(report), paths);
+      return detail ? [detail] : [];
+    });
+    expect(
+      illegalReportFailures,
+      "each illegal report has exactly its declared issue paths",
+    ).toEqual([]);
 
-    // Oversized records are rejected by the store, not by the schema (AC-RE1.12 belongs to R05).
-    const oversizedAccepted = RunRecordSchema.safeParse(buildOversizedLedger()).success;
+    const rejectedBoundaries = BOUNDARIES.filter((boundary) => !boundary.accepted()).map(
+      (boundary) => boundary.id,
+    );
+    expect(rejectedBoundaries, "schema must accept the later-layer boundaries").toEqual([]);
 
     const legalTotal = LEGAL_LEDGERS.length + VALID_REPORTS.length;
     const illegalTotal = INVALID.length + INVALID_REPORTS.length;
@@ -165,15 +222,14 @@ describe("run engine fixtures against R01 schemas", () => {
         `(ledgers ${LEGAL_LEDGERS.length}/${LEGAL_LEDGERS.length}, reports ${VALID_REPORTS.length}/${VALID_REPORTS.length})`,
     );
     console.log(
-      `[run-engine fixtures] illegal ${illegalTotal}/${illegalTotal} rejected ` +
+      `[run-engine fixtures] illegal ${illegalTotal}/${illegalTotal} rejected at their declared paths ` +
         `(ledgers ${INVALID.length}/${INVALID.length}, reports ${INVALID_REPORTS.length}/${INVALID_REPORTS.length}; ` +
         "missing-evidence=[] is illegal)",
     );
     console.log(
-      `[run-engine fixtures] schema-accepted store-rejected boundaries ${oversizedAccepted ? 1 : 0}/1 ` +
-        "(oversized ledger)",
+      `[run-engine fixtures] schema-accepted, later-layer-rejected boundaries ${BOUNDARIES.length}/${BOUNDARIES.length} ` +
+        `(${BOUNDARIES.map((boundary) => `${boundary.id} → ${boundary.rejectedBy}`).join("; ")})`,
     );
-    expect(oversizedAccepted, "oversized ledger stays schema-valid").toBe(true);
   });
 
   test("valid samples are plain JSON and keep unique ids", () => {

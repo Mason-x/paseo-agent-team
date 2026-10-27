@@ -35,36 +35,56 @@ export const CORRUPT_JSON_TEXTS: readonly { id: string; text: string; damage: st
   },
 ];
 
-/** RE1.3 / Y15: structurally parseable but missing required top-level or task fields. */
+/**
+ * RE1.3 / Y15: each sample is the valid baseline with exactly one field removed or corrupted, so
+ * the rejection has one cause. `missing` is the expected zod issue path (dot notation); the
+ * self-check asserts exactly that path and no other.
+ */
+function without(value: object, key: string): Record<string, unknown> {
+  const copy = { ...(value as Record<string, unknown>) };
+  delete copy[key];
+  return copy;
+}
+
+const BASELINE_TASKS = NORMAL_RUN_LEDGER.tasks as unknown as Record<string, unknown>[];
+const [FIRST_TASK, ...OTHER_TASKS] = BASELINE_TASKS;
+const FIRST_SPEC = FIRST_TASK.spec as Record<string, unknown>;
+
 export const CORRUPT_MISSING_FIELDS: readonly {
   id: string;
   value: unknown;
   missing: readonly string[];
 }[] = [
-  { id: "no-schema-version", value: { runId: "run-rec0re-m1" }, missing: ["schemaVersion"] },
+  {
+    id: "no-schema-version",
+    value: without(NORMAL_RUN_LEDGER, "schemaVersion"),
+    missing: ["schemaVersion"],
+  },
   {
     id: "no-run-id",
-    value: { schemaVersion: 1, lifecycle: "active", tasks: [] },
+    value: without(NORMAL_RUN_LEDGER, "runId"),
     missing: ["runId"],
   },
   {
     id: "no-tasks",
-    value: { schemaVersion: 1, runId: "run-rec0re-m3" },
+    value: without(NORMAL_RUN_LEDGER, "tasks"),
     missing: ["tasks"],
   },
   {
     id: "task-without-id",
     value: {
-      schemaVersion: 1,
-      runId: "run-rec0re-m4",
-      tasks: [{ status: "pending", title: "orphan" }],
+      ...NORMAL_RUN_LEDGER,
+      tasks: [{ ...FIRST_TASK, spec: without(FIRST_SPEC, "id") }, ...OTHER_TASKS],
     },
-    missing: ["tasks[0].id"],
+    missing: ["tasks.0.spec.id"],
   },
   {
     id: "task-with-unknown-status",
-    value: { schemaVersion: 1, runId: "run-rec0re-m5", tasks: [{ id: "T1", status: "thinking" }] },
-    missing: ["tasks[0].status"],
+    value: {
+      ...NORMAL_RUN_LEDGER,
+      tasks: [{ ...FIRST_TASK, state: "thinking" }, ...OTHER_TASKS],
+    },
+    missing: ["tasks.0.state"],
   },
 ];
 
