@@ -10,6 +10,7 @@ import {
   RunHistoryCheckpointSchema,
   RunNonceEntrySchema,
   RunPolicySnapshotSchema,
+  type RunRecord,
   RunRecordSchema,
   RunReopenGrantSchema,
 } from "../shared/schemas/run-engine/ledger";
@@ -486,6 +487,50 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
     expect(RunReopenGrantSchema.safeParse({ ...grant, expiresAt: undefined }).success).toBe(false);
     expect(RunReopenGrantSchema.safeParse({ ...grant, intentId: undefined }).success).toBe(false);
     expect(RunReopenGrantSchema.safeParse({ ...grant, status: "used" }).success).toBe(false);
+    // status and consumedAt must agree.
+    expect(RunReopenGrantSchema.safeParse({ ...grant, consumedAt: NOW }).success).toBe(false);
+    expect(
+      RunReopenGrantSchema.safeParse({ ...grant, status: "consumed", consumedAt: null }).success,
+    ).toBe(false);
+    expect(
+      RunReopenGrantSchema.safeParse({ ...grant, status: "consumed", consumedAt: NOW }).success,
+    ).toBe(true);
+  });
+
+  test("RunRecord embeds the typed policy snapshot and rejects unknown policy versions", () => {
+    expect(RunRecordSchema.parse(runRecord()).policy.policyVersion).toBe(1);
+    // Empty block, missing version, and a future version are all refused: an unknown policy is
+    // never interpreted as "looser defaults" (AC-RE5.2).
+    expect(RunRecordSchema.safeParse(runRecord({ policy: {} })).success).toBe(false);
+    expect(
+      RunRecordSchema.safeParse(runRecord({ policy: { ...policy(), policyVersion: undefined } }))
+        .success,
+    ).toBe(false);
+    expect(
+      RunRecordSchema.safeParse(runRecord({ policy: { ...policy(), policyVersion: 2 } })).success,
+    ).toBe(false);
+  });
+
+  test("a roster seat may be configured without an agent", () => {
+    const unbound = runRecord({
+      roster: [
+        {
+          seatId: "seat-a1",
+          tier: "A",
+          agentId: null,
+          channelId: "channel-a",
+          duties: ["review"],
+          enabled: true,
+        },
+      ],
+    });
+    expect(RunRecordSchema.parse(unbound).roster[0]).toMatchObject({ agentId: null });
+    expect(
+      RunRecordSchema.safeParse({
+        ...unbound,
+        roster: [{ ...unbound.roster[0], agentId: undefined }],
+      }).success,
+    ).toBe(false);
   });
 
   test("stored policy carries archive-resume, control attempts, and only a soft capacity", () => {
@@ -759,9 +804,10 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
       expect(serialized).not.toContain(forbidden);
     }
     expect(parsed.tasks[0]).toMatchObject({ phase: "awaiting-rework", frozen: false });
-    // Compile-time guard: a ledger record is not a view DTO.
-    // @ts-expect-error ledger record must not be assignable to the redacted view
-    const notAView: RunDetailView = runRecord();
+    // Compile-time guard: a parsed ledger record is structurally incompatible with the view.
+    const ledgerRecord: RunRecord = RunRecordSchema.parse(runRecord());
+    // @ts-expect-error a ledger record must not be assignable to the redacted view
+    const notAView: RunDetailView = ledgerRecord;
     void notAView;
   });
 

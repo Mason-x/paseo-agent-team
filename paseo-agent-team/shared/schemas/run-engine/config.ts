@@ -10,6 +10,12 @@ import {
   RunTierSchema,
 } from "./ledger";
 
+/** Single source: the policy/capacity/DEV-target shapes live in ledger.ts. */
+export {
+  RunCapacityPolicySchema,
+  RunDevTargetSchema,
+} from "./ledger";
+
 /**
  * Team-level Run Engine configuration (H-R1=A): `Team.runEngine`, absent = disabled.
  *
@@ -64,22 +70,3 @@ export const RUN_CAPACITY = {
   softBytes: RUN_SOFT_BYTES,
   hardBytes: RUN_HARD_BYTES,
 } as const;
-
-export const RunCapacityPolicySchema = z
-  .object({
-    softBytes: z.number().int().min(1).max(RUN_SOFT_BYTES).optional(),
-  })
-  .passthrough();
-
-/**
- * `reference` deliberately uses a plain string: a team may reference an existing DEV target by
- * its normalized identity. Recognizing/normalizing loopback aliases is a runtime gate (R08),
- * not something this schema can prove.
- */
-export const RunDevTargetReferenceSchema = z
-  .object({
-    serverId: z.string().min(1).max(128),
-    host: z.string().min(1).max(256),
-    home: z.string().min(1).max(512),
-  })
-  .passthrough();

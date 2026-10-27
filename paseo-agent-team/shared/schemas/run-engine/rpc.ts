@@ -310,7 +310,8 @@ export const RunControlActionSchema = z.discriminatedUnion("action", [
   }),
   z.strictObject({
     action: z.literal("cancel"),
-    taskIds: z.array(Text(64)).max(64),
+    // Empty means nothing is cancelled, which is not a cancellation request.
+    taskIds: z.array(Text(64)).min(1).max(64),
   }),
   z.strictObject({ action: z.literal("archive-terminal") }),
 ]);

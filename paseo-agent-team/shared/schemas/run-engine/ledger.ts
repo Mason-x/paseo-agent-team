@@ -239,7 +239,23 @@ export const RunReopenGrantSchema = z
     expiresAt: RunTimeSchema,
     consumedAt: RunTimeSchema.nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((grant, ctx) => {
+    if (grant.status === "consumed" && grant.consumedAt === null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "a consumed grant must record consumedAt",
+        path: ["consumedAt"],
+      });
+    }
+    if (grant.status !== "consumed" && grant.consumedAt !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "only a consumed grant may carry consumedAt",
+        path: ["consumedAt"],
+      });
+    }
+  });
 export type RunReopenGrant = z.infer<typeof RunReopenGrantSchema>;
 
 export const RunAssignmentSchema = z
@@ -359,7 +375,8 @@ export const RunSeatSnapshotSchema = z
   .object({
     seatId: RunIdRefSchema,
     tier: RunTierSchema,
-    agentId: RunIdRefSchema,
+    /** Null for a configured seat without an agent yet; the roster still freezes it. */
+    agentId: RunIdRefSchema.nullable(),
     channelId: z.string().min(1).max(128),
     duties: z.array(z.string().min(1).max(64)).max(16),
     enabled: z.boolean(),
@@ -675,6 +692,79 @@ export const RunEffectIntentSchema = z
   });
 export type RunEffectIntent = z.infer<typeof RunEffectIntentSchema>;
 
+/**
+ * Capacity and DEV-target shapes live here so config.ts and the stored snapshot share one source.
+ * The soft threshold is the only configurable capacity field; it can never exceed the hard
+ * ledger constant.
+ */
+export const RunCapacityPolicySchema = z
+  .object({
+    softBytes: z.number().int().min(1).max(RUN_SOFT_BYTES).optional(),
+  })
+  .passthrough();
+
+/** A dedicated DEV target reference; alias normalization is a runtime gate (R08). */
+export const RunDevTargetSchema = z
+  .object({
+    serverId: z.string().min(1).max(128),
+    host: z.string().min(1).max(256),
+    home: RunPathSchema,
+  })
+  .passthrough();
+
+/**
+ * Stored policy snapshot. `policyVersion` is a literal: an unknown policy version is refused, not
+ * interpreted with looser defaults (AC-RE5.2). Unknown fields remain visible through passthrough.
+ */
+export const RunPolicySnapshotSchema = z
+  .object({
+    policyVersion: z.literal(1),
+    configuredConcurrency: z.number().int().min(1).max(64),
+    perTask: z
+      .object({
+        protocolResends: z.number().int().min(0).max(10),
+        evidenceReturns: z.number().int().min(0).max(10),
+        reworkPerLayer: z.number().int().min(0).max(5),
+        implementationAttempts: z.number().int().min(1).max(32),
+      })
+      .passthrough(),
+    run: z
+      .object({
+        failedTasks: z.number().int().min(0).max(64),
+        strategicTurns: z.number().int().min(0).max(256),
+      })
+      .passthrough(),
+    seatBudgets: z.array(RunBudgetEntrySchema).max(64),
+    groupBudgets: z.array(RunBudgetEntrySchema).max(64),
+    controlAttempts: z
+      .object({
+        probe: z.number().int().min(0).max(32),
+        reopen: z.number().int().min(0).max(32),
+      })
+      .passthrough(),
+    disabledProfileIds: z.array(RunIdRefSchema).max(512),
+    disabledChannels: z.array(z.string().min(1).max(128)).max(256),
+    capabilityRulesVersion: z.string().min(1).max(64),
+    devTargets: z.array(RunDevTargetSchema).max(16),
+    evidenceRoot: RunPathSchema,
+    requestLimits: z
+      .object({
+        burst: z.number().int().min(1).max(64),
+        perMinute: z.number().int().min(1).max(600),
+      })
+      .passthrough(),
+    /** archived seats revive only by an explicit resume-seat control (05 §6 B3). */
+    archiveResume: z
+      .object({
+        seatRevival: z.literal("explicit-resume-seat"),
+        keepsArchivedAssignments: z.boolean(),
+      })
+      .passthrough(),
+    capacity: RunCapacityPolicySchema,
+  })
+  .passthrough();
+export type RunPolicySnapshot = z.infer<typeof RunPolicySnapshotSchema>;
+
 export const RunRecordSchema = z
   .object({
     schemaVersion: z.literal(RUN_SCHEMA_VERSION),
@@ -712,7 +802,7 @@ export const RunRecordSchema = z
       })
       .passthrough(),
     lifecycle: RunLifecycleSchema,
-    policy: z.record(z.string(), z.unknown()),
+    policy: RunPolicySnapshotSchema,
     roster: z.array(RunSeatSnapshotSchema).max(64),
     dagRevision: z.number().int().min(0),
     tasks: z.array(RunTaskRecordSchema).max(RUN_MAX_TASKS),
@@ -738,66 +828,3 @@ export const RunRecordSchema = z
   })
   .passthrough();
 export type RunRecord = z.infer<typeof RunRecordSchema>;
-
-/** Stored policy snapshot. Its stored copy is tolerant; config.ts owns the writer shape. */
-export const RunPolicySnapshotSchema = z
-  .object({
-    policyVersion: z.number().int().min(1),
-    configuredConcurrency: z.number().int().min(1).max(64),
-    perTask: z
-      .object({
-        protocolResends: z.number().int().min(0).max(10),
-        evidenceReturns: z.number().int().min(0).max(10),
-        reworkPerLayer: z.number().int().min(0).max(5),
-        implementationAttempts: z.number().int().min(1).max(32),
-      })
-      .passthrough(),
-    run: z
-      .object({
-        failedTasks: z.number().int().min(0).max(64),
-        strategicTurns: z.number().int().min(0).max(256),
-      })
-      .passthrough(),
-    seatBudgets: z.array(RunBudgetEntrySchema).max(64),
-    groupBudgets: z.array(RunBudgetEntrySchema).max(64),
-    controlAttempts: z
-      .object({
-        probe: z.number().int().min(0).max(32),
-        reopen: z.number().int().min(0).max(32),
-      })
-      .passthrough(),
-    disabledProfileIds: z.array(RunIdRefSchema).max(512),
-    disabledChannels: z.array(z.string().min(1).max(128)).max(256),
-    capabilityRulesVersion: z.string().min(1).max(64),
-    devTargets: z
-      .array(
-        z
-          .object({
-            serverId: z.string().min(1).max(128),
-            host: z.string().min(1).max(256),
-            home: RunPathSchema,
-          })
-          .passthrough(),
-      )
-      .max(16),
-    evidenceRoot: RunPathSchema,
-    requestLimits: z
-      .object({
-        burst: z.number().int().min(1).max(64),
-        perMinute: z.number().int().min(1).max(600),
-      })
-      .passthrough(),
-    /** archived seats revive only by an explicit resume-seat control (05 §6 B3). */
-    archiveResume: z
-      .object({
-        seatRevival: z.literal("explicit-resume-seat"),
-        keepsArchivedAssignments: z.boolean(),
-      })
-      .passthrough(),
-    capacity: z
-      .object({
-        softBytes: z.number().int().min(1).max(RUN_SOFT_BYTES).optional(),
-      })
-      .passthrough(),
-  })
-  .passthrough();
