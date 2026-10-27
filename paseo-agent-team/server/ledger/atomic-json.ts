@@ -170,7 +170,9 @@ async function assertContained(
     } catch (error) {
       if (error instanceof AtomicJsonError) throw error;
       const errorWithCode = errorCode(error);
-      if (errorWithCode === "ENOTDIR") throw new AtomicJsonError(code, target);
+      // A file in the middle of the path is a shape error, not an escape. R05 health
+      // should say the home is unreadable, not that a junction left the tree.
+      if (errorWithCode === "ENOTDIR") throw new AtomicJsonError("unreadable", target);
       if (errorWithCode !== "ENOENT") throw new AtomicJsonError("unreadable", target);
       const parent = path.dirname(current);
       if (parent === current) throw new AtomicJsonError(code, target);
@@ -583,6 +585,14 @@ export function createAtomicJson<T>(options: {
     return { revision: header.revision, digest, bytes, needsCompaction: bytes >= softBytes };
   }
 
+  /**
+   * Remove leftover `.${basename}.*.tmp` files next to this record.
+   *
+   * Callers MUST hold the root ProcessLock, or run this only during a
+   * single-writer startup phase. There is no age filter: a concurrent sweep
+   * would delete an in-flight tmp and make that commit `rename-failed`
+   * (fail-closed; the published record is unchanged).
+   */
   async function sweepTemporary(): Promise<number> {
     const directory = path.dirname(file);
     const prefix = `.${path.basename(file)}.`;

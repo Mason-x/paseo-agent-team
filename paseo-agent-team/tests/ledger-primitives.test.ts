@@ -37,6 +37,7 @@ class FakeDisk {
   readonly writes: string[] = [];
   readonly events: string[] = [];
   readonly renameFailures: (string | null)[] = [];
+  readonly rmFailures: string[] = [];
   issueWriteFailure = false;
   recordWriteFailure: string | null = null;
   lockWriteFailure: string | null = null;
@@ -96,6 +97,8 @@ class FakeDisk {
         disk.files.delete(source);
       },
       async rm(target) {
+        const failure = disk.rmFailures.shift();
+        if (failure !== undefined) throw fsError(failure);
         disk.files.delete(path.resolve(target));
       },
       async readdir(target) {
@@ -118,6 +121,13 @@ class FakeDisk {
           ) {
             return path.resolve(to, relative);
           }
+        }
+        let ancestor = path.dirname(resolved);
+        for (;;) {
+          if (disk.files.has(ancestor)) throw fsError("ENOTDIR");
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) break;
+          ancestor = parent;
         }
         if (disk.dirs.has(resolved) || disk.files.has(resolved)) return resolved;
         throw fsError("ENOENT");
@@ -153,6 +163,8 @@ class FakeDisk {
         disk.files.delete(source);
       },
       async rm(target) {
+        const failure = disk.rmFailures.shift();
+        if (failure !== undefined) throw fsError(failure);
         disk.files.delete(path.resolve(target));
       },
       async readdir(target) {
@@ -278,6 +290,15 @@ describe("atomic-json roots", () => {
     disk.realpaths.set(roots.records, path.join(OUTSIDE, "runs"));
     await expect(ensureLedgerDirs(roots, files)).rejects.toBeInstanceOf(AtomicJsonError);
     await expect(ensureLedgerDirs(roots, files)).rejects.toMatchObject({ code: "path-escape" });
+  });
+
+  test("reports ENOTDIR as unreadable rather than path-escape", async () => {
+    const disk = new FakeDisk();
+    disk.addDir(HOME);
+    const files = disk.asLedgerFs();
+    const roots = await resolveLedgerRoots(HOME, files);
+    disk.files.set(path.join(HOME, "agent-team-runs"), "not-a-directory");
+    await expect(ensureLedgerDirs(roots, files)).rejects.toMatchObject({ code: "unreadable" });
   });
 
   test("does not create directories until ensureLedgerDirs runs", async () => {
@@ -534,6 +555,15 @@ describe("atomic-json limits and quarantine", () => {
     expect(await store.sweepTemporary()).toBe(1);
     expect(disk.files.has(own)).toBe(false);
     expect(disk.files.has(foreign)).toBe(true);
+  });
+
+  test("sweeps a freshly written tmp; callers must hold the root lock", async () => {
+    // Conservative: no mtime skip. A concurrent sweep would delete in-flight tmp.
+    const { disk, store } = await atomicFixture();
+    const fresh = path.join(path.dirname(store.file), `.${path.basename(store.file)}.inflight.tmp`);
+    disk.files.set(fresh, "in-progress");
+    expect(await store.sweepTemporary()).toBe(1);
+    expect(disk.files.has(fresh)).toBe(false);
   });
 });
 
@@ -828,6 +858,16 @@ describe("process-lock", () => {
       lockFixture({ disk, processes: liveness({ alive: (pid) => pid === 777 }) }),
     ).rejects.toMatchObject({ code: "lock-contended" });
     expect(disk.readText(lockPath)).toContain('"ownerToken":"old"');
+  });
+
+  test("retries release after rm fails instead of forgetting the hold", async () => {
+    const { disk, lock, lockPath } = await lockFixture();
+    disk.rmFailures.push("EPERM");
+    await expect(lock.release()).rejects.toMatchObject({ code: "lock-unavailable" });
+    expect(disk.files.has(lockPath)).toBe(true);
+    await lock.release();
+    expect(disk.files.has(lockPath)).toBe(false);
+    await lock.release();
   });
 
   test("releases idempotently after deletion and refuses to delete a corrupt lock", async () => {
