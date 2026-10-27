@@ -1,7 +1,7 @@
 # Run Engine 验收夹具矩阵（RE-V01）
 
 范围：`tests/fixtures/run-engine/**` 是**离线输入数据**。本文件把每个样本映射到 `02-spec-run-engine.md` 的 Y1–Y17 与 I1–I8、以及 RE1/RE2/RE3 的 AC 条款。
-本任务**不写任何依赖实现的断言**：夹具不含 `import` 产品模块的测试；`fixtures.selfcheck.test.ts` 只做 JSON 形状、计数、键唯一、无密钥/无默认 home 常量的静态自检。行为断言（schema 解析、reducer、锁与名额、协议扫描、RPC 投影）分别归 R01/R02/R03/R05 的实现用例与 V02 端到端用例。
+本任务**不写依赖 reducer 行为的断言**。夹具类型由已实现的 R01 schema 推导（`types.ts`），`fixtures.selfcheck.test.ts` 用真实 `RunRecordSchema`/`RunTaskReportBlockSchema`/`RunTeamEngineConfigSchema`/`RunGetInputSchema` 做静态契约自检（不 mock）：**合法台账 40/40（27 具名 + 13 不变式）、非法台账 8/8、合法协议报告 5/5、非法协议报告 2/2（含空 evidence）、损坏字节 5/5**。reducer、锁与名额、RPC 投影等行为断言归 R01/R02/R03/R05 的实现用例与 V02。
 
 记号：`输入` = 本任务交付的样本；`断言` = 后续实现用例负责。所有夹具目录版本为 `fixtureVersion=1`（与台账 `schemaVersion` 无关）。
 
@@ -11,12 +11,12 @@
 |---|---|---|---|---|---|
 | `normal-ledger` | T1 done（带 review）、T2 in_progress（锁+intent+turnId）、T3 pending 依赖 T2；预算/渠道/告警正常 | — | I1–I8 合法基线 | RE1.1/1.8 | 输入：干净台账。断言：schema+不变式+状态机 |
 | `outcome-unknown-ledger` | intent `outcome-unknown`（recoverySendCount=1）、T2 blocked、锁 frozen、D1 open | Y21 | I3/I8 | RE1.11 | 输入：终态 intent。断言：不循环重试、frozen、D1 唯一 |
-| `cancelling-ledger` | 取消 intent sending；`quiescence.turnEnded=true / refreshState=idle / cancelReceipt=unconfirmed`（2/3） | Y18 | I3 | RE1.10/RE4.3 | 输入：未静止。断言：拒绝释放、保 frozen |
-| `quiescent-cancelled-ledger` | 三条件全真、assignment revoked、claim 已收回 | Y18 | I3 | RE1.10 | 输入：可释放。断言：由显式决策释放 |
+| `cancelling-ledger` | 取消请求：`assignment.cancellation.receipt.kind=none`（回执未确认）、outbox `wake` 取消消息 sending | Y18 | I3 | RE1.10/RE4.3 | 输入：未静止。断言：拒绝释放、保 frozen |
+| `quiescent-cancelled-ledger` | `cancellation.receipt` archive 已确认、assignment `cancelled`、claim 已收回 | Y18 | I3 | RE1.10 | 输入：可释放。断言：由显式决策释放 |
 | `blocked-ledger` | `blocked+frozen` 持锁，D1 open | Y7 | I3（合法） | RE1.8/RE4.3 | 输入：合法 frozen。断言：不自动解锁、重启后一致 |
 | `unknown-schema-version-ledger` | `schemaVersion=2` + `futureTopLevel` + task 未知字段 | Y15 | — | RE1.3 | 输入：未知版本原字节。断言：只读错误投影、禁迁移/改写 |
-| `oversized-ledger`（`buildOversizedLedger()`） | >8MiB（`policy.limits.maxBytes`）单 Run 记录 | Y25 | — | RE1.12 | 输入：超限。断言：停写、D7、导出，不截断 nonce |
-| `overlong-fields-ledger` | title>120、goal>2000、blocker path>512、summary>1000 | — | — | RE1.7/RE2.8 | 输入：超长字段。断言：拒绝/截断策略与摘要上限 |
+| `oversized-ledger`（`buildOversizedLedger()`） | >`RUN_HARD_BYTES`（8MiB）单 Run；schema 接受，store 必须拒写 | Y25 | — | RE1.12 | 输入：超限。断言：停写、D7、导出，不截断 nonce |
+| `overlong-fields-ledger` | title>120、goal>2000、acceptance>500、scope path>512 → **非法样本** | — | — | RE1.7/RE2.8 | 输入：schema 拒收。断言：store 不可写入并报路径 |
 
 ## 2. 损坏与诊断（`corrupt.ts`）
 
@@ -45,14 +45,14 @@
 | id | 内容 | Y | AC | 输入 / 断言 |
 |---|---|---|---|---|
 | `closed-after-report` | 已有 report（turn_ended completed），agent 转 closed，任务在 review | Y20 | RE4.10 | 输入：正常静息。断言：不得改 blocked |
-| `closed-while-assigned` | 未收 report、agent closed、attempts=1、reopen intent prepared、D1 | Y20 | RE4.10 | 输入：异常 closed。断言：blocked+D1，attempt 不变 |
-| `reopen-started` | reopen intent confirmed 且关联 `turn_started` | Y20 | RE4.10 | 输入：成功证据。断言：只有 turn_started 判定成功 |
+| `closed-while-assigned` | 未收 report、agent closed、attempts=1、issued reopen grant + `assignment.reopenGrantId`、reopen intent prepared、D1 | Y20 | RE4.10 | 输入：异常 closed。断言：blocked+D1，attempt 不变 |
+| `reopen-started` | consumed reopen grant、reopen intent confirmed 且关联 `turn_started` | Y20 | RE4.10 | 输入：成功证据。断言：只有 turn_started 判定成功 |
 
 ## 5. 计数上限与渠道探测（`control.ts`）
 
 | id | 内容 | Y | AC |
 |---|---|---|---|
-| `control-attempts` | protocolFailures=2、evidenceReturns=3、reworkCount=2、6 次 attempt、席位预算 10/12 与 6/6、80%+100% 合并一条 D4 | Y8/Y9/Y10 | RE4.5/RE5.1/5.2/5.3 |
+| `control-attempts` | protocolFailures=2、evidenceReturns=3、reworkCount=2、`attempts=6`、席位预算 10/12 与 6/6、80%+100% 合并一条 D4 | Y8/Y9/Y10 | RE4.5/RE5.1/5.2/5.3 |
 | `probe-eligible` | 渠道 paused、until 已到、无在途 probe、**全员 idle 且无在途 turn**（任务仅 T1 done） | Y19 | RE5.5 |
 | `probe-blocked-inflight-turn` | 同上但 T2 在途、seat-b1 running：五条件之一不成立 | Y19 | RE5.5 |
 | `probe-in-flight` | 同渠道 probe sending | Y19 | RE5.5 |
@@ -75,7 +75,7 @@
 |---|---|---|---|
 | `missing-block` / `two-task-reports` / `mixed-kinds` / `non-json-body` / `unknown-version` / `oversized-block` | 单块/多块/混种/非 JSON/未知版本/>32KiB | Y5 | RE2.3/RE2.8 |
 | `escaped-fence-inside-string` | 字符串内转义 fence 仅数据 | Y5 | RE2.8 |
-| `missing-evidence` | 合法 schema、空证据（证据门） | Y1/Y5 | RE2.3/RE3.2 |
+| `missing-evidence` | done 报告 evidence=[]：**schema 非法**（AC-RE2.3 要求 ≥1）；由协议失败路径处理 | Y1/Y5 | RE2.3/RE3.2 |
 | `wrong-task` / `wrong-attempt` / `unknown-nonce` / `reused-nonce` / `non-assignee` | 身份与所有权不符 | Y6 | RE2.2/RE2.5 |
 | `deprecated-timeline` | `turn_ended.timeline=[]` + messageId refetch 窗口 | Y16 | RE2.4 |
 | `scan-budget` | 整回复 256KiB+1、21 页、缺页 | Y5 | RE2.9 |
@@ -102,7 +102,7 @@
 | `i3-blocked-frozen-claim` | I3 | 合法 | RE1.8/RE4.3（10-27 修订） |
 | `i3-pending-holds-claim` | I3 | 违规 | RE4.3 / Y7 |
 | `i4-review-awaiting-does-not-count` | I4 | 合法 | RE3.6/RE4.5 |
-| `i4-capacity-over-effective` | I4 | 违规 | RE4.5 / Y8 |
+| `i4-capacity-over-effective` | I4 | 边界（max() 语义下合法） | RE4.5 / Y8 |
 | `i5-nonce-replayed` | I5 | 违规 | RE1.4/RE2.2 / Y6 |
 | `i5-turn-ended-redelivered` | I5 | 合法 | RE1.4 / Y11 |
 | `i6-rework-count-below-events` | I6 | 违规 | RE5.1 / Y9 |
@@ -113,12 +113,12 @@
 ## 10. 覆盖核对
 
 - Y1–Y17：全部有输入（Y1 §6/§7；Y2 §4/§9；Y3 §9；Y4 §6；Y5 §2/§7；Y6 §7/§9；Y7 §3/§9；Y8 §5/§9；Y9 §5/§9；Y10 §5；Y11 §1/§7/§9；Y12 §8；Y13 §8；Y14 §8；Y15 §1–§3/§9；Y16 §7；Y17 §8）。
-- I1–I8：每个至少一条违规输入；I2–I5 另有合法边界（见 §9）。
+- I1–I8：每个至少一条违规输入；I2–I5 另有合法边界，I4 以边界样本验证 `max(configured, 既有占用)`（见 §9）。
 - 附带覆盖（非本任务硬性）：Y18 §1、Y19 §3/§5、Y20 §4、Y21 §1、Y22 由 `normal-ledger.team` 的 `modeContract/plannerVersion` 样本提供。
 
 ## 11. 已知空缺（留给后续用例）
 
 - Y23（B 批 `run.reconcile` 零推进）：需要真实 store + RPC，夹具仅提供 `normal-ledger` 作为"推进前快照"。
 - Y24（无事件不轮询）：静态数据无法证明调用次数，归 R06 fake-clock/[REV]。
-- Y25 的 `run.get` 零 nonce 泄漏：需要 DTO 快照用例，夹具只覆盖超限记录与超长字段。
+- Y25 的 `run.get` 零 nonce 泄漏：需要 DTO 快照用例；夹具的超大记录由 schema 接受、由 store 层拒写，超长字段为 schema 非法样本。
 - 期望值不在夹具中：任何 `expect` 都由 R01/R02/R03/R05 的实现用例撰写；本目录只锁定输入形状与计数。

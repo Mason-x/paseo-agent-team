@@ -73,7 +73,7 @@ export const UNKNOWN_TASK_STATUS_RECORD: unknown = {
   ...NORMAL_RUN_LEDGER,
   runId: "run-rec0re-sts",
   revision: 5,
-  tasks: [{ ...T2, status: "awaiting-human" }],
+  tasks: [{ ...T2, state: "awaiting-human" }],
 };
 
 /** Diagnosis sidecar inputs: a corrupt record and the digest that names its issues file. */
