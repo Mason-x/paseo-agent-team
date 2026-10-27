@@ -138,6 +138,7 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
   - 可观测与调优：记录任务级的模型、返工、耗时与 token，按历史数据调整层级。
 - **并入 backlog P1**：
   - 启动对话框去掉"本次运行模式"，改为只读显示 Team 的模式。这是本轮第一个任务，难度 L2，详见 backlog P1 第 0 条。
+  - Team 列表与 Team 编辑页显示每个成员按模式解析出的模型，复用启动预览的同一套规划。难度 L3，详见 backlog P1 第 0b 条。
   - 覆盖率统计盲区。
   - `appliedHash` 重算。
   - 协调者 Profile 的引导。
