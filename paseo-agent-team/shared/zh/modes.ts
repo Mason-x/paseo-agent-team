@@ -40,7 +40,8 @@ export const modesZh = {
   economyAllExcludedProfileMissing: (profileId: string) => `Profile 不存在：${profileId}`,
   economyAllExcludedModel: "live model 无法识别为已支持的低成本系列",
   economyAllExcludedHighCost: "live model 属于高价系列，不能进入经济名单",
-  economyAllExcludedBudget: "已被标记为非低成本预算（旗舰或未知），与经济名单冲突；请改标注或移出名单",
+  economyAllExcludedBudget:
+    "已被标记为非低成本预算（旗舰或未知），与经济名单冲突；请改标注或移出名单",
   economyAllExcludedRebind: "provider/model 已变化或家族未核实，需重新确认",
   economyAllRebind: "重新确认低成本身份",
   economyAllProviderUnavailable: (provider: string, reason?: string) =>

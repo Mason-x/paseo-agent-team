@@ -238,9 +238,9 @@ describe("unresolved rows", () => {
     expect(cheap("MODE_CHEAP_POLICY_REQUIRED", { route: "execution", reason: "absent" })).toBe(
       "route-unavailable",
     );
-    expect(cheap("MODE_CHEAP_PROFILE_INVALID", { route: "execution", reason: "tuple-changed" })).toBe(
-      "no-cheap-profile",
-    );
+    expect(
+      cheap("MODE_CHEAP_PROFILE_INVALID", { route: "execution", reason: "tuple-changed" }),
+    ).toBe("no-cheap-profile");
   });
 
   test("counts unresolved rows, groups reasons, and keeps total equal to enabled rows", () => {

@@ -131,9 +131,7 @@ export function toModeLaunchPreview(
   };
 
   return {
-    ...(plan.rawMode === undefined
-      ? { requestedMode: plan.mode }
-      : { rawMode: plan.rawMode }),
+    ...(plan.rawMode === undefined ? { requestedMode: plan.mode } : { rawMode: plan.rawMode }),
     coordinator,
     seats,
     counts: plan.seatCounts,

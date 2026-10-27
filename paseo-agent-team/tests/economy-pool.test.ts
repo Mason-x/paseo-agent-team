@@ -10,7 +10,6 @@ import {
   buildStoredEconomy,
   cheapFamilyOf,
   checkAllSeatsEntry,
-  isGrok47,
   DEFAULT_MAX_MEMBERS,
   decideEconomySave,
   draftFromStored,
@@ -18,6 +17,7 @@ import {
   effectiveTaskOrder,
   familyIsInvalid,
   familyNeedsRebind,
+  isGrok47,
   MAX_MAX_MEMBERS,
   mergeEconomyPreferences,
   moveAllSeatsRouteEntry,
@@ -44,13 +44,12 @@ import {
 import { normalizeEconomyPolicy, resolveModeProfile } from "../shared/domain/mode-resolver";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import { PreferencesSchema } from "../shared/schemas/preferences";
-import { role as roleFixture } from "./fixtures";
 import {
   ALL_SEATS_WRITER_LIMIT,
   StoredAllSeatsPolicySchema,
   TaskKindSchema,
 } from "../shared/schemas/team-mode";
-import { NOW } from "./fixtures";
+import { NOW, role as roleFixture } from "./fixtures";
 
 const profiles: PaseoProfile[] = [
   {
@@ -774,9 +773,9 @@ describe("economy-all allowlist", () => {
     }
     expect(conflicts).toBe(8);
     // A missing availability row is unverified, exactly like the planner.
-    expect(checkAllSeatsEntry(entry, [sonnet], [{ provider: "omp", available: true }]).exclusion).toBe(
-      "provider-unverified",
-    );
+    expect(
+      checkAllSeatsEntry(entry, [sonnet], [{ provider: "omp", available: true }]).exclusion,
+    ).toBe("provider-unverified");
   });
 
   test("P1-FIX1 item 9: saving writes only the entries the user touched", () => {

@@ -1,3 +1,4 @@
+import { evaluateCheapCandidate } from "../../shared/domain/cheap-routing";
 import type { EconomyBudget } from "../../shared/domain/mode-resolver";
 import {
   identifyModelFamily,
@@ -7,7 +8,6 @@ import {
   sameModelTuple,
   storedModelFamily,
 } from "../../shared/domain/model-family";
-import { evaluateCheapCandidate } from "../../shared/domain/cheap-routing";
 import { isTaskKind } from "../../shared/domain/role-execution";
 import type { PaseoProfile, ProviderAvailability } from "../../shared/paseo/adapter";
 import { type Preferences, PreferencesSchema } from "../../shared/schemas/preferences";
