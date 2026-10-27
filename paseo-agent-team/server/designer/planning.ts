@@ -1,3 +1,4 @@
+import { routeOf } from "../../shared/domain/cheap-routing";
 import type {
   DesignPlanCheck,
   DesignPlanningCapabilities,
@@ -8,7 +9,10 @@ import { buildLaunchPlan } from "../../shared/domain/launch-plan";
 import { launchPreviewWarnings, toModeLaunchPreview } from "../../shared/domain/launch-preview";
 import { LAUNCH_RUNTIME_CAPABILITIES } from "../../shared/domain/launch-runtime";
 import { type EconomyPolicy, normalizeEconomyPolicy } from "../../shared/domain/mode-resolver";
+import type { DesignIssue, DesignRoleGap } from "../../shared/schemas/design";
+import type { TeamMode } from "../../shared/schemas/team-mode";
 import { hashLaunchPlan } from "../launch-hash";
+import type { DesignModeRouting } from "./context";
 
 const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 
@@ -75,5 +79,68 @@ export function planDesign(
     preview: toModeLaunchPreview(plan, planHash, economyIssues, economyValue),
     issues,
     launchWarnings: launchPreviewWarnings(plan, economyIssues),
+  };
+}
+
+/**
+ * AC-0d.16 for a suggested Profile: in economy-all a new Role's Profile must be a candidate of
+ * the route its own `use` and `executionPolicy` pick, and that candidate must pass D02's cheap
+ * eligibility. The route table comes from the context snapshot, so this never re-plans the team;
+ * launching still re-derives everything through D02. Returns no issue when the mode is legacy or
+ * the gap is an `unlaunchable-role` (the inventory verdict already covers it).
+ */
+export function checkGapEconomyEligibility(input: {
+  mode: TeamMode;
+  gap: DesignRoleGap;
+  routing: DesignModeRouting | undefined;
+  path?: DesignIssue["path"];
+}): DesignIssue[] {
+  if (input.mode !== "economy-all") return [];
+  if (input.gap.kind !== "missing-role") return [];
+  const path = input.path ?? [];
+  const routing = input.routing;
+  if (routing === undefined || routing.status === "absent") {
+    return [modePlanIssue(path, { modeCode: "MODE_CHEAP_POLICY_REQUIRED", reason: "absent" })];
+  }
+  if (routing.status === "invalid") {
+    return [
+      modePlanIssue(path, { modeCode: "MODE_CHEAP_POLICY_REQUIRED", reason: routing.reason }),
+    ];
+  }
+  const { use, profiles, suggestedRole } = input.gap;
+  const policy = suggestedRole.executionPolicy;
+  const route = routeOf(use === "coordinator" ? "coordinator" : "member", policy.tier);
+  const taskKind = route === "execution" ? policy.taskKind : null;
+  const row = routing.routes.find((entry) => entry.route === route && entry.taskKind === taskKind);
+  if (row === undefined || row.candidates.length === 0) {
+    return [modePlanIssue(path, { modeCode: "MODE_CHEAP_ROUTE_UNAVAILABLE", route })];
+  }
+  if (profiles.kind === "none") return [];
+  const issues: DesignIssue[] = [];
+  for (const [index, profileId] of profiles.profileIds.entries()) {
+    const candidate = row.candidates.find((entry) => entry.profileId === profileId);
+    if (candidate?.eligible === true) continue;
+    issues.push(
+      modePlanIssue([...path, "profiles", "profileIds", index], {
+        modeCode: "MODE_CHEAP_PROFILE_INVALID",
+        route,
+        profileId,
+        reason: candidate?.reason ?? "outside-list",
+      }),
+    );
+  }
+  return issues;
+}
+
+function modePlanIssue(
+  path: DesignIssue["path"],
+  params: Record<string, string | number>,
+): DesignIssue {
+  return {
+    code: "DESIGN_MODE_PLAN_INVALID",
+    severity: "error",
+    path,
+    params,
+    action: "repair",
   };
 }
