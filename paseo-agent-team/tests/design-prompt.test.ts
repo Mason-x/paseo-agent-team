@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -187,6 +188,97 @@ function textOf(result: ReturnType<typeof buildDesignKickoff>): string {
   if (!result.ok) throw new Error(result.issues.map((issue) => issue.code).join(","));
   return result.text;
 }
+
+/** Byte-exact baseline for the legacy contract (record outputContractVersion = 1). */
+function goldenSha(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function realScaleRoles(): DesignPromptRoleSummary[] {
+  const catalog = [
+    ...expectedRoleContent,
+    ...expectedRoleContent.slice(0, 8).map((item) => ({ ...item, id: `${item.id}-custom` })),
+  ];
+  return catalog.map((item, index) =>
+    role(index, {
+      id: item.id,
+      name: item.name,
+      mission: item.mission,
+      responsibilities: item.responsibilities,
+      launchable: index !== 0,
+      unavailableProfileIds: index === 0 ? ["profile-missing"] : [],
+    }),
+  );
+}
+
+describe("v1 prompt golden snapshot", () => {
+  test("freezes the small kickoff byte for byte", () => {
+    const result = kickoff();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(9140);
+    expect(goldenSha(result.text)).toBe(
+      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+    );
+  });
+
+  test("freezes the real-sized compressed kickoff byte for byte", () => {
+    const roles = realScaleRoles();
+    const result = kickoff({
+      request: "设计一个功能开发团队",
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(29384);
+    expect(goldenSha(result.text)).toBe(
+      "f05f00a4c499a780dd55411da07fe2268628d52dfd53bcb1857f353839dc1cf6",
+    );
+  });
+
+  test("freezes the realistic correction byte for byte", () => {
+    const roles = expectedRoleContent.map((item, index) =>
+      role(index, {
+        id: item.id,
+        name: item.name,
+        mission: item.mission,
+        responsibilities: item.responsibilities,
+      }),
+    );
+    const realistic = context({
+      roles,
+      profiles: [profile(1)],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+      expectedChoices: [],
+    });
+    const result = buildDesignCorrection({
+      jobId: JOB_ID,
+      attempt: 2,
+      nonce: NONCE,
+      issues: [
+        {
+          code: "DESIGN_OUTPUT_IDENTITY",
+          severity: "error",
+          path: ["nonce"],
+          params: { field: "nonce" },
+          action: "repair",
+        },
+      ],
+      context: realistic,
+      expectedChoices: [],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(4202);
+    expect(goldenSha(result.text)).toBe(
+      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+    );
+  });
+});
 
 describe("team design recipes", () => {
   test("copies all nine source lineups without inventing counts", () => {
