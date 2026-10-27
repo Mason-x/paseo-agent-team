@@ -31,6 +31,13 @@ export const LaunchStartInputSchema = z.object({
    * from the saved Team.mode and never persist an override.
    */
   mode: TeamModeSchema.optional(),
+  /**
+   * Mode-contract negotiation. Any integer is accepted and normalized by
+   * `requestContractVersion` (only 2 is v2; absent, 1, 3, … are legacy), so an explicit `1` from a
+   * copy of the old client stays a legacy request instead of becoming a schema error. It is not a
+   * semantic request field and never enters the plan hash.
+   */
+  contractVersion: z.number().int().optional(),
   /** Token from launch.preview. Omitted by legacy callers; new clients always send it. */
   expectedPlanHash: z.string().min(1).max(128).optional(),
 });
@@ -39,6 +46,8 @@ export const LaunchPreviewInputSchema = z.object({
   ...LaunchRequestShape,
   /** Advanced override for scripts and tests only; the App never sends it. */
   mode: TeamModeSchema.optional(),
+  /** See `LaunchStartInputSchema.contractVersion`. */
+  contractVersion: z.number().int().optional(),
 });
 
 const LaunchJobStepSchema = z.enum(["workspace", "coordinator", "member", "kickoff", "done"]);
@@ -68,6 +77,8 @@ export const LaunchJobSchema = z.object({
   startedAt: z.string(),
   finishedAt: z.string().optional(),
   mode: TeamModeSchema.optional(),
+  /** Present instead of `mode` when the stored Team mode could not be read (FIX1 contract). */
+  rawMode: z.string().optional(),
   planHash: z.string().optional(),
 });
 
