@@ -85,12 +85,75 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
     profileId: seat.selected.unavailable ? null : seat.selected.profile.id,
     source: seat.selected.source,
     family: seat.selected.family ?? null,
+    ...(seat.selected.route === undefined ? {} : { route: seat.selected.route }),
     alternates: [...(seat.selected.alternates ?? [])],
     budget: seat.selected.budget,
     budgetBasis: seat.selected.budgetBasis,
     standby: seat.selected.standby,
     unavailable: seat.selected.unavailable,
   }));
+
+  const economyAll = input.plan.mode === "economy-all";
+  const allSeats = input.economy.allSeats;
+  const referencedIds = new Set<string>();
+  if (allSeats?.status === "ready") {
+    for (const ids of Object.values(allSeats.routes)) {
+      for (const id of ids ?? []) referencedIds.add(id);
+    }
+    for (const ids of Object.values(allSeats.executionTaskOrder)) {
+      for (const id of ids ?? []) referencedIds.add(id);
+    }
+  }
+  const referencedBudget = Object.fromEntries(
+    [...referencedIds]
+      .filter((profileId) => input.economy.profileBudget[profileId] !== undefined)
+      .sort()
+      .map((profileId) => [profileId, input.economy.profileBudget[profileId]]),
+  );
+  const allSeatsPayload =
+    allSeats === undefined || allSeats.status === "absent"
+      ? { status: "absent" }
+      : allSeats.status === "invalid"
+        ? {
+            status: "invalid",
+            reason: allSeats.reason,
+            ...(allSeats.version === undefined ? {} : { version: allSeats.version }),
+          }
+        : {
+            status: "ready",
+            version: allSeats.version,
+            profiles: [...allSeats.profiles]
+              .sort((left, right) => left.profileId.localeCompare(right.profileId))
+              .map((entry) => ({
+                profileId: entry.profileId,
+                enabled: entry.enabled,
+                family: entry.family,
+                boundModel: entry.boundModel,
+                live:
+                  input.host.status === "ready"
+                    ? (() => {
+                        const live = input.host.profiles.find(
+                          (profile) => profile.id === entry.profileId,
+                        );
+                        if (!live) return { tuple: null, availability: "unverified" };
+                        const row = input.host.availability.find(
+                          (candidate) => candidate.provider === live.provider,
+                        );
+                        return {
+                          tuple: profileTuple(live),
+                          availability:
+                            row === undefined
+                              ? "unverified"
+                              : row.available
+                                ? "available"
+                                : "unavailable",
+                        };
+                      })()
+                    : { tuple: null, availability: "unverified" },
+              })),
+            routes: allSeats.routes,
+            executionTaskOrder: allSeats.executionTaskOrder,
+          };
 
   const payload: Record<string, unknown> = {
     mode: input.plan.mode,
@@ -101,6 +164,11 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
       profileId:
         input.plan.coordinator.profile.id === "missing" ? null : input.plan.coordinator.profile.id,
       source: input.plan.coordinator.source,
+      ...(economyAll && input.plan.coordinatorSelected?.route === undefined
+        ? {}
+        : economyAll
+          ? { route: input.plan.coordinatorSelected?.route }
+          : {}),
     },
     seats,
     economy: {
@@ -115,5 +183,10 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
     maxMembers: Math.min(input.maxMembers, MAX_RUNTIME_MEMBERS),
     runtimeCapabilities: input.runtimeCapabilities,
   };
+  if (economyAll) {
+    payload.plannerVersion = 2;
+    payload.allSeats = allSeatsPayload;
+    payload.economy = { profileBudget: referencedBudget };
+  }
   return canonicalize(payload);
 }
