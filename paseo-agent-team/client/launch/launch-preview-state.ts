@@ -4,7 +4,6 @@ import type {
   ModeIssueDto,
   SeatPreview,
 } from "../../shared/schemas/launch-preview";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 
 export const PREVIEW_TASK_DEBOUNCE_MS = 400;
@@ -14,7 +13,8 @@ export type LaunchPreviewKeyInput = {
   teamId: string;
   task: string;
   target: LaunchTarget | null;
-  mode: TeamMode;
+  /** The saved Team.mode string: it invalidates the preview after a Team edit, but is never sent. */
+  savedMode: string;
 };
 
 /** The debounced task is the preview identity; a non-empty difference keeps start disabled. */
@@ -36,7 +36,7 @@ export function launchPreviewQueryKey(input: LaunchPreviewKeyInput): readonly un
     input.teamId,
     input.task.trim(),
     input.target,
-    input.mode,
+    input.savedMode,
   ] as const;
 }
 

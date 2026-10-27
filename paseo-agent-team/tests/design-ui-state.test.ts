@@ -385,8 +385,8 @@ describe("result launch prefill", () => {
       lockTeam: true,
       initialTask: result.request,
       initialWorkspaceId: "ws-target",
-      initialMode: result.mode,
     });
+    expect(prefill).not.toHaveProperty("initialMode");
     expect(prefill?.initialWorkspaceId).not.toBe("ws-carrier");
   });
 

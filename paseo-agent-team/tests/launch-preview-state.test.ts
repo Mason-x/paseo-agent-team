@@ -21,7 +21,6 @@ import {
   type LaunchPreviewResult,
   ModeLaunchPreviewSchema,
 } from "../shared/schemas/launch-preview";
-import type { TeamMode } from "../shared/schemas/team-mode";
 import { zh } from "../shared/zh";
 import {
   allAvailable,
@@ -39,7 +38,7 @@ const input = {
   teamId: "team-1",
   task: "  ship it  ",
   target,
-  mode: "economy" as TeamMode,
+  savedMode: "economy",
 };
 
 const preview = ModeLaunchPreviewSchema.parse({
@@ -103,7 +102,7 @@ function gate(overrides: Partial<Parameters<typeof launchGate>[0]> = {}) {
 }
 
 describe("launch preview identity", () => {
-  test("query key includes host, Team, trimmed task, target, and mode", () => {
+  test("query key includes host, Team, trimmed task, target, and saved mode", () => {
     expect(launchPreviewQueryKey(input)).toEqual([
       "agent-team",
       "launch-preview",
@@ -119,7 +118,7 @@ describe("launch preview identity", () => {
     expect(launchPreviewIdentity({ ...input, task: "ship it" })).toBe(launchPreviewIdentity(input));
   });
 
-  test("task, target, and mode changes all create a new identity", () => {
+  test("task, target, and saved-mode changes all create a new identity", () => {
     const base = launchPreviewIdentity(input);
     expect(launchPreviewIdentity({ ...input, task: "ship it now" })).not.toBe(base);
     expect(
@@ -128,7 +127,7 @@ describe("launch preview identity", () => {
         target: { kind: "new-workspace", projectId: "project-1" },
       }),
     ).not.toBe(base);
-    expect(launchPreviewIdentity({ ...input, mode: "sota" })).not.toBe(base);
+    expect(launchPreviewIdentity({ ...input, savedMode: "sota" })).not.toBe(base);
   });
 });
 

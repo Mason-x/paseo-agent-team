@@ -10,7 +10,6 @@ import { createPaseoAdapter } from "../../shared/paseo/adapter";
 import { defaultCatalogPreviewRpc } from "../../shared/rpc";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import {
   preferencesSettings,
   RolesDocumentSchema,
@@ -92,7 +91,6 @@ type LaunchSeed = {
   teamId?: string;
   lockTeam?: boolean;
   initialTask?: string;
-  initialMode?: TeamMode;
   initialWorkspaceId?: string;
 };
 
@@ -1024,9 +1022,13 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           initialTeamId={launch.teamId}
           lockTeam={launch.lockTeam ?? launch.teamId !== undefined}
           initialTask={launch.initialTask}
-          initialMode={launch.initialMode}
           initialWorkspaceId={launch.initialWorkspaceId}
           onClose={() => setLaunch(null)}
+          onEditTeam={(team) => {
+            setLaunch(null);
+            setTab("teams");
+            setTeamEditor({ mode: "edit", team });
+          }}
           onLaunched={() => {
             setLaunch(null);
             setTab("runs");

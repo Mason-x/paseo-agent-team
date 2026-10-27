@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { resolveLaunchPrefill } from "../client/launch/launch-args";
+import {
+  launchModeDisplay,
+  launchPreviewRequest,
+  launchStartRequest,
+  resolveLaunchPrefill,
+} from "../client/launch/launch-args";
+import { zh } from "../shared/zh";
 import { codingTeam } from "./fixtures";
 
 const teams = [codingTeam, { ...codingTeam, id: "research-team", name: "Research Team" }];
@@ -53,5 +59,63 @@ describe("resolveLaunchPrefill", () => {
       teamId: undefined,
       task: "kept",
     });
+  });
+});
+
+describe("launchModeDisplay", () => {
+  test("no selected Team shows no mode row", () => {
+    expect(launchModeDisplay(undefined)).toEqual({ kind: "none" });
+  });
+
+  test("known modes use the existing mode copy", () => {
+    expect(launchModeDisplay({ ...codingTeam, mode: "economy" })).toEqual({
+      kind: "known",
+      mode: "economy",
+      label: zh.teamModeEconomy,
+    });
+    expect(launchModeDisplay({ ...codingTeam, mode: "collaborative" })).toEqual({
+      kind: "known",
+      mode: "collaborative",
+      label: zh.teamModeCollaborative,
+    });
+  });
+
+  test("a Team without a saved mode falls back to the planner default, SOTA", () => {
+    expect(launchModeDisplay(codingTeam)).toEqual({
+      kind: "known",
+      mode: "sota",
+      label: zh.teamModeSota,
+    });
+  });
+
+  test("an unknown stored value stays unknown and keeps the original text", () => {
+    expect(launchModeDisplay({ ...codingTeam, mode: "turbo" })).toEqual({
+      kind: "unknown",
+      value: "turbo",
+    });
+  });
+});
+
+describe("launch requests", () => {
+  const target = { kind: "workspace" as const, workspaceId: "ws-1" };
+
+  test("preview and start never send a mode", () => {
+    const preview = launchPreviewRequest({ teamId: "coding-team", task: "Ship it", target });
+    expect(preview).toEqual({ teamId: "coding-team", task: "Ship it", target });
+    expect(preview).not.toHaveProperty("mode");
+
+    const start = launchStartRequest({
+      teamId: "coding-team",
+      task: "Ship it",
+      target,
+      expectedPlanHash: "hash-1",
+    });
+    expect(start).toEqual({
+      teamId: "coding-team",
+      task: "Ship it",
+      target,
+      expectedPlanHash: "hash-1",
+    });
+    expect(start).not.toHaveProperty("mode");
   });
 });
