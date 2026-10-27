@@ -1,7 +1,7 @@
 # Run Engine 验收夹具矩阵（RE-V01）
 
 范围：`tests/fixtures/run-engine/**` 是**离线输入数据**。本文件把每个样本映射到 `02-spec-run-engine.md` 的 Y1–Y17 与 I1–I8、以及 RE1/RE2/RE3 的 AC 条款。
-本任务**不写依赖 reducer 行为的断言**。夹具类型由已实现的 R01 schema 推导（`types.ts`），`fixtures.selfcheck.test.ts` 用真实 `RunRecordSchema`/`RunTaskReportBlockSchema`/`RunTeamEngineConfigSchema`/`RunGetInputSchema` 做静态契约自检（不 mock）：**合法台账 40/40（27 具名 + 13 不变式）、非法台账 8/8、合法协议报告 5/5、非法协议报告 2/2（含空 evidence）、损坏字节 5/5**。reducer、锁与名额、RPC 投影等行为断言归 R01/R02/R03/R05 的实现用例与 V02。
+本任务**不写依赖 reducer 行为的断言**。夹具类型由已实现的 R01 schema 推导（`types.ts`），`fixtures.selfcheck.test.ts` 用真实 `RunRecordSchema`/`RunTaskReportBlockSchema`/`RunTeamEngineConfigSchema`/`RunGetInputSchema` 做静态契约自检（不 mock）：**合法台账 40/40（27 具名 + 13 不变式）、非法台账 8/8（每条断言唯一 issue path）、合法协议报告 5/5、非法协议报告 1/1（空 evidence）、损坏字节 5/5、schema 合法/后层拒绝边界 2/2（见 §12）**。reducer、锁与名额、RPC 投影等行为断言归 R01/R02/R03/R05 的实现用例与 V02。
 
 记号：`输入` = 本任务交付的样本；`断言` = 后续实现用例负责。所有夹具目录版本为 `fixtureVersion=1`（与台账 `schemaVersion` 无关）。
 
@@ -23,7 +23,7 @@
 | id | 内容 | Y | I | AC |
 |---|---|---|---|---|
 | `truncated-mid-object` / `empty-file` / `two-writes-concatenated` / `non-utf8-bytes` / `trailing-comma` | 5 份不可解析字节 | Y15 | I1 | RE1.2/RE1.3/RE7.1 |
-| `no-schema-version` / `no-run-id` / `no-tasks` / `task-without-id` / `task-with-unknown-status` | 结构可解析但缺必需字段 | Y15 | I1 | RE1.3/RE7.1 |
+| `no-schema-version` / `no-run-id` / `no-tasks` / `task-without-id` / `task-with-unknown-status` | 合法基线上只改一处：删 `schemaVersion` / `runId` / `tasks` / `tasks[0].spec.id`，或把 `tasks[0].state` 设为未知值（单因） | Y15 | I1 | RE1.3/RE7.1 |
 | `unknown-task-status-record` | 任务状态 `awaiting-human` | Y15 | — | RE3.1/RE7.1 |
 | `corrupt-record-with-digest` | 原字节 + digest + `issues/<digest>.json` 旁路、`autoRepair=false` | Y15 | — | RE1.3 |
 
@@ -76,7 +76,8 @@
 | `missing-block` / `two-task-reports` / `mixed-kinds` / `non-json-body` / `unknown-version` / `oversized-block` | 单块/多块/混种/非 JSON/未知版本/>32KiB | Y5 | RE2.3/RE2.8 |
 | `escaped-fence-inside-string` | 字符串内转义 fence 仅数据 | Y5 | RE2.8 |
 | `missing-evidence` | done 报告 evidence=[]：**schema 非法**（AC-RE2.3 要求 ≥1）；由协议失败路径处理 | Y1/Y5 | RE2.3/RE3.2 |
-| `wrong-task` / `wrong-attempt` / `unknown-nonce` / `reused-nonce` / `non-assignee` | 身份与所有权不符 | Y6 | RE2.2/RE2.5 |
+| `wrong-task` / `wrong-attempt` / `unknown-nonce` / `reused-nonce` | schema 合法；身份/所有权不符，由 R05/R06 拒绝 | Y6 | RE2.2/RE2.5 |
+| `non-assignee` | schema 合法（R01 无 reporter 字段）；`assignmentId`+`nonce` 不属于派发记录，由 R05/R06 所有权校验拒绝；见 §12 | Y6 | RE2.2/RE2.5 |
 | `deprecated-timeline` | `turn_ended.timeline=[]` + messageId refetch 窗口 | Y16 | RE2.4 |
 | `scan-budget` | 整回复 256KiB+1、21 页、缺页 | Y5 | RE2.9 |
 | `protocol-replay` | 同 report 多次投递（同/异 messageId） | Y6/Y11 | RE1.4 |
@@ -121,4 +122,14 @@
 - Y23（B 批 `run.reconcile` 零推进）：需要真实 store + RPC，夹具仅提供 `normal-ledger` 作为"推进前快照"。
 - Y24（无事件不轮询）：静态数据无法证明调用次数，归 R06 fake-clock/[REV]。
 - Y25 的 `run.get` 零 nonce 泄漏：需要 DTO 快照用例；夹具的超大记录由 schema 接受、由 store 层拒写，超长字段为 schema 非法样本。
+- `non-assignee` 的"非受派者"判定归 **R05/R06**：R01 `ReportIdentityShape` 不携带 reporter 身份，schema 层无法表达（见 §12）；不得为强制拒收而添加 `agentId` 等多余键。
 - 期望值不在夹具中：任何 `expect` 都由 R01/R02/R03/R05 的实现用例撰写；本目录只锁定输入形状与计数。
+
+## 12. schema 合法、后层拒绝的边界组
+
+这些样本**不在**非法组：schema 必须接受，拒绝由后续层完成。自检 `BOUNDARIES` 断言 2/2 被接受。
+
+| id | schema | 拒绝层 | 验证任务 |
+|---|---|---|---|
+| `oversized-ledger`（`buildOversizedLedger()`） | `RunRecordSchema` 接受 | store 字节上限（`RUN_SOFT_BYTES`/`RUN_HARD_BYTES`，停写 + D7） | R05（AC-RE1.12） |
+| `non-assignee`（`NON_ASSIGNEE_REPORT`） | `RunTaskReportBlockSchema` 接受（无 reporter 字段） | 协议/store 所有权：`assignmentId` + `nonce` 不属于派发记录 | R05/R06（RE2.2/RE2.5 / Y6） |

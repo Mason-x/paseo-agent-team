@@ -84,7 +84,19 @@ export const PROTOCOL_BLOCK_CASES: readonly { id: string; raw: string; defect: s
   },
 ];
 
-/** RE2.2 / RE2.5 / Y6: identity/ownership mismatches carried by an otherwise valid-looking report. */
+/**
+ * RE2.2 / RE2.5 / Y6: a report whose assignment/nonce do not belong to the dispatched assignment.
+ * R01 `ReportIdentityShape` has no reporter field, so "who reported" is not expressible in the
+ * schema at all: this sample is deliberately schema-valid and is rejected later by ownership
+ * checks (R05/R06), exactly like the oversized ledger is accepted by schema and rejected by the
+ * store (R05). Do not add extra keys just to force a schema rejection.
+ */
+export const NON_ASSIGNEE_REPORT: Record<string, unknown> = {
+  ...(JSON.parse(validReport) as Record<string, unknown>),
+  assignmentId: "assignment-t2-a2",
+  nonce: "6f1c2a44-3b7e-4f0a-9a11-00000000b2b2",
+};
+
 export const PROTOCOL_IDENTITY_CASES: readonly {
   id: string;
   report: Record<string, unknown>;
@@ -115,7 +127,7 @@ export const PROTOCOL_IDENTITY_CASES: readonly {
   },
   {
     id: "non-assignee",
-    report: { ...JSON.parse(validReport), agentId: "agent-b2" },
+    report: NON_ASSIGNEE_REPORT,
     defect: "reporter-not-assignee",
   },
 ];
