@@ -16,7 +16,7 @@
 
 ### 编排职责一分为二
 - **Strategic Orchestrator（战略编排）**：理解用户目标、分析代码库、拆分任务 DAG、决定执行顺序、解决架构分歧、失败后重新规划。这部分非常值得使用 SOTA，Claude-Opus-5.5-Max 在这一层优势明显。
-- **Operational Orchestrator（运行调度）**：分配已就绪的任务、检测 Worker 状态、续租、执行重试策略、管理并发和任务锁。GPT-6.1-Sol Max 在这一层的成本优势突出。不过按 2026-10-27 的额度，过渡期改由 Claude Sonnet 5.5（Claude 订阅，额度耐用）担任：这个席位事件最多，又要长时间可靠地遵守协议；Sol Max 改为按需使用。
+- **Operational Orchestrator（运行调度）**：分配已就绪的任务、检测 Worker 状态、续租、执行重试策略、管理并发和任务锁。GPT-6.1-Sol Max 在这一层的成本优势突出。过渡期由 Sol Max 担任（人于 2026-10-27 确认）；它撞额度时，改由 Claude Sonnet 5.5 接替。
 - 这样分工后，SOTA 的 token 消耗不会随 Worker 的每一次心跳或状态更新而增加。
 
 ## 2. 外部依据
@@ -63,7 +63,7 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 人 ──(目标 / 选择 / 不可逆操作的批准)──▶ 战略编排（Opus-5.5-Max；架构裁决协同 Astra-Max）
                                               │ task-dag（结构化）     ▲ 精简摘要（仅决策点）
                                               ▼                        │
-                         运行调度：插件 Run Engine（确定性）＋ 过渡期的 Claude Sonnet 5.5
+                         运行调度：插件 Run Engine（确定性）＋ 过渡期的 GPT-6.1-Sol Max
                      台账 · 就绪分配 · 租约 · 重试与升级 · 锁 · 并发 · 预算 · 质量门 · 集成队列
                                               │ 任务提示（模板化）     ▲ task-report（结构化）
                                               ▼                        │
@@ -103,9 +103,10 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
   - 禁用 Grok-4.7。
 - **按额度分层（2026-10-27 生效）**：
   - **S（按需，最紧）**：Opus-5.5-Max（战略编排、攻坚专家·L4）、Astra-Max（架构师）、Opus-5.5-High（L4 终审）。只用于决策、架构与 L4。
-  - **A（Claude Sonnet 5.5，Claude 订阅，比 Opus 耐用得多，可以多派活）**：运行调度（Xhigh）、需求规格（Max）、核心开发·L3（Xhigh）、常规审查 ×2（High）。
+  - **运行调度**：GPT-6.1-Sol Max（人指定），承担全部日常派活；撞额度时由 Sonnet 5.5 接替。
+  - **A（Claude Sonnet 5.5，Claude 订阅，比 Opus 耐用得多，可以多派活）**：需求规格（Max）、核心开发·L3（Xhigh）、常规审查 ×2（High）。
   - **B（DeepSeek-V4.1-Flash-Max、Grok-4.6-High-Fast（Cursor），额度充足，尽情用）**：L1–L2 实现（两个家族各一席）、测试设计、代码库分析、DEV 验收、集成。
-  - **不用**：Grok-4.7；Cursor 渠道里 Grok 以外的模型（额度将尽，包括 Cursor-Claude-Sonnet-5.5、走 Cursor 的 Gemini）。Sol Max、Gemini 等其他模型只在必要时按需使用。
+  - **不用**：Grok-4.7；Cursor 渠道里 Grok 以外的模型（额度将尽，包括 Cursor-Claude-Sonnet-5.5、走 Cursor 的 Gemini）。Sol Max 只用于运行调度；Gemini 等其他模型只在必要时按需使用。
   - **分配**：L1–L2 → B；L3 → Sonnet；L4 → Opus（攻坚专家实现，或由 Sonnet 实现、攻坚专家审方案）。
   - **交叉验证**：
     - L1 由另一家族的 B 层执行者互审；
@@ -143,7 +144,7 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 
 | 席位 | Role | 首选 Profile | 层级 | 承担 |
 | --- | --- | --- | --- | --- |
-| seat-operations | 【统筹】运行调度（新） | Sonnet 5.5 Xhigh（备选 DeepSeek、Grok） | A | 全部日常派活、台账、锁、重试、升级、心跳自检 |
+| seat-operations | 【统筹】运行调度（新） | GPT-6.1-Sol Max（备选 Sonnet 5.5 Xhigh、DeepSeek、Grok） | 调度 | 全部日常派活、台账、锁、重试、升级、心跳自检 |
 | seat-spec | 【规划】需求规格（新） | Sonnet 5.5 Max（备选 Astra、DeepSeek） | A | 编号、可验证的验收标准与反例 |
 | seat-architect | 【规划】架构师 | GPT-6-Astra-Max（备选 Opus-Max） | S | 方案、接口、跨模块合同 |
 | seat-codebase | 【研究】代码库分析（新） | Grok-4.6（备选 DeepSeek） | B | 现状与 SDK 能力梳理 |
@@ -164,7 +165,7 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 - 新 Role 都不含 Grok-4.7 和 Cursor 渠道里 Grok 以外的模型。
 - 模式为 SOTA，含义是"每个 Role 使用自己的绑定"。层级已经直接写在各 Role 的绑定里。
 - **已知限制（过渡期）**：
-  - 运行调度出错或撞额度时，Paseo 不会主动通知战略编排。需要人在 Runs 页看到"需处理"后告诉战略编排，由它新建运行调度、从台账接手。
+  - 运行调度出错或撞额度时，Paseo 不会主动通知战略编排。需要人在 Runs 页看到"需处理"后告诉战略编排，由它新建运行调度（优先 Sonnet 5.5 Xhigh），从台账接手。
   - 运行调度的心跳自检只能发现停滞，不能代替 Run Engine。
 
 ## 8. 成功指标
