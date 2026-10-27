@@ -544,7 +544,10 @@ function asBudget(value: string | undefined): SeatPreview["budget"] | undefined 
 }
 
 function asBudgetBasis(value: string | undefined): SeatPreview["budgetBasis"] | undefined {
-  return value === "host" || value === "pool" || value === "conservative-default"
+  return value === "host" ||
+    value === "pool" ||
+    value === "route" ||
+    value === "conservative-default"
     ? value
     : undefined;
 }

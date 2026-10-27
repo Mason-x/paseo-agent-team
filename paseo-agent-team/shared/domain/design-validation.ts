@@ -1781,23 +1781,26 @@ export function validateRoleGap(
           issues.push(error("DESIGN_PROFILE_MISSING", at, { profileId }));
           return;
         }
-        // A suggested Profile must be a low-cost one this build can verify. Full economy-all
-        // eligibility and route membership stay with C02 (D02 exports); this is the cheap floor.
-        const family = identifyModelFamily({ model: profile.model });
-        const familyReason = namesHighCostFamily(family)
-          ? "high-cost-family"
-          : family.status === "identified" && family.cost === "low"
-            ? null
-            : "family-unverified";
-        if (familyReason) {
-          issues.push(
-            error("DESIGN_OUTPUT_SCHEMA", at, {
-              path: at.join("."),
-              reason: familyReason,
-              profileId,
-            }),
-          );
-          return;
+        // Only the all-seats cheap mode restricts suggestions to low-cost families this build can
+        // verify (full eligibility and route membership stay with C02). Flagship, standard, and
+        // collaborative keep their original semantics: a Profile that exists on the host is fine.
+        if (context.mode === "economy-all") {
+          const family = identifyModelFamily({ model: profile.model });
+          const familyReason = namesHighCostFamily(family)
+            ? "high-cost-family"
+            : family.status === "identified" && family.cost === "low"
+              ? null
+              : "family-unverified";
+          if (familyReason) {
+            issues.push(
+              error("DESIGN_OUTPUT_SCHEMA", at, {
+                path: at.join("."),
+                reason: familyReason,
+                profileId,
+              }),
+            );
+            return;
+          }
         }
         report.profiles.push(gapProfileSummary(profile));
       });

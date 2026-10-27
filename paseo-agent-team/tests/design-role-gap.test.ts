@@ -249,6 +249,35 @@ describe("role-gap acceptance", () => {
     expect(codes(unresolved)).toEqual(["DESIGN_OUTPUT_SCHEMA"]);
     if (!unresolved.ok) expect(unresolved.issues[0]?.params.reason).toBe("family-unverified");
   });
+
+  test.each(["sota", "economy", "collaborative"] as const)(
+    "P1-FIX1 item 1: %s does not apply the all-seats low-cost floor to suggestions",
+    (mode) => {
+      const result = validateRoleGap(
+        gapProposal([
+          missingRoleGap({
+            profiles: { kind: "existing", profileIds: [claudeOpus.id, codexXhigh.id] },
+          }),
+        ]),
+        context({ mode }),
+        ACCEPT,
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.gaps[0]?.profiles.map((profile) => profile.id)).toEqual([
+          claudeOpus.id,
+          codexXhigh.id,
+        ]);
+      }
+      // A Profile that does not exist is still rejected in every mode.
+      const missing = validateRoleGap(
+        gapProposal([missingRoleGap({ profiles: { kind: "existing", profileIds: ["p-gone"] } })]),
+        context({ mode }),
+        ACCEPT,
+      );
+      expect(codes(missing)).toEqual(["DESIGN_PROFILE_MISSING"]);
+    },
+  );
 });
 
 describe("unlaunchable-role uses the verified per-use verdict", () => {

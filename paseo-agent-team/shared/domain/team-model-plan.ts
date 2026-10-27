@@ -33,6 +33,12 @@ export type TeamModelPlan = {
   seatPlan: SeatPlan;
   coordinator: TeamModelCoordinator;
   issues: readonly ModeIssue[];
+  /**
+   * Issues beyond the seat plan's own: the coordinator's and, in economy-all, the all-seats policy
+   * configuration. `issues` already contains them; callers that render the seat plan separately
+   * use this to add only the rest.
+   */
+  extraIssues: readonly ModeIssue[];
   blockers: readonly ModeIssue[];
 };
 
@@ -89,7 +95,7 @@ export function buildTeamModelPlan(input: BuildTeamModelPlanInput): TeamModelPla
         selection: resolved.selection,
         warnings: resolved.warnings,
         legacyFailureReason: null,
-        issues: [],
+        issues: resolved.issues,
       };
     } else {
       coordinator = {
@@ -101,7 +107,14 @@ export function buildTeamModelPlan(input: BuildTeamModelPlanInput): TeamModelPla
       };
     }
   }
-  issues.push(...coordinator.issues);
+  const allSeatsIssues: ModeIssue[] = [];
+  if (effectiveMode === "economy-all" && input.economy.allSeats?.status === "ready") {
+    // Static policy problems (bad entry, outside-list id, over-limit) reach the DTO instead of
+    // staying inside normalize; absent/invalid policies already block through resolveCheapSeat.
+    allSeatsIssues.push(...input.economy.allSeats.issues);
+  }
+  const extraIssues = [...coordinator.issues, ...allSeatsIssues];
+  issues.push(...extraIssues);
   const blockers = issues.filter((entry) => entry.severity === "blocker");
   return {
     effectiveMode,
@@ -110,6 +123,7 @@ export function buildTeamModelPlan(input: BuildTeamModelPlanInput): TeamModelPla
     seatPlan,
     coordinator,
     issues,
+    extraIssues,
     blockers,
   };
 }

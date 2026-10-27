@@ -168,12 +168,16 @@ describe("cheap issue copy and ordering", () => {
     const plan = planWith(policy);
     const invalid = plan.seatIssues
       .map((issue, index) => ({ issue, index }))
-      .filter((item) => item.issue.code === "MODE_CHEAP_PROFILE_INVALID");
+      .filter(
+        (item) =>
+          item.issue.code === "MODE_CHEAP_PROFILE_INVALID" && item.issue.severity === "blocker",
+      );
     const route = plan.seatIssues
       .map((issue, index) => ({ issue, index }))
       .filter(
         (item) =>
           item.issue.code === "MODE_CHEAP_ROUTE_UNAVAILABLE" &&
+          item.issue.severity === "blocker" &&
           item.issue.params.route === "execution",
       );
     expect(route).toHaveLength(1);

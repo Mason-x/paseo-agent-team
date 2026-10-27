@@ -6,6 +6,7 @@ import type { TeamMode } from "../schemas/team-mode";
 import { zh } from "../zh";
 import { cheapIssueText } from "../zh/mode-plan";
 import type { EconomyPolicy, HostSnapshot, ProfileSelection } from "./mode-resolver";
+import { resolveCoordinatorProfile } from "./mode-resolver";
 import { resolveProfile } from "./profile-resolver";
 import {
   type CoordinatorRosterEntry,
@@ -52,6 +53,11 @@ export type LaunchPlan = {
   seatIssues: ModeIssue[];
   /** The same selection the coordinator was built from; preview uses it for the new mode. */
   coordinatorSelected?: ProfileSelection;
+  /**
+   * The stored Team.mode this version cannot read. `mode` above is then only an internal
+   * placeholder (planning is blocked by MODE_UNKNOWN); consumers must not present it as resolved.
+   */
+  rawMode?: string;
   kickoffMessage: string;
   warnings: string[];
   blockers: string[];
@@ -339,6 +345,11 @@ export function buildLaunchPlan(input: {
     if (entry.severity !== "warning") continue;
     warnings.push(warningIssueText(entry, seatPlan.seats));
   }
+  // Coordinator policy warnings and (economy-all) all-seats configuration problems.
+  for (const entry of modelPlan.extraIssues) {
+    if (entry.severity !== "warning") continue;
+    warnings.push(warningIssueText(entry, seatPlan.seats));
+  }
   if (seatPlan.mode === "collaborative" && !capabilities.collaboration) {
     blockers.push(zh.modes.collaborationRuntimeUnavailable);
   }
@@ -362,7 +373,21 @@ export function buildLaunchPlan(input: {
   let coordinator: PlannedAgent = emptyCoordinator;
   let coordinatorSelected: ProfileSelection | undefined;
   if (coordinatorRole) {
-    const selection = modelPlan.coordinator.selection;
+    // An unreadable stored mode is blocked by MODE_UNKNOWN, but the coordinator is still shown as
+    // the baseline did: the Role's own binding through the legacy resolver. Nothing starts.
+    const selection =
+      modelPlan.coordinator.selection ??
+      (modelPlan.effectiveMode === null
+        ? (() => {
+            const legacy = resolveCoordinatorProfile({
+              mode: "sota",
+              role: coordinatorRole,
+              host,
+              economy: input.economy ?? EMPTY_ECONOMY_POLICY,
+            });
+            return legacy.ok ? legacy.selection : null;
+          })()
+        : null);
     if (selection) {
       warnings.push(...modelPlan.coordinator.warnings);
       coordinatorSelected = selection;
@@ -505,6 +530,7 @@ export function buildLaunchPlan(input: {
     seatBudget: seatPlan.budget,
     seatIssues: [...modelPlan.issues],
     ...(coordinatorSelected === undefined ? {} : { coordinatorSelected }),
+    ...(modelPlan.rawMode === undefined ? {} : { rawMode: modelPlan.rawMode }),
     kickoffMessage,
     warnings: [...new Set(warnings)],
     blockers: [...new Set(blockers)],

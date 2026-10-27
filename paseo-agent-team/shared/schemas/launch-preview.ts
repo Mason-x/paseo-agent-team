@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TeamModeSchema } from "./team-mode";
+import { BudgetBasisSchema, TeamModeSchema } from "./team-mode";
 
 export const ModeIssueSchema = z.strictObject({
   code: z.string().min(1).max(64),
@@ -34,7 +34,7 @@ export const SeatPreviewSchema = z.strictObject({
   family: z.string().optional(),
   alternates: z.array(z.string()),
   budget: z.enum(["economy", "sota", "unknown"]),
-  budgetBasis: z.enum(["host", "pool", "conservative-default"]),
+  budgetBasis: BudgetBasisSchema,
   standby: z.boolean(),
   unavailable: z.boolean(),
   issues: z.array(ModeIssueSchema),
@@ -47,7 +47,7 @@ export const CoordinatorPreviewSchema = z.strictObject({
   source: z.enum(["role-preferred", "role-fallback", "economy-pool", "unavailable"]),
   route: z.string().min(1).max(32).optional(),
   budget: z.enum(["economy", "sota", "unknown"]).optional(),
-  budgetBasis: z.enum(["host", "pool", "conservative-default"]).optional(),
+  budgetBasis: BudgetBasisSchema.optional(),
   issues: z.array(ModeIssueSchema),
 });
 
@@ -68,7 +68,9 @@ export const SeatBudgetSchema = z.strictObject({
 });
 
 export const ModeLaunchPreviewSchema = z.strictObject({
-  requestedMode: TeamModeSchema,
+  /** Absent when the stored Team.mode is unreadable; `rawMode` then carries the original value. */
+  requestedMode: TeamModeSchema.optional(),
+  rawMode: z.string().optional(),
   coordinator: CoordinatorPreviewSchema,
   seats: z.array(SeatPreviewSchema),
   counts: SeatCountsSchema,

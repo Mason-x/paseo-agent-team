@@ -209,6 +209,40 @@ describe("unresolved rows", () => {
     ).toBe("policy");
   });
 
+  test("P1-FIX1 item 3: economy-all route failures keep their own reasons", () => {
+    const cheap = (code: string, params: Record<string, string>) =>
+      unresolvedReasonOf(
+        row({
+          profile: null,
+          // The provider snapshot must not outrank the route-level cause.
+          availability: "unverified",
+          issues: [issue(code, params)],
+        }),
+      );
+    for (const reason of ["list-empty", "route-empty"]) {
+      expect(cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason })).toBe(
+        "route-unavailable",
+      );
+    }
+    for (const reason of ["all-disabled", "model-unverified", "no-eligible"]) {
+      expect(cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason })).toBe(
+        "no-cheap-profile",
+      );
+    }
+    expect(
+      cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason: "profile-missing" }),
+    ).toBe("profile-missing");
+    expect(
+      cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason: "provider-unavailable" }),
+    ).toBe("provider-unavailable");
+    expect(cheap("MODE_CHEAP_POLICY_REQUIRED", { route: "execution", reason: "absent" })).toBe(
+      "route-unavailable",
+    );
+    expect(
+      cheap("MODE_CHEAP_PROFILE_INVALID", { route: "execution", reason: "tuple-changed" }),
+    ).toBe("no-cheap-profile");
+  });
+
   test("counts unresolved rows, groups reasons, and keeps total equal to enabled rows", () => {
     const rows = [
       row({ rowKey: "a" }),

@@ -116,6 +116,9 @@ function allSeatsStatus(
       warning: true,
     };
   }
+  if (check.exclusion === "budget-conflict") {
+    return { text: modesZh.economyAllExcludedBudget, warning: true };
+  }
   if (check.exclusion === "provider-unverified") {
     return {
       text: modesZh.economyAllProviderUnverified(profile?.provider ?? ""),
@@ -750,7 +753,13 @@ export function EconomyPoolEditor({
                 {allSeats.profiles.map((entry) => {
                   const profile = profilesById.get(entry.profileId);
                   const displayName = profile?.name ?? entry.profileId;
-                  const check = checkAllSeatsEntry(entry, profiles, availability.data ?? null);
+                  const check = checkAllSeatsEntry(
+                    entry,
+                    profiles,
+                    availability.data ?? null,
+                    // A pool member's label is dropped on save, so it cannot conflict.
+                    poolIds.has(entry.profileId) ? undefined : state.profileBudget[entry.profileId],
+                  );
                   const status = allSeatsStatus(check, profile, entry.enabled, entry.profileId);
                   const binding = profile
                     ? `${profile.provider}${profile.model ? `/${profile.model}` : ""}`
