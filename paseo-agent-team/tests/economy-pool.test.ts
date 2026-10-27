@@ -41,8 +41,10 @@ import {
   setPoolFamily,
   setProfileBudget,
 } from "../client/settings/economy-pool";
+import { normalizeEconomyPolicy, resolveModeProfile } from "../shared/domain/mode-resolver";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import { PreferencesSchema } from "../shared/schemas/preferences";
+import { role as roleFixture } from "./fixtures";
 import {
   ALL_SEATS_WRITER_LIMIT,
   StoredAllSeatsPolicySchema,
@@ -694,6 +696,129 @@ describe("economy-all allowlist", () => {
       live,
     );
     expect(kept.allSeats.profiles[0]?.profileId).toBe("p-opus");
+  });
+
+  test("P1-FIX1 item 5: the editor's eligible verdict is the planner's verdict", () => {
+    const sonnet = live[0] as PaseoProfile;
+    const entryDraft = draftFromStored({
+      allSeats: {
+        version: 1,
+        profiles: [
+          {
+            profileId: "p-sonnet",
+            enabled: true,
+            costClass: "low",
+            family: "sonnet",
+            boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
+          },
+        ],
+        routes: { execution: ["p-sonnet"] },
+      },
+    });
+    const entry = entryDraft.allSeats.profiles[0];
+    if (!entry) throw new Error("fixture missing");
+    const worker = roleFixture({
+      id: "eng-fullstack",
+      name: "Eng",
+      preferredProfiles: [{ profileId: "p-sonnet" }],
+    });
+    const budgets = [undefined, "economy", "sota", "unknown"] as const;
+    const availabilities: (ProviderAvailability[] | null)[] = [
+      available,
+      [{ provider: "claude", available: false }],
+      [{ provider: "omp", available: true }],
+      null,
+    ];
+    let conflicts = 0;
+    for (const budget of budgets) {
+      for (const rows of availabilities) {
+        const result = normalizeEconomyPolicy(
+          {
+            pool: [],
+            taskOrder: {},
+            profileBudget: budget === undefined ? {} : { "p-sonnet": budget },
+            allSeats: {
+              version: 1,
+              profiles: [
+                {
+                  profileId: "p-sonnet",
+                  enabled: true,
+                  costClass: "low",
+                  family: "sonnet",
+                  boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
+                },
+              ],
+              routes: { execution: ["p-sonnet"] },
+            },
+          },
+          [sonnet],
+        );
+        if (!result.ok) throw new Error("policy failed");
+        const planner = resolveModeProfile({
+          mode: "economy-all",
+          role: worker,
+          kind: "member",
+          host: { status: "ready", profiles: [sonnet], availability: rows ?? [] },
+          economy: result.value,
+        });
+        const plannerEligible = planner.ok && !planner.value.unavailable;
+        const editor = checkAllSeatsEntry(entry, [sonnet], rows, budget);
+        expect(editor.exclusion === null, `${budget}/${JSON.stringify(rows)}`).toBe(
+          plannerEligible,
+        );
+        if (budget === "sota" || budget === "unknown") {
+          conflicts += 1;
+          expect(editor.exclusion).toBe("budget-conflict");
+        }
+      }
+    }
+    expect(conflicts).toBe(8);
+    // A missing availability row is unverified, exactly like the planner.
+    expect(checkAllSeatsEntry(entry, [sonnet], [{ provider: "omp", available: true }]).exclusion).toBe(
+      "provider-unverified",
+    );
+  });
+
+  test("P1-FIX1 item 9: saving writes only the entries the user touched", () => {
+    const sonnetRaw = {
+      profileId: "p-sonnet",
+      nameSnapshot: "Old Name",
+      enabled: true,
+      costClass: "mid", // a newer writer's classification
+      family: "sonnet",
+      boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
+      futureEntryField: { keep: 1 },
+    };
+    const noTupleRaw = { profileId: "p-deepseek", family: "deepseek", enabled: true };
+    const raw = {
+      allSeats: {
+        version: 1,
+        profiles: [sonnetRaw, noTupleRaw],
+        routes: { execution: ["p-deepseek"] },
+      },
+    };
+    const base = draftFromStored(raw);
+    const storedProfiles = (draft: typeof base) =>
+      (buildStoredEconomy(raw, draft, live).allSeats as { profiles: unknown[] }).profiles;
+
+    // Editing a route (touching the block) leaves both untouched entries byte for byte.
+    const routed = addAllSeatsRouteEntry(base, "retain", "p-sonnet");
+    expect(storedProfiles(routed)).toEqual([sonnetRaw, noTupleRaw]);
+
+    // Toggling one entry changes only its `enabled`; costClass, tuple, and name stay as stored.
+    const toggled = setAllSeatsEnabled(base, "p-sonnet", false);
+    expect(storedProfiles(toggled)).toEqual([{ ...sonnetRaw, enabled: false }, noTupleRaw]);
+
+    // An explicit re-confirmation is the one case that writes the live family and tuple.
+    const rebound = rebindAllSeatsProfile(base, "p-sonnet", live[0] as PaseoProfile);
+    expect(storedProfiles(rebound)[0]).toMatchObject({
+      costClass: "low",
+      family: "sonnet",
+      boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
+      nameSnapshot: "Claude Sonnet",
+      futureEntryField: { keep: 1 },
+    });
+    expect(storedProfiles(rebound)[1]).toEqual(noTupleRaw);
   });
 
   const grok47 = (id: string, name: string, model: string): PaseoProfile => ({

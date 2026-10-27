@@ -7,6 +7,7 @@ import {
   sameModelTuple,
   storedModelFamily,
 } from "../../shared/domain/model-family";
+import { evaluateCheapCandidate } from "../../shared/domain/cheap-routing";
 import { isTaskKind } from "../../shared/domain/role-execution";
 import type { PaseoProfile, ProviderAvailability } from "../../shared/paseo/adapter";
 import { type Preferences, PreferencesSchema } from "../../shared/schemas/preferences";
@@ -421,7 +422,8 @@ export type AllSeatsExclusionReason =
   | "family-high-cost"
   | "needs-rebind"
   | "provider-unavailable"
-  | "provider-unverified";
+  | "provider-unverified"
+  | "budget-conflict";
 
 export type AllSeatsEntryCheck = {
   liveFamily: ModelFamily | null;
@@ -440,14 +442,19 @@ function allSeatsBindingVerified(entry: AllSeatsEntryDraft, profile: PaseoProfil
 }
 
 /**
- * Display-side eligibility: allowlist ∩ resolved low-cost live model ∩ verified tuple ∩ provider
- * available. `availability` null means the query has not answered, which is never treated as
- * available. Disabled entries keep their reason; the editor labels them separately.
+ * Display-side eligibility. The model identity and the saved binding are checked here (they decide
+ * what the editor shows and writes); the budget label, the family match, and the provider
+ * availability come from the planner's own `evaluateCheapCandidate`, so "合格" here and a launch
+ * blocker can never disagree. `availability` null means the query has not answered, which is never
+ * treated as available. `profileBudget` is the explicit label that would be saved for this
+ * Profile (pool members carry none). Disabled entries keep their reason; the editor labels them
+ * separately.
  */
 export function checkAllSeatsEntry(
   entry: AllSeatsEntryDraft,
   profiles: readonly PaseoProfile[],
   availability?: readonly ProviderAvailability[] | null,
+  profileBudget?: EconomyBudget,
 ): AllSeatsEntryCheck {
   const profile = profiles.find((item) => item.id === entry.profileId);
   if (!profile) return { liveFamily: null, exclusion: "profile-missing" };
@@ -465,17 +472,44 @@ export function checkAllSeatsEntry(
   if (!allSeatsBindingVerified(entry, profile)) {
     return { liveFamily: match.family, exclusion: "needs-rebind" };
   }
-  if (!availability) return { liveFamily: match.family, exclusion: "provider-unverified" };
-  const provider = availability.find((item) => item.provider === profile.provider);
-  if (!provider) return { liveFamily: match.family, exclusion: "provider-unavailable" };
-  if (!provider.available) {
-    return {
-      liveFamily: match.family,
-      exclusion: "provider-unavailable",
-      ...(provider.reason === undefined ? {} : { providerReason: provider.reason }),
-    };
+  const family = storedModelFamily(entry.familyTouched ? entry.family : entry.originalFamily);
+  const live = liveBinding(profile);
+  const verdict = evaluateCheapCandidate({
+    entry: {
+      profileId: entry.profileId,
+      enabled: true,
+      family: family ?? match.family,
+      boundModel: { provider: live.provider, model: live.model ?? "" },
+    },
+    live: profile,
+    route: "execution",
+    ...(profileBudget === undefined ? {} : { profileBudget }),
+    availability: availability ?? [],
+  });
+  if (verdict.ok) return { liveFamily: match.family, exclusion: null };
+  const row = availability?.find((item) => item.provider === profile.provider);
+  switch (verdict.reason) {
+    case "budget-conflict":
+      return { liveFamily: match.family, exclusion: "budget-conflict" };
+    case "unverified":
+      return { liveFamily: match.family, exclusion: "provider-unverified" };
+    case "unavailable":
+      return {
+        liveFamily: match.family,
+        exclusion: "provider-unavailable",
+        ...(row?.reason === undefined ? {} : { providerReason: row.reason }),
+      };
+    case "high-cost-family":
+      return { liveFamily: match.family, exclusion: "family-high-cost" };
+    case "model-missing":
+    case "model-auto":
+    case "family-unknown":
+    case "family-ambiguous":
+      return { liveFamily: match.family, exclusion: "model-unresolved" };
+    default:
+      // family-mismatch, tuple-changed: the saved claim no longer describes the live Profile.
+      return { liveFamily: match.family, exclusion: "needs-rebind" };
   }
-  return { liveFamily: match.family, exclusion: null };
 }
 
 /** A new or re-confirmed entry can only be written with a live, resolved low-cost Profile. */
@@ -967,7 +1001,9 @@ export function buildStoredEconomy(
 }
 
 /**
- * Write one allowlist entry. Sibling fields of the stored entry survive; a re-confirmed entry
+ * Write one allowlist entry, and only what the user touched. An entry nobody edited is returned
+ * exactly as stored: no costClass rewrite, no tuple stamped on an entry that never had one, no
+ * refreshed nameSnapshot. A toggled entry changes only `enabled`. A new or re-confirmed entry
  * writes the live low-cost family and tuple it was verified against, never a typed-in claim.
  */
 function buildAllSeatsEntry(
@@ -975,26 +1011,24 @@ function buildAllSeatsEntry(
   raw: Record<string, unknown> | undefined,
   profile: PaseoProfile | undefined,
 ): Record<string, unknown> {
+  if (raw && !entry.familyTouched) {
+    return (raw.enabled !== false) === entry.enabled ? raw : { ...raw, enabled: entry.enabled };
+  }
   const out: Record<string, unknown> = {
     ...(raw ?? {}),
     profileId: entry.profileId,
     enabled: entry.enabled,
     costClass: "low",
   };
-  if (entry.familyTouched) {
-    const family = profile ? cheapFamilyOf(profile) : null;
-    if (family) {
-      out.family = family;
-      if (profile) out.boundModel = liveBinding(profile);
-    } else if (entry.family) {
-      out.family = entry.family;
-    }
-    // Writer shape: a re-confirmed entry must carry the family and the verified live tuple.
-    StoredAllSeatsEntrySchema.parse(out);
-  } else if (profile && entry.originalBoundModel === null && entry.originalFamily) {
-    // The family is unchanged; record the tuple it was accepted with for the next verification.
-    out.boundModel = liveBinding(profile);
+  const family = profile ? cheapFamilyOf(profile) : null;
+  if (family) {
+    out.family = family;
+    if (profile) out.boundModel = liveBinding(profile);
+  } else if (entry.family) {
+    out.family = entry.family;
   }
+  // Writer shape: a new or re-confirmed entry must carry the family and the verified live tuple.
+  StoredAllSeatsEntrySchema.parse(out);
   if (profile?.name) out.nameSnapshot = profile.name;
   return out;
 }
