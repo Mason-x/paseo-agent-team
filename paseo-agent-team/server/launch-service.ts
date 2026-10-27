@@ -1,11 +1,7 @@
 import { buildLaunchPlan, type LaunchPlan } from "../shared/domain/launch-plan";
 import { launchPreviewWarnings, toModeLaunchPreview } from "../shared/domain/launch-preview";
 import { isLaunchError, launchTeam } from "../shared/domain/launch-team";
-import {
-  checkModeAccess,
-  readStoredMode,
-  requestContractVersion,
-} from "../shared/domain/mode-contract";
+import { checkModeAccess, requestContractVersion } from "../shared/domain/mode-contract";
 import type { EconomyPolicy } from "../shared/domain/mode-resolver";
 import type { ModeIssue } from "../shared/domain/role-execution";
 import { createRunId } from "../shared/ids";
@@ -152,11 +148,6 @@ export function createLaunchService(deps: {
     if (target.kind === "new-workspace" && !project) targetBlockers.push(zh.projectMissing);
 
     const { economy, issues: economyIssues } = planningEconomy(settings.preferences, host);
-    const storedMode = readStoredMode(team?.mode);
-    // FIX1 adds `plan.rawMode`; this branch mirrors it (unknown stored value and no override) until
-    // that branch is integrated, so a job never reports the placeholder mode as real.
-    const rawMode =
-      storedMode.status === "unknown" && input.mode === undefined ? storedMode.raw : undefined;
     const plan = buildLaunchPlan({
       team,
       roles: settings.roles.roles,
@@ -192,7 +183,7 @@ export function createLaunchService(deps: {
       preferences: settings.preferences,
       economy,
       economyIssues,
-      ...(rawMode === undefined ? {} : { rawMode }),
+      ...(plan.rawMode === undefined ? {} : { rawMode: plan.rawMode }),
     };
     if (blockers.length > 0) {
       return { ok: false, blockers, warnings: plan.warnings, issues };
