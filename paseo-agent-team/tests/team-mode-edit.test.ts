@@ -88,12 +88,29 @@ describe("seat ids", () => {
 });
 
 describe("stored mode and collaboration", () => {
-  test("unknown mode falls back to SOTA but is reported", () => {
+  test("unknown mode falls back to SOTA in the form but is reported with its raw value", () => {
     expect(readStoredTeamMode(undefined)).toEqual({ mode: "sota", unknown: null });
     expect(readStoredTeamMode("economy")).toEqual({ mode: "economy", unknown: null });
     expect(readStoredTeamMode("future-mode")).toEqual({
       mode: "sota",
       unknown: "future-mode",
+    });
+  });
+
+  test("every contract mode reads as itself, including the fourth one", () => {
+    expect(readStoredTeamMode("sota")).toEqual({ mode: "sota", unknown: null });
+    expect(readStoredTeamMode("economy-all")).toEqual({ mode: "economy-all", unknown: null });
+    expect(readStoredTeamMode("collaborative")).toEqual({
+      mode: "collaborative",
+      unknown: null,
+    });
+    // Blank is the SOTA default planning applies; it is not an unreadable value.
+    expect(readStoredTeamMode("   ")).toEqual({ mode: "sota", unknown: null });
+    expect(readStoredTeamMode(" economy ")).toEqual({ mode: "economy", unknown: null });
+    // A mode this version does not know is never silently reported as a known one.
+    expect(readStoredTeamMode("economy-ALL")).toEqual({
+      mode: "sota",
+      unknown: "economy-ALL",
     });
   });
 
@@ -161,5 +178,49 @@ describe("stored mode and collaboration", () => {
       mode: "collaborative",
       collaboration: { replicas: 2 },
     });
+  });
+
+  test("each explicit choice writes its own value and reopens as the same mode", () => {
+    const base = {
+      original: { ...codingTeam, mode: "economy" },
+      modeTouched: true,
+      memberCreation: "" as const,
+      memberCreationTouched: false,
+      collaboration: { replicas: 2 as const, judgeRoleId: "", escalationRoleId: "" },
+      collaborationTouched: untouched,
+    };
+    const modes = ["sota", "economy", "economy-all", "collaborative"] as const;
+    const stored = modes.map((mode) => buildTeamModeFields({ ...base, mode }).mode);
+    expect(stored).toEqual(["sota", "economy", "economy-all", "collaborative"]);
+    expect(new Set(stored).size).toBe(modes.length);
+
+    for (const mode of modes) {
+      const parsed = TeamSchema.safeParse({
+        ...codingTeam,
+        ...buildTeamModeFields({ ...base, mode }),
+      });
+      if (!parsed.success) throw new Error("team fixture invalid");
+      expect(parsed.data.mode).toBe(mode);
+      expect(readStoredTeamMode(parsed.data.mode)).toEqual({ mode, unknown: null });
+    }
+  });
+
+  test("an untouched mode keeps the exact stored value, including unknown and blank", () => {
+    const base = {
+      mode: "economy-all" as const,
+      modeTouched: false,
+      memberCreation: "" as const,
+      memberCreationTouched: false,
+      collaboration: { replicas: 2 as const, judgeRoleId: "", escalationRoleId: "" },
+      collaborationTouched: untouched,
+    };
+    for (const stored of [undefined, "", "economy", "economy-all", "future-mode", " sota "]) {
+      const fields = buildTeamModeFields({ ...base, original: { ...codingTeam, mode: stored } });
+      expect(fields.mode).toBe(stored);
+    }
+    // A Team saved without a mode stays without one: the default is never written back.
+    expect(
+      buildTeamModeFields({ ...base, original: { ...codingTeam, mode: undefined } }),
+    ).not.toHaveProperty("mode");
   });
 });

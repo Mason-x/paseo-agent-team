@@ -1,19 +1,25 @@
+import {
+  TEAM_MODE_DISPLAY,
+  TEAM_MODES,
+  type TeamModeDisplay,
+} from "../../shared/domain/mode-contract";
 import type { RoleTier, TaskKind, TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
+import { modesZh } from "../../shared/zh/modes";
 
+/**
+ * The single picker table, derived from the mode contract: 旗舰（SOTA）/ 标准 / 经济 / 协作 in
+ * `TEAM_MODES` order, with labels keyed by display identity so no two modes share a name.
+ */
 export const TEAM_MODE_OPTIONS: readonly {
   value: TeamMode;
+  display: TeamModeDisplay;
   label: string;
   hint: string;
-}[] = [
-  { value: "sota", label: zh.teamModeSota, hint: zh.teamModeSotaHint },
-  { value: "economy", label: zh.teamModeEconomy, hint: zh.teamModeEconomyHint },
-  {
-    value: "collaborative",
-    label: zh.teamModeCollaborative,
-    hint: zh.teamModeCollaborativeHint,
-  },
-];
+}[] = TEAM_MODES.map((value) => {
+  const display = TEAM_MODE_DISPLAY[value];
+  return { value, display, label: modesZh.modeLabels[display], hint: modesZh.modeHints[display] };
+});
 
 export const ROLE_TIER_OPTIONS: readonly { value: RoleTier; label: string }[] = [
   { value: "decision", label: zh.roleTierDecision },

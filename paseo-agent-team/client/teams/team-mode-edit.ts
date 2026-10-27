@@ -1,4 +1,4 @@
-import { normalizeMode } from "../../shared/domain/mode-resolver";
+import { modeToStore, readStoredMode } from "../../shared/domain/mode-contract";
 import type { Role } from "../../shared/schemas/role";
 import type { TeamMember } from "../../shared/schemas/team";
 import type { StoredCollaboration, TeamMode } from "../../shared/schemas/team-mode";
@@ -7,9 +7,16 @@ import type { MemberCreation } from "../shared/team-mode-options";
 
 export type StoredModeRead = { mode: TeamMode; unknown: string | null };
 
+/**
+ * The picker needs a concrete mode, so an unreadable stored value selects the SOTA default in the
+ * form — but `unknown` carries the raw value, the editor warns with it, and an untouched save
+ * writes the original back (never `sota`).
+ */
 export function readStoredTeamMode(raw: string | undefined): StoredModeRead {
-  const parsed = normalizeMode(raw);
-  return parsed.ok ? { mode: parsed.value, unknown: null } : { mode: "sota", unknown: raw ?? "" };
+  const stored = readStoredMode(raw);
+  return stored.status === "known"
+    ? { mode: stored.mode, unknown: null }
+    : { mode: "sota", unknown: stored.raw };
 }
 
 export function readMemberCreation(raw: string | undefined): MemberCreation {
@@ -185,7 +192,11 @@ export function buildTeamModeFields(input: {
   collaboration: CollaborationDraft;
   collaborationTouched: CollaborationTouched;
 }): TeamModeFields {
-  const mode = input.modeTouched ? input.mode : input.original?.mode;
+  const mode = modeToStore({
+    original: input.original?.mode,
+    selected: input.mode,
+    touched: input.modeTouched,
+  });
   const memberCreation = input.memberCreationTouched
     ? input.memberCreation || undefined
     : input.original?.memberCreation;
