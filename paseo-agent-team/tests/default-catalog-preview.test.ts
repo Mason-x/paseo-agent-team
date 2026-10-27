@@ -38,7 +38,7 @@ describe("default catalog preview", () => {
       warnings: [],
     });
     if (!preview.ok) throw new Error("unexpected blocked preview");
-    expect(preview.roles).toHaveLength(23);
+    expect(preview.roles).toHaveLength(13);
     expect(
       preview.roles.every((row) => row.kind === "missing" && row.defaultAction === "add"),
     ).toBe(true);
@@ -89,8 +89,14 @@ describe("default catalog preview", () => {
 
   test("reports unique runtime renames and leaves ambiguous twins unbound", async () => {
     const deps = readyDeps();
+    // Two Profiles share Opus Medium's runtime, so its hints stay unbound.
+    const medium = sourceProfiles.find((profile) => profile.name === "Claude-Opus-5.5-Medium");
+    if (!medium) throw new Error("Missing Opus Medium fixture");
     deps.listProfiles.mockResolvedValue(
-      sourceProfiles.map((profile) => ({ ...profile, name: `Renamed ${profile.id}` })),
+      [...sourceProfiles, { ...medium, id: "agent_profile_twin" }].map((profile) => ({
+        ...profile,
+        name: `Renamed ${profile.id}`,
+      })),
     );
     const preview = await previewDefaultCatalog({ allowUnboundOnProfileError: false }, deps);
     expect(preview.ok).toBe(true);

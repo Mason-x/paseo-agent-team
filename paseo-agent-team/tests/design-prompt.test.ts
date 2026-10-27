@@ -48,37 +48,37 @@ const SOURCE_RECIPES = [
     id: "release-check",
     name: "上线前检查",
     coordinatorRoleId: "lead-tech",
-    members: ["qa-security", "qa-acceptance", "eng-ops"],
+    members: ["qa-review", "qa-test", "eng-batch"],
   },
   {
     id: "technical-research",
     name: "技术调研",
-    coordinatorRoleId: "lead-research",
+    coordinatorRoleId: "lead-orchestrator",
     members: ["research-web", "research-codebase", "research-docs"],
   },
   {
     id: "materials",
     name: "资料与截图研读",
-    coordinatorRoleId: "lead-research",
-    members: ["research-docs", "research-vision"],
+    coordinatorRoleId: "lead-orchestrator",
+    members: ["research-docs", "content-writer"],
   },
   {
     id: "creative-content",
     name: "文案、脚本、视频文案",
-    coordinatorRoleId: "lead-content",
-    members: ["research-web", "content-creative", "content-editor"],
+    coordinatorRoleId: "lead-orchestrator",
+    members: ["research-web", "content-writer"],
   },
   {
     id: "technical-writing",
     name: "技术文档",
-    coordinatorRoleId: "lead-content",
-    members: ["research-codebase", "content-technical", "content-editor"],
+    coordinatorRoleId: "lead-orchestrator",
+    members: ["research-codebase", "content-writer"],
   },
   {
     id: "cross-domain",
     name: "跨领域",
     coordinatorRoleId: "lead-orchestrator",
-    members: ["research-web", "plan-architect", "eng-fullstack", "qa-review", "content-creative"],
+    members: ["research-web", "plan-architect", "eng-fullstack", "qa-review", "content-writer"],
   },
 ] as const;
 
@@ -91,25 +91,25 @@ const HINTS = [
     thinkingOptionId: "max",
   },
   {
-    name: "GPT-6-Astra-Max",
-    provider: "codex",
-    model: "gpt-6-astra",
-    modeId: "auto-review",
-    thinkingOptionId: "max",
-  },
-  {
-    name: "Claude-Opus-5.5-High",
+    name: "Claude-Opus-5.5-Medium",
     provider: "claude",
     model: "claude-opus-5-5",
     modeId: "auto",
-    thinkingOptionId: "high",
+    thinkingOptionId: "medium",
   },
   {
-    name: "Gemini-4-Argon-High｜通用对话",
+    name: "GPT-6.1-Sol Xhigh",
+    provider: "codex",
+    model: "codex/gpt-6.1-sol",
+    modeId: "full-access",
+    thinkingOptionId: "xhigh",
+  },
+  {
+    name: "DeepSeek-V4.1-Flash-Max",
     provider: "omp",
-    model: "cursor/gemini-4-argon",
+    model: "opencode-go/deepseek-v4.1-flash",
     modeId: "full",
-    thinkingOptionId: "high",
+    thinkingOptionId: "max",
   },
 ] as const;
 
@@ -313,7 +313,13 @@ describe("designer prompt budgets", () => {
   });
 
   test("keeps launchability in a real-sized kickoff after compression", () => {
-    const roles = expectedRoleContent.map((item, index) =>
+    // The presets plus eight custom Roles: the slim catalog alone
+    // fits without compression.
+    const catalog = [
+      ...expectedRoleContent,
+      ...expectedRoleContent.slice(0, 8).map((item) => ({ ...item, id: `${item.id}-custom` })),
+    ];
+    const roles = catalog.map((item, index) =>
       role(index, {
         id: item.id,
         name: item.name,

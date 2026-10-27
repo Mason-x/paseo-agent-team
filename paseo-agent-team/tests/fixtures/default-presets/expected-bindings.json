@@ -1,144 +1,67 @@
 [
   {
     "id": "lead-orchestrator",
-    "preferred": ["agent_profile_mvmc6kj5_gp2f44npy7k", "agent_profile_mtw3nnvk_mdlvv3bji59"],
-    "fallback": ["agent_profile_mucika28_q5u3fhksr9"]
+    "preferred": ["agent_profile_mub9al8i_n1fbqae2oqi"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97", "agent_profile_mu8ldfz3_8jhpp66604a"]
   },
   {
     "id": "lead-tech",
-    "preferred": ["agent_profile_mvmc6kj5_gp2f44npy7k", "agent_profile_mtw3nnvk_mdlvv3bji59"],
-    "fallback": ["agent_profile_mucika28_q5u3fhksr9"]
-  },
-  {
-    "id": "lead-research",
-    "preferred": ["agent_profile_mub9al8i_n1fbqae2oqi", "agent_profile_mtw3nnvk_mdlvv3bji59"],
-    "fallback": ["agent_profile_arena_20261024_gemini4_chat"]
-  },
-  {
-    "id": "lead-content",
-    "preferred": [
-      "agent_profile_mub9al8i_n1fbqae2oqi",
-      "agent_profile_arena_20261024_gemini4_chat"
-    ],
-    "fallback": ["agent_profile_mtw3nnvk_mdlvv3bji59"]
-  },
-  {
-    "id": "plan-requirements",
-    "preferred": [
-      "agent_profile_mub9al8i_n1fbqae2oqi",
-      "agent_profile_arena_20261024_gemini4_chat"
-    ],
-    "fallback": ["agent_profile_mtw3nnvk_mdlvv3bji59"]
+    "preferred": ["agent_profile_mub9al8i_n1fbqae2oqi"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97", "agent_profile_mu8ldfz3_8jhpp66604a"]
   },
   {
     "id": "plan-architect",
-    "preferred": ["agent_profile_mtw3nnvk_mdlvv3bji59", "agent_profile_mvmc6kj5_gp2f44npy7k"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
-  },
-  {
-    "id": "eng-expert",
-    "preferred": [
-      "agent_profile_mvmc6kj5_gp2f44npy7k",
-      "agent_profile_mutlstlz_riirwcu36j",
-      "agent_profile_mtw3nnvk_mdlvv3bji59"
-    ],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
+    "preferred": ["agent_profile_mvmc6kj5_gp2f44npy7k"],
+    "fallback": ["agent_profile_mub9al8i_n1fbqae2oqi", "agent_profile_mubbhclu_e57toxj0x"]
   },
   {
     "id": "eng-fullstack",
-    "preferred": ["agent_profile_mubbhclu_e57toxj0x", "agent_profile_mutlstlz_riirwcu36j"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
+    "preferred": ["agent_profile_mu8ldfz3_8jhpp66604a"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97"]
   },
   {
     "id": "eng-frontend",
-    "preferred": ["agent_profile_mvmhnriv_i0kn49ehqyp", "agent_profile_mubbhclu_e57toxj0x"],
-    "fallback": ["agent_profile_mvmdxsb7_5efalsrc964", "agent_profile_mutltn52_uvfm5351b97"]
+    "preferred": ["agent_profile_mutltn52_uvfm5351b97"],
+    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
   },
   {
     "id": "eng-batch",
-    "preferred": [
-      "agent_profile_mu8ldfz3_8jhpp66604a",
-      "agent_profile_mucika28_q5u3fhksr9",
-      "agent_profile_mvmcydux_t4cagx625o",
-      "agent_profile_mtw3l35d_kiz9cdpp92f"
-    ],
-    "fallback": ["agent_profile_mutltn52_uvfm5351b97", "agent_profile_mubbhclu_e57toxj0x"]
-  },
-  {
-    "id": "eng-rapid",
     "preferred": ["agent_profile_mtw3l35d_kiz9cdpp92f"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a", "agent_profile_mubbhclu_e57toxj0x"]
+    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a", "agent_profile_mutltn52_uvfm5351b97"]
   },
   {
-    "id": "eng-ops",
-    "preferred": ["agent_profile_mubbhclu_e57toxj0x", "agent_profile_mucika28_q5u3fhksr9"],
-    "fallback": ["agent_profile_mutlstlz_riirwcu36j"]
+    "id": "eng-expert",
+    "preferred": ["agent_profile_mubbhclu_e57toxj0x"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97"]
   },
   {
     "id": "qa-review",
-    "preferred": ["agent_profile_mub9al8i_n1fbqae2oqi", "agent_profile_mtw3nnvk_mdlvv3bji59"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
+    "preferred": ["agent_profile_mubbhclu_e57toxj0x"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97"]
   },
   {
     "id": "qa-test",
-    "preferred": ["agent_profile_mutlstlz_riirwcu36j", "agent_profile_mubbhclu_e57toxj0x"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
-  },
-  {
-    "id": "qa-acceptance",
-    "preferred": ["agent_profile_mubbhclu_e57toxj0x", "agent_profile_mutlstlz_riirwcu36j"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
-  },
-  {
-    "id": "qa-security",
-    "preferred": ["agent_profile_mtw3nnvk_mdlvv3bji59", "agent_profile_mvmc6kj5_gp2f44npy7k"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
-  },
-  {
-    "id": "research-web",
-    "preferred": [
-      "agent_profile_arena_20261024_sol56_search",
-      "agent_profile_mtw3nnvk_mdlvv3bji59"
-    ],
-    "fallback": ["agent_profile_mub9al8i_n1fbqae2oqi"]
+    "preferred": ["agent_profile_mu8ldfz3_8jhpp66604a"],
+    "fallback": ["agent_profile_mtw3l35d_kiz9cdpp92f", "agent_profile_mutltn52_uvfm5351b97"]
   },
   {
     "id": "research-codebase",
-    "preferred": ["agent_profile_mutlstlz_riirwcu36j", "agent_profile_mtw3nnvk_mdlvv3bji59"],
-    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a"]
+    "preferred": ["agent_profile_mtw3l35d_kiz9cdpp92f"],
+    "fallback": ["agent_profile_mu8ldfz3_8jhpp66604a", "agent_profile_mutltn52_uvfm5351b97"]
+  },
+  {
+    "id": "research-web",
+    "preferred": ["agent_profile_mtw3l35d_kiz9cdpp92f"],
+    "fallback": ["agent_profile_mu17b936_fqptynx841d", "agent_profile_mutltn52_uvfm5351b97"]
   },
   {
     "id": "research-docs",
-    "preferred": [
-      "agent_profile_mub9al8i_n1fbqae2oqi",
-      "agent_profile_arena_20261024_sol56_search"
-    ],
-    "fallback": ["agent_profile_mu17b936_fqptynx841d"]
+    "preferred": ["agent_profile_mu17b936_fqptynx841d"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97"]
   },
   {
-    "id": "research-vision",
-    "preferred": ["agent_profile_mu17b936_fqptynx841d", "agent_profile_mubbhclu_e57toxj0x"],
-    "fallback": ["agent_profile_mub9al8i_n1fbqae2oqi"]
-  },
-  {
-    "id": "content-creative",
-    "preferred": ["agent_profile_mvmk07xw_q0yyt5jxtc", "agent_profile_mub9al8i_n1fbqae2oqi"],
-    "fallback": ["agent_profile_arena_20261024_gemini4_chat"]
-  },
-  {
-    "id": "content-technical",
-    "preferred": [
-      "agent_profile_mub9al8i_n1fbqae2oqi",
-      "agent_profile_arena_20261024_gemini4_chat"
-    ],
-    "fallback": ["agent_profile_mubbhclu_e57toxj0x"]
-  },
-  {
-    "id": "content-editor",
-    "preferred": [
-      "agent_profile_arena_20261024_gemini4_chat",
-      "agent_profile_mub9al8i_n1fbqae2oqi"
-    ],
-    "fallback": ["agent_profile_mu17b936_fqptynx841d"]
+    "id": "content-writer",
+    "preferred": ["agent_profile_mu17b936_fqptynx841d"],
+    "fallback": ["agent_profile_mutltn52_uvfm5351b97"]
   }
 ]

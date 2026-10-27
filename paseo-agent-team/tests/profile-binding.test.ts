@@ -108,18 +108,24 @@ describe("strict Profile hint binding", () => {
   test("same normalized name disambiguates runtime twins regardless of host ordering", () => {
     const twins = [{ ...profile, id: "other", name: "General" }, profile];
     expect(bind(twins).preferredProfiles[0].profileId).toBe(profile.id);
-    const renamed = sourceProfiles.map((entry) =>
-      entry.name === "Claude-Opus-5.5-High" ? { ...entry, name: "Opus High" } : entry,
-    );
+    // Renaming Opus Medium leaves two Profiles with its runtime: the hint must not pick one.
+    const medium = sourceProfiles.find((entry) => entry.name === "Claude-Opus-5.5-Medium");
+    if (!medium) throw new Error("Missing Opus Medium fixture");
+    const renamed = [
+      ...sourceProfiles.map((entry) =>
+        entry === medium ? { ...entry, name: "Opus Medium" } : entry,
+      ),
+      { ...medium, id: "agent_profile_twin", name: "Opus Medium twin" },
+    ];
     const { bindingReport } = materializeDefaultCatalog(renamed, NOW);
-    const generalReports = bindingReport.filter(
-      (entry) => entry.hint.name === "Claude-Opus-5.5-High",
+    const mediumReports = bindingReport.filter(
+      (entry) => entry.hint.name === "Claude-Opus-5.5-Medium",
     );
-    expect(generalReports.length).toBeGreaterThan(0);
+    expect(mediumReports.length).toBeGreaterThan(0);
     expect(
-      generalReports.every((entry) => entry.method === "unbound" && entry.reason === "ambiguous"),
+      mediumReports.every((entry) => entry.method === "unbound" && entry.reason === "ambiguous"),
     ).toBe(true);
-    expect(bindingReport.find((entry) => entry.hint.name.endsWith("｜创意写作"))).toMatchObject({
+    expect(bindingReport.find((entry) => entry.hint.name === "Claude-Opus-5.5-Max")).toMatchObject({
       method: "exact",
     });
   });
@@ -183,8 +189,8 @@ describe("strict Profile hint binding", () => {
     const role = exampleCatalog(sourceProfiles, NOW).roles[0];
     const result = resolveProfile(role, sourceProfiles, [{ provider: "claude", available: false }]);
     expect(role.preferredProfiles[0].profileId).toBe(
-      sourceProfiles.find((entry) => entry.name === "Claude-Opus-5.5-Max")?.id,
+      sourceProfiles.find((entry) => entry.name === "Claude-Opus-5.5-Medium")?.id,
     );
-    expect(result).toMatchObject({ ok: true, profile: { provider: "codex" } });
+    expect(result).toMatchObject({ ok: true, profile: { provider: "omp" } });
   });
 });

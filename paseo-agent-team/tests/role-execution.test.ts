@@ -34,6 +34,7 @@ const EXPECTED_TIERS = [
   ["content-creative", "retain", "general"],
   ["content-technical", "retain", "general"],
   ["content-editor", "retain", "general"],
+  ["content-writer", "retain", "general"],
 ] as const;
 
 function member(id: string, executionPolicy?: Record<string, unknown>) {
@@ -41,7 +42,7 @@ function member(id: string, executionPolicy?: Record<string, unknown>) {
 }
 
 describe("role execution defaults", () => {
-  test("covers exactly the 23 presets with the designed tier and task kind", () => {
+  test("covers the 13 presets and the retired ids with the designed tier and task kind", () => {
     expect(Object.keys(DEFAULT_ROLE_EXECUTION).sort()).toEqual(
       EXPECTED_TIERS.map(([id]) => id).sort(),
     );
