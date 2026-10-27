@@ -14,14 +14,14 @@ import { NOW } from "./fixtures";
 describe("default Role templates", () => {
   const catalog = exampleCatalog(sourceProfiles, NOW);
 
-  test("ships exactly the 22 source Roles and no Teams; raw and materialized schemas pass", () => {
+  test("ships exactly the 23 source Roles and no Teams; raw and materialized schemas pass", () => {
     expect(sourceProfiles).toHaveLength(16);
-    expect(defaultCatalogRevision).toBe("defaults-2026-10-25.2");
-    expect(defaultRoleTemplates).toHaveLength(22);
+    expect(defaultCatalogRevision).toBe("defaults-2026-10-27.1");
+    expect(defaultRoleTemplates).toHaveLength(23);
     expect(catalog.roles.map((role) => role.id)).toEqual(
       expectedRoleContent.map((role) => role.id),
     );
-    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(22);
+    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(23);
     expect(catalog.teams).toEqual([]);
     for (const template of defaultRoleTemplates) {
       expect(DefaultRoleTemplateSchema.parse(template)).toEqual(template);
@@ -74,8 +74,8 @@ describe("default Role templates", () => {
     }
   });
 
-  test("the generator writes the explicit tier for all 22 presets", () => {
-    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(22);
+  test("the generator writes the explicit tier for all 23 presets", () => {
+    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(23);
     expect(defaultRoleTemplates.map((role) => role.id).sort()).toEqual(
       Object.keys(DEFAULT_ROLE_EXECUTION).sort(),
     );
@@ -173,7 +173,7 @@ describe("default Role templates", () => {
   });
 
   test.each(["claude", "codex", "omp"])(
-    "all 22 Roles resolve when %s Profiles are absent",
+    "all 23 Roles resolve when %s Profiles are absent",
     (provider) => {
       const profiles = sourceProfiles.filter((profile) => profile.provider !== provider);
       const availability = ["claude", "codex", "omp"].map((name) => ({

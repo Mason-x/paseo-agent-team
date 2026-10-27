@@ -74,7 +74,7 @@ export type Result<T, E> = { ok: true; value: T; issues?: E } | { ok: false; iss
 
 export type RoleExecutionPolicy = { tier: RoleTier; taskKind: TaskKind };
 
-// Defaults for the 22 built-in presets. Explicitly stored fields on a Role always win, and an
+// Defaults for the built-in presets. Explicitly stored fields on a Role always win, and an
 // unknown custom Role keeps its original binding (retain/general).
 export const DEFAULT_ROLE_EXECUTION: Readonly<Record<string, RoleExecutionPolicy | undefined>> = {
   "lead-orchestrator": { tier: "decision", taskKind: "general" },
@@ -89,6 +89,7 @@ export const DEFAULT_ROLE_EXECUTION: Readonly<Record<string, RoleExecutionPolicy
   "eng-fullstack": { tier: "execution", taskKind: "coding" },
   "eng-frontend": { tier: "execution", taskKind: "coding" },
   "eng-batch": { tier: "execution", taskKind: "coding" },
+  "eng-rapid": { tier: "execution", taskKind: "coding" },
   "eng-ops": { tier: "execution", taskKind: "ops" },
   "qa-test": { tier: "execution", taskKind: "testing" },
   "qa-acceptance": { tier: "execution", taskKind: "acceptance" },

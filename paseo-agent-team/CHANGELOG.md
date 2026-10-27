@@ -4,6 +4,9 @@
 
 ### Features
 
+- 新增“【工程】快速开发”默认 Role：首选 Grok 4.6 High，沿用现有 High-Fast Profile，
+  后备 DeepSeek V4.1 Flash Max / GPT-6.1-Sol Max；作为 execution/coding 成员承担规格明确的
+  快速迭代，默认预设增至 23 个，已有目录可通过“同步默认预设”补入。
 - Team 页新增设计师——描述需求后生成可启动的 Team，结果可预览并一键保存、启动。
 - Agent Teams opens on the Team page, with tabs ordered Team / Role / 运行; Role and Team
   searches keep independent queries
@@ -19,7 +22,7 @@
 - 启动对话框可临时切换本次运行的模式，并按物理席位预览成员、Profile 与预算。
 - Crew panel: allow a permission for the rest of the session
 - the launch task is stored on the coordinator as a label, so runs describe themselves
-- default Role presets: import 22 built-in Roles that bind to local Profiles by normalized name and
+- default Role presets: import 23 built-in Roles that bind to local Profiles by normalized name and
   identical provider/model/mode/thinking settings, with strict unbound, ambiguous, and
   config-changed reporting
 - `agent-team.templates.defaults.preview` previews missing, updated, deleted, and colliding preset

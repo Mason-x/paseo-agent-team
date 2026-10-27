@@ -1,5 +1,7 @@
 # 下一轮：按难度等级选 Role 与模型
 
+> 2026-10-27 补充：编排架构与下一轮目标已在 `docs/orchestration-roadmap.md` 中重新设计（战略编排 / 运行调度分层，治理由确定性程序执行）。本文件保留难度等级、模型实测表现与分配规则，两者冲突时以路线图为准。
+
 本文件是下一轮 Agent Team 迭代的输入，包括人的要求、上一轮（round-ape，2026-10-24 至 10-27）各模型的实测表现，以及难度分级和分配规则的建议。建议部分需由需求分析师和架构师确认或修订；存在多个合理方案时，交人选择。
 
 ## 人的要求（2026-10-27）
@@ -8,6 +10,8 @@
 - 其他 Role，按上一轮各模型的真实表现分配，包括 Opus 5.5 High、Sonnet 系列、DeepSeek、Grok 4.6 等。
 - 以后建 Team 时，先给任务和模块定难度等级，再按等级分配：SOTA 模型只做最高难度的部分，次 SOTA 模型做难度相对高的部分，其余交给经济模型。
 - 这一套规则要做进插件：协调者开 Team 派活时如何选 Role 和模型，设计师建 Team 时如何按难度配置成员。
+- 新增 Grok 4.6 High 快速开发席位：按人的使用反馈，能力与 DeepSeek V4.1 Flash Max 相近，
+  比 Grok 4.7 Xhigh 稳定，额度大，适合规格明确的快速开发；沿用现有 Grok-4.6-High-Fast Profile。
 
 ## 上一轮各模型实测表现
 
@@ -20,7 +24,7 @@
 | Claude-Sonnet-5.5 Xhigh / Max（claude） | 前端、代码库梳理 | 早期产出正常 | 很快撞到 Claude 额度而中断 | A，受额度限制 |
 | Cursor-Claude-Sonnet-5.5（omp） | 备用代码审查，约 40 份 | 稳定；能用真实 store 或探针复现缺陷；没有因额度中断 | 偶有"推断、未实测"的结论 | A：常规代码审查主力 |
 | DeepSeek-V4.1-Flash-Max（omp） | 约九成的实现与返工 | 稳定；20 多个长回合未退化；自报准确 | 首轮质量中等，多数首审有阻断或重要问题；状态机、并发、恢复类模块要 4–7 轮 | B：规格明确的实现、测试、返工 |
-| Grok-4.6-High-Fast（omp） | dev daemon 验收，共 6 个回合 | 稳定，证据和报告规范 | 偶尔提前结束回合，需要提醒继续 | B：验收、脚本、集成 |
+| Grok-4.6-High-Fast（omp） | dev daemon 验收，共 6 个回合；人补充可承担快速开发 | 稳定，证据和报告规范；按人反馈与 DeepSeek V4.1 Flash Max 能力相近，额度大，比 Grok 4.7 Xhigh 稳定 | 偶尔提前结束回合，需要提醒继续 | B：规格明确的快速开发、测试、返工、验收、脚本、集成 |
 | Grok-4.7-Xhigh / Xhigh-Fast（omp） | 实现、集成、验收 | 无 | 3 次输出退化，自报失实，渠道不可用 | 禁用 |
 | Claude Haiku 4.5（DEV 设计 Profile） | 设计师流程验证 | 能走完流程 | 编造 nonce，需要 3 轮修正 | 只用于低成本验证 |
 
@@ -46,7 +50,7 @@
 | --- | --- | --- | --- |
 | L4 | S 层实现；或 A 层实现、S 层审查 | A 层（Opus-High）审查，并要求真实 store / 真实环境用例 | DEV 实测 |
 | L3 | A 层（Sol Max / Sonnet） | A 层（Cursor-Sonnet） | DEV 冒烟 |
-| L2 | B 层（DeepSeek） | A 层（Cursor-Sonnet） | 按需 |
+| L2 | B 层（DeepSeek / Grok-4.6-High） | A 层（Cursor-Sonnet） | 按需 |
 | L1 | B 层（DeepSeek / Grok-4.6） | 抽查 | 无 |
 
 - 决策和架构始终由 S 层完成，包括需求定稿、方案、跨模块合同、合入结论。

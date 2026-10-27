@@ -8,7 +8,7 @@ import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default
 
 const root = join(import.meta.dirname, "..");
 const script = join(root, "scripts/generate-default-catalog.mjs");
-const revision = "defaults-2026-10-25.2";
+const revision = "defaults-2026-10-27.1";
 
 function sourceFixture() {
   return {
@@ -65,7 +65,7 @@ test("generator uses allowlists, preserves fixture content, and produces stable 
       fixtures,
     ];
     expect(execFileSync(process.execPath, args, { cwd: root, encoding: "utf8" })).toContain(
-      "22 default Roles",
+      "23 default Roles",
     );
     const first = await readFile(output, "utf8");
     expect(first).toBe(await readFile(join(root, "server/templates/default-catalog.ts"), "utf8"));

@@ -9,7 +9,7 @@ import { RoleTierSchema, TaskKindSchema } from "../shared/schemas/team-mode";
 import { role } from "./fixtures";
 
 // Deliberately independent of DEFAULT_ROLE_EXECUTION so a typo in the table cannot pass through
-// this test. Order and content follow the design's 22-preset table.
+// this test. Order and content follow the built-in preset table.
 const EXPECTED_TIERS = [
   ["lead-orchestrator", "decision", "general"],
   ["lead-tech", "decision", "general"],
@@ -23,6 +23,7 @@ const EXPECTED_TIERS = [
   ["eng-fullstack", "execution", "coding"],
   ["eng-frontend", "execution", "coding"],
   ["eng-batch", "execution", "coding"],
+  ["eng-rapid", "execution", "coding"],
   ["eng-ops", "execution", "ops"],
   ["qa-test", "execution", "testing"],
   ["qa-acceptance", "execution", "acceptance"],
@@ -40,7 +41,7 @@ function member(id: string, executionPolicy?: Record<string, unknown>) {
 }
 
 describe("role execution defaults", () => {
-  test("covers exactly the 22 presets with the designed tier and task kind", () => {
+  test("covers exactly the 23 presets with the designed tier and task kind", () => {
     expect(Object.keys(DEFAULT_ROLE_EXECUTION).sort()).toEqual(
       EXPECTED_TIERS.map(([id]) => id).sort(),
     );
