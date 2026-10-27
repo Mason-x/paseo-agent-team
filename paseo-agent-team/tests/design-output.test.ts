@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   DESIGN_OUTPUT_MAX_BYTES,
+  extractDesignOutput,
   extractDesignProposal,
   formatDesignIssue,
   utf8ByteLength,
@@ -198,5 +199,133 @@ describe("formatDesignIssue", () => {
     expect(Object.keys(designZh.actions).sort()).toEqual(
       [...DesignIssueActionSchema.options].sort(),
     );
+  });
+});
+
+describe("contract-aware extraction", () => {
+  const teamV2 = { ...designProposal(), version: 2 as const, kind: "team" as const };
+  const gapV2 = {
+    version: 2 as const,
+    kind: "role-gap" as const,
+    jobId: DESIGN_JOB_ID,
+    attempt: 1,
+    nonce: DESIGN_NONCE,
+    summary: "现有 Role 覆盖不了迁移评审。",
+    gaps: [
+      {
+        kind: "unavailable-role" as string,
+      },
+    ],
+  };
+  const realGap = {
+    ...gapV2,
+    gaps: [
+      {
+        kind: "unlaunchable-role" as const,
+        roleId: "architect",
+        responsibility: "架构决定需要人拍板",
+        reason: "架构 Role 在当前 host 无可启动绑定。",
+        use: "member" as const,
+        profiles: { kind: "existing" as const, profileIds: ["codex-xhigh"] },
+      },
+    ],
+  };
+
+  function extractOutput(body: unknown, outputContractVersion: 1 | 2, identity = {}) {
+    return extractDesignOutput({
+      text: fence(JSON.stringify(body)),
+      jobId: DESIGN_JOB_ID,
+      attempt: 1,
+      nonce: DESIGN_NONCE,
+      outputContractVersion,
+      ...identity,
+    });
+  }
+
+  test("contract 2 decodes a team block and reports its kind", () => {
+    const result = extractOutput(teamV2, 2);
+    expect(result.ok).toBe(true);
+    if (result.ok && result.contract === 2 && result.kind === "team") {
+      expect(result.proposal.kind).toBe("team");
+      expect(result.proposal.version).toBe(2);
+    }
+  });
+
+  test("contract 2 decodes a gap block without touching the team branch", () => {
+    const result = extractOutput(realGap, 2);
+    expect(result.ok).toBe(true);
+    if (result.ok && result.contract === 2 && result.kind === "role-gap") {
+      expect(result.gap.gaps[0]?.kind).toBe("unlaunchable-role");
+    }
+    expect(extractOutput(gapV2, 2)).toMatchObject({ ok: false });
+  });
+
+  test("contract selection is strict in both directions", () => {
+    const legacy = extractOutput(designProposal(), 1);
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) expect(legacy.contract).toBe(1);
+
+    // A v2 job does not accept a v1 body: `kind` is part of the contract.
+    expect(codes(fence(JSON.stringify(designProposal())))).toEqual([]);
+    const missingKind = extractOutput(designProposal(), 2);
+    expect(missingKind.ok).toBe(false);
+    if (!missingKind.ok) {
+      expect(missingKind.issues.every((entry) => entry.code === "DESIGN_OUTPUT_SCHEMA")).toBe(true);
+      expect(missingKind.issues.some((entry) => entry.params.path === "kind")).toBe(true);
+    }
+    // A v1 record does not accept a v2 body, even with matching identity.
+    const wrongVersion = extractOutput(teamV2, 1);
+    expect(wrongVersion.ok).toBe(false);
+    if (!wrongVersion.ok) {
+      expect(wrongVersion.issues.every((entry) => entry.code === "DESIGN_OUTPUT_SCHEMA")).toBe(
+        true,
+      );
+      expect(wrongVersion.issues.some((entry) => entry.params.path === "version")).toBe(true);
+    }
+  });
+
+  test("the gap branch shares identity, single-fence, and size checks", () => {
+    const wrongJob = extractOutput(
+      { ...realGap, jobId: "99999999-9999-4999-8999-999999999999" },
+      2,
+    );
+    expect(wrongJob.ok).toBe(false);
+    if (!wrongJob.ok) {
+      expect(wrongJob.issues.map((i) => i.code)).toContain("DESIGN_OUTPUT_IDENTITY");
+      expect(wrongJob.issues.map((i) => i.params.field)).toContain("jobId");
+    }
+    const wrongNonce = extractOutput({ ...realGap, nonce: "c".repeat(32) }, 2);
+    expect(wrongNonce.ok).toBe(false);
+    if (!wrongNonce.ok) expect(wrongNonce.issues[0]?.params.field).toBe("nonce");
+    expect(
+      extractDesignOutput({
+        text: `${fence(JSON.stringify(realGap))}\n${fence(JSON.stringify(realGap))}`,
+        jobId: DESIGN_JOB_ID,
+        attempt: 1,
+        nonce: DESIGN_NONCE,
+        outputContractVersion: 2,
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_OUTPUT_MULTIPLE" }] });
+    const oversized = fence(
+      JSON.stringify({ ...realGap, summary: "x".repeat(DESIGN_OUTPUT_MAX_BYTES) }),
+    );
+    expect(
+      extractDesignOutput({
+        text: oversized,
+        jobId: DESIGN_JOB_ID,
+        attempt: 1,
+        nonce: DESIGN_NONCE,
+        outputContractVersion: 2,
+      }),
+    ).toMatchObject({ ok: false, issues: [{ code: "DESIGN_OUTPUT_TOO_LARGE" }] });
+  });
+
+  test("a gap cannot smuggle team fields past the strict schema", () => {
+    const result = extractOutput({ ...realGap, team: designProposal().team }, 2);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.map((issue) => issue.code)).toEqual(["DESIGN_OUTPUT_SCHEMA"]);
+      expect(result.issues[0]?.params.path).toBe("(root)");
+    }
   });
 });

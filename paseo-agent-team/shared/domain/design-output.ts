@@ -1,5 +1,11 @@
-import type { DesignIssue, DesignProposal } from "../schemas/design";
-import { DesignProposalSchema } from "../schemas/design";
+import type {
+  DesignIssue,
+  DesignOutputContractVersion,
+  DesignProposal,
+  DesignRoleGapProposal,
+  DesignTeamProposalV2,
+} from "../schemas/design";
+import { DesignOutputV2Schema, DesignProposalSchema } from "../schemas/design";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../zh/design";
 
 /** The model's complete fenced block may not exceed 32 KiB of UTF-8. */
@@ -89,17 +95,11 @@ export type ExtractDesignProposalResult =
   | { ok: true; proposal: DesignProposal }
   | { ok: false; issues: DesignIssue[] };
 
-/**
- * Extracts the single `agent-team-design` fenced JSON block from one attempt's assistant text and
- * verifies its identity. Semantic checks (member keys, reuse set, placement, mode planning) belong
- * to design-validation; this function only owns fence/JSON/schema/identity failures.
- */
-export function extractDesignProposal(
-  input: ExtractDesignProposalInput,
-): ExtractDesignProposalResult {
-  const designFences = scanFences(input.text).filter(
-    (fence) => fence.language === DESIGN_FENCE_LANGUAGE,
-  );
+type DesignJsonRead = { ok: true; raw: unknown } | { ok: false; issues: DesignIssue[] };
+
+/** The one fenced `agent-team-design` block of one attempt, parsed but not shape-checked. */
+function readDesignJson(text: string): DesignJsonRead {
+  const designFences = scanFences(text).filter((fence) => fence.language === DESIGN_FENCE_LANGUAGE);
 
   if (designFences.length === 0) {
     return { ok: false, issues: [outputIssue("DESIGN_OUTPUT_MISSING", [], {})] };
@@ -132,47 +132,98 @@ export function extractDesignProposal(
     };
   }
 
-  let raw: unknown;
   try {
-    raw = JSON.parse(fence.body);
+    return { ok: true, raw: JSON.parse(fence.body) };
   } catch {
     return {
       ok: false,
       issues: [outputIssue("DESIGN_OUTPUT_JSON", [], { reason: "invalid-json" })],
     };
   }
+}
 
-  const parsed = DesignProposalSchema.safeParse(raw);
-  if (!parsed.success) {
-    return {
-      ok: false,
-      issues: parsed.error.issues.slice(0, MAX_SCHEMA_ISSUES).map((issue) =>
-        outputIssue(
-          "DESIGN_OUTPUT_SCHEMA",
-          issue.path.map((part) => (typeof part === "number" ? part : String(part))),
-          {
-            path:
-              issue.path.length === 0 ? "(root)" : issue.path.map((part) => String(part)).join("."),
-          },
-        ),
-      ),
-    };
+function schemaFailure(error: {
+  issues: readonly { path: readonly PropertyKey[] }[];
+}): DesignIssue[] {
+  return error.issues.slice(0, MAX_SCHEMA_ISSUES).map((issue) =>
+    outputIssue(
+      "DESIGN_OUTPUT_SCHEMA",
+      issue.path.map((part) => (typeof part === "number" ? part : String(part))),
+      {
+        path: issue.path.length === 0 ? "(root)" : issue.path.map((part) => String(part)).join("."),
+      },
+    ),
+  );
+}
+
+function identityFailure(
+  value: { jobId: string; attempt: number; nonce: string },
+  input: ExtractDesignProposalInput,
+): DesignIssue[] {
+  const issues: DesignIssue[] = [];
+  if (value.jobId !== input.jobId) {
+    issues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["jobId"], { field: "jobId" }));
+  }
+  if (value.attempt !== input.attempt) {
+    issues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["attempt"], { field: "attempt" }));
+  }
+  if (value.nonce !== input.nonce) {
+    issues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["nonce"], { field: "nonce" }));
+  }
+  return issues;
+}
+
+export type ExtractDesignOutputInput = ExtractDesignProposalInput & {
+  /** Chosen by the record, never by the current build: a legacy job keeps contract 1. */
+  outputContractVersion: DesignOutputContractVersion;
+};
+
+export type ExtractedDesignOutput =
+  | { ok: true; contract: 1; kind: "team"; proposal: DesignProposal }
+  | { ok: true; contract: 2; kind: "team"; proposal: DesignTeamProposalV2 }
+  | { ok: true; contract: 2; kind: "role-gap"; gap: DesignRoleGapProposal }
+  | { ok: false; issues: DesignIssue[] };
+
+/**
+ * Contract-aware extraction: fence/JSON/32KiB/identity are shared, the shape is selected by the
+ * record's output contract. Contract 2 is a discriminated `kind`, so a v2 job rejects a block
+ * without one; contract 1 keeps reading the legacy shape even on a new build.
+ */
+export function extractDesignOutput(input: ExtractDesignOutputInput): ExtractedDesignOutput {
+  const read = readDesignJson(input.text);
+  if (!read.ok) return read;
+
+  if (input.outputContractVersion === 1) {
+    const parsed = DesignProposalSchema.safeParse(read.raw);
+    if (!parsed.success) return { ok: false, issues: schemaFailure(parsed.error) };
+    const identity = identityFailure(parsed.data, input);
+    if (identity.length > 0) return { ok: false, issues: identity };
+    return { ok: true, contract: 1, kind: "team", proposal: parsed.data };
   }
 
-  const proposal = parsed.data;
-  const identityIssues: DesignIssue[] = [];
-  if (proposal.jobId !== input.jobId) {
-    identityIssues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["jobId"], { field: "jobId" }));
-  }
-  if (proposal.attempt !== input.attempt) {
-    identityIssues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["attempt"], { field: "attempt" }));
-  }
-  if (proposal.nonce !== input.nonce) {
-    identityIssues.push(outputIssue("DESIGN_OUTPUT_IDENTITY", ["nonce"], { field: "nonce" }));
-  }
-  if (identityIssues.length > 0) return { ok: false, issues: identityIssues };
+  const parsed = DesignOutputV2Schema.safeParse(read.raw);
+  if (!parsed.success) return { ok: false, issues: schemaFailure(parsed.error) };
+  const identity = identityFailure(parsed.data, input);
+  if (identity.length > 0) return { ok: false, issues: identity };
+  return parsed.data.kind === "team"
+    ? { ok: true, contract: 2, kind: "team", proposal: parsed.data }
+    : { ok: true, contract: 2, kind: "role-gap", gap: parsed.data };
+}
 
-  return { ok: true, proposal };
+/**
+ * Legacy entry point: contract-1 extraction only. Kept for callers that read old records; a new
+ * job must use `extractDesignOutput` with its record's contract version.
+ */
+export function extractDesignProposal(
+  input: ExtractDesignProposalInput,
+): ExtractDesignProposalResult {
+  const result = extractDesignOutput({ ...input, outputContractVersion: 1 });
+  if (!result.ok) return result;
+  if (result.contract === 1) return { ok: true, proposal: result.proposal };
+  return {
+    ok: false,
+    issues: [outputIssue("DESIGN_OUTPUT_SCHEMA", ["version"], { path: "version" })],
+  };
 }
 
 /**
