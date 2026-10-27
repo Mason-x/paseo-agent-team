@@ -12,6 +12,7 @@ import {
   modeMinContract,
   modeToStore,
   modeUsable,
+  normalizeContractVersion,
   projectLegacyMode,
   readCliMode,
   readStoredMode,
@@ -23,6 +24,7 @@ import {
   teamModeDisplay,
 } from "../shared/domain/mode-contract";
 import { normalizeMode } from "../shared/domain/mode-resolver";
+import { DesignStartInputSchema } from "../shared/schemas/design";
 import { TeamSchema } from "../shared/schemas/team";
 import { type TeamMode, TeamModeSchema } from "../shared/schemas/team-mode";
 import { NOW } from "./fixtures";
@@ -221,6 +223,45 @@ describe("contract-v2 negotiation and access gate (04 §3.2)", () => {
     expect(requestContractVersion({ contractVersion: 3 })).toBe(1);
   });
 
+  test("P1-FIX1 item 6: request, access gate, and capability probe share one normalizer", () => {
+    // Only the integer 2 is v2; everything else is legacy, on every path.
+    const cases: [unknown, 1 | 2][] = [
+      [undefined, 1],
+      [null, 1],
+      [0, 1],
+      [1, 1],
+      [2, 2],
+      [3, 1],
+      [-1, 1],
+      [2.5, 1],
+      ["2", 1],
+      [Number.NaN, 1],
+    ];
+    for (const [raw, expected] of cases) {
+      expect(normalizeContractVersion(raw)).toBe(expected);
+      const request = requestContractVersion({ contractVersion: raw as number | undefined });
+      expect(request).toBe(expected);
+      const gate = checkModeAccess({ storedMode: "economy-all", contractVersion: raw });
+      expect(gate.ok).toBe(expected === 2);
+      const probe = modeContractSupport({ kind: "capabilities", modeContract: raw });
+      expect(probe).toBe(expected === 2 ? "v2" : "legacy");
+    }
+  });
+
+  test("P1-FIX1 item 6: design start accepts integers and rejects non-integers", () => {
+    const base = {
+      clientRequestId: "11111111-1111-4111-8111-111111111111",
+      request: "补一个 Role",
+      mode: "economy-all" as const,
+    };
+    for (const contractVersion of [0, 1, 2, 3, -1]) {
+      expect(DesignStartInputSchema.safeParse({ ...base, contractVersion }).success).toBe(true);
+    }
+    for (const contractVersion of [2.5, "2", Number.NaN]) {
+      expect(DesignStartInputSchema.safeParse({ ...base, contractVersion }).success).toBe(false);
+    }
+  });
+
   test("a legacy caller cannot launch a Team saved with a mode it cannot represent", () => {
     // A stale page shows such a Team as SOTA and would send mode:sota; the override must not help.
     for (const requestedMode of [undefined, ...LEGACY_TEAM_MODES]) {
@@ -275,7 +316,8 @@ describe("contract-v2 negotiation and access gate (04 §3.2)", () => {
 
   test("the probe only reports a legacy daemon on an explicit method-not-found", () => {
     expect(modeContractSupport({ kind: "capabilities", modeContract: 2 })).toBe("v2");
-    expect(modeContractSupport({ kind: "capabilities", modeContract: 3 })).toBe("v2");
+    // Only 2 is v2 (coordinator ruling for P1-FIX1): any other integer is the legacy contract.
+    expect(modeContractSupport({ kind: "capabilities", modeContract: 3 })).toBe("legacy");
     expect(modeContractSupport({ kind: "capabilities", modeContract: 1 })).toBe("legacy");
     expect(modeContractSupport({ kind: "capabilities" })).toBe("legacy");
     expect(modeContractSupport({ kind: "capabilities", modeContract: "2" })).toBe("legacy");

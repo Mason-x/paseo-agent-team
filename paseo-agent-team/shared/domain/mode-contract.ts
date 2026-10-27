@@ -124,9 +124,19 @@ export function projectLegacyMode(mode: TeamMode): LegacyTeamMode | null {
   return isLegacyTeamMode(mode) ? mode : null;
 }
 
+/**
+ * The one contract-version normalizer, shared by request handling, the access gate, and the
+ * capability probe. Only the integer 2 is v2; absent, 1, 3, 0, negative, fractional, or non-numeric
+ * values are the legacy contract. A request schema decides separately whether to reject a
+ * non-integer outright (design start does: `z.number().int()`).
+ */
+export function normalizeContractVersion(raw: unknown): ModeContractVersion {
+  return raw === MODE_CONTRACT_VERSION ? MODE_CONTRACT_VERSION : 1;
+}
+
 /** A request opts into contract v2 only with an explicit 2; absence is the legacy contract. */
 export function requestContractVersion(input: { contractVersion?: number }): ModeContractVersion {
-  return input.contractVersion === MODE_CONTRACT_VERSION ? MODE_CONTRACT_VERSION : 1;
+  return normalizeContractVersion(input.contractVersion);
 }
 
 export type ModeAccessDenial = {
@@ -164,9 +174,12 @@ function contractIssue(value: string): ModeIssue {
 export function checkModeAccess(input: {
   storedMode: string | undefined;
   requestedMode?: TeamMode;
-  contractVersion: ModeContractVersion;
+  /** Raw caller value; normalized with `normalizeContractVersion`. */
+  contractVersion: unknown;
 }): ModeAccessResult {
-  if (input.contractVersion >= MODE_CONTRACT_VERSION) return { ok: true };
+  if (normalizeContractVersion(input.contractVersion) === MODE_CONTRACT_VERSION) {
+    return { ok: true };
+  }
   const stored = readStoredMode(input.storedMode);
   if (stored.status === "unknown") {
     return {
@@ -207,9 +220,7 @@ export type ModeContractSupport = "v2" | "legacy" | "unknown";
 export function modeContractSupport(probe: ModeContractProbe): ModeContractSupport {
   if (probe.kind === "method-not-found") return "legacy";
   if (probe.kind === "failed") return "unknown";
-  return typeof probe.modeContract === "number" && probe.modeContract >= MODE_CONTRACT_VERSION
-    ? "v2"
-    : "legacy";
+  return normalizeContractVersion(probe.modeContract) === MODE_CONTRACT_VERSION ? "v2" : "legacy";
 }
 
 /**
