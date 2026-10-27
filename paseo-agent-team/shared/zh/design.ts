@@ -90,7 +90,8 @@ export const designZh = {
 
   modes: {
     sota: "SOTA",
-    economy: "经济",
+    economy: "标准",
+    "economy-all": "经济",
     collaborative: "协作",
   } satisfies Record<TeamMode, string>,
 

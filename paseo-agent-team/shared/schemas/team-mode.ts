@@ -4,7 +4,9 @@ import { z } from "zod";
 // these directly: settings parses whole documents, so one unrecognized value would invalidate the
 // entire Roles, Teams, or Preferences catalog. The Stored* shapes below accept future values and
 // preserve unknown keys; planning reports the specific unsupported field instead.
-export const TeamModeSchema = z.enum(["sota", "economy", "collaborative"]);
+// Mode values are stable (shared/domain/mode-contract.ts): `economy` keeps its original meaning,
+// shown as 标准; `economy-all` is the all-seats cheap mode, shown as 经济. No value is ever renamed.
+export const TeamModeSchema = z.enum(["sota", "economy", "economy-all", "collaborative"]);
 export const RoleTierSchema = z.enum(["decision", "execution", "escalation", "retain"]);
 export const TaskKindSchema = z.enum([
   "coding",
@@ -51,13 +53,57 @@ export const StoredEconomyEntrySchema = z
   })
   .passthrough();
 
+// Routes of the economy-all policy. The coordinator has its own route even though it plans as a
+// decision seat; qa-review/qa-security stay in decision (no separate review route).
+export const AllSeatsRouteSchema = z.enum([
+  "coordinator",
+  "decision",
+  "execution",
+  "escalation",
+  "retain",
+]);
+
+export const ALL_SEATS_POLICY_VERSION = 1;
+// Writer/form limits for the allowlist and for each route or task order. Reading a larger saved
+// policy reports it; storage never truncates it.
+export const ALL_SEATS_WRITER_LIMIT = 32;
+
+// Writer/form shape for one allowlisted Profile. costClass is always "low", and family/boundModel
+// record the live provider/model tuple the family was verified against; planning re-verifies the
+// tuple and the family on every run, so a renamed or re-pointed Profile drops out.
+export const StoredAllSeatsEntrySchema = z
+  .object({
+    profileId: z.string().min(1),
+    nameSnapshot: z.string().optional(),
+    enabled: z.boolean(),
+    costClass: z.literal("low"),
+    family: z.string().min(1),
+    boundModel: z.object({ provider: z.string().min(1), model: z.string().min(1) }).passthrough(),
+  })
+  .passthrough();
+
+// Reader shape for preferences.economy.allSeats (safeParse it; the stored block itself is unknown).
+// Every field stays unknown so a newer writer or a future version is read, reported, and kept as
+// written: an unknown version is never reset or emptied.
+export const StoredAllSeatsPolicySchema = z
+  .object({
+    version: z.unknown().optional(),
+    profiles: z.unknown().optional(),
+    routes: z.unknown().optional(),
+    executionTaskOrder: z.unknown().optional(),
+  })
+  .passthrough();
+
 // Stored in host Preferences. Containers keep their JSON shape but their entries stay unknown;
-// normalizeEconomyPolicy owns per-entry validation and reporting.
+// normalizeEconomyPolicy owns per-entry validation and reporting. allSeats is read only by the
+// economy-all mode, so even its container stays unknown: a wrong shape blocks that mode alone and
+// can neither invalidate the Preferences document (maxMembers, recentRuns) nor be dropped by a write.
 export const StoredEconomyPolicySchema = z
   .object({
     pool: z.array(z.unknown()).optional(),
     taskOrder: z.record(z.string(), z.unknown()).optional(),
     profileBudget: z.record(z.string(), z.unknown()).optional(),
+    allSeats: z.unknown().optional(),
   })
   .passthrough();
 
@@ -75,5 +121,8 @@ export type TaskKind = z.infer<typeof TaskKindSchema>;
 export type StoredRoleExecutionPolicy = z.infer<typeof StoredRoleExecutionPolicySchema>;
 export type StoredCollaboration = z.infer<typeof StoredCollaborationSchema>;
 export type StoredEconomyEntry = z.infer<typeof StoredEconomyEntrySchema>;
+export type AllSeatsRoute = z.infer<typeof AllSeatsRouteSchema>;
+export type StoredAllSeatsEntry = z.infer<typeof StoredAllSeatsEntrySchema>;
+export type StoredAllSeatsPolicy = z.infer<typeof StoredAllSeatsPolicySchema>;
 export type StoredEconomyPolicy = z.infer<typeof StoredEconomyPolicySchema>;
 export type StoredQuotaRecovery = z.infer<typeof StoredQuotaRecoverySchema>;

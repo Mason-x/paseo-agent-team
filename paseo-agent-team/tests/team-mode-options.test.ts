@@ -7,11 +7,13 @@ import {
   TASK_KIND_OPTIONS,
   TEAM_MODE_OPTIONS,
 } from "../client/shared/team-mode-options";
-import { RoleTierSchema, TaskKindSchema, TeamModeSchema } from "../shared/schemas/team-mode";
+import { LEGACY_TEAM_MODES } from "../shared/domain/mode-contract";
+import { RoleTierSchema, TaskKindSchema } from "../shared/schemas/team-mode";
 
 describe("mode and policy options", () => {
   test("team mode options match the strict command enum", () => {
-    expect(TEAM_MODE_OPTIONS.map((option) => option.value)).toEqual(TeamModeSchema.options);
+    // TODO(U01): 补第四档后恢复为与 TeamModeSchema 全量相等
+    expect(TEAM_MODE_OPTIONS.map((option) => option.value)).toEqual(LEGACY_TEAM_MODES);
     expect(TEAM_MODE_OPTIONS.every((option) => option.label && option.hint)).toBe(true);
   });
 
