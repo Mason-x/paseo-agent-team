@@ -70,7 +70,7 @@ export type RuntimeCapabilities = {
 };
 
 export type BuildSeatPlanInput = {
-  team: Team;
+  team: Pick<Team, "mode" | "members" | "memberCreation" | "collaboration">;
   roles: readonly Role[];
   host: HostSnapshot;
   economy: EconomyPolicy;
@@ -211,7 +211,7 @@ export function buildSeatPlan(input: BuildSeatPlanInput): SeatPlan {
     // Stored values stay readable; a value this version cannot run blocks the plan instead of
     // silently becoming the mode default.
     push(issue("MODE_UNKNOWN", "blocker", { field: "memberCreation", value: rawCreation }));
-  } else if (!onDemandAvailable && mode === "economy") {
+  } else if (!onDemandAvailable && (mode === "economy" || mode === "economy-all")) {
     // Transitional 5A behavior: a Team that never chose on-demand runs eagerly instead of
     // making the economy mode unusable before the on-demand runtime exists.
     memberActivation = "eager";
