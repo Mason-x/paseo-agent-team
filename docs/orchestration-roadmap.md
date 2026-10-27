@@ -139,6 +139,8 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 - **并入 backlog P1**：
   - 启动对话框去掉"本次运行模式"，改为只读显示 Team 的模式。这是本轮第一个任务，难度 L2，详见 backlog P1 第 0 条。
   - Team 列表与 Team 编辑页显示每个成员按模式解析出的模型，复用启动预览的同一套规划。难度 L3，详见 backlog P1 第 0b 条。
+  - 设计师增加"只用现有 Role"开关，默认开启。详见 backlog P1 第 0c 条。
+  - 模式语义调整：旗舰（SOTA）不变；现在的"经济"改称"标准"；新增真正的"经济"模式，所有席位都用 DeepSeek、Grok、Sonnet 等量大廉价的模型。难度 L4，兼容方案由架构师提出、交人选择，详见 backlog P1 第 0d 条。
   - 覆盖率统计盲区。
   - `appliedHash` 重算。
   - 协调者 Profile 的引导。
