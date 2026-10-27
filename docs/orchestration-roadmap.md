@@ -136,7 +136,12 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
   - 协作模式（多家族并行 + 仲裁）建立在 Run Engine 之上；
   - 额度感知（用量接口）；
   - 可观测与调优：记录任务级的模型、返工、耗时与 token，按历史数据调整层级。
-- **并入 backlog P1**：覆盖率统计盲区、`appliedHash` 重算、协调者 Profile 引导、README。
+- **并入 backlog P1**：
+  - 启动对话框去掉"本次运行模式"，改为只读显示 Team 的模式。这是本轮第一个任务，难度 L2，详见 backlog P1 第 0 条。
+  - 覆盖率统计盲区。
+  - `appliedHash` 重算。
+  - 协调者 Profile 的引导。
+  - 补全 README。
 
 ## 7. Team 设计（已建，未运行）
 
