@@ -346,7 +346,7 @@ describe("atomic-json read/commit", () => {
     if (unchanged.status === "ok") expect(unchanged.revision).toBe(1);
   });
 
-  test("detects two writers that both hold the same CAS without a lock", async () => {
+  test("rejects a sequential stale CAS write from an earlier read (no lock)", async () => {
     const { disk, store } = await atomicFixture();
     const created = await createFirst(store);
     const second = createAtomicJson<TestRecord>({

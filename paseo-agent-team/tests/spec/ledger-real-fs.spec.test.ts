@@ -59,6 +59,12 @@ const replySchema = z.looseObject({
 });
 type ChildReply = z.infer<typeof replySchema>;
 
+const readySchema = z.looseObject({
+  revision: z.number(),
+  digest: z.string(),
+  pid: z.number(),
+});
+
 type ChildOutcome = { code: number | null; reply: ChildReply | null; stderr: string };
 
 const homes: string[] = [];
@@ -71,16 +77,17 @@ import * as locks from ${JSON.stringify(lockUrl)};
 
 const [mode, raw] = process.argv.slice(2);
 const args = raw ? JSON.parse(raw) : {};
-if (args.barrier) {
+async function waitFor(file) {
   for (;;) {
     try {
-      await fsp.access(args.barrier);
-      break;
+      await fsp.access(file);
+      return;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }
 }
+if (args.barrier) await waitFor(args.barrier);
 const codec = {
   schemaVersion: 1,
   parse(value) {
@@ -170,6 +177,69 @@ try {
     ));
     process.exit(0);
   }
+  if (mode === "atomic-shared-read") {
+    const store = openStore();
+    const current = await store.read();
+    if (current.status !== "ok") {
+      console.log(JSON.stringify({ ok: false, code: current.status }));
+      process.exit(0);
+    }
+    await fsp.writeFile(
+      args.ready,
+      JSON.stringify({ revision: current.revision, digest: current.digest, pid: process.pid }),
+    );
+    await waitFor(args.go);
+    try {
+      const result = await store.commit(
+        {
+          ...current.record,
+          revision: current.revision + 1,
+          previousDigest: current.digest,
+          value: args.value,
+        },
+        { revision: current.revision, digest: current.digest },
+      );
+      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value }));
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
+    }
+    process.exit(0);
+  }
+  if (mode === "atomic-stale-locked") {
+    const store = openStore();
+    const current = await store.read();
+    if (current.status !== "ok") {
+      console.log(JSON.stringify({ ok: false, code: current.status }));
+      process.exit(0);
+    }
+    await fsp.writeFile(
+      args.ready,
+      JSON.stringify({ revision: current.revision, digest: current.digest, pid: process.pid }),
+    );
+    await waitFor(args.go);
+    const lock = await locks.acquireProcessLock({
+      file: args.lockFile,
+      acquireTimeoutMs: 10_000,
+      retryDelayMs: 10,
+    });
+    try {
+      const result = await store.commit(
+        {
+          ...current.record,
+          revision: current.revision + 1,
+          previousDigest: current.digest,
+          value: args.value,
+        },
+        { revision: current.revision, digest: current.digest },
+      );
+      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value }));
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
+    } finally {
+      await lock.release();
+    }
+    process.exit(0);
+  }
   if (mode === "atomic-locked-write") {
     const lock = await locks.acquireProcessLock({
       file: args.lockFile,
@@ -185,11 +255,11 @@ try {
           ...current.record,
           revision: current.revision + 1,
           previousDigest: current.digest,
-          value: "racer",
+          value: args.value ?? "racer",
         },
         { revision: current.revision, digest: current.digest },
       );
-      console.log(JSON.stringify({ ok: true, revision: result.revision }));
+      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value ?? "racer" }));
       await lock.release();
     } catch (error) {
       console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
@@ -285,6 +355,20 @@ async function barrierRace(
   const children = Array.from({ length: count }, () => runChild(mode, { ...args, barrier }));
   await writeFile(barrier, "go");
   return Promise.all(children);
+}
+
+async function waitForPath(file: string): Promise<void> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      await stat(file);
+      return;
+    } catch {
+      // Keep polling until the child writes the rendezvous file or the deadline passes.
+    }
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${file}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 async function waitForLockPid(file: string, pid: number): Promise<void> {
@@ -453,45 +537,115 @@ describe("ledger on the real filesystem", () => {
     }
   }, 30_000);
 
-  test("rejects a stale cross-process commit", async () => {
-    const { roots } = await homeFixture("cas-stale");
+  test("rejects the loser when two processes commit from the same read", async () => {
+    const { home, roots } = await homeFixture("cas-shared-read");
     const store = storeFor(roots, "run");
-    const current = await createBase(store);
-    const first = await runChild("atomic-write", {
-      file: store.file,
-      issuesDir: roots.issues,
-      root: roots.home,
-      point: "none",
-      record: { ...current, revision: 2, previousDigest: current.digest, value: "first" },
-      cas: { revision: 1, digest: current.digest },
+    const base = await createBase(store);
+    const baseArgs = { file: store.file, issuesDir: roots.issues, root: roots.home };
+    const readyA = path.join(home, "ready-a");
+    const readyB = path.join(home, "ready-b");
+    const goA = path.join(home, "go-a");
+    const goB = path.join(home, "go-b");
+    const childA = spawnChild("atomic-shared-read", {
+      ...baseArgs,
+      ready: readyA,
+      go: goA,
+      value: "alpha",
     });
-    expect(first.reply).toMatchObject({ ok: true, revision: 2 });
-    const stale = await runChild("atomic-write", {
-      file: store.file,
-      issuesDir: roots.issues,
-      root: roots.home,
-      point: "none",
-      record: { ...current, revision: 2, previousDigest: current.digest, value: "stale" },
-      cas: { revision: 1, digest: current.digest },
+    const childB = spawnChild("atomic-shared-read", {
+      ...baseArgs,
+      ready: readyB,
+      go: goB,
+      value: "beta",
     });
-    expect(stale.reply).toMatchObject({ ok: false, code: "cas-mismatch" });
-  }, 20_000);
+    await Promise.all([waitForPath(readyA), waitForPath(readyB)]);
+    const readA = readySchema.parse(JSON.parse(await readFile(readyA, "utf8")));
+    const readB = readySchema.parse(JSON.parse(await readFile(readyB, "utf8")));
+    expect(readA).toMatchObject({ revision: 1, digest: base.digest });
+    expect(readB).toMatchObject({ revision: 1, digest: base.digest });
+    expect(readA.pid).not.toBe(readB.pid);
 
-  test("serializes four writers that hold the root lock", async () => {
-    const { roots } = await homeFixture("cas-locked");
+    await writeFile(goA, "go");
+    const first = await childA.done;
+    expect(first.reply).toMatchObject({ ok: true, revision: 2, value: "alpha" });
+    const between = await store.read();
+    if (between.status !== "ok") throw new Error(`unexpected ${between.status}`);
+    expect(between.revision).toBe(2);
+    expect(between.record.value).toBe("alpha");
+    const alphaDigest = between.digest;
+
+    await writeFile(goB, "go");
+    const second = await childB.done;
+    expect(second.reply).toMatchObject({ ok: false, code: "cas-mismatch" });
+
+    const final = await store.read();
+    if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);
+    expect(final.revision).toBe(2);
+    expect(final.record.value).toBe("alpha");
+    expect(final.record.value).not.toBe("beta");
+    expect(final.digest).toBe(alphaDigest);
+    const names = await readdir(roots.records);
+    expect(names.filter((name) => name.endsWith(".tmp"))).toHaveLength(0);
+    expect(names).toEqual([path.basename(store.file)]);
+  }, 30_000);
+
+  test("serializes two lock writers on the latest revision", async () => {
+    const { home, roots } = await homeFixture("cas-locked");
     const store = storeFor(roots, "run");
     await createBase(store);
-    const outcomes = await barrierRace(4, "atomic-locked-write", {
+    const barrier = path.join(home, "barrier");
+    const lockFile = path.join(roots.root, ".lock");
+    const baseArgs = {
       file: store.file,
       issuesDir: roots.issues,
       root: roots.home,
-      lockFile: path.join(roots.root, ".lock"),
-    });
-    expect(outcomes.filter((outcome) => outcome.reply?.ok === true)).toHaveLength(4);
-    expect(outcomes.map((outcome) => outcome.reply?.revision).sort()).toEqual([2, 3, 4, 5]);
+      lockFile,
+      barrier,
+    };
+    const first = spawnChild("atomic-locked-write", { ...baseArgs, value: "first" });
+    const second = spawnChild("atomic-locked-write", { ...baseArgs, value: "second" });
+    await writeFile(barrier, "go");
+    const [outcomeA, outcomeB] = await Promise.all([first.done, second.done]);
+    expect(outcomeA.reply).toMatchObject({ ok: true });
+    expect(outcomeB.reply).toMatchObject({ ok: true });
+    const revisions = [outcomeA.reply?.revision, outcomeB.reply?.revision].sort();
+    expect(revisions).toEqual([2, 3]);
+    const lastWriter = outcomeA.reply?.revision === 3 ? outcomeA.reply : outcomeB.reply;
     const final = await store.read();
-    expect(final.status).toBe("ok");
-    if (final.status === "ok") expect(final.revision).toBe(5);
+    if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);
+    expect(final.revision).toBe(3);
+    expect(final.record.value).toBe(lastWriter?.value);
+    expect(["first", "second"]).toContain(final.record.value);
+  }, 30_000);
+
+  test("rejects a stale read even when the retry holds the lock", async () => {
+    const { home, roots } = await homeFixture("cas-stale-locked");
+    const store = storeFor(roots, "run");
+    const base = await createBase(store);
+    const ready = path.join(home, "ready");
+    const go = path.join(home, "go");
+    const lockFile = path.join(roots.root, ".lock");
+    const baseArgs = { file: store.file, issuesDir: roots.issues, root: roots.home, lockFile };
+    const stale = spawnChild("atomic-stale-locked", {
+      ...baseArgs,
+      ready,
+      go,
+      value: "stale",
+    });
+    await waitForPath(ready);
+    const staleRead = readySchema.parse(JSON.parse(await readFile(ready, "utf8")));
+    expect(staleRead).toMatchObject({ revision: 1, digest: base.digest });
+
+    const winner = await runChild("atomic-locked-write", { ...baseArgs, value: "winner" });
+    expect(winner.reply).toMatchObject({ ok: true, revision: 2, value: "winner" });
+
+    await writeFile(go, "go");
+    const rejected = await stale.done;
+    expect(rejected.reply).toMatchObject({ ok: false, code: "cas-mismatch" });
+    const final = await store.read();
+    if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);
+    expect(final.revision).toBe(2);
+    expect(final.record.value).toBe("winner");
   }, 30_000);
 
   test("isolates corrupt and unknown-version records without rewriting them", async () => {
