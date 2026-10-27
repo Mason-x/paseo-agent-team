@@ -4,53 +4,113 @@
 //
 // Usage: node scripts/verify-host-compile.mjs
 // Checks against the @getpaseo/server version installed with @getpaseo/cli.
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const serverRoot = path.join(root, "node_modules", "@getpaseo", "server");
-const pluginsDir = path.join(serverRoot, "dist", "server", "server", "plugins");
-const hostModule = (file) => import(pathToFileURL(path.join(pluginsDir, file)).href);
+const RM_OPTIONS = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
 
-const { compilePlugin } = await hostModule("compiler.js");
-const { readPluginManifest } = await hostModule("manifest.js");
-const { evaluateBundle } = await hostModule("bundle-evaluator.js");
-const { assertPluginCompatibility } = await import("@getpaseo/protocol/plugin-requirements");
+// Captured as soon as contribute() returns so a later throw still disposes the ledger
+// before the isolated home is removed. Swallowing rm errors without deleting is not a fix.
+let pluginCleanup = async () => {};
 
-const hostVersion = JSON.parse(
-  await readFile(path.join(serverRoot, "package.json"), "utf8"),
-).version;
-const manifest = await readPluginManifest(root);
-assertPluginCompatibility({ ...manifest, version: hostVersion, runtime: "daemon" });
+// The evaluated server bundle reads process.env.PASEO_HOME only (index.server.ts contribute and
+// confirmPendingBoot). It never reads USERPROFILE/HOME/HOMEDRIVE. Isolate before host imports or
+// bundle evaluation so an inherited home is never created or locked.
+const isolatedHome = await mkdtemp(path.join(tmpdir(), "paseo-verify-home-"));
+const previousPaseoHome = process.env.PASEO_HOME;
+process.env.PASEO_HOME = isolatedHome;
+let fatal;
+let cleanupFailed;
 
-const { clientBundle, serverBundle } = await compilePlugin({
-  client: path.join(root, "index.client.tsx"),
-  server: path.join(root, "index.server.ts"),
-});
-if (!clientBundle || !serverBundle) throw new Error("Expected both a client and a server bundle");
-for (const [name, bundle] of Object.entries({ client: clientBundle, server: serverBundle })) {
-  if (bundle.includes("agent_profile_"))
-    throw new Error(`${name} bundle contains a host Profile ID`);
+try {
+  await verifyHostCompile();
+} catch (error) {
+  fatal = error;
+} finally {
+  try {
+    await pluginCleanup();
+  } catch (error) {
+    console.error(
+      `isolated host plugin cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (previousPaseoHome === undefined) delete process.env.PASEO_HOME;
+  else process.env.PASEO_HOME = previousPaseoHome;
+  try {
+    await removeIsolatedHome(isolatedHome);
+  } catch (error) {
+    console.error(
+      `isolated home cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    cleanupFailed = error;
+  }
+}
+if (fatal) throw fatal;
+if (cleanupFailed) throw cleanupFailed;
+
+async function removeIsolatedHome(home) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      await rm(home, RM_OPTIONS);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+  await rm(home, RM_OPTIONS);
 }
 
-const server = recordServerContributions(evaluateBundle(serverBundle));
-const client = recordClientContributions(clientBundle);
+async function verifyHostCompile() {
+  const serverRoot = path.join(root, "node_modules", "@getpaseo", "server");
+  const pluginsDir = path.join(serverRoot, "dist", "server", "server", "plugins");
+  const hostModule = (file) => import(pathToFileURL(path.join(pluginsDir, file)).href);
 
-console.log(
-  JSON.stringify(
-    {
-      host: hostVersion,
-      manifest: { id: manifest.id, requirements: manifest.requirements },
-      bundles: { client: clientBundle.length, server: serverBundle.length },
-      server,
-      client,
-    },
-    null,
-    2,
-  ),
-);
+  const { compilePlugin } = await hostModule("compiler.js");
+  const { readPluginManifest } = await hostModule("manifest.js");
+  const { evaluateBundle } = await hostModule("bundle-evaluator.js");
+  const { assertPluginCompatibility } = await import("@getpaseo/protocol/plugin-requirements");
+
+  const hostVersion = JSON.parse(
+    await readFile(path.join(serverRoot, "package.json"), "utf8"),
+  ).version;
+  const manifest = await readPluginManifest(root);
+  assertPluginCompatibility({ ...manifest, version: hostVersion, runtime: "daemon" });
+
+  const { clientBundle, serverBundle } = await compilePlugin({
+    client: path.join(root, "index.client.tsx"),
+    server: path.join(root, "index.server.ts"),
+  });
+  if (!clientBundle || !serverBundle) throw new Error("Expected both a client and a server bundle");
+  for (const [name, bundle] of Object.entries({ client: clientBundle, server: serverBundle })) {
+    if (bundle.includes("agent_profile_"))
+      throw new Error(`${name} bundle contains a host Profile ID`);
+  }
+
+  const { recorded: server, cleanup } = recordServerContributions(evaluateBundle(serverBundle));
+  try {
+    const client = recordClientContributions(clientBundle);
+    console.log(
+      JSON.stringify(
+        {
+          host: hostVersion,
+          manifest: { id: manifest.id, requirements: manifest.requirements },
+          bundles: { client: clientBundle.length, server: serverBundle.length },
+          server,
+          client,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    await cleanup();
+    pluginCleanup = async () => {};
+  }
+}
 
 function recordServerContributions(setup) {
   const recorded = { settings: [], rpc: [], events: [], before: [] };
@@ -81,8 +141,9 @@ function recordServerContributions(setup) {
       throw new Error("Unexpected usage source registration");
     },
   });
+  if (typeof cleanup === "function") pluginCleanup = cleanup;
   if (typeof cleanup !== "function") throw new Error("Server contribution must return a cleanup");
-  return recorded;
+  return { recorded, cleanup };
 }
 
 // The client bundle runs in React Native. Host modules are external, so any stub that survives
