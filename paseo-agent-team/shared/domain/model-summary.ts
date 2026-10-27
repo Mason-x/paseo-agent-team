@@ -27,6 +27,10 @@ export type ModelSummaryReason =
   | "profile-missing"
   | "provider-unavailable"
   | "unverified"
+  /** economy-all: nothing is configured for the seat's route (policy absent, list or route empty). */
+  | "route-unavailable"
+  /** economy-all: candidates exist but none is an eligible low-cost Profile. */
+  | "no-cheap-profile"
   | "policy";
 
 export type ModelSummaryGroup = {
@@ -67,6 +71,33 @@ const ISSUE_REASON: Readonly<Record<string, ModelSummaryReason>> = {
   "all-excluded": "policy",
 };
 
+/** economy-all route failures by their stable `reason` (see routeFailureReason). */
+const CHEAP_ROUTE_REASON: Readonly<Record<string, ModelSummaryReason>> = {
+  "list-empty": "route-unavailable",
+  "route-empty": "route-unavailable",
+  "profile-missing": "profile-missing",
+  "provider-unavailable": "provider-unavailable",
+  "availability-unverified": "unverified",
+  "all-disabled": "no-cheap-profile",
+  "model-unverified": "no-cheap-profile",
+  "no-eligible": "no-cheap-profile",
+};
+
+function cheapReasonOf(issues: TeamPlanRow["issues"]): ModelSummaryReason | null {
+  const route = issues.find((issue) => issue.code === "MODE_CHEAP_ROUTE_UNAVAILABLE");
+  if (route) {
+    const reason = typeof route.params.reason === "string" ? route.params.reason : "";
+    return CHEAP_ROUTE_REASON[reason] ?? "route-unavailable";
+  }
+  if (issues.some((issue) => issue.code === "MODE_CHEAP_POLICY_REQUIRED")) {
+    return "route-unavailable";
+  }
+  if (issues.some((issue) => issue.code === "MODE_CHEAP_PROFILE_INVALID")) {
+    return "no-cheap-profile";
+  }
+  return null;
+}
+
 /**
  * Why an enabled physical row has no selected Profile. Issue detail wins over the availability
  * snapshot; "user has not bound a Profile" and "the provider is down" must not collapse into one
@@ -81,6 +112,8 @@ export function unresolvedReasonOf(
     const reason = typeof issue.params.reason === "string" ? issue.params.reason : "";
     return ISSUE_REASON[reason] ?? "unbound";
   }
+  const cheap = cheapReasonOf(row.issues);
+  if (cheap !== null) return cheap;
   if (row.availability === "unverified") return "unverified";
   if (row.availability === "unavailable") return "provider-unavailable";
   if (row.issues.length > 0) return "policy";
