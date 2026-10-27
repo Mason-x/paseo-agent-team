@@ -75,7 +75,8 @@ export type Result<T, E> = { ok: true; value: T; issues?: E } | { ok: false; iss
 export type RoleExecutionPolicy = { tier: RoleTier; taskKind: TaskKind };
 
 // Defaults for the built-in presets. Explicitly stored fields on a Role always win, and an
-// unknown custom Role keeps its original binding (retain/general).
+// unknown custom Role keeps its original binding (retain/general). Ids retired from the catalog
+// stay listed so Roles imported from an earlier revision keep their tier.
 export const DEFAULT_ROLE_EXECUTION: Readonly<Record<string, RoleExecutionPolicy | undefined>> = {
   "lead-orchestrator": { tier: "decision", taskKind: "general" },
   "lead-tech": { tier: "decision", taskKind: "general" },
@@ -101,6 +102,7 @@ export const DEFAULT_ROLE_EXECUTION: Readonly<Record<string, RoleExecutionPolicy
   "content-creative": { tier: "retain", taskKind: "general" },
   "content-technical": { tier: "retain", taskKind: "general" },
   "content-editor": { tier: "retain", taskKind: "general" },
+  "content-writer": { tier: "retain", taskKind: "general" },
 };
 
 export function issueValue(value: unknown): string | number | boolean {

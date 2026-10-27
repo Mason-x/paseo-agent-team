@@ -3,9 +3,9 @@ import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { BindingReport } from "../../shared/schemas/default-catalog";
 import type { ProfileHint, ProfileRef } from "../../shared/schemas/profile-ref";
 /**
- * The built-in designer is not a catalog Role. These four hints are the default binding order the
- * human confirmed: Opus Max, Astra Max, Opus High, then Gemini Argon chat. Fields come from the
- * fixture profiles; the stored Profile id is deliberately absent so a hint never pins one machine.
+ * The built-in designer is not a catalog Role. These four hints are the default binding order, all
+ * taken from the host's current Profiles: Opus Max (planning), Opus Medium, Sol Xhigh, then
+ * DeepSeek. Fields come from the fixture profiles; the stored Profile id is deliberately absent so a hint never pins one machine.
  */
 export const DESIGNER_PROFILE_HINTS = [
   {
@@ -16,25 +16,25 @@ export const DESIGNER_PROFILE_HINTS = [
     thinkingOptionId: "max",
   },
   {
-    name: "GPT-6-Astra-Max",
-    provider: "codex",
-    model: "gpt-6-astra",
-    modeId: "auto-review",
-    thinkingOptionId: "max",
-  },
-  {
-    name: "Claude-Opus-5.5-High",
+    name: "Claude-Opus-5.5-Medium",
     provider: "claude",
     model: "claude-opus-5-5",
     modeId: "auto",
-    thinkingOptionId: "high",
+    thinkingOptionId: "medium",
   },
   {
-    name: "Gemini-4-Argon-High｜通用对话",
+    name: "GPT-6.1-Sol Xhigh",
+    provider: "codex",
+    model: "codex/gpt-6.1-sol",
+    modeId: "full-access",
+    thinkingOptionId: "xhigh",
+  },
+  {
+    name: "DeepSeek-V4.1-Flash-Max",
     provider: "omp",
-    model: "cursor/gemini-4-argon",
+    model: "opencode-go/deepseek-v4.1-flash",
     modeId: "full",
-    thinkingOptionId: "high",
+    thinkingOptionId: "max",
   },
 ] as const satisfies readonly ProfileHint[];
 

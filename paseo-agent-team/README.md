@@ -49,7 +49,7 @@ and **Launch agent team** Command Center actions open the panel directly.
 
 1. Create at least one Paseo Agent Profile per provider you want on a team
    (**Settings → Agents / Profiles**). Roles store Profile ids and optional binding hints.
-2. Open **Agent Teams → Roles**. Create a Role or import the 23 default Role presets
+2. Open **Agent Teams → Roles**. Create a Role or import the 13 default Role presets
    when the catalog is empty. The presets do not include Teams.
 3. Bind each Role to a preferred Profile (and optional fallbacks). Missing
    Profiles are marked; they are never silently replaced.
@@ -61,10 +61,22 @@ previews additions and field differences: missing presets are selected by defaul
 Roles and previously deleted presets are kept unless you explicitly select them. Adopting a
 preset preserves its creation time and rebinds its Profiles using the current host.
 
-The **【工程】快速开发** preset uses Grok 4.6 High (the configured
-`Grok-4.6-High-Fast` Profile), with DeepSeek V4.1 Flash Max and GPT-6.1-Sol Max as
-fallbacks. It handles clearly specified features, local fixes, scripts, tests, and review fixes
-as an `execution/coding` member. Existing catalogs can add it with **同步默认预设**.
+The presets bind only to the host's current Profiles, one job per model:
+
+| Profile | Preset Roles |
+| --- | --- |
+| Claude-Opus-5.5-Max | 【规划】架构师 (project planning and architecture; writes no code) |
+| Claude-Opus-5.5-Medium | 【统筹】总协调, 【统筹】技术负责人 (task breakdown and dispatch) |
+| GPT-6.1-Sol Xhigh | 【工程】排障修复, 【质量】代码审查 (finding and fixing bugs) |
+| DeepSeek-V4.1-Flash-Max | 【工程】全栈开发, 【质量】测试与验收 (main coder) |
+| Claude-Sonnet 5.5 high | 【工程】前端开发 (second main coder; DeepSeek takes over when its quota runs out) |
+| Grok-4.6-Xhigh | 【工程】批量开发, 【研究】代码库分析师, 【研究】联网研究员 (simple, token-heavy work) |
+| Gemini-3.8-flash-High | 【研究】资料与视觉解析, 【内容】写作与翻译 (OCR, charts, Q&A, summaries, translation, drafts) |
+
+Each Role also has a fallback on another provider. The 2026-10-28 catalog merged or dropped
+the earlier research and content leads, requirements analyst, rapid, ops, security, acceptance,
+vision and the three content Roles. Roles already imported from those presets stay in your
+catalog; **同步默认预设** leaves them untouched and never deletes them.
 
 Binding requires a normalized name and identical provider/model/mode/thinking settings, or a
 unique runtime match when there is no same-name Profile. Ambiguous, changed, or missing

@@ -135,10 +135,10 @@ describe("default preset diff and selected merge", () => {
         updatedAt: NOW,
       };
     });
-    expect(unmarked).toHaveLength(23);
+    expect(unmarked).toHaveLength(13);
     expect(unmarked.every((entry) => entry.executionPolicy === undefined)).toBe(true);
     const rows = diff(unmarked);
-    expect(rows).toHaveLength(23);
+    expect(rows).toHaveLength(13);
     expect(rows.every((row) => row.kind === "same")).toBe(true);
     expect(rows.every((row) => row.defaultAction === "keep")).toBe(true);
     expect(rows.every((row) => row.changedFields.length === 0 && !row.locallyChanged)).toBe(true);
@@ -295,10 +295,10 @@ describe("default preset diff and selected merge", () => {
     expect(result.roles).toEqual([expect.objectContaining({ id: candidates[0].id })]);
   });
 
-  test("default selection appends only the 13 missing presets; all 13 existing Roles are byte-identical", () => {
+  test("default selection appends only the 8 missing presets; all 8 existing Roles are byte-identical", () => {
     const current = [
       ...originals
-        .slice(0, 10)
+        .slice(0, 5)
         .map((entry, index) =>
           index < 2 ? { ...entry, systemPrompt: "User edits", custom: { keep: true } } : entry,
         ),
@@ -308,12 +308,12 @@ describe("default preset diff and selected merge", () => {
     ];
     const snapshots = current.map((entry) => JSON.stringify(entry));
     const result = apply(current, diff(current));
-    expect(result).toHaveLength(26);
+    expect(result).toHaveLength(16);
     expect(result.slice(0, current.length).map((entry) => JSON.stringify(entry))).toEqual(
       snapshots,
     );
     for (const [index, entry] of current.entries()) expect(result[index]).toBe(entry);
-    expect(current).toHaveLength(13);
+    expect(current).toHaveLength(8);
   });
 
   test("an explicit adoption preserves createdAt, rebinds Profiles, and updates origin/hashes", () => {

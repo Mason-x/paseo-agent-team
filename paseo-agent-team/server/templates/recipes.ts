@@ -1,5 +1,6 @@
 /**
- * Reference lineups copied from the 2026-10-25 recipe table. They are prompt material only:
+ * Reference lineups from the 2026-10-25 recipe table, narrowed to the 2026-10-28 slim catalog.
+ * They are prompt material only:
  * importing them never creates Roles or Teams, and a missing catalog Role stays missing.
  */
 export type TeamDesignRecipeMember = {
@@ -57,15 +58,15 @@ export const TEAM_DESIGN_RECIPES = [
     name: "上线前检查",
     coordinatorRoleId: "lead-tech",
     members: [
-      { roleId: "qa-security", minInstances: 1, maxInstances: 1 },
-      { roleId: "qa-acceptance", minInstances: 1, maxInstances: 1 },
-      { roleId: "eng-ops", minInstances: 1, maxInstances: 1 },
+      { roleId: "qa-review", minInstances: 1, maxInstances: 1 },
+      { roleId: "qa-test", minInstances: 1, maxInstances: 1 },
+      { roleId: "eng-batch", minInstances: 1, maxInstances: 1 },
     ],
   },
   {
     id: "technical-research",
     name: "技术调研",
-    coordinatorRoleId: "lead-research",
+    coordinatorRoleId: "lead-orchestrator",
     members: [
       { roleId: "research-web", minInstances: 1, maxInstances: 1 },
       { roleId: "research-codebase", minInstances: 1, maxInstances: 1 },
@@ -75,30 +76,28 @@ export const TEAM_DESIGN_RECIPES = [
   {
     id: "materials",
     name: "资料与截图研读",
-    coordinatorRoleId: "lead-research",
+    coordinatorRoleId: "lead-orchestrator",
     members: [
       { roleId: "research-docs", minInstances: 1, maxInstances: 1 },
-      { roleId: "research-vision", minInstances: 1, maxInstances: 1 },
+      { roleId: "content-writer", minInstances: 1, maxInstances: 1 },
     ],
   },
   {
     id: "creative-content",
     name: "文案、脚本、视频文案",
-    coordinatorRoleId: "lead-content",
+    coordinatorRoleId: "lead-orchestrator",
     members: [
       { roleId: "research-web", minInstances: 1, maxInstances: 1 },
-      { roleId: "content-creative", minInstances: 1, maxInstances: 1 },
-      { roleId: "content-editor", minInstances: 1, maxInstances: 1 },
+      { roleId: "content-writer", minInstances: 1, maxInstances: 1 },
     ],
   },
   {
     id: "technical-writing",
     name: "技术文档",
-    coordinatorRoleId: "lead-content",
+    coordinatorRoleId: "lead-orchestrator",
     members: [
       { roleId: "research-codebase", minInstances: 1, maxInstances: 1 },
-      { roleId: "content-technical", minInstances: 1, maxInstances: 1 },
-      { roleId: "content-editor", minInstances: 1, maxInstances: 1 },
+      { roleId: "content-writer", minInstances: 1, maxInstances: 1 },
     ],
   },
   {
@@ -110,7 +109,7 @@ export const TEAM_DESIGN_RECIPES = [
       { roleId: "plan-architect", minInstances: 1, maxInstances: 1 },
       { roleId: "eng-fullstack", minInstances: 1, maxInstances: 1 },
       { roleId: "qa-review", minInstances: 1, maxInstances: 1 },
-      { roleId: "content-creative", minInstances: 1, maxInstances: 1 },
+      { roleId: "content-writer", minInstances: 1, maxInstances: 1 },
     ],
     notes: "调研→开发→发布文案",
   },

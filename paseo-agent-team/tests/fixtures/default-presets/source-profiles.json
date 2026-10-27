@@ -1,21 +1,30 @@
 [
   {
-    "id": "agent_profile_mtw3nnvk_mdlvv3bji59",
-    "name": "GPT-6-Astra-Max",
-    "provider": "codex",
-    "model": "gpt-6-astra",
-    "modeId": "auto-review",
+    "id": "agent_profile_mvmc6kj5_gp2f44npy7k",
+    "name": "Claude-Opus-5.5-Max",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "modeId": "auto",
     "thinkingOptionId": "max",
-    "notes": "Code / Fullstack：质量优先的端到端应用开发，适合架构设计、前后端与数据库贯通、复杂方案论证；兼任 Agent 根因分析与疑难任务复核。\nArena：Fullstack #1；Frontend #3；Image-to-WebDev #3；Agent Overall / Code #3；Search #7（均 Max）。"
+    "notes": "整体项目规划与架构设计，只规划不写代码。"
+  },
+  {
+    "id": "agent_profile_mub9al8i_n1fbqae2oqi",
+    "name": "Claude-Opus-5.5-Medium",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "modeId": "auto",
+    "thinkingOptionId": "medium",
+    "notes": "任务拆分与调度（统筹 Role）。"
   },
   {
     "id": "agent_profile_mubbhclu_e57toxj0x",
-    "name": "GPT-6.1-Sol Max",
+    "name": "GPT-6.1-Sol Xhigh",
     "provider": "codex",
-    "model": "gpt-6.1-sol",
+    "model": "codex/gpt-6.1-sol",
     "modeId": "full-access",
-    "thinkingOptionId": "max",
-    "notes": "Code / Fullstack：日常全栈主力，负责功能落地、跨文件调试、重构、测试与前后端联调；Agent / Work 可承担资料处理与工程自动化。\nArena：Fullstack #3；Frontend / Image-to-WebDev #5；Agent Code / Work #4；Vision #9；Search #8（均 Max）。视觉细节打磨优先 Sonnet xHigh，复杂工程攻坚优先 Opus Max。"
+    "thinkingOptionId": "xhigh",
+    "notes": "找 bug、修 bug：排障修复与代码审查。"
   },
   {
     "id": "agent_profile_mu8ldfz3_8jhpp66604a",
@@ -24,43 +33,7 @@
     "model": "opencode-go/deepseek-v4.1-flash",
     "modeId": "full",
     "thinkingOptionId": "max",
-    "notes": "Code / Fullstack：常规全栈实现、批量脚本、测试补全、重复性代码改写与结构化数据处理；作为主力工程模型的批量任务备选。\nArena ：20261017 Max 的 Fullstack #9、Frontend #15、Agent Code #13。Text / 创作不作为首选。"
-  },
-  {
-    "id": "agent_profile_mvmc6kj5_gp2f44npy7k",
-    "name": "Claude-Opus-5.5-Max",
-    "provider": "claude",
-    "model": "claude-opus-5-5",
-    "modeId": "auto",
-    "thinkingOptionId": "max",
-    "notes": "Agent：高难度、多步骤工程任务首选，适合大型代码库改造、复杂缺陷定位、迁移与任务统筹；Code：质量优先的前端、截图还原和复杂全栈交付。\nArena：Agent Overall / Code / Chat / Work 均 #1；Frontend #1；Image-to-WebDev #1；Fullstack #2（均 Max）。"
-  },
-  {
-    "id": "agent_profile_mub9al8i_n1fbqae2oqi",
-    "name": "Claude-Opus-5.5-High",
-    "provider": "claude",
-    "model": "claude-opus-5-5",
-    "modeId": "auto",
-    "thinkingOptionId": "high",
-    "notes": "Chat / Text：严格遵循要求的方案撰写、技术解释、结构化输出与中文英文润色；兼作代码审阅、需求审查和实现方案复核。专注创作时选择同模型的“创意写作”预设。\nArena：Instruction Following #1；Text #2；English #2；Chinese #2；Creative Writing #1；Vision #10 / Diagram #6（均 High）。"
-  },
-  {
-    "id": "agent_profile_mutlstlz_riirwcu36j",
-    "name": "Claude-Sonnet 5.5-Max",
-    "provider": "claude",
-    "model": "claude-sonnet-5-5",
-    "modeId": "auto",
-    "thinkingOptionId": "max",
-    "notes": "Agent / Code：需要连续工具调用的工程执行、跨文件修改、排错、测试修复和长任务推进；作为 Opus Max 的工程执行备选。\nArena：Agent Overall #2、Code #2、Chat #2、Work #3（均 Max）。WebDev 展示的是 xHigh / High，不能给本 Max 档直接套用；前端任务优先选择有直接榜单证据的 Sonnet xHigh。"
-  },
-  {
-    "id": "agent_profile_mvmhnriv_i0kn49ehqyp",
-    "name": "Claude-Sonnet-5.5 Xhigh",
-    "provider": "claude",
-    "model": "claude-sonnet-5-5",
-    "modeId": "auto",
-    "thinkingOptionId": "xhigh",
-    "notes": "Code / Frontend：前端主力，适合 React 组件、复杂交互、状态管理、页面视觉打磨、截图或设计稿还原；也可承担中等规模全栈联调。\nArena：Frontend #2；Image-to-WebDev #2；Fullstack #6（均 xHigh）。Text Chinese #11 / English #18，但创意写作 #22，多轮对话 #53，创作和日常聊天优先专用 Chat 预设。"
+    "notes": "编码主力；Sonnet 额度受限时顶上。"
   },
   {
     "id": "agent_profile_mutltn52_uvfm5351b97",
@@ -69,52 +42,16 @@
     "model": "claude-sonnet-5-5",
     "modeId": "auto",
     "thinkingOptionId": "high",
-    "notes": "Code / Frontend：日常组件开发、布局样式调整、局部交互与缺陷修复，需求明确时使用；复杂交互、设计稿还原和质量优先任务升级至 Sonnet xHigh 或 Opus Max。\nArena：Frontend #7；WebDev Overall #7；Fullstack #16（均 High）。Agent Max 与 Text xHigh 的排名不代表本 High 档。"
-  },
-  {
-    "id": "agent_profile_mvmdxsb7_5efalsrc964",
-    "name": "Cursor-Claude-Sonnet-5.5",
-    "provider": "omp",
-    "model": "magpie/cursor/claude-sonnet-5-5",
-    "modeId": "full",
-    "thinkingOptionId": "high",
-    "notes": "Code / Frontend：通过 Cursor / Magpie 渠道执行日常网页、组件、样式和局部修复；作为原生 Claude Sonnet High 的渠道备选。\nArena 原版 High 参考：Frontend #7、WebDev Overall #7、Fullstack #16。"
-  },
-  {
-    "id": "agent_profile_mvmk07xw_q0yyt5jxtc",
-    "name": "Claude-Opus-5.5-High｜创意写作",
-    "provider": "claude",
-    "model": "claude-opus-5-5",
-    "modeId": "auto",
-    "thinkingOptionId": "high",
-    "notes": "Chat / Text / Creative Writing：中英文创意写作首选。英文：小说、角色对白、品牌叙事、营销文案与风格改写；中文：故事、散文、脚本、人物口吻、文案与自然化润色；适合多稿构思后精修。\nArena High：Creative Writing #1；English #2；Chinese #2；Instruction Following #1。语言榜与创作榜分别统计，不能称为“英文/中文创意写作交叉榜第1”。看图创作优先视觉专用预设。"
-  },
-  {
-    "id": "agent_profile_mvmcydux_t4cagx625o",
-    "name": "Grok-4.7-Xhigh-Fast",
-    "provider": "omp",
-    "model": "cursor/grok-4.7-500k-fast",
-    "modeId": "full",
-    "thinkingOptionId": "xhigh",
-    "notes": "Code：局部功能、明确缺陷修复、脚本和代码维护备选；已有该渠道工作流时使用。\nArena参考：Agent Code #18、Frontend #18、Fullstack #24；Text #96、Creative Writing #86。"
-  },
-  {
-    "id": "agent_profile_mucika28_q5u3fhksr9",
-    "name": "Grok-4.7-Xhigh",
-    "provider": "omp",
-    "model": "CPA/grok-4.7",
-    "modeId": "full",
-    "thinkingOptionId": "xhigh",
-    "notes": "Code：常规功能维护、局部排错、脚本与仓库操作备选；适合已有明确方案、验收标准的实现任务。\nArena 参考：Agent Code #18、Frontend #18、Fullstack #24；Text #96、Creative Writing #86。"
+    "notes": "第二编码主力（额度受限）。"
   },
   {
     "id": "agent_profile_mtw3l35d_kiz9cdpp92f",
-    "name": "Grok-4.6-High-Fast",
+    "name": "Grok-4.6-Xhigh",
     "provider": "omp",
     "model": "cursor/cursor-grok-4.6-fast",
     "modeId": "full",
-    "thinkingOptionId": "high",
-    "notes": "Code：简单脚本、局部代码修改、批量格式转换和已有流程的小修。\nArena 参考：Image-to-WebDev #14、Fullstack #26、Frontend #28；Creative Writing #53、Text #66。"
+    "thinkingOptionId": "xhigh",
+    "notes": "简单、耗 token 的任务。"
   },
   {
     "id": "agent_profile_mu17b936_fqptynx841d",
@@ -123,24 +60,6 @@
     "model": "CPA/gemini-3.8-flash-high",
     "modeId": "full",
     "thinkingOptionId": "high",
-    "notes": "Chat / Vision：OCR、截图文字提取、图表与流程图解读的日常备选；Chat / Text：多轮问答、摘要、翻译、脑暴与写作初稿。\nArena 参考：OCR #2、Diagram #2、Vision #12；Text #9、Multi-Turn #9、Creative Writing #9、English #11、Chinese #14（均 Preliminary）。"
-  },
-  {
-    "id": "agent_profile_arena_20261024_gemini4_chat",
-    "name": "Gemini-4-Argon-High｜通用对话",
-    "provider": "omp",
-    "model": "cursor/gemini-4-argon",
-    "modeId": "full",
-    "thinkingOptionId": "high",
-    "notes": "Chat / Text：中英文通用问答、多轮讨论、思路探索、方案比较与表达改写主力；创意写作的第二方案来源，定稿优先 Opus 5.5 High。\nArena 参考：Text #1、English #1、Chinese #1、Multi-Turn #1；Creative Writing #2、Instruction Following #2。"
-  },
-  {
-    "id": "agent_profile_arena_20261024_sol56_search",
-    "name": "GPT-5.6-Sol-Xhigh｜搜索研究",
-    "provider": "codex",
-    "model": "gpt-5.6-sol",
-    "modeId": "auto-review",
-    "thinkingOptionId": "xhigh",
-    "notes": "Chat / Search：联网研究、最新信息核实、多来源检索、竞品资料收集与带引用的分析；需要实际搜索并核对原文、发布日期和来源。\nArena Search #1（xHigh，榜单更新 2026-10-13）；Document #10。Search 比较的是带检索集成的系统，Codex 的实际检索工具与 Arena 不完全相同；仅用于选型参考，不代表仅靠模型就能联网。"
+    "notes": "Chat / Vision：OCR、截图文字提取、图表与流程图解读；Chat / Text：多轮问答、摘要、翻译、脑暴与写作初稿。"
   }
 ]

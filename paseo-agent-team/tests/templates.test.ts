@@ -14,14 +14,14 @@ import { NOW } from "./fixtures";
 describe("default Role templates", () => {
   const catalog = exampleCatalog(sourceProfiles, NOW);
 
-  test("ships exactly the 23 source Roles and no Teams; raw and materialized schemas pass", () => {
-    expect(sourceProfiles).toHaveLength(16);
-    expect(defaultCatalogRevision).toBe("defaults-2026-10-27.1");
-    expect(defaultRoleTemplates).toHaveLength(23);
+  test("ships exactly the 13 source Roles and no Teams; raw and materialized schemas pass", () => {
+    expect(sourceProfiles).toHaveLength(7);
+    expect(defaultCatalogRevision).toBe("defaults-2026-10-28.1");
+    expect(defaultRoleTemplates).toHaveLength(13);
     expect(catalog.roles.map((role) => role.id)).toEqual(
       expectedRoleContent.map((role) => role.id),
     );
-    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(23);
+    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(13);
     expect(catalog.teams).toEqual([]);
     for (const template of defaultRoleTemplates) {
       expect(DefaultRoleTemplateSchema.parse(template)).toEqual(template);
@@ -74,11 +74,12 @@ describe("default Role templates", () => {
     }
   });
 
-  test("the generator writes the explicit tier for all 23 presets", () => {
-    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(23);
-    expect(defaultRoleTemplates.map((role) => role.id).sort()).toEqual(
-      Object.keys(DEFAULT_ROLE_EXECUTION).sort(),
-    );
+  test("the generator writes the explicit tier for all 13 presets", () => {
+    // The table also keeps the ids retired from earlier catalog revisions.
+    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(24);
+    expect(
+      defaultRoleTemplates.every((role) => Object.hasOwn(DEFAULT_ROLE_EXECUTION, role.id)),
+    ).toBe(true);
     for (const template of defaultRoleTemplates) {
       expect(template.executionPolicy, template.id).toEqual(DEFAULT_ROLE_EXECUTION[template.id]);
     }
@@ -92,7 +93,7 @@ describe("default Role templates", () => {
     ).toBe(true);
   });
 
-  test("binds all preferred and fallback IDs in the exact source order, including both Opus Highs", () => {
+  test("binds all preferred and fallback IDs in the exact source order, Opus Max only for planning", () => {
     for (const [index, role] of catalog.roles.entries()) {
       const expected = expectedBindings[index];
       expect(role.id).toBe(expected.id);
@@ -110,20 +111,16 @@ describe("default Role templates", () => {
         );
       }
     }
-    const creative = catalog.roles.find((role) => role.id === "content-creative");
-    const creativeId = "agent_profile_mvmk07xw_q0yyt5jxtc";
-    const generalId = "agent_profile_mub9al8i_n1fbqae2oqi";
-    expect(creative?.preferredProfiles.slice(0, 2).map((ref) => ref.profileId)).toEqual([
-      creativeId,
-      generalId,
-    ]);
-    for (const role of catalog.roles.filter((role) => role.id !== "content-creative")) {
-      expect(
-        [...role.preferredProfiles, ...role.fallbackProfiles].some(
-          (ref) => ref.profileId === creativeId,
-        ),
-      ).toBe(false);
-    }
+    const opusMaxId = "agent_profile_mvmc6kj5_gp2f44npy7k";
+    expect(
+      catalog.roles
+        .filter((role) =>
+          [...role.preferredProfiles, ...role.fallbackProfiles].some(
+            (ref) => ref.profileId === opusMaxId,
+          ),
+        )
+        .map((role) => role.id),
+    ).toEqual(["plan-architect"]);
     expect(
       materializeDefaultCatalog(sourceProfiles, NOW).bindingReport.every(
         (entry) => entry.method === "exact",
@@ -163,7 +160,7 @@ describe("default Role templates", () => {
 
   test("research Roles retain their read-only restrictions", () => {
     const researchRoles = catalog.roles.filter((role) => role.id.startsWith("research-"));
-    expect(researchRoles).toHaveLength(4);
+    expect(researchRoles).toHaveLength(3);
     for (const role of researchRoles) {
       expect(
         role.restrictions.some((item) => /只读|不修改/.test(item)),
@@ -173,7 +170,7 @@ describe("default Role templates", () => {
   });
 
   test.each(["claude", "codex", "omp"])(
-    "all 23 Roles resolve when %s Profiles are absent",
+    "all 13 Roles resolve when %s Profiles are absent",
     (provider) => {
       const profiles = sourceProfiles.filter((profile) => profile.provider !== provider);
       const availability = ["claude", "codex", "omp"].map((name) => ({
