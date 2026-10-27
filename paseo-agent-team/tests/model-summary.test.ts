@@ -210,7 +210,7 @@ describe("unresolved rows", () => {
   });
 
   test("P1-FIX1 item 3: economy-all route failures keep their own reasons", () => {
-    const cheap = (code: string, params: Record<string, string | number | boolean>) =>
+    const cheap = (code: string, params: Record<string, string>) =>
       unresolvedReasonOf(
         row({
           profile: null,

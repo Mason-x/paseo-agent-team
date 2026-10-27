@@ -10,6 +10,7 @@ import {
   buildStoredEconomy,
   cheapFamilyOf,
   checkAllSeatsEntry,
+  isGrok47,
   DEFAULT_MAX_MEMBERS,
   decideEconomySave,
   draftFromStored,
@@ -693,6 +694,64 @@ describe("economy-all allowlist", () => {
       live,
     );
     expect(kept.allSeats.profiles[0]?.profileId).toBe("p-opus");
+  });
+
+  const grok47 = (id: string, name: string, model: string): PaseoProfile => ({
+    id,
+    name,
+    provider: "omp",
+    model,
+  });
+
+  test("P1-FIX1 item 4: suggestions never add Grok 4.7, whatever the id spelling", () => {
+    const withGrok = [
+      ...live,
+      grok47("p-g47", "Grok-4.7-Xhigh", "grok-4.7"),
+      grok47("p-g47-fast", "Fast", "grok-4.7-fast"),
+      grok47("p-g47-dash", "Fast", "grok-4-7"),
+      grok47("p-g47-named", "Grok-4.7-Xhigh-Fast", "grok-4.6-renamed"),
+    ];
+    const next = applySuggestedAllSeats(draftFromStored(undefined), withGrok);
+    const ids = next.allSeats.profiles.map((entry) => entry.profileId);
+    expect(ids).toEqual(["p-sonnet", "p-deepseek", "p-grok"]);
+    expect(isGrok47({ model: "grok-4.6" })).toBe(false);
+    expect(isGrok47({ model: "grok-4.70" })).toBe(false);
+    expect(isGrok47({ model: "grok-4.7-fast" })).toBe(true);
+    expect(next.allSeats.routes.execution).toEqual(["p-deepseek", "p-grok"]);
+  });
+
+  test("P1-FIX1 item 4: a hand-configured Grok 4.7 entry and route survive the suggestion", () => {
+    const hand = draftFromStored({
+      allSeats: {
+        version: 1,
+        profiles: [
+          {
+            profileId: "p-g47",
+            enabled: true,
+            costClass: "low",
+            family: "grok",
+            boundModel: { provider: "omp", model: "grok-4.7" },
+          },
+        ],
+        routes: { execution: ["p-g47"] },
+        executionTaskOrder: { coding: ["p-g47"] },
+      },
+    });
+    const next = applySuggestedAllSeats(hand, [
+      ...live,
+      grok47("p-g47", "Grok-4.7-Xhigh", "grok-4.7"),
+    ]);
+    expect(next.allSeats.profiles.map((entry) => entry.profileId)).toEqual([
+      "p-g47",
+      "p-sonnet",
+      "p-deepseek",
+      "p-grok",
+    ]);
+    // The configured route and task order are the user's; only the empty layers are filled.
+    expect(next.allSeats.routes.execution).toEqual(["p-g47"]);
+    expect(next.allSeats.executionTaskOrder.coding).toEqual(["p-g47"]);
+    expect(next.allSeats.routes.coordinator).toEqual(["p-sonnet"]);
+    expect(next.allSeats.executionTaskOrder.ops).toEqual(["p-grok", "p-deepseek"]);
   });
 });
 

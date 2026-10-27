@@ -652,9 +652,20 @@ export function resetAllSeatsTaskOrder(draft: EconomyDraft, kind: TaskKind): Eco
 }
 
 /**
+ * A Grok 4.7 Profile. Suggestions leave it out (H5: the default must not add Grok-4.7); a hand
+ * configured entry stays. The model id is the evidence; the Profile name only widens the exclusion,
+ * which is safe because this never decides eligibility.
+ */
+export function isGrok47(profile: { name?: string; model?: string }): boolean {
+  const pattern = /grok[^a-z0-9]*4[^a-z0-9]*7(?![0-9])/i;
+  return pattern.test(profile.model ?? "") || pattern.test(profile.name ?? "");
+}
+
+/**
  * Fill the allowlist and routes from the live low-cost Profiles: Sonnet for coordinator, decision,
  * escalation, and retain; DeepSeek then Grok for execution, with ops/acceptance preferring Grok.
- * Advice only: it edits the draft and never saves, and it never removes an existing entry.
+ * Advice only: it edits the draft and never saves. Grok 4.7 is never suggested, an existing entry
+ * is never removed, and a route or task order the user already configured is left as it is.
  */
 export function applySuggestedAllSeats(
   draft: EconomyDraft,
@@ -662,7 +673,7 @@ export function applySuggestedAllSeats(
 ): EconomyDraft {
   const suggested = profiles.flatMap((profile) => {
     const family = cheapFamilyOf(profile);
-    if (!family) return [];
+    if (!family || isGrok47(profile)) return [];
     if (!SUGGESTED_DECISION_FAMILIES.includes(family)) {
       if (!SUGGESTED_EXECUTION_FAMILIES.includes(family)) return [];
     }
@@ -685,24 +696,34 @@ export function applySuggestedAllSeats(
   const deepseek = execution.filter((id) => familyById.get(id) === "deepseek");
   const grok = execution.filter((id) => familyById.get(id) === "grok");
   const executionOrder = [...deepseek, ...grok].slice(0, ALL_SEATS_WRITER_LIMIT);
-  return editAllSeats(next, {
-    ...next.allSeats,
-    routes: {
-      coordinator: decision,
-      decision,
-      execution,
-      escalation: decision,
-      retain: decision,
-    },
-    executionTaskOrder: {
-      coding: executionOrder,
-      testing: executionOrder,
-      codebase: executionOrder,
-      general: executionOrder,
-      ops: [...grok, ...deepseek].slice(0, ALL_SEATS_WRITER_LIMIT),
-      acceptance: [...grok, ...deepseek].slice(0, ALL_SEATS_WRITER_LIMIT),
-    },
-  });
+  const grokFirst = [...grok, ...deepseek].slice(0, ALL_SEATS_WRITER_LIMIT);
+  const suggestedRoutes: Record<AllSeatsRoute, string[]> = {
+    coordinator: decision,
+    decision,
+    execution,
+    escalation: decision,
+    retain: decision,
+  };
+  const current = next.allSeats;
+  const routes = { ...current.routes };
+  for (const route of ALL_SEATS_ROUTES) {
+    if (current.routes[route].length === 0) routes[route] = suggestedRoutes[route];
+  }
+  const suggestedOrder: Partial<Record<TaskKind, string[]>> = {
+    coding: executionOrder,
+    testing: executionOrder,
+    codebase: executionOrder,
+    general: executionOrder,
+    ops: grokFirst,
+    acceptance: grokFirst,
+  };
+  const executionTaskOrder = { ...current.executionTaskOrder };
+  for (const [kind, ids] of Object.entries(suggestedOrder)) {
+    if (current.executionTaskOrder[kind as TaskKind] === undefined) {
+      executionTaskOrder[kind as TaskKind] = ids;
+    }
+  }
+  return editAllSeats(next, { ...current, routes, executionTaskOrder });
 }
 
 export type EconomySuggestion = { name: string; family: string };
