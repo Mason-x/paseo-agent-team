@@ -1,0 +1,122 @@
+// Index of the offline Run Engine fixtures: ids only, no imports, so the matrix and the batch-A
+// regression can cite a sample without loading the data module.
+export const RUN_ENGINE_FIXTURE_MANIFEST = {
+  fixtureVersion: 1,
+  groups: {
+    ledgers: {
+      count: 8,
+      ids: [
+        "normal-ledger",
+        "outcome-unknown-ledger",
+        "cancelling-ledger",
+        "quiescent-cancelled-ledger",
+        "blocked-ledger",
+        "unknown-schema-version-ledger",
+        "oversized-ledger",
+        "overlong-fields-ledger",
+      ],
+    },
+    corrupt: {
+      count: 12,
+      ids: [
+        "truncated-mid-object",
+        "empty-file",
+        "two-writes-concatenated",
+        "non-utf8-bytes",
+        "trailing-comma",
+        "no-schema-version",
+        "no-run-id",
+        "no-tasks",
+        "task-without-id",
+        "task-with-unknown-status",
+        "unknown-task-status-record",
+        "corrupt-record-with-digest",
+      ],
+    },
+    locks: {
+      count: 9,
+      ids: [
+        "lock-conflict-run-a",
+        "lock-conflict-run-b",
+        "lock-conflict-aliased-claim",
+        "root-lock",
+        "stale-root-lock",
+        "probe-conflict-run-a",
+        "probe-conflict-run-b",
+        "probe-same-channel-seats",
+        "corrupt-resource-holder",
+      ],
+    },
+    reopen: {
+      count: 3,
+      ids: ["closed-after-report", "closed-while-assigned", "reopen-started"],
+    },
+    control: {
+      count: 7,
+      ids: [
+        "control-attempts",
+        "probe-eligible",
+        "probe-blocked-inflight-turn",
+        "probe-in-flight",
+        "probe-completed",
+        "probe-failed",
+        "probe-unknown",
+      ],
+    },
+    gates: {
+      count: 4,
+      ids: ["evidence-incomplete", "stale-review", "dev-smoke-missing", "dev-smoke-ready"],
+    },
+    protocolBlocks: {
+      count: 8,
+      ids: [
+        "missing-block",
+        "two-task-reports",
+        "mixed-kinds",
+        "non-json-body",
+        "unknown-version",
+        "escaped-fence-inside-string",
+        "oversized-block",
+        "missing-evidence",
+      ],
+    },
+    protocolIdentity: {
+      count: 5,
+      ids: ["wrong-task", "wrong-attempt", "unknown-nonce", "reused-nonce", "non-assignee"],
+    },
+    timelineScan: {
+      count: 3,
+      ids: ["deprecated-timeline", "scan-budget", "protocol-replay"],
+    },
+    observation: {
+      count: 6,
+      ids: [
+        "event-storm-50",
+        "permission-pending",
+        "irreversible-unapproved",
+        "external-activity",
+        "legacy-run-without-ledger",
+        "finished-decision",
+      ],
+    },
+    invariantCases: {
+      count: 13,
+      ids: [
+        "i1-half-write-bytes",
+        "i2-ready-with-unfinished-dep",
+        "i2-pending-with-unfinished-dep",
+        "i3-blocked-frozen-claim",
+        "i3-pending-holds-claim",
+        "i4-review-awaiting-does-not-count",
+        "i4-capacity-over-effective",
+        "i5-nonce-replayed",
+        "i5-turn-ended-redelivered",
+        "i6-rework-count-below-events",
+        "i7-done-without-review",
+        "i7-self-review",
+        "i8-assignment-without-intent",
+      ],
+    },
+  },
+  totals: { files: 14, samples: 78 },
+} as const;
