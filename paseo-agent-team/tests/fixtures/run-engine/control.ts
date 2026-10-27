@@ -2,81 +2,101 @@
 // channel-probe lifecycle. These are inputs for cap, escalation, and probe-uniqueness cases.
 import {
   AT_UPDATED,
-  attempt,
-  intent,
-  NONCE_PROBE,
+  claim,
+  DECISION_D4,
   PROFILE_HAIKU,
+  probeIntent,
+  spec,
   T1,
   T2,
-  T3,
+  taskRecord,
   withLedger,
 } from "./base";
-import type { LedgerFixture } from "./types";
+import type { ChannelFixture, LedgerFixture, RunTaskRecord } from "./types";
 
-const SIX_ATTEMPTS = [1, 2, 3, 4, 5, 6].map((n) =>
-  attempt({
-    attempt: n,
-    nonce: `6f1c2a44-3b7e-4f0a-9a11-00000000010${n}`,
-    status: n === 6 ? "in_progress" : "superseded",
-  }),
-);
+function pausedChannel(until: string | null, incidentId = "incident-claude-1"): ChannelFixture {
+  return {
+    channelId: "claude",
+    profileIds: [PROFILE_HAIKU.id],
+    state: "paused",
+    unavailableUntil: until,
+    scope: "channel",
+    source: "structured-error",
+    code: "quota",
+    observedAt: AT_UPDATED,
+    incidentId,
+    revision: 2,
+  };
+}
 
 /** RE2.3 / RE5.1 / RE5.2 / Y9: every counter already sits at its cap. */
 export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-ctl",
   revision: 21,
   tasks: [
-    { ...T1, protocolFailures: 2, status: "blocked", phase: "frozen" },
-    { ...T2, evidenceReturns: 3, reworkCount: 2, status: "review", phase: "awaiting-rework" },
-    { ...T3, deps: [], attempts: SIX_ATTEMPTS, status: "in_progress", phase: "implement" },
-  ],
-  resources: [
     {
-      id: "lock-t3",
-      repoId: "repo-re-verify",
-      kind: "file",
-      path: "src/docs/run-engine",
-      taskId: "T3",
-      access: "write",
-      state: "held",
-      frozen: false,
+      ...T1,
+      state: "blocked",
+      waitingReason: "protocol-failures-exhausted",
+      protocolFailures: 2,
+    } as RunTaskRecord,
+    {
+      ...T2,
+      state: "review",
+      phase: "awaiting-rework",
+      evidenceReturns: 3,
+      reworkCount: 2,
+    } as RunTaskRecord,
+    {
+      ...taskRecord(spec("T3", "Docs"), {
+        state: "in_progress",
+        phase: "implementation",
+        attempts: 6,
+      }),
     },
   ],
+  resources: [claim({ claimId: "claim-t3", taskId: "T3", path: "docs/run-engine" })],
   budgets: {
-    strategic: { seatId: "seat-s1", limit: 12, reserved: 10, confirmed: 9 },
-    seats: [
+    entries: [
       {
-        seatId: "seat-s1",
+        scope: "seat",
+        subjectId: "seat-s1",
         limit: 12,
         reserved: 10,
         confirmed: 9,
         observedTurns: 8,
-        partial: false,
       },
-      { seatId: "seat-b1", limit: 6, reserved: 6, confirmed: 4, observedTurns: 3, partial: false },
+      {
+        scope: "seat",
+        subjectId: "seat-b1",
+        limit: 6,
+        reserved: 6,
+        confirmed: 4,
+        observedTurns: 3,
+      },
     ],
   },
   decisions: [
     {
-      id: "dec-budget-80-100-sts",
-      kind: "D4",
+      decisionId: DECISION_D4,
+      category: "D4",
       state: "open",
-      reason: "seat-b1 reached 80% and 100% in one revision",
+      dedupeKey: "run-rec0re-ctl|D4|seat-b1|budget-100",
+      subjectId: "seat-b1",
+      summary: "seat-b1 reached 80% and 100% in one revision; one merged decision.",
       createdAt: AT_UPDATED,
-      seatId: "seat-b1",
-      threshold: [80, 100],
-      merged: true,
+      answeredAt: null,
     },
   ],
   alerts: [
     {
-      id: "alert-budget-sts",
+      alertId: "alert-budget-sts",
+      state: "open",
       severity: "warning",
-      code: "budget-threshold",
-      message: "80% and 100% merged into one D4; no new intent may be submitted.",
-      taskId: null,
-      at: AT_UPDATED,
-      acked: false,
+      summary: "80% and 100% merged into one D4; no new intent may be submitted.",
+      createdAt: AT_UPDATED,
+      acknowledgedAt: null,
+      resolvedAt: null,
     },
   ],
 });
@@ -86,31 +106,39 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbe",
   revision: 22,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   roster: [
     {
       seatId: "seat-s1",
       tier: "S",
-      roleId: "lead-orchestrator",
       agentId: "agent-s1",
-      state: "idle",
+      channelId: "claude",
+      duties: ["coordinate"],
+      enabled: true,
     },
-    { seatId: "seat-b1", tier: "B", roleId: "eng-fullstack", agentId: "agent-b1", state: "idle" },
-    { seatId: "seat-b2", tier: "B", roleId: "qa-review", agentId: "agent-b2", state: "idle" },
+    {
+      seatId: "seat-b1",
+      tier: "B",
+      agentId: "agent-b1",
+      channelId: "claude",
+      duties: ["implement"],
+      enabled: true,
+    },
+    {
+      seatId: "seat-b2",
+      tier: "B",
+      agentId: "agent-b2",
+      channelId: "claude",
+      duties: ["review"],
+      enabled: true,
+    },
   ],
   tasks: [T1],
   resources: [],
   assignments: [],
   outbox: [],
   eventReceipts: [],
+  counters: { observationSeq: 0, eventsThroughSeq: 0, probeAttempts: 0, reopenAttempts: 0 },
   decisions: [],
 });
 
@@ -119,15 +147,7 @@ export const PROBE_BLOCKED_INFLIGHT_TURN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbt",
   revision: 22,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   outbox: [],
   decisions: [],
 });
@@ -137,37 +157,16 @@ export const PROBE_IN_FLIGHT_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbf",
   revision: 23,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-inflight",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-inflight",
+      messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      idempotencyKey: "probe-claude-inflight",
       state: "sending",
-      semanticArgs: { channelId: "claude", reason: "unavailableUntil reached" },
     }),
   ],
-  nonceRegistry: [
-    {
-      nonce: NONCE_PROBE,
-      runId: "run-rec0re-pbf",
-      taskId: "_probe",
-      attempt: 1,
-      phase: "probe",
-      agentId: "agent-s1",
-      seatId: "seat-s1",
-      consumedAt: AT_UPDATED,
-    },
-  ],
+  counters: { observationSeq: 7, eventsThroughSeq: 7, probeAttempts: 1, reopenAttempts: 0 },
 });
 
 /** RE5.5: success is the correlated turn_ended(completed); send acceptance alone is not enough. */
@@ -175,37 +174,29 @@ export const PROBE_COMPLETED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbx",
   revision: 24,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   eventReceipts: [
     {
-      key: "agent-s1|turn-probe-1|turn_ended",
+      eventKey: "agent-s1|turn-probe-1|turn_ended",
+      kind: "turn_ended",
       agentId: "agent-s1",
       turnId: "turn-probe-1",
-      kind: "turn_ended",
-      outcome: "completed",
-      seenAt: AT_UPDATED,
-      digest: `sha256:${"8".repeat(64)}`,
+      seq: 8,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-s1|turn-probe-1|turn_ended",
+      disposition: "accepted",
     },
   ],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-done",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-done",
+      messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      idempotencyKey: "probe-claude-done",
       state: "confirmed",
       confirmedAt: AT_UPDATED,
-      semanticArgs: { channelId: "claude", reason: "unavailableUntil reached" },
     }),
   ],
+  counters: { observationSeq: 8, eventsThroughSeq: 7, probeAttempts: 1, reopenAttempts: 0 },
 });
 
 /** RE5.5 failure: send accepted, then the turn failed. until is cleared, never auto-renewed. */
@@ -213,46 +204,38 @@ export const PROBE_FAILED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pby",
   revision: 25,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "probe-failed",
-      unavailableUntil: null,
-    },
-  ],
+  channels: [pausedChannel(null, "incident-claude-2")],
   eventReceipts: [
     {
-      key: "agent-s1|turn-probe-2|turn_ended",
+      eventKey: "agent-s1|turn-probe-2|turn_ended",
+      kind: "turn_ended",
       agentId: "agent-s1",
       turnId: "turn-probe-2",
-      kind: "turn_ended",
-      outcome: "failed",
-      seenAt: AT_UPDATED,
-      digest: `sha256:${"9".repeat(64)}`,
+      seq: 8,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-s1|turn-probe-2|turn_ended",
+      disposition: "accepted",
     },
   ],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-failed",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-failed",
+      messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      idempotencyKey: "probe-claude-failed",
       state: "confirmed",
       confirmedAt: AT_UPDATED,
-      semanticArgs: { channelId: "claude", reason: "unavailableUntil reached" },
     }),
   ],
+  counters: { observationSeq: 8, eventsThroughSeq: 7, probeAttempts: 1, reopenAttempts: 0 },
   alerts: [
     {
-      id: "alert-probe-failed",
+      alertId: "alert-probe-failed",
+      state: "open",
       severity: "warning",
-      code: "probe-failed",
-      message: "Probe ended without completion; channel stays paused and until is empty.",
-      taskId: null,
-      at: AT_UPDATED,
-      acked: false,
+      summary: "Probe ended without completion; channel stays paused and until is empty.",
+      createdAt: AT_UPDATED,
+      acknowledgedAt: null,
+      resolvedAt: null,
     },
   ],
 });
@@ -262,35 +245,27 @@ export const PROBE_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbz",
   revision: 26,
   lifecycle: "paused",
-  channels: [
-    {
-      channelId: "claude",
-      provider: "claude",
-      state: "paused",
-      pausedReason: "probe-unknown",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z", "incident-claude-3")],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-unknown",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-unknown",
+      messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      idempotencyKey: "probe-claude-unknown",
       state: "outcome-unknown",
       recoverySendCount: 1,
-      semanticArgs: { channelId: "claude", reason: "unavailableUntil reached" },
+      confirmedAt: null,
     }),
   ],
+  counters: { observationSeq: 7, eventsThroughSeq: 7, probeAttempts: 1, reopenAttempts: 0 },
   alerts: [
     {
-      id: "alert-probe-unknown",
+      alertId: "alert-probe-unknown",
+      state: "open",
       severity: "warning",
-      code: "probe-unknown",
-      message: "Probe outcome unknown; channel remains paused.",
-      taskId: null,
-      at: AT_UPDATED,
-      acked: false,
+      summary: "Probe outcome unknown; channel remains paused.",
+      createdAt: AT_UPDATED,
+      acknowledgedAt: null,
+      resolvedAt: null,
     },
   ],
 });

@@ -1,7 +1,19 @@
 // Observation/wake inputs: event storms, permission and irreversible approvals, out-of-ledger
 // activity, a legacy Run without a ledger, and a finished Run with an open end-of-phase decision.
-import { AT_CREATED, AT_UPDATED, NORMAL_RUN_LEDGER, review, T1, T2, T3, withLedger } from "./base";
-import type { LedgerFixture } from "./types";
+import {
+  AT_CREATED,
+  AT_UPDATED,
+  DECISION_D4,
+  DECISION_D6,
+  NORMAL_RUN_LEDGER,
+  spec,
+  T1,
+  T2,
+  T3,
+  taskRecord,
+  withLedger,
+} from "./base";
+import type { LedgerFixture, RunTaskRecord } from "./types";
 
 /** RE6.5 / Y12: 50 redeliveries across 4 turns plus unknown-turn events; request counts must not scale. */
 export const EVENT_STORM_50: readonly {
@@ -24,29 +36,30 @@ export const EVENT_STORM_50: readonly {
 export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-per",
   revision: 27,
-  tasks: [T1, { ...T2, phase: "permission-pending" }, T3],
+  tasks: [
+    T1,
+    { ...T2, phase: "implementation", waitingReason: "permission-pending" } as RunTaskRecord,
+    T3,
+  ],
   events: [
     ...NORMAL_RUN_LEDGER.events,
     {
       seq: 8,
-      id: "evt-perm-1",
       kind: "permission_requested",
       at: AT_UPDATED,
-      taskId: "T2",
-      agentId: "agent-b1",
-      requestId: "perm-1",
+      payload: { taskId: "T2", agentId: "agent-b1", requestId: "perm-1" },
     },
   ],
   decisions: [],
   alerts: [
     {
-      id: "alert-permission",
+      alertId: "alert-permission",
+      state: "open",
       severity: "warning",
-      code: "permission-pending",
-      message: "Permission request needs a human; the engine never responds to it.",
-      taskId: "T2",
-      at: AT_UPDATED,
-      acked: false,
+      summary: "Permission request needs a human; the engine never responds to it.",
+      createdAt: AT_UPDATED,
+      acknowledgedAt: null,
+      resolvedAt: null,
     },
   ],
 });
@@ -57,14 +70,17 @@ export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
   revision: 28,
   tasks: [
     T1,
-    {
-      ...T2,
-      status: "ready",
-      phase: "awaiting-approval",
-      attempts: [],
-      workspace: null,
-      irreversible: { reason: "publish release branch", approvalId: null },
-    },
+    taskRecord(
+      spec("T2", "Publish release", {
+        irreversible: {
+          kind: "push",
+          target: "refs/heads/main",
+          description: "publish the release branch",
+          artifactRef: null,
+        },
+      }),
+      { state: "ready", waitingReason: "awaiting-approval", attempts: 0 },
+    ),
     T3,
   ],
   resources: [],
@@ -103,38 +119,41 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
     T1,
     {
       ...T2,
-      status: "done",
-      phase: "done",
+      state: "done",
+      phase: "review",
       ref: { kind: "git-commit", value: "b7e4d10" },
-      reviews: [review()],
-    },
+      changedFiles: ["src/t2.ts"],
+    } as RunTaskRecord,
     {
       ...T3,
-      status: "done",
-      deps: ["T2"],
-      phase: "done",
+      state: "done",
       ref: { kind: "git-commit", value: "e1a9c33" },
-      reviews: [review({ reviewedRef: { kind: "git-commit", value: "e1a9c33" } })],
-    },
+      changedFiles: ["docs/run-engine/readme.md"],
+    } as RunTaskRecord,
   ],
   resources: [],
   assignments: [],
+  outbox: [],
   decisions: [
     {
-      id: "dec-phase-end",
-      kind: "D6",
+      decisionId: DECISION_D6,
+      category: "D6",
       state: "open",
-      reason: "phase complete; awaiting strategic close-out",
+      dedupeKey: "run-rec0re-fin|D6|phase-end",
+      subjectId: null,
+      summary: "Phase complete; awaiting strategic close-out.",
       createdAt: AT_UPDATED,
+      answeredAt: null,
     },
     {
-      id: "dec-budget-final",
-      kind: "D4",
+      decisionId: DECISION_D4,
+      category: "D4",
       state: "answered",
-      reason: "budget increase approved before the last task",
+      dedupeKey: "run-rec0re-fin|D4|budget-final",
+      subjectId: "seat-s1",
+      summary: "Budget increase approved before the last task.",
       createdAt: AT_CREATED,
       answeredAt: AT_UPDATED,
     },
   ],
-  outbox: [],
 });

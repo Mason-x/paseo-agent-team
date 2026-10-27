@@ -8,26 +8,13 @@ import {
   NONCE_T2,
   NORMAL_RUN_LEDGER,
   POLICY,
-  review,
   T1,
   T2,
   T3,
   task,
   withLedger,
 } from "./base";
-
-export type InvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
-
-export type InvariantCase = {
-  id: string;
-  invariant: InvariantId;
-  kind: "legal" | "violation";
-  ledger: unknown;
-  note: string;
-};
-
-const [, NONCE_T2_ENTRY] = NORMAL_RUN_LEDGER.nonceRegistry;
-const [FIRST_RECEIPT] = NORMAL_RUN_LEDGER.eventReceipts;
+import type { InvariantCase } from "./types";
 
 const doneWithoutReview = {
   ...T1,
@@ -36,28 +23,18 @@ const doneWithoutReview = {
 
 const readyWithUnfinishedDep = {
   ...T3,
-  status: "ready" as const,
+  state: "ready" as const,
   deps: ["T2"],
 };
 
-const pendingHoldsClaim = claim({ id: "lock-t3", taskId: "T3", path: "docs/run-engine" });
+const pendingHoldsClaim = claim({ claimId: "claim-t3", taskId: "T3", path: "docs/run-engine" });
 
 const inFlight = (id: string) =>
-  task({
-    id,
-    title: `In-flight ${id}`,
-    status: "in_progress",
-    phase: "implement",
-    workspace: { id: `ws-${id}`, branch: `re-${id.toLowerCase()}-a1`, baseRef: "main" },
-    attempts: [
-      {
-        attempt: 1,
-        seatId: "seat-b1",
-        agentId: "agent-b1",
-        nonce: `6f1c2a44-3b7e-4f0a-9a11-00000000000${id.slice(1)}`,
-        status: "in_progress",
-      },
-    ],
+  task(id, `In-flight ${id}`, {
+    state: "in_progress",
+    phase: "implementation",
+    attempts: 1,
+    currentAssignmentId: `assignment-${id.toLowerCase()}-a1`,
   });
 
 const FIVE_IN_FLIGHT = [
@@ -100,10 +77,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i3o",
-      tasks: [T1, { ...T2, status: "blocked", phase: "frozen" }, T3],
-      resources: [
-        claim({ id: "lock-t2", taskId: "T2", path: "src/t2.ts", state: "frozen", frozen: true }),
-      ],
+      tasks: [T1, { ...T2, state: "blocked", waitingReason: "missing-seat" }, T3],
+      resources: [claim({ frozen: true })],
     }),
     note: "blocked+frozen may keep a claim after the 10-27 revision.",
   },
@@ -113,7 +88,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i3x",
-      resources: [claim({ id: "lock-t2", taskId: "T2", path: "src/t2.ts" }), pendingHoldsClaim],
+      resources: [claim(), pendingHoldsClaim],
     }),
     note: "T3 is pending yet holds a write claim.",
   },
@@ -123,21 +98,21 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i4o",
-      policy: { ...POLICY, concurrency: { configuredLimit: 2, effectiveLimit: 5 } },
-      tasks: [T1, { ...T2, status: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
+      policy: { ...POLICY, configuredConcurrency: 3 },
+      tasks: [T1, { ...T2, state: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
     }),
-    note: "Five in-flight at effectiveLimit 5 is legal; awaiting-rework adds none.",
+    note: "Five in-flight with configuredConcurrency 3: effectiveLimit=max(3,5)=5, so legal.",
   },
   {
     id: "i4-capacity-over-effective",
     invariant: "I4",
-    kind: "violation",
+    kind: "boundary",
     ledger: withLedger({
       runId: "run-rec0re-i4x",
-      policy: { ...POLICY, concurrency: { configuredLimit: 2, effectiveLimit: 2 } },
-      tasks: [T1, T2, ...FIVE_IN_FLIGHT.slice(0, 3)],
+      policy: { ...POLICY, configuredConcurrency: 2 },
+      tasks: [T1, T2, ...FIVE_IN_FLIGHT.slice(0, 4)],
     }),
-    note: "Four in-flight tasks exceed effectiveLimit 2.",
+    note: "Boundary: 5 in-flight with configured 2 is legal under max(); R03 decides occupancy rules.",
   },
   {
     id: "i5-nonce-replayed",
@@ -147,7 +122,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
       runId: "run-rec0re-i5x",
       nonceRegistry: [
         ...NORMAL_RUN_LEDGER.nonceRegistry,
-        { ...NONCE_T2_ENTRY, consumedAt: AT_UPDATED },
+        { ...NORMAL_RUN_LEDGER.nonceRegistry[1], acceptedAt: AT_UPDATED },
       ],
     }),
     note: "The same nonce appears twice in the registry.",
@@ -158,7 +133,10 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i5o",
-      eventReceipts: [...NORMAL_RUN_LEDGER.eventReceipts, { ...FIRST_RECEIPT, seenAt: AT_UPDATED }],
+      eventReceipts: [
+        ...NORMAL_RUN_LEDGER.eventReceipts,
+        { ...NORMAL_RUN_LEDGER.eventReceipts[0], receivedAt: AT_UPDATED },
+      ],
     }),
     note: "Transport redelivery of one event is legal; dedupe key is unchanged.",
   },
@@ -171,8 +149,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
       tasks: [{ ...T2, reworkCount: 0 }],
       events: [
         ...NORMAL_RUN_LEDGER.events,
-        { seq: 8, id: "evt-rw1", kind: "rework_started", at: AT_UPDATED, taskId: "T2" },
-        { seq: 9, id: "evt-rw2", kind: "rework_started", at: AT_UPDATED, taskId: "T2" },
+        { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
+        { seq: 9, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
       ],
     }),
     note: "Two rework events exist while the counter says zero.",
@@ -193,7 +171,15 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
       tasks: [
         {
           ...T1,
-          reviews: [review({ reviewerAgentId: "agent-b1", reviewerSeatId: "seat-b1" })],
+          reviews: [
+            {
+              reviewerAgentId: "agent-b1",
+              reviewerSeatId: "seat-b1",
+              verdict: "可合入",
+              reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
+              blockers: [],
+            },
+          ],
         },
         T2,
         T3,
@@ -207,7 +193,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i8x",
-      assignments: [assignment({ attempt: 1, nonce: NONCE_T2, messageId: "msg-t2-a1" })],
+      assignments: [assignment({ nonce: NONCE_T2 })],
       outbox: [],
     }),
     note: "An assignment messageId exists with no preceding send intent.",

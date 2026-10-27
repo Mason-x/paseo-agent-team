@@ -4,36 +4,49 @@ import {
   AT_CREATED,
   AT_UPDATED,
   claim,
-  intent,
-  NONCE_PROBE,
   PROFILE_HAIKU,
+  probeIntent,
   REPO_ID,
   withLedger,
 } from "./base";
-import type { LedgerFixture } from "./types";
+import type { ChannelFixture, LedgerFixture } from "./types";
 
 export const SHARED_FILE = "src/shared/util.ts";
 export const SHARED_CHANNEL = "claude";
+
+function pausedChannel(until: string | null): ChannelFixture {
+  return {
+    channelId: SHARED_CHANNEL,
+    profileIds: [PROFILE_HAIKU.id],
+    state: "paused",
+    unavailableUntil: until,
+    scope: "channel",
+    source: "structured-error",
+    code: "quota",
+    observedAt: AT_UPDATED,
+    incidentId: "incident-claude-1",
+    revision: 2,
+  };
+}
 
 /** RE4.3 / Y7: two Runs declare the same canonical write scope. */
 export const LOCK_CONFLICT_RUN_A: LedgerFixture = withLedger({
   runId: "run-rec0re-lka",
   revision: 5,
-  resources: [claim({ id: "lock-shared-a", taskId: "T2", path: SHARED_FILE, state: "held" })],
+  resources: [claim({ claimId: "claim-shared-a", path: SHARED_FILE, frozen: false })],
 });
 
 export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
   revision: 6,
-  resources: [claim({ id: "lock-shared-b", taskId: "T2", path: SHARED_FILE, state: "requested" })],
+  resources: [claim({ claimId: "claim-shared-b", taskId: "T3", path: SHARED_FILE, frozen: false })],
 });
 
 /** Same physical file through a Windows alias; canonicalization must converge on SHARED_FILE. */
 export const LOCK_CONFLICT_ALIASED_CLAIM = claim({
-  id: "lock-shared-alias",
-  taskId: "T2",
+  claimId: "claim-shared-alias",
+  taskId: "T3",
   path: "SRC\\Shared\\UTIL.ts",
-  state: "requested",
 });
 
 /** Only one plugin instance may write, regardless of Run. */
@@ -64,58 +77,29 @@ export const STALE_ROOT_LOCK = {
 export const PROBE_CONFLICT_RUN_A: LedgerFixture = withLedger({
   runId: "run-rec0re-prba",
   revision: 14,
-  channels: [
-    {
-      channelId: SHARED_CHANNEL,
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  lifecycle: "paused",
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-a",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-a",
-      semanticArgs: { channelId: SHARED_CHANNEL, reason: "unavailableUntil reached" },
+      messageId: "99999999-9999-4999-8999-999999999999",
+      idempotencyKey: "probe-claude-a",
       state: "sending",
     }),
   ],
-  nonceRegistry: [
-    {
-      nonce: NONCE_PROBE,
-      runId: "run-rec0re-prba",
-      taskId: "_probe",
-      attempt: 1,
-      phase: "probe",
-      agentId: "agent-s1",
-      seatId: "seat-s1",
-      consumedAt: AT_UPDATED,
-    },
-  ],
+  counters: { observationSeq: 7, eventsThroughSeq: 7, probeAttempts: 1, reopenAttempts: 0 },
 });
 
 export const PROBE_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-prbb",
   revision: 15,
-  channels: [
-    {
-      channelId: SHARED_CHANNEL,
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:31:00.000Z",
-    },
-  ],
+  lifecycle: "paused",
+  channels: [pausedChannel("2026-10-27T12:31:00.000Z")],
   outbox: [
-    intent({
+    probeIntent({
       id: "intent-probe-b",
-      kind: "probe-channel",
-      recipient: PROFILE_HAIKU.channelId,
-      messageId: "msg-probe-b",
-      semanticArgs: { channelId: SHARED_CHANNEL, reason: "unavailableUntil reached" },
+      messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      idempotencyKey: "probe-claude-b",
       state: "prepared",
     }),
   ],
@@ -125,34 +109,27 @@ export const PROBE_CONFLICT_RUN_B: LedgerFixture = withLedger({
 export const PROBE_SAME_CHANNEL_SEATS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-prbs",
   revision: 16,
-  channels: [
-    {
-      channelId: SHARED_CHANNEL,
-      provider: "claude",
-      state: "paused",
-      pausedReason: "quota",
-      unavailableUntil: "2026-10-27T12:30:00.000Z",
-    },
-  ],
+  lifecycle: "paused",
+  channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   resources: [
     claim({
-      id: "probe-lock",
-      taskId: null,
-      kind: "channel",
-      path: SHARED_CHANNEL,
-      access: "exclusive",
-      state: "held",
+      claimId: "probe-lock",
+      taskId: "T2",
+      kind: "file",
+      path: "probe/channel-claude",
+      access: "read",
+      frozen: false,
     }),
   ],
   alerts: [
     {
-      id: "alert-channel-paused",
+      alertId: "alert-channel-paused",
+      state: "open",
       severity: "warning",
-      code: "channel-paused",
-      message: "claude paused for every seat until the recovery window.",
-      taskId: null,
-      at: AT_CREATED,
-      acked: false,
+      summary: "claude paused for every seat until the recovery window.",
+      createdAt: AT_CREATED,
+      acknowledgedAt: null,
+      resolvedAt: null,
     },
   ],
 });
@@ -161,8 +138,8 @@ export const PROBE_SAME_CHANNEL_SEATS_LEDGER: LedgerFixture = withLedger({
 export const CORRUPT_RESOURCE_HOLDER = {
   runId: "run-rec0re-bad",
   readable: false,
-  digest: `sha256:${"e".repeat(64)}`,
-  knownClaims: [claim({ id: "lock-bad", taskId: "T2", path: SHARED_FILE, state: "held" })],
+  digest: "e".repeat(64),
+  knownClaims: [claim({ claimId: "claim-bad", path: SHARED_FILE })],
   indexEffect: {
     repoId: REPO_ID,
     freezeNewGrants: true,

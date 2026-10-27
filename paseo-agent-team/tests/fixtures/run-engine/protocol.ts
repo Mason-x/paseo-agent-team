@@ -1,21 +1,42 @@
 // Protocol-layer inputs for R02: bad fences/blocks, identity mismatches, and the observation edges
 // (deprecated timeline, scan budget). Strings are payloads, not fixtures that need to parse.
-import type { ArtifactRefFixture } from "./types";
+import type { RunArtifactRef } from "./types";
 
 const fence = (kind: string, body: string) => `\`\`\`${kind}\n${body}\n\`\`\``;
+
+const artifact: RunArtifactRef = { kind: "git-commit", value: "b7e4d10" };
+
+const reportEvidence = {
+  id: "five-gates",
+  command: "npm run check && npm test",
+  exitCode: 0,
+  summary: "check and tests passed",
+  artifactPath: "evidence/five-gates.log",
+  ref: artifact,
+};
 
 const validReport = JSON.stringify({
   protocolVersion: 1,
   runId: "run-rec0re-prt",
-  taskId: "T2",
+  taskId: "t2",
+  assignmentId: "assignment-t2-a1",
   attempt: 1,
   nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000002",
   status: "done",
   changedFiles: ["src/t2.ts"],
-  ref: { kind: "git-commit", value: "b7e4d10" },
+  ref: artifact,
   workspace: { id: "ws-t2", branch: "re-t2-a1", baseRef: "main" },
-  evidence: [],
+  evidence: [reportEvidence],
 });
+
+/**
+ * AC-RE2.3: a `done` report needs at least one evidence entry. This is schema-invalid (protocol
+ * failure), not a gate decision, so the self-check counts it with the illegal samples.
+ */
+export const EMPTY_EVIDENCE_REPORT: Record<string, unknown> = {
+  ...(JSON.parse(validReport) as Record<string, unknown>),
+  evidence: [],
+};
 
 /** RE2.3 / RE2.8 / Y5: one defect per sample; each must reject or be treated as data only. */
 export const PROTOCOL_BLOCK_CASES: readonly { id: string; raw: string; defect: string }[] = [
@@ -44,7 +65,10 @@ export const PROTOCOL_BLOCK_CASES: readonly { id: string; raw: string; defect: s
     id: "escaped-fence-inside-string",
     raw: fence(
       "task-report",
-      JSON.stringify({ ...JSON.parse(validReport), summary: "```task-dag```" }),
+      JSON.stringify({
+        ...JSON.parse(validReport),
+        evidence: [{ ...reportEvidence, summary: "```task-dag``` is data here" }],
+      }),
     ),
     defect: "nested-fence-is-data",
   },
@@ -55,8 +79,8 @@ export const PROTOCOL_BLOCK_CASES: readonly { id: string; raw: string; defect: s
   },
   {
     id: "missing-evidence",
-    raw: fence("task-report", JSON.stringify({ ...JSON.parse(validReport), evidence: [] })),
-    defect: "empty-evidence",
+    raw: fence("task-report", JSON.stringify(EMPTY_EVIDENCE_REPORT)),
+    defect: "empty-evidence-is-invalid",
   },
 ];
 
@@ -68,7 +92,7 @@ export const PROTOCOL_IDENTITY_CASES: readonly {
 }[] = [
   {
     id: "wrong-task",
-    report: { ...JSON.parse(validReport), taskId: "T1" },
+    report: { ...JSON.parse(validReport), taskId: "t1" },
     defect: "taskId-mismatch",
   },
   {
@@ -105,7 +129,7 @@ export const DEPRECATED_TIMELINE_CASE = {
     timelineDeprecated: true,
   },
   refetch: {
-    dispatchMessageId: "msg-t2-a1",
+    dispatchMessageId: "22222222-2222-4222-8222-222222222222",
     assistantMessageIds: ["asst-7-1", "asst-7-2"],
     turnId: "turn-7",
     epoch: 3,
@@ -134,4 +158,4 @@ export const PROTOCOL_REPLAY_CASE = {
 } as const;
 
 /** A review verdict tied to the exact artifact the smoke/review gate compares against. */
-export const REVIEWED_REF: ArtifactRefFixture = { kind: "git-commit", value: "b7e4d10" };
+export const REVIEWED_REF: RunArtifactRef = { kind: "git-commit", value: "b7e4d10" };
