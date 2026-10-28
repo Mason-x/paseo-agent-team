@@ -109,7 +109,8 @@ export const RunLockViewSchema = z.object({
   claimId: RunIdRefSchema,
   taskId: Text(64),
   repoId: Text(256),
-  kind: z.enum(["file", "directory"]),
+  /** hot/tool locks are named repo resources; path carries that name, not a repo path. */
+  kind: z.enum(["file", "directory", "hot", "tool"]),
   path: RunPathSchema,
   access: z.enum(["read", "write"]),
   frozen: z.boolean(),

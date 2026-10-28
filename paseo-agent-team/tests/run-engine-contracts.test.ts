@@ -808,7 +808,10 @@ describe("R01c decision nonce digest and frozen phase", () => {
     for (const value of invalid) {
       const parsed = RunDecisionPointSchema.safeParse(value);
       expect(parsed.success).toBe(false);
-      if (!parsed.success) expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
+      }
     }
   });
 
@@ -827,7 +830,16 @@ describe("R01c decision nonce digest and frozen phase", () => {
     }
     const invalid = RunResourceClaimSchema.safeParse({ ...base, kind: "glob" });
     expect(invalid.success).toBe(false);
-    if (!invalid.success) expect(invalid.error.issues[0]?.path).toEqual(["kind"]);
+    if (!invalid.success) {
+      expect(invalid.error.issues).toHaveLength(1);
+      expect(invalid.error.issues[0]?.path).toEqual(["kind"]);
+    }
+    const readOnly = RunResourceClaimSchema.safeParse({ ...base, kind: "hot", access: "read" });
+    expect(readOnly.success).toBe(false);
+    if (!readOnly.success) {
+      expect(readOnly.error.issues).toHaveLength(1);
+      expect(readOnly.error.issues[0]?.path).toEqual(["access"]);
+    }
   });
 
   test("frozen is a legal phase and an unknown phase is a single-defect rejection", () => {
@@ -836,11 +848,37 @@ describe("R01c decision nonce digest and frozen phase", () => {
     expect(
       RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
     ).toBe(true);
-    const invalid = RunTaskRecordSchema.safeParse(
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: undefined })).success,
+    ).toBe(true);
+    const invalidPhases = [
+      { state: "ready", phase: "frozen" },
+      { state: "in_progress", phase: "frozen" },
+      { state: "review", phase: "frozen" },
+      { state: "done", phase: "frozen" },
+      { state: "cancelled", phase: "frozen" },
+      { state: "done", phase: "awaiting-rework" },
+      { state: "blocked", phase: "awaiting-rework" },
+    ];
+    for (const value of invalidPhases) {
+      const invalid = RunTaskRecordSchema.safeParse(taskRecord(value));
+      expect(invalid.success).toBe(false);
+      if (!invalid.success) {
+        expect(invalid.error.issues).toHaveLength(1);
+        expect(invalid.error.issues[0]?.path).toEqual(["phase"]);
+      }
+    }
+    const unknown = RunTaskRecordSchema.safeParse(
       taskRecord({ state: "review", phase: "holding" }),
     );
-    expect(invalid.success).toBe(false);
-    if (!invalid.success) expect(invalid.error.issues[0]?.path).toEqual(["phase"]);
+    expect(unknown.success).toBe(false);
+    if (!unknown.success) {
+      expect(unknown.error.issues).toHaveLength(1);
+      expect(unknown.error.issues[0]?.path).toEqual(["phase"]);
+    }
   });
 });
 
@@ -1079,10 +1117,40 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
           frozen: false,
         },
       ],
-      locks: [],
+      locks: [
+        {
+          claimId: "claim-hot",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "hot",
+          path: "repo:hotspot",
+          access: "write",
+          frozen: false,
+        },
+        {
+          claimId: "claim-tool",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "tool",
+          path: "npm:install",
+          access: "write",
+          frozen: false,
+        },
+      ],
       capacity: { configuredLimit: 4, effectiveLimit: 4, inUse: 1 },
       budgets: [],
-      decisions: [],
+      decisions: [
+        {
+          decisionId: "66666666-6666-4666-8666-666666666666",
+          category: "D1",
+          state: "open",
+          subjectId: null,
+          summary: "A decision",
+          createdAt: NOW,
+          controlNonceDigest: "d".repeat(64),
+          nonce: "raw-control-nonce",
+        },
+      ],
       channels: [],
       alerts: [],
       metrics: {
@@ -1116,9 +1184,11 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
       issues: [],
     });
     const serialized = JSON.stringify(ready);
-    for (const forbidden of ["nonce", "prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
+    for (const forbidden of ["prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
       expect(serialized).not.toContain(forbidden);
     }
+    expect(serialized).not.toMatch(/nonce/iu);
+    expect(serialized).not.toContain("d".repeat(64));
     expect(parsed.tasks[0]).toMatchObject({ phase: "awaiting-rework", frozen: false });
 
     // Q1: ready always carries run+history; the failure branches never do.
