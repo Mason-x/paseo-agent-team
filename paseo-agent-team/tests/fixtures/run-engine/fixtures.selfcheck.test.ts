@@ -171,6 +171,18 @@ function issuePathMismatch(
 }
 
 describe("run engine fixtures against R01 schemas", () => {
+  test("legal/boundary fixtures bind every nonce registration to their own Run", () => {
+    for (const entry of INVARIANT_CASES.filter((item) => item.kind !== "violation")) {
+      const ledger = entry.ledger as {
+        runId: string;
+        nonceRegistry: ReadonlyArray<{ runId: string }>;
+      };
+      for (const nonce of ledger.nonceRegistry) {
+        expect(nonce.runId, entry.id).toBe(ledger.runId);
+      }
+    }
+  });
+
   test("legal samples parse and negative samples reject for their declared cause", () => {
     expect(NAMED_LEDGERS.length, "named ledger count").toBe(27);
     expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(40);
