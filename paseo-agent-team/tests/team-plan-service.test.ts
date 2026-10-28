@@ -182,6 +182,135 @@ describe("team plan parity with launch preview", () => {
   });
 });
 
+describe("failed-row routes", () => {
+  const decisionRole: Role = {
+    ...architect,
+    executionPolicy: { tier: "decision", taskKind: "general" },
+  };
+  const executionRole: Role = {
+    ...developer,
+    executionPolicy: { tier: "execution", taskKind: "coding" },
+  };
+  const routedTeam: Team = {
+    ...codingTeam,
+    id: "routed-team",
+    mode: "economy-all",
+    members: [
+      { roleId: decisionRole.id, enabled: true },
+      { roleId: executionRole.id, enabled: true },
+    ],
+  };
+
+  function routedSetup(prefs = cheapPreferences, available = true) {
+    const fixture = setup({
+      roles: reading({ roles: [techLead, decisionRole, executionRole] }),
+      teams: reading({ teams: [routedTeam] }),
+      preferences: reading(prefs),
+    });
+    if (!available) {
+      fixture.port.providers.listAvailable.mockResolvedValue({
+        providers: [
+          { provider: "claude", available: false },
+          { provider: "codex", available: false },
+          { provider: "deepseek", available: false },
+        ],
+      });
+    }
+    return fixture;
+  }
+
+  test("an economy-all outage keeps the coordinator and each member route", async () => {
+    const fixture = routedSetup(cheapPreferences, false);
+    const result = resultOf(
+      valid(await fixture.service.plan({ items: [saved("r", routedTeam.id)] }, fixture.port)),
+      "r",
+    );
+    expect(result.status).toBe("blocked");
+    for (const row of result.rows.filter((entry) => entry.enabled)) {
+      expect(row.route, row.rowKey).toBeDefined();
+    }
+    expect(result.rows.find((row) => row.kind === "coordinator")?.route).toBe("coordinator");
+    expect(result.rows.find((row) => row.roleId === decisionRole.id)?.route).toBe("decision");
+    expect(result.rows.find((row) => row.roleId === executionRole.id)?.route).toBe("execution");
+  });
+
+  test("an absent all-seats policy still gives economy-all rows their route", async () => {
+    const fixture = routedSetup(preferences);
+    const result = resultOf(
+      valid(await fixture.service.plan({ items: [saved("r", routedTeam.id)] }, fixture.port)),
+      "r",
+    );
+    expect(result.status).toBe("blocked");
+    expect(result.rows.find((row) => row.kind === "coordinator")?.route).toBe("coordinator");
+    expect(result.rows.find((row) => row.roleId === decisionRole.id)?.route).toBe("decision");
+    expect(result.rows.find((row) => row.roleId === executionRole.id)?.route).toBe("execution");
+  });
+
+  test("standard and legacy rows keep no route", async () => {
+    for (const mode of ["economy", "sota"] as const) {
+      const team: Team = { ...routedTeam, id: `plain-${mode}`, mode };
+      const fixture = setup({
+        roles: reading({ roles: [techLead, decisionRole, executionRole] }),
+        teams: reading({ teams: [team] }),
+      });
+      const result = resultOf(
+        valid(await fixture.service.plan({ items: [saved("p", team.id)] }, fixture.port)),
+        "p",
+      );
+      expect(
+        result.rows.every((row) => row.route === undefined),
+        mode,
+      ).toBe(true);
+    }
+  });
+
+  test("a disabled economy-all member keeps no route", async () => {
+    const team: Team = {
+      ...routedTeam,
+      id: "disabled-routed",
+      members: [
+        { roleId: decisionRole.id, enabled: true },
+        { roleId: executionRole.id, enabled: false },
+      ],
+    };
+    const fixture = setup({
+      roles: reading({ roles: [techLead, decisionRole, executionRole] }),
+      teams: reading({ teams: [team] }),
+    });
+    const result = resultOf(
+      valid(await fixture.service.plan({ items: [saved("d", team.id)] }, fixture.port)),
+      "d",
+    );
+    const disabled = result.rows.find((row) => row.enabled === false);
+    expect(disabled?.route).toBeUndefined();
+    expect(disabled?.profile).toBeNull();
+  });
+});
+
+describe("duplicate stored seat ids", () => {
+  test("row keys fall back to member:<index> and stay unique and stable", async () => {
+    const team: Team = {
+      ...codingTeam,
+      id: "duplicate-seats",
+      members: [
+        { roleId: architect.id, seatId: "dup", enabled: true },
+        { roleId: developer.id, seatId: "dup", enabled: true },
+        { roleId: architect.id, seatId: "other", enabled: false },
+      ],
+    };
+    const fixture = setup({ teams: reading({ teams: [team] }) });
+    const items: TeamPlanInput = { items: [saved("dup", team.id)] };
+    const first = resultOf(valid(await fixture.service.plan(items, fixture.port)), "dup");
+    const second = resultOf(valid(await fixture.service.plan(items, fixture.port)), "dup");
+    const keys = first.rows.map((row) => row.rowKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("seat:dup");
+    expect(keys).toContain("member:1");
+    expect(second.rows.map((row) => row.rowKey)).toEqual(keys);
+    expect(first.status).toBe("blocked");
+  });
+});
+
 describe("team plan batching and probe", () => {
   test("one batch reads each source once regardless of item count", async () => {
     const fixture = setup();

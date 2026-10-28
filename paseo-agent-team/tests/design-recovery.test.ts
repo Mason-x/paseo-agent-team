@@ -8,6 +8,7 @@ import {
 import {
   DESIGN_RECORD_VERSION,
   type DesignJobStore,
+  LEGACY_RECORD_RULES,
   type StoredDesignJob,
 } from "../server/designer/store";
 import type { DesignTimelineItem, DesignTimelinePort } from "../server/designer/timeline";
@@ -18,6 +19,7 @@ const REQUEST = "22222222-2222-4222-8222-222222222222";
 function record(overrides: Partial<StoredDesignJob> = {}): StoredDesignJob {
   return {
     schemaVersion: DESIGN_RECORD_VERSION,
+    ...LEGACY_RECORD_RULES,
     job: designJob({ attempt: 1, agentCreated: true, state: "designing" }),
     request: "给后台做一次改版",
     requestHash: DESIGN_HASH,

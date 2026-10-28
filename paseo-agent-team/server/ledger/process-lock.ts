@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { type FileHandle, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { uptime } from "node:os";
 import path from "node:path";
 
@@ -97,25 +97,75 @@ export function createProcessLiveness(kill: KillProbe = process.kill): ProcessLi
 
 export const defaultProcessLiveness = createProcessLiveness();
 
-export const nodeLockFs: LockFs = {
-  readFile(target) {
-    return readFile(target, "utf8");
-  },
-  async writeFileExclusive(target, content) {
-    const handle = await open(target, "wx");
-    try {
-      await handle.writeFile(content, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  },
-  rename,
-  async rm(target) {
-    await rm(target, { force: true });
-  },
-  readdir,
+/** Windows can return these from open(wx) while the previous handle is still settling. */
+export const TRANSIENT_EXCLUSIVE_OPEN_CODES = {
+  EPERM: true,
+  EBUSY: true,
+  EACCES: true,
+} as const;
+export const EXCLUSIVE_OPEN_ATTEMPTS = 5;
+export const EXCLUSIVE_OPEN_BACKOFF_MS = 20;
+export const EXCLUSIVE_OPEN_BUDGET_MS = 200;
+
+export type ExclusiveOpenDeps = {
+  openFile?: (target: string, flags: string) => Promise<FileHandle>;
+  sleeper?: LockSleeper;
+  now?: () => number;
 };
+
+export function isTransientExclusiveOpenError(error: unknown): boolean {
+  const code = errorCode(error);
+  return code !== undefined && Object.hasOwn(TRANSIENT_EXCLUSIVE_OPEN_CODES, code);
+}
+
+/** open(wx) with a bounded retry for transient Windows codes. EEXIST is not retried. */
+export async function openExclusive(
+  target: string,
+  deps: ExclusiveOpenDeps = {},
+): Promise<FileHandle> {
+  const openFile = deps.openFile ?? open;
+  const sleeper = deps.sleeper ?? defaultSleeper;
+  const now = deps.now ?? Date.now;
+  const started = now();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= EXCLUSIVE_OPEN_ATTEMPTS; attempt += 1) {
+    try {
+      return await openFile(target, "wx");
+    } catch (error) {
+      lastError = error;
+      if (!isTransientExclusiveOpenError(error)) throw error;
+      if (attempt === EXCLUSIVE_OPEN_ATTEMPTS || now() - started >= EXCLUSIVE_OPEN_BUDGET_MS) {
+        throw error;
+      }
+      await sleeper.sleep(EXCLUSIVE_OPEN_BACKOFF_MS * attempt);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`exclusive open failed for ${target}`);
+}
+
+export function createNodeLockFs(deps: ExclusiveOpenDeps = {}): LockFs {
+  return {
+    readFile(target) {
+      return readFile(target, "utf8");
+    },
+    async writeFileExclusive(target, content) {
+      const handle = await openExclusive(target, deps);
+      try {
+        await handle.writeFile(content, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
+    rename,
+    async rm(target) {
+      await rm(target, { force: true });
+    },
+    readdir,
+  };
+}
+
+export const nodeLockFs: LockFs = createNodeLockFs();
 
 const defaultClock: LockClock = { now: () => new Date().toISOString() };
 const defaultIds: LockIds = { next: randomUUID };

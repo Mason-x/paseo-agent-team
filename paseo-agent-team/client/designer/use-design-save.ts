@@ -19,9 +19,11 @@ import type {
 import { preferencesSettings, rolesSettings, teamsSettings } from "../../shared/settings";
 import {
   createDesignSaveGateway,
+  type DesignModeContract,
   type DesignSaveGateway,
   type SettingsReadReply,
   type SettingsWriteReply,
+  withDesignContract,
 } from "./design-gateway";
 import {
   compensateDesign,
@@ -40,6 +42,8 @@ const preferencesReadRpc = settingsRpc(preferencesSettings.id).read;
 export type UseDesignSaveInput = {
   hostId: string;
   clientId: string;
+  /** From the `team.plan` probe; only a confirmed "v2" adds `contractVersion: 2` to the save RPCs. */
+  modeContract?: DesignModeContract;
   onOutcome?: (jobId: string, outcome: DesignSaveOutcome) => void;
   onCleanupOutcome?: (jobId: string, outcome: DesignCompensationOutcome) => void;
 };
@@ -55,6 +59,19 @@ export type UseDesignSaveResult = {
   /** Unknown writes block compensation for the same job in this host session. */
   unknownWrites: DesignUnknownWrites;
 };
+
+/** Adds the host's contract to the three save RPCs; the settings RPCs are not design RPCs. */
+export function withContractOnSaveRpcs(
+  rpcs: DesignSaveHookRpcs,
+  modeContract: DesignModeContract,
+): DesignSaveHookRpcs {
+  return {
+    ...rpcs,
+    prepareSave: (input) => rpcs.prepareSave(withDesignContract(input, modeContract)),
+    markSaved: (input) => rpcs.markSaved(withDesignContract(input, modeContract)),
+    saveFailed: (input) => rpcs.saveFailed(withDesignContract(input, modeContract)),
+  };
+}
 
 export type DesignSaveHookRpcs = {
   readRoles(input: Record<string, never>): Promise<SettingsReadReply>;
@@ -308,20 +325,26 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
   useEffect(() => () => runner.dispose(), [runner]);
 
   const { hostId, clientId } = input;
+  const modeContract: DesignModeContract = input.modeContract ?? "legacy";
   const makeGateway = useCallback(
     () =>
-      buildDesignSaveGateway({
-        readRoles,
-        writeRoles,
-        readTeams,
-        writeTeams,
-        readPreferences,
-        prepareSave,
-        markSaved,
-        saveFailed,
-        reloadRoles: () => roles.reload(),
-        reloadTeams: () => teams.reload(),
-      }),
+      buildDesignSaveGateway(
+        withContractOnSaveRpcs(
+          {
+            readRoles,
+            writeRoles,
+            readTeams,
+            writeTeams,
+            readPreferences,
+            prepareSave,
+            markSaved,
+            saveFailed,
+            reloadRoles: () => roles.reload(),
+            reloadTeams: () => teams.reload(),
+          },
+          modeContract,
+        ),
+      ),
     [
       readRoles,
       writeRoles,
@@ -331,6 +354,7 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
       prepareSave,
       markSaved,
       saveFailed,
+      modeContract,
       roles.reload,
       teams.reload,
     ],

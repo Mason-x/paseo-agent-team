@@ -11,6 +11,12 @@ export type DesignerPrefill = {
   text: string;
   workspaceId: string | null;
   mode?: TeamMode;
+  /** Set only by the Role-gap retry (false). A `/team-design` prefill never carries it. */
+  existingRolesOnly?: boolean;
+  /** The retry keeps the original Profile intent; absent leaves the draft's choice alone. */
+  profileChoice?: string | null;
+  /** The retry replaces a typed draft only after the user says yes. */
+  confirmReplace?: boolean;
 };
 
 export function designerPrefillFromEvent(event: DesignPrefillEvent): DesignerPrefill {

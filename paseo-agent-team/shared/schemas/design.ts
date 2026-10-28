@@ -361,6 +361,27 @@ export type RoleGapReport = z.infer<typeof RoleGapReportSchema>;
 export type { ModeLaunchPreview };
 export { ModeLaunchPreviewSchema };
 
+/**
+ * The seed the UI needs to retry a Role-gap job without the switch (H3=B). It is the user's own
+ * request text, already stored in the same host's ledger, so it adds no trust boundary; it is
+ * bounded like the original request (4000 code points, 16KiB of UTF-8) and never trimmed or
+ * rewritten here. Strip object: a newer writer's extra keys do not reach a reader.
+ */
+export const DESIGN_GAP_RETRY_MAX_BYTES = 16 * 1024;
+export const DesignGapRetrySchema = z.object({
+  request: z
+    .string()
+    .refine(
+      (value) =>
+        checkDesignRequest(value).ok &&
+        new TextEncoder().encode(value).length <= DESIGN_GAP_RETRY_MAX_BYTES,
+      { message: "design.inputInvalid" },
+    ),
+  profileId: DesignIdSchema.nullable(),
+  useDefaultProfileHints: z.boolean(),
+});
+export type DesignGapRetry = z.infer<typeof DesignGapRetrySchema>;
+
 export const DesignJobSchema = z.object({
   jobId: DesignUuidSchema,
   clientRequestId: DesignUuidSchema,
@@ -376,6 +397,13 @@ export const DesignJobSchema = z.object({
   existingRolesOnly: z.boolean().optional(),
   outputContractVersion: DesignOutputContractVersionSchema.optional(),
   roleGap: z.array(RoleGapReportSchema).max(8).nullable().optional(),
+  /**
+   * Retry seed of a Role-gap job. Present only on `design.status({ jobId })` for a job that
+   * ended with a gap, never in a list, a result, or a mutation reply. A stored Job extension with
+   * this name (a newer/tolerant writer) is stripped and never trusted: only the seed re-derived
+   * from the record root can be served. Absent from an older daemon: the client falls back.
+   */
+  gapRetry: DesignGapRetrySchema.optional(),
   createdAt: DesignTimeSchema,
   updatedAt: DesignTimeSchema,
   finishedAt: DesignTimeSchema.nullable(),
@@ -511,6 +539,8 @@ export const DesignStartInputSchema = z
 export const DesignStartOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignStatusInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema.optional(),
 });
 
@@ -522,6 +552,8 @@ export const DesignStatusOutputSchema = reply({
 });
 
 export const DesignResultInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
@@ -556,6 +588,8 @@ export const DesignPreparedSchema = z.discriminatedUnion("outcome", [
 export type DesignPrepared = z.infer<typeof DesignPreparedSchema>;
 
 export const DesignPrepareSaveInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   clientId: DesignUuidSchema,
@@ -566,6 +600,8 @@ export const DesignPrepareSaveInputSchema = z.strictObject({
 export const DesignPrepareSaveOutputSchema = reply({ prepared: DesignPreparedSchema });
 
 export const DesignMarkSavedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema.optional(),
@@ -574,6 +610,8 @@ export const DesignMarkSavedInputSchema = z.strictObject({
 export const DesignMarkSavedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignSaveFailedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema,
@@ -591,12 +629,16 @@ export const DesignSaveFailedInputSchema = z.strictObject({
 export const DesignSaveFailedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignCancelInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
 export const DesignCancelOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignContinueInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   expectedRevision: DesignUuidSchema,
   action: z.enum(["recheck", "repair"]),
