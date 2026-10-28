@@ -1065,6 +1065,7 @@ describe("R01e spec tier consistency and escalation counters", () => {
             tier: "A",
             implementationPolicy: "a-with-s-plan",
             architectureTaskId: "T0",
+            deps: ["T0"],
           }),
         }),
       ).success,
@@ -1079,6 +1080,7 @@ describe("R01e spec tier consistency and escalation counters", () => {
           tier: "A",
           implementationPolicy: "a-with-s-plan",
           architectureTaskId: "T0",
+          deps: ["T0"],
         },
         path: ["spec", "level"],
       },
@@ -1088,6 +1090,7 @@ describe("R01e spec tier consistency and escalation counters", () => {
           tier: "B",
           implementationPolicy: "a-with-s-plan",
           architectureTaskId: "T0",
+          deps: ["T0"],
         },
         path: ["spec", "tier"],
       },
@@ -1102,7 +1105,57 @@ describe("R01e spec tier consistency and escalation counters", () => {
     }
   });
 
-  test("escalation counters are monotonic and bounded by the task totals", () => {
+  test("DAG protocol rejects a tier/level mismatch with a readable path", () => {
+    const dag = {
+      protocolVersion: 1 as const,
+      runId: RUN_ID,
+      taskId: "_dag" as const,
+      attempt: 1 as const,
+      nonce: NONCE,
+      dagRevision: 1,
+      expectedDagRevision: 0,
+      tasks: [taskSpec({ level: "L4", tier: "B" })],
+      cancelTaskIds: [],
+      budgetRequests: [],
+    };
+    const parsed = RunTaskDagBlockSchema.safeParse(dag);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toHaveLength(1);
+      expect(parsed.error.issues[0]?.path).toEqual(["tasks", 0, "tier"]);
+    }
+  });
+
+  test("a-with-s-plan requires a distinct architecture task in deps; default forbids one", () => {
+    const plan = (overrides: Record<string, unknown>) =>
+      taskSpec({
+        level: "L4",
+        tier: "A",
+        implementationPolicy: "a-with-s-plan",
+        architectureTaskId: "T0",
+        deps: ["T0"],
+        ...overrides,
+      });
+    const cases: Array<{ spec: Record<string, unknown>; path: (string | number)[] }> = [
+      { spec: plan({ architectureTaskId: null }), path: ["spec", "architectureTaskId"] },
+      { spec: plan({ architectureTaskId: "t1" }), path: ["spec", "architectureTaskId"] },
+      { spec: plan({ deps: [] }), path: ["spec", "architectureTaskId"] },
+      {
+        spec: taskSpec({ level: "L2", tier: "B", architectureTaskId: "T0" }),
+        path: ["spec", "architectureTaskId"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(taskRecord({ spec: entry.spec }));
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("escalation counters are strictly increasing, positive, and bounded", () => {
     const base = { fromTier: "B", toTier: "A", atAttempt: 3, qualityFailures: 3, at: NOW };
     const cases: Array<{ task: ReturnType<typeof taskRecord>; path: (string | number)[] }> = [
       {
@@ -1131,6 +1184,30 @@ describe("R01e spec tier consistency and escalation counters", () => {
           escalations: [{ ...base, atAttempt: 3 }],
         }),
         path: ["escalations", 0, "atAttempt"],
+      },
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [base, { ...base, fromTier: "A", toTier: "S", atAttempt: 4 }],
+        }),
+        path: ["escalations", 1, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [base, { ...base, fromTier: "A", toTier: "S", qualityFailures: 4 }],
+        }),
+        path: ["escalations", 1, "atAttempt"],
+      },
+      {
+        task: taskRecord({
+          attempts: 3,
+          qualityFailures: 1,
+          escalations: [{ ...base, qualityFailures: 0 }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
       },
     ];
     for (const entry of cases) {
@@ -1395,6 +1472,10 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
           protocolFailures: 0,
           evidenceReturns: 0,
           reworkCount: 1,
+          qualityFailures: 2,
+          currentTier: "B",
+          escalations: [],
+          blockedBy: null,
           waitingReason: null,
           frozen: false,
         },
@@ -1443,6 +1524,12 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
         reworks: 1,
         firstReviewAccepted: 0,
         coverage: "partial",
+      },
+      capabilities: {
+        runEngine: 1,
+        observationOnly: true,
+        enabled: false,
+        supportedControls: [],
       },
       issues: [],
     };

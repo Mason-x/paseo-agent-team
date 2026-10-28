@@ -30,7 +30,8 @@ export type RunIssueView = z.infer<typeof RunIssueViewSchema>;
 
 /**
  * run.get returns the first history page plus this issue when a `historyCursor` no longer matches
- * the run it was issued for (the cursor is opaque and bound to a revision). Paging then restarts.
+ * the run/event sequence (opaque cursor bound to runId + beforeSeq + checkpointThroughSeq). Paging
+ * then restarts at the newest page.
  */
 export const RUN_HISTORY_CURSOR_EXPIRED = "history-cursor-expired";
 
@@ -43,6 +44,37 @@ export function runHistoryCursorExpiredIssue(): RunIssueView {
     action: "refresh",
   };
 }
+
+export const RunCapabilitiesSchema = z.object({
+  runEngine: z.literal(1),
+  /** Batch B: diagnose only; no writes, no task advance. */
+  observationOnly: z.boolean(),
+  enabled: z.boolean(),
+  supportedControls: z.array(Text(64)).max(16),
+});
+
+export const RunTaskEscalationViewSchema = z.object({
+  fromTier: Text(1),
+  toTier: Text(1),
+  atAttempt: z.number().int().nonnegative(),
+  qualityFailures: z.number().int().nonnegative(),
+  at: z.string().datetime(),
+});
+
+/** Structured source of a task block; ref is a task/lock/decision/channel id when known. */
+export const RunTaskBlockedBySchema = z.object({
+  kind: z.enum([
+    "dependency",
+    "lock",
+    "capacity",
+    "permission",
+    "decision",
+    "channel",
+    "seat",
+    "other",
+  ]),
+  ref: Text(128).nullable(),
+});
 
 /** Redacted task row. No nonce, no payload, no prompt. */
 export const RunTaskViewSchema = z.object({
@@ -68,6 +100,12 @@ export const RunTaskViewSchema = z.object({
   protocolFailures: z.number().int().nonnegative(),
   evidenceReturns: z.number().int().nonnegative(),
   reworkCount: z.number().int().nonnegative(),
+  qualityFailures: z.number().int().nonnegative(),
+  /** executionTier: last escalation's toTier, else the frozen spec tier. */
+  currentTier: Text(1),
+  escalations: z.array(RunTaskEscalationViewSchema).max(2),
+  /** Structured reason; waitingReason remains human-readable fallback. */
+  blockedBy: RunTaskBlockedBySchema.nullable(),
   waitingReason: Text(600).nullable(),
   frozen: z.boolean(),
 });
@@ -99,10 +137,21 @@ export const RunHistoryEntryViewSchema = z.object({
 });
 export type RunHistoryEntryView = z.infer<typeof RunHistoryEntryViewSchema>;
 
+/**
+ * History direction is frozen: the first page is the newest ≤50 events, events inside a page are
+ * ascending by seq, and nextCursor walks toward older events. All history stays redacted.
+ */
 export const RunHistoryPageSchema = z.object({
   events: z.array(RunHistoryEntryViewSchema).max(50),
   nextCursor: Text(256).nullable(),
 });
+
+/** Frozen failure codes for R07 copy; lower-case hyphen style. */
+export const RUN_READ_FAILURE_CODES = [
+  "run-missing",
+  "run-corrupt",
+  "run-unknown-version",
+] as const;
 export type RunHistoryPage = z.infer<typeof RunHistoryPageSchema>;
 
 export const RunLockViewSchema = z.object({
@@ -313,14 +362,6 @@ export const RunSummaryViewSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type RunSummaryView = z.infer<typeof RunSummaryViewSchema>;
-
-export const RunCapabilitiesSchema = z.object({
-  runEngine: z.literal(1),
-  /** Batch B: diagnose only; no writes, no task advance. */
-  observationOnly: z.boolean(),
-  enabled: z.boolean(),
-  supportedControls: z.array(Text(64)).max(16),
-});
 
 export const RunHealthEntrySchema = z.object({
   runId: RunIdSchema.nullable(),
