@@ -2506,10 +2506,7 @@ describe("design service", () => {
 
   test("a new Role without noveltyReason enters a correction round", async () => {
     const evidence = JSON.parse(
-      await readFile(
-        join(import.meta.dirname, "fixtures", "v01b-dev-d5-off-start.json"),
-        "utf8",
-      ),
+      await readFile(join(import.meta.dirname, "fixtures", "v01b-dev-d5-off-start.json"), "utf8"),
     ) as { req: { clientRequestId: string; request: string } };
     const store = new FakeStore();
     const adapter = new FakeAdapter();

@@ -715,9 +715,140 @@ describe("design output contract", () => {
     }
   });
 
+  test("the 40-Role / 30-Team / 12-Profile economy-all stress fits both switches", () => {
+    const roles = [
+      ...realScaleRoles(),
+      ...Array.from({ length: 19 }, (_, index) =>
+        role(100 + index, {
+          id: `stress-${index}`,
+          name: `【质量】压测审查 ${index}`,
+          mission: `负责第 ${index} 类后台模块的迁移评审、风险核对与回归确认，覆盖多实例并行时的共享依赖。`,
+          responsibilities: [
+            "核对迁移脚本的可回滚性与数据一致性",
+            "覆盖并发写入、失败补偿与重试路径",
+            "验证多实例席位之间的职责边界",
+            "输出可复现的回归证据与残余风险",
+            "对高风险改动提出阻断或降级建议",
+            "维护本领域的验收清单",
+          ],
+        }),
+      ),
+    ];
+    expect(roles).toHaveLength(40);
+    const teams = Array.from({ length: 30 }, (_, index) => ({
+      id: `team-${index}`,
+      name: `已有 Team ${index}`,
+    }));
+    const profiles = Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80)));
+    for (const on of [false, true]) {
+      const ctx: DesignPromptContext = {
+        ...realScaleContext({
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          profiles,
+          occupiedTeams: teams,
+          occupiedRoleIds: roles.map((item) => item.id),
+          occupiedRoleNames: roles.map((item) => item.name),
+        }),
+        outputContractVersion: 2,
+        existingRolesOnly: on,
+      };
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: ctx,
+      });
+      expect(result.ok, `on=${on}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, `on=${on} bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+        DESIGN_KICKOFF_TARGET_BYTES,
+      );
+      expect(result.text).toContain(NONCE);
+      expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
+      expect(result.text).toContain("## 字段合同");
+      if (!on) expect(result.text).toContain("noveltyReason 1–600");
+      expect(result.text).toContain('"profileChoices"');
+      expect(result.text).toContain(`"id":"stress-18"`);
+      const index = jsonBlockAt(result.text, "Role 索引") as unknown[];
+      expect(index).toHaveLength(40);
+      expect(result.text).not.toContain("## Role 摘要");
+    }
+  });
+
+  test("the DEV catalog snapshot (27 Roles / 22 Teams) fits both switches", () => {
+    type Backup = {
+      roles: {
+        roles: Array<{
+          id: string;
+          name: string;
+          enabled?: boolean;
+          mission: string;
+          responsibilities: string[];
+          preferredProfiles?: Array<{ profileId: string }>;
+          fallbackProfiles?: Array<{ profileId: string }>;
+          executionPolicy?: { tier?: string; taskKind?: string };
+        }>;
+      };
+      teams: { teams: Array<{ id: string; name: string }> };
+    };
+    // Fixture captured from the DEV host; only the prompt-facing fields are read.
+    const backup = JSON.parse(
+      readFileSync(join(import.meta.dirname, "fixtures", "v01b-dev-settings-backup.json"), "utf8"),
+    ) as Backup;
+    const roles = backup.roles.roles.map((entry, index) =>
+      role(index, {
+        id: entry.id,
+        name: entry.name,
+        enabled: entry.enabled !== false,
+        mission: entry.mission,
+        responsibilities: entry.responsibilities,
+        preferredProfileIds: entry.preferredProfiles?.map((ref) => ref.profileId) ?? ["profile-1"],
+        fallbackProfileIds: entry.fallbackProfiles?.map((ref) => ref.profileId) ?? [],
+        launchable: true,
+        tier: entry.executionPolicy?.tier ?? "execution",
+        taskKind: entry.executionPolicy?.taskKind ?? "general",
+      }),
+    );
+    const teams = backup.teams.teams.map((entry) => ({ id: entry.id, name: entry.name }));
+    expect(roles).toHaveLength(27);
+    expect(teams).toHaveLength(22);
+    for (const on of [false, true]) {
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: on,
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          occupiedTeams: teams,
+          occupiedRoleIds: roles.map((item) => item.id),
+          occupiedRoleNames: roles.map((item) => item.name),
+          profiles: [profile(1, "DEV Haiku"), profile(2, "DEV Luna"), profile(3)],
+        }),
+      });
+      expect(result.ok, `on=${on}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, `on=${on} bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+        DESIGN_KICKOFF_TARGET_BYTES,
+      );
+      expect(result.text).toContain(NONCE);
+      expect(jsonBlockAt(result.text, "Role 索引")).toHaveLength(27);
+    }
+  });
+
   test("a v2 kickoff that cannot reach 30KiB fails instead of being sent", () => {
-    const roles = Array.from({ length: 40 }, (_, index) =>
-      role(index, { mission: "任".repeat(2000), responsibilities: ["责".repeat(300)] }),
+    const roles = Array.from({ length: 700 }, (_, index) =>
+      role(index, {
+        id: `role-${index}`,
+        name: `角色${index}`,
+        mission: "任".repeat(2000),
+        responsibilities: ["责".repeat(300)],
+      }),
     );
     const base = context({
       outputContractVersion: 2,
@@ -737,7 +868,11 @@ describe("design output contract", () => {
       jobId: JOB_ID,
       attempt: 1,
       nonce: NONCE,
-      context: { ...base, outputContractVersion: 1 },
+      context: {
+        ...base,
+        outputContractVersion: 1,
+        roles: roles.slice(0, 40),
+      },
     });
     expect(legacy.ok).toBe(true);
     if (!legacy.ok) return;
@@ -960,7 +1095,12 @@ describe("designer prompt budgets", () => {
         code: "DESIGN_INPUT_TOO_LARGE",
         severity: "error",
         path: [],
-        params: { bytes: expect.any(Number), limit: DESIGN_KICKOFF_MAX_BYTES },
+        params: {
+          bytes: expect.any(Number),
+          limit: DESIGN_KICKOFF_MAX_BYTES,
+          roles: 700,
+          teams: 1,
+        },
         action: "none",
       },
     ]);
