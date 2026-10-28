@@ -337,8 +337,21 @@ function createHandle(files: LockFs, file: string, ownerToken: string): ProcessL
       if (current.ownerToken !== ownerToken) {
         throw new ProcessLockError("lock-lost", `no longer owns ${file}`, holderOf(current));
       }
+      // Drop the file first. If rm fails (Windows handle / EPERM), keep `held` so
+      // a later release() can retry instead of leaving an orphan lock forever.
+      try {
+        await files.rm(file);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") {
+          held = false;
+          return;
+        }
+        throw new ProcessLockError(
+          "lock-unavailable",
+          `failed to remove ${file}: ${messageOf(error)}`,
+        );
+      }
       held = false;
-      await files.rm(file);
     },
   };
 }
