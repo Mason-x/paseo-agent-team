@@ -9,10 +9,13 @@ import {
   type DesignJob,
   DesignJobSchema,
   DesignNonceSchema,
+  type DesignOutputContractVersion,
   type DesignResult,
   DesignResultSchema,
   DesignTimeSchema,
   DesignUuidSchema,
+  type RoleGapReport,
+  RoleGapReportSchema,
 } from "../../shared/schemas/design";
 import {
   CoordinatorPreviewSchema,
@@ -34,7 +37,24 @@ import {
   resolveDesignDataRoot,
 } from "./data-root";
 
-export const DESIGN_RECORD_VERSION = 1;
+/**
+ * Record schema version written by this build. Version 1 records (baseline) stay readable: the
+ * reader fills the v2 rule fields in memory and never rewrites the file; only a successful CAS
+ * update writes version 2. The directory layout (`agent-team-designer/v1/jobs`) is unrelated and
+ * does not change.
+ */
+export const DESIGN_RECORD_VERSION = 2;
+export const LEGACY_DESIGN_RECORD_VERSION = 1;
+/** What a version 1 record means under the v2 fields: the creation-time (≤3 new Roles) rules. */
+export const LEGACY_RECORD_RULES = {
+  requestHashVersion: 1,
+  outputContractVersion: 1,
+  existingRolesOnly: false,
+  roleGap: null,
+} as const satisfies Pick<
+  StoredDesignJob,
+  "requestHashVersion" | "outputContractVersion" | "existingRolesOnly" | "roleGap"
+>;
 export const DESIGN_RECORD_MAX_BYTES = 512 * 1024;
 const LOCK_NAME = ".lock";
 const RECLAIM_GUARD_NAME = ".reclaim";
@@ -91,10 +111,19 @@ export type StoredCreateRequest = {
   clientMessageId: string;
 };
 export type StoredDesignJob = {
+  /** The version read from disk (1 is upgraded in memory); a write always stores 2. */
   schemaVersion: number;
   job: DesignJob;
   request: string;
   requestHash: string;
+  /** 1: the original payload; 2: payloadVersion 2 (adds existingRolesOnly). Authority for retries. */
+  requestHashVersion: 1 | 2;
+  /** Decoder for the model's output. Chosen when the job is created; never re-derived. */
+  outputContractVersion: DesignOutputContractVersion;
+  /** The creation-time rule: authority for the 0/3 new-Role limit. Legacy records are false. */
+  existingRolesOnly: boolean;
+  /** Reported gaps of a job that ended with a role-gap; null otherwise. */
+  roleGap: RoleGapReport[] | null;
   mode: z.infer<typeof TeamModeSchema>;
   selectionIntent: string | null;
   creation: {
@@ -110,19 +139,24 @@ export type StoredDesignJob = {
   receipts: Record<string, string>;
   outcomeUnknown: boolean;
 };
-const AttemptRecordSchema = z.object({
-  attempt: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-  nonce: DesignNonceSchema,
-  messageId: DesignUuidSchema,
-  promptHash: DesignHashSchema,
-  epoch: z.string().nullable(),
-  endCursor: z.string().nullable(),
-  summary: z.string().nullable(),
-  ack: z.enum(["pending", "acked", "unknown"]),
-  sentAt: z.string().nullable().optional(),
-  turnId: z.string().nullable().optional(),
-  lastError: z.string().nullable().optional(),
-});
+// Record-owned layers (root, job, result, attempts, creation) keep keys a newer writer added, so
+// a CAS update never drops them. They are removed again before anything leaves the service
+// (compat.ts projects through the strip-mode DTO schemas); `result.preview` stays strip-only.
+const AttemptRecordSchema = z
+  .object({
+    attempt: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    nonce: DesignNonceSchema,
+    messageId: DesignUuidSchema,
+    promptHash: DesignHashSchema,
+    epoch: z.string().nullable(),
+    endCursor: z.string().nullable(),
+    summary: z.string().nullable(),
+    ack: z.enum(["pending", "acked", "unknown"]),
+    sentAt: z.string().nullable().optional(),
+    turnId: z.string().nullable().optional(),
+    lastError: z.string().nullable().optional(),
+  })
+  .passthrough();
 const LedgerModeIssueSchema = ModeIssueSchema.strip();
 const LedgerSeatProfileSchema = SeatProfileSchema.strip();
 const LedgerSeatPreviewSchema = SeatPreviewSchema.strip().extend({
@@ -143,10 +177,10 @@ const LedgerModeLaunchPreviewSchema = ModeLaunchPreviewSchema.strip().extend({
 /** Future preview fields are accepted for reading and stripped to the current DTO. */
 export const StoredDesignResultSchema = DesignResultSchema.extend({
   preview: LedgerModeLaunchPreviewSchema,
-});
-export const StoredDesignJobSchema = z.object({
+}).passthrough();
+const StoredDesignJobBaseShape = {
   schemaVersion: z.number().int().positive(),
-  job: DesignJobSchema,
+  job: DesignJobSchema.passthrough(),
   request: z.string(),
   requestHash: DesignHashSchema,
   mode: TeamModeSchema,
@@ -179,6 +213,7 @@ export const StoredDesignJobSchema = z.object({
         .nullable()
         .optional(),
     })
+    .passthrough()
     .nullable(),
   attempts: z.array(AttemptRecordSchema).max(3),
   proposal: z.unknown().nullable(),
@@ -187,7 +222,19 @@ export const StoredDesignJobSchema = z.object({
   leaseOwner: z.string().nullable(),
   receipts: z.record(z.string(), z.string()),
   outcomeUnknown: z.boolean(),
-});
+};
+/** Version 1 (baseline) record. Read-only shape: parseRecord fills the v2 fields in memory. */
+const StoredDesignJobV1Schema = z.object(StoredDesignJobBaseShape).passthrough();
+/** Version 2 record: the four rule fields are required and `roleGap` is the capped C01 report. */
+export const StoredDesignJobSchema = z
+  .object({
+    ...StoredDesignJobBaseShape,
+    requestHashVersion: z.union([z.literal(1), z.literal(2)]),
+    outputContractVersion: z.union([z.literal(1), z.literal(2)]),
+    existingRolesOnly: z.boolean(),
+    roleGap: z.array(RoleGapReportSchema).min(1).max(8).nullable(),
+  })
+  .passthrough();
 export type DesignStoreIssue =
   | "unavailable"
   | "exists"
@@ -282,6 +329,38 @@ function rawClientRequestId(raw: string): string | null {
   return typeof job.clientRequestId === "string" ? job.clientRequestId : null;
 }
 
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+/**
+ * The record root is the only authority for the rules (04 §6.1). The Job DTO inside carries a copy
+ * only for a version-2 output contract, and the copy must equal the root; a legacy-contract record
+ * has no copy at all (absent means "the old ≤3 rule", which is not the same as an explicit false).
+ */
+function rulesConsistent(record: StoredDesignJob): boolean {
+  const job = record.job;
+  if (record.outputContractVersion === 1) {
+    // Version 1 outputs only ever ran under the legacy rule, and no gap can exist.
+    return (
+      record.existingRolesOnly === false &&
+      record.roleGap === null &&
+      job.existingRolesOnly === undefined &&
+      job.outputContractVersion === undefined &&
+      (job.roleGap === undefined || job.roleGap === null)
+    );
+  }
+  if (record.roleGap !== null) {
+    // A gap is only legal for an existing-roles-only job that ended as failed without a result.
+    if (!record.existingRolesOnly || job.state !== "failed" || record.result !== null) return false;
+  }
+  return (
+    job.existingRolesOnly === record.existingRolesOnly &&
+    job.outputContractVersion === 2 &&
+    sameJson(job.roleGap, record.roleGap)
+  );
+}
+
 function parseRecord(raw: string, file: string): StoredDesignJob | DesignStoreProblem["reason"] {
   let parsed: unknown;
   try {
@@ -291,10 +370,25 @@ function parseRecord(raw: string, file: string): StoredDesignJob | DesignStorePr
   }
   const version = z.object({ schemaVersion: z.number() }).safeParse(parsed);
   if (!version.success) return "corrupt";
-  if (version.data.schemaVersion !== DESIGN_RECORD_VERSION) return "unknown-version";
-  const record = StoredDesignJobSchema.safeParse(parsed);
-  if (!record.success || path.basename(file, ".json") !== record.data.job.jobId) return "corrupt";
-  return record.data;
+  let record: StoredDesignJob;
+  if (version.data.schemaVersion === LEGACY_DESIGN_RECORD_VERSION) {
+    // Baseline record: validated by its own (old) shape, then the v2 fields are filled in memory.
+    // Nothing is recomputed (hash, nonce, promptHash, resultId, label) and nothing is written.
+    const legacy = StoredDesignJobV1Schema.safeParse(parsed);
+    if (!legacy.success) return "corrupt";
+    record = { ...legacy.data, ...LEGACY_RECORD_RULES } as StoredDesignJob;
+  } else if (version.data.schemaVersion === DESIGN_RECORD_VERSION) {
+    const current = StoredDesignJobSchema.safeParse(parsed);
+    if (!current.success) return "corrupt";
+    record = current.data as StoredDesignJob;
+  } else {
+    return "unknown-version";
+  }
+  if (path.basename(file, ".json") !== record.job.jobId) return "corrupt";
+  if (version.data.schemaVersion === DESIGN_RECORD_VERSION && !rulesConsistent(record)) {
+    return "corrupt";
+  }
+  return record;
 }
 type KillProbe = (pid: number, signal: 0) => unknown;
 
@@ -482,6 +576,23 @@ async function sweepTemporaryFiles(files: DesignStoreFs, jobs: string): Promise<
   for (const name of await files.readdir(jobs))
     if (TEMP_FILE.test(name)) await files.rm(path.join(jobs, name));
 }
+function withJobRuleCopy(record: StoredDesignJob): StoredDesignJob {
+  const { existingRolesOnly, outputContractVersion, roleGap, ...rest } = record.job;
+  void existingRolesOnly;
+  void outputContractVersion;
+  void roleGap;
+  if (record.outputContractVersion === 1) return { ...record, job: rest };
+  return {
+    ...record,
+    job: {
+      ...rest,
+      existingRolesOnly: record.existingRolesOnly,
+      outputContractVersion: 2,
+      roleGap: record.roleGap,
+    },
+  };
+}
+
 export function createDesignJobStore(options: {
   home: string | undefined;
   fs?: DesignStoreFs;
@@ -523,7 +634,11 @@ export function createDesignJobStore(options: {
     if (!root || !ownerToken || disposed) throw new DesignStoreError("unavailable");
     return root;
   };
-  async function writeRecord(dataRoot: DesignDataRoot, record: StoredDesignJob): Promise<void> {
+  async function writeRecord(dataRoot: DesignDataRoot, input: StoredDesignJob): Promise<void> {
+    // Every write is version 2, and the Job DTO's rule copy is derived from the root here, in one
+    // place, so the two can never diverge (a legacy-contract record gets no copy).
+    const record = withJobRuleCopy({ ...input, schemaVersion: DESIGN_RECORD_VERSION });
+    if (!rulesConsistent(record)) throw new DesignStoreError("corrupt");
     const parsed = StoredDesignJobSchema.safeParse(record);
     if (!parsed.success) throw new DesignStoreError("corrupt");
     const encoded = `${JSON.stringify(parsed.data)}\n`;
@@ -727,7 +842,12 @@ export function createDesignJobStore(options: {
         if (
           (currentTerminal && !nextTerminal) ||
           next.requestHash !== current.requestHash ||
-          next.job.clientRequestId !== current.job.clientRequestId
+          next.job.clientRequestId !== current.job.clientRequestId ||
+          // The creation-time rules never change after create; a gap may be set once.
+          next.requestHashVersion !== current.requestHashVersion ||
+          next.outputContractVersion !== current.outputContractVersion ||
+          next.existingRolesOnly !== current.existingRolesOnly ||
+          (current.roleGap !== null && !sameJson(current.roleGap, next.roleGap))
         )
           throw new DesignStoreError("conflict");
         // Receipts are append-only idempotency evidence: existing keys may not be dropped or

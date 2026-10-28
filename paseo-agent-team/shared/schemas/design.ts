@@ -511,6 +511,8 @@ export const DesignStartInputSchema = z
 export const DesignStartOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignStatusInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema.optional(),
 });
 
@@ -522,6 +524,8 @@ export const DesignStatusOutputSchema = reply({
 });
 
 export const DesignResultInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
@@ -556,6 +560,8 @@ export const DesignPreparedSchema = z.discriminatedUnion("outcome", [
 export type DesignPrepared = z.infer<typeof DesignPreparedSchema>;
 
 export const DesignPrepareSaveInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   clientId: DesignUuidSchema,
@@ -566,6 +572,8 @@ export const DesignPrepareSaveInputSchema = z.strictObject({
 export const DesignPrepareSaveOutputSchema = reply({ prepared: DesignPreparedSchema });
 
 export const DesignMarkSavedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema.optional(),
@@ -574,6 +582,8 @@ export const DesignMarkSavedInputSchema = z.strictObject({
 export const DesignMarkSavedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignSaveFailedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema,
@@ -591,12 +601,16 @@ export const DesignSaveFailedInputSchema = z.strictObject({
 export const DesignSaveFailedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignCancelInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
 export const DesignCancelOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignContinueInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   expectedRevision: DesignUuidSchema,
   action: z.enum(["recheck", "repair"]),

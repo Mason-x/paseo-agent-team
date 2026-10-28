@@ -20,6 +20,7 @@ import {
   DESIGN_RECORD_MAX_BYTES,
   DESIGN_RECORD_VERSION,
   type DesignStoreFs,
+  LEGACY_RECORD_RULES,
   type StoredDesignJob,
 } from "../server/designer/store";
 import { DesignResultSchema } from "../shared/schemas/design";
@@ -43,6 +44,7 @@ function record(
 ): StoredDesignJob {
   return {
     schemaVersion: DESIGN_RECORD_VERSION,
+    ...LEGACY_RECORD_RULES,
     job: designJob({ jobId, stateRevision: revision, attempt: 1 }),
     request: "给后台做一次改版",
     requestHash: DESIGN_HASH,
@@ -240,7 +242,7 @@ describe("design job ledger", () => {
       issue: "conflict",
     });
     const file = path.join(directory, "agent-team-designer", "v1", "jobs", `${DESIGN_JOB_ID}.json`);
-    await writeFile(file, JSON.stringify({ ...current, schemaVersion: 2 }), "utf8");
+    await writeFile(file, JSON.stringify({ ...current, schemaVersion: 3 }), "utf8");
     expect(await store.problems()).toEqual([
       { name: `${DESIGN_JOB_ID}.json`, reason: "unknown-version" },
     ]);
@@ -789,7 +791,7 @@ describe("design job ledger", () => {
       path.join(jobs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json"),
       JSON.stringify({
         ...record("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-        schemaVersion: 2,
+        schemaVersion: 3,
         job: {
           ...record().job,
           jobId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
