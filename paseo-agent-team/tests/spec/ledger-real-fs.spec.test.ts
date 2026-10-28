@@ -65,7 +65,12 @@ const readySchema = z.looseObject({
   pid: z.number(),
 });
 
-type ChildOutcome = { code: number | null; reply: ChildReply | null; stderr: string };
+type ChildOutcome = {
+  code: number | null;
+  reply: ChildReply | null;
+  stdout: string;
+  stderr: string;
+};
 
 const homes: string[] = [];
 let childScript = "";
@@ -86,6 +91,17 @@ async function waitFor(file) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }
+}
+async function writeReady(file, payload) {
+  const tmp = file + "." + process.pid + ".tmp";
+  await fsp.writeFile(tmp, JSON.stringify(payload));
+  await fsp.rename(tmp, file);
+}
+let reported = false;
+function report(payload) {
+  if (reported) return;
+  reported = true;
+  console.log(JSON.stringify(payload));
 }
 if (args.barrier) await waitFor(args.barrier);
 const codec = {
@@ -124,9 +140,9 @@ try {
       retryDelayMs: 10,
       ownerToken: args.token,
     });
-    console.log(JSON.stringify({ ok: true, token: lock.ownerToken, pid: process.pid }));
     if (args.holdMs) await new Promise((resolve) => setTimeout(resolve, args.holdMs));
     if (!args.keep) await lock.release();
+    report({ ok: true, token: lock.ownerToken, pid: process.pid });
     process.exit(0);
   }
   if (mode === "lock-crash") {
@@ -135,7 +151,7 @@ try {
       acquireTimeoutMs: 2000,
       retryDelayMs: 10,
     });
-    console.log(JSON.stringify({ ok: true, token: lock.ownerToken, pid: process.pid }));
+    report({ ok: true, token: lock.ownerToken, pid: process.pid });
     process.exit(7);
   }
   if (mode === "lock-hold") {
@@ -144,7 +160,7 @@ try {
       acquireTimeoutMs: 2000,
       retryDelayMs: 10,
     });
-    console.log(JSON.stringify({ ok: true, token: lock.ownerToken, pid: process.pid }));
+    report({ ok: true, token: lock.ownerToken, pid: process.pid });
     await new Promise((resolve) => setTimeout(resolve, 60000));
   }
   if (mode === "atomic-write") {
@@ -163,31 +179,32 @@ try {
     };
     const store = openStore(files);
     const result = await store.commit(args.record, args.cas);
-    console.log(JSON.stringify({ ok: true, revision: result.revision }));
+    report({ ok: true, revision: result.revision });
     process.exit(0);
   }
   if (mode === "atomic-read") {
     const result = await openStore().read();
-    console.log(JSON.stringify(
+    report(
       result.status === "ok"
         ? { status: "ok", revision: result.revision }
         : result.status === "corrupt"
           ? { status: "corrupt", reason: result.reason, diagnostic: result.diagnostic }
           : { status: result.status },
-    ));
+    );
     process.exit(0);
   }
   if (mode === "atomic-shared-read") {
     const store = openStore();
     const current = await store.read();
     if (current.status !== "ok") {
-      console.log(JSON.stringify({ ok: false, code: current.status }));
+      report({ ok: false, code: current.status });
       process.exit(0);
     }
-    await fsp.writeFile(
-      args.ready,
-      JSON.stringify({ revision: current.revision, digest: current.digest, pid: process.pid }),
-    );
+    await writeReady(args.ready, {
+      revision: current.revision,
+      digest: current.digest,
+      pid: process.pid,
+    });
     await waitFor(args.go);
     try {
       const result = await store.commit(
@@ -199,9 +216,9 @@ try {
         },
         { revision: current.revision, digest: current.digest },
       );
-      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value }));
+      report({ ok: true, revision: result.revision, value: args.value });
     } catch (error) {
-      console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
+      report({ ok: false, code: error.code ?? "unknown" });
     }
     process.exit(0);
   }
@@ -209,19 +226,21 @@ try {
     const store = openStore();
     const current = await store.read();
     if (current.status !== "ok") {
-      console.log(JSON.stringify({ ok: false, code: current.status }));
+      report({ ok: false, code: current.status });
       process.exit(0);
     }
-    await fsp.writeFile(
-      args.ready,
-      JSON.stringify({ revision: current.revision, digest: current.digest, pid: process.pid }),
-    );
+    await writeReady(args.ready, {
+      revision: current.revision,
+      digest: current.digest,
+      pid: process.pid,
+    });
     await waitFor(args.go);
     const lock = await locks.acquireProcessLock({
       file: args.lockFile,
       acquireTimeoutMs: 10_000,
       retryDelayMs: 10,
     });
+    let committed = null;
     try {
       const result = await store.commit(
         {
@@ -232,12 +251,16 @@ try {
         },
         { revision: current.revision, digest: current.digest },
       );
-      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value }));
+      committed = { ok: true, revision: result.revision, value: args.value };
     } catch (error) {
-      console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
-    } finally {
-      await lock.release();
+      committed = { ok: false, code: error.code ?? "unknown" };
     }
+    try {
+      await lock.release();
+    } catch {
+      // A release error must not replace the commit result.
+    }
+    report(committed);
     process.exit(0);
   }
   if (mode === "atomic-locked-write") {
@@ -246,6 +269,7 @@ try {
       acquireTimeoutMs: 10_000,
       retryDelayMs: 10,
     });
+    let committed = null;
     try {
       const store = openStore();
       const current = await store.read();
@@ -259,29 +283,58 @@ try {
         },
         { revision: current.revision, digest: current.digest },
       );
-      console.log(JSON.stringify({ ok: true, revision: result.revision, value: args.value ?? "racer" }));
-      await lock.release();
+      committed = { ok: true, revision: result.revision, value: args.value ?? "racer" };
     } catch (error) {
-      console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown" }));
+      committed = { ok: false, code: error.code ?? "unknown" };
     }
+    try {
+      await lock.release();
+    } catch {
+      // A release error must not replace the commit result.
+    }
+    report(committed);
     process.exit(0);
   }
-  console.log(JSON.stringify({ ok: false, code: "bad-mode" }));
+  report({ ok: false, code: "bad-mode" });
   process.exit(2);
 } catch (error) {
-  console.log(JSON.stringify({ ok: false, code: error.code ?? "unknown", error: String(error) }));
+  report({ ok: false, code: error.code ?? "unknown", error: String(error) });
   process.exit(1);
 }
 `;
 
-function replyOf(stdout: string): ChildReply | null {
-  const line = stdout.trim().split(/\r?\n/u).at(-1);
-  if (line === undefined || line === "") return null;
-  try {
-    return replySchema.parse(JSON.parse(line));
-  } catch {
-    return null;
+function parseReplyLines(stdout: string): ChildReply[] {
+  const replies: ChildReply[] = [];
+  for (const line of stdout.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    try {
+      replies.push(replySchema.parse(JSON.parse(trimmed)));
+    } catch {
+      // Ignore banners, stack traces, and other non-reply lines.
+    }
   }
+  return replies;
+}
+
+/** Last commit result if any child printed one; otherwise the last parsed reply. */
+function replyOf(stdout: string): ChildReply | null {
+  const replies = parseReplyLines(stdout);
+  const commits = replies.filter(
+    (reply) =>
+      reply.revision !== undefined ||
+      (reply.ok === false && reply.code !== undefined && reply.error === undefined),
+  );
+  return commits.at(-1) ?? replies.at(-1) ?? null;
+}
+
+function receipts(outcomes: readonly ChildOutcome[]): string {
+  return outcomes
+    .map(
+      (outcome, index) =>
+        `#${index} code=${String(outcome.code)} reply=${JSON.stringify(outcome.reply)} stdout=${JSON.stringify(outcome.stdout)} stderr=${JSON.stringify(outcome.stderr)}`,
+    )
+    .join("\n");
 }
 
 function spawnChild(mode: string, args: Record<string, unknown>) {
@@ -302,7 +355,7 @@ function spawnChild(mode: string, args: Record<string, unknown>) {
   const timer = setTimeout(() => child.kill(), 30_000);
   child.on("close", (code) => {
     clearTimeout(timer);
-    resolve({ code, reply: replyOf(stdout), stderr });
+    resolve({ code, reply: replyOf(stdout), stdout, stderr });
   });
   return { child, done: promise };
 }
@@ -361,10 +414,10 @@ async function waitForPath(file: string): Promise<void> {
   const deadline = Date.now() + 5000;
   for (;;) {
     try {
-      await stat(file);
+      readySchema.parse(JSON.parse(await readFile(file, "utf8")));
       return;
     } catch {
-      // Keep polling until the child writes the rendezvous file or the deadline passes.
+      // Keep polling until rename publishes a complete ready object.
     }
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${file}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -443,11 +496,17 @@ describe("ledger on the real filesystem", () => {
       timeout: 300,
       holdMs: 1200,
     });
-    expect(outcomes.filter((outcome) => outcome.reply?.ok === true)).toHaveLength(1);
-    expect(outcomes.filter((outcome) => outcome.reply?.code === "lock-contended")).toHaveLength(3);
+    expect(
+      outcomes.filter((outcome) => outcome.reply?.ok === true),
+      receipts(outcomes),
+    ).toHaveLength(1);
+    expect(
+      outcomes.filter((outcome) => outcome.reply?.code === "lock-contended"),
+      receipts(outcomes),
+    ).toHaveLength(3);
     expect(home).toBe(roots.home);
     const fifth = await runChild("lock", { file: lockFile, timeout: 1000 });
-    expect(fifth.reply?.ok).toBe(true);
+    expect(fifth.reply?.ok, receipts([fifth])).toBe(true);
   }, 20_000);
 
   test("reclaims after a hard crash and after a killed holder", async () => {
@@ -494,8 +553,11 @@ describe("ledger on the real filesystem", () => {
       keep: true,
     });
     const winners = outcomes.filter((outcome) => outcome.reply?.ok === true);
-    expect(winners).toHaveLength(1);
-    expect(outcomes.filter((outcome) => outcome.reply?.code === "lock-contended")).toHaveLength(1);
+    expect(winners, receipts(outcomes)).toHaveLength(1);
+    expect(
+      outcomes.filter((outcome) => outcome.reply?.code === "lock-contended"),
+      receipts(outcomes),
+    ).toHaveLength(1);
     const finalLock = replySchema
       .extend({ ownerToken: z.string() })
       .parse(JSON.parse(await readFile(lockFile, "utf8")));
@@ -567,7 +629,11 @@ describe("ledger on the real filesystem", () => {
 
     await writeFile(goA, "go");
     const first = await childA.done;
-    expect(first.reply).toMatchObject({ ok: true, revision: 2, value: "alpha" });
+    expect(first.reply, receipts([first])).toMatchObject({
+      ok: true,
+      revision: 2,
+      value: "alpha",
+    });
     const between = await store.read();
     if (between.status !== "ok") throw new Error(`unexpected ${between.status}`);
     expect(between.revision).toBe(2);
@@ -576,7 +642,10 @@ describe("ledger on the real filesystem", () => {
 
     await writeFile(goB, "go");
     const second = await childB.done;
-    expect(second.reply).toMatchObject({ ok: false, code: "cas-mismatch" });
+    expect(second.reply, receipts([first, second])).toMatchObject({
+      ok: false,
+      code: "cas-mismatch",
+    });
 
     const final = await store.read();
     if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);
@@ -606,8 +675,8 @@ describe("ledger on the real filesystem", () => {
     const second = spawnChild("atomic-locked-write", { ...baseArgs, value: "second" });
     await writeFile(barrier, "go");
     const [outcomeA, outcomeB] = await Promise.all([first.done, second.done]);
-    expect(outcomeA.reply).toMatchObject({ ok: true });
-    expect(outcomeB.reply).toMatchObject({ ok: true });
+    expect(outcomeA.reply, receipts([outcomeA, outcomeB])).toMatchObject({ ok: true });
+    expect(outcomeB.reply, receipts([outcomeA, outcomeB])).toMatchObject({ ok: true });
     const revisions = [outcomeA.reply?.revision, outcomeB.reply?.revision].sort();
     expect(revisions).toEqual([2, 3]);
     const lastWriter = outcomeA.reply?.revision === 3 ? outcomeA.reply : outcomeB.reply;
@@ -637,11 +706,18 @@ describe("ledger on the real filesystem", () => {
     expect(staleRead).toMatchObject({ revision: 1, digest: base.digest });
 
     const winner = await runChild("atomic-locked-write", { ...baseArgs, value: "winner" });
-    expect(winner.reply).toMatchObject({ ok: true, revision: 2, value: "winner" });
+    expect(winner.reply, receipts([winner])).toMatchObject({
+      ok: true,
+      revision: 2,
+      value: "winner",
+    });
 
     await writeFile(go, "go");
     const rejected = await stale.done;
-    expect(rejected.reply).toMatchObject({ ok: false, code: "cas-mismatch" });
+    expect(rejected.reply, receipts([winner, rejected])).toMatchObject({
+      ok: false,
+      code: "cas-mismatch",
+    });
     const final = await store.read();
     if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);
     expect(final.revision).toBe(2);
