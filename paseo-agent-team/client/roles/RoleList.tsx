@@ -1,14 +1,68 @@
 import { useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
-import { preferredProfileLabel, teamsUsingRole } from "../domain/validation";
+import { teamPlanZh } from "../../shared/zh/team-plan";
+import { type ProfileBinding, profileBindingLabels, teamsUsingRole } from "../domain/validation";
 import { GhostIconButton } from "../shared/buttons";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginTheme } from "../shared/theme";
+
+function BindingLine({
+  theme,
+  label,
+  items,
+  emptyLabel,
+}: {
+  theme: PluginTheme;
+  label: string;
+  items: readonly ProfileBinding[];
+  emptyLabel: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? items : items.slice(0, 2);
+  const overflow = items.length - shown.length;
+  const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
+  const danger = { color: theme.colors.statusDanger, fontSize: 12 };
+  const link = { color: theme.colors.accent, fontSize: 12, fontWeight: "600" as const };
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+      <Text style={muted}>{label}：</Text>
+      {items.length === 0 ? <Text style={muted}>{emptyLabel}</Text> : null}
+      {shown.map((item, index) => (
+        <Text key={item.profileId} style={item.missing ? danger : muted}>
+          {item.missing
+            ? item.label === null
+              ? teamPlanZh.noProfile
+              : teamPlanZh.bindings.missing(item.label)
+            : item.label}
+          {index === shown.length - 1 ? "" : "、"}
+        </Text>
+      ))}
+      {overflow > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={teamPlanZh.bindings.expand(overflow)}
+          onPress={() => setExpanded(true)}
+        >
+          <Text style={link}>{teamPlanZh.bindings.expand(overflow)}</Text>
+        </Pressable>
+      ) : null}
+      {expanded && items.length > 2 ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={teamPlanZh.bindings.collapse}
+          onPress={() => setExpanded(false)}
+        >
+          <Text style={link}>{teamPlanZh.bindings.collapse}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
 
 export function RoleList({
   theme,
@@ -80,7 +134,7 @@ export function RoleList({
     <View style={styles.list}>
       {filtered.map((role, index) => {
         const usedBy = teamsUsingRole(teams, role.id);
-        const profile = preferredProfileLabel(role, profiles);
+        const bindings = profileBindingLabels(role, profiles);
         const usage = usedBy.length === 0 ? zh.unused : zh.usedBy(usedBy.length);
         return (
           <View key={role.id} style={[styles.row, index > 0 && styles.rowBorder]}>
@@ -90,10 +144,19 @@ export function RoleList({
                 <Text style={styles.title} numberOfLines={1}>
                   {role.name}
                 </Text>
-                <Text style={profile.missing ? styles.danger : styles.summary} numberOfLines={1}>
-                  {profile.name}
-                </Text>
               </View>
+              <BindingLine
+                theme={theme}
+                label={teamPlanZh.bindings.preferred}
+                items={bindings.preferred}
+                emptyLabel={teamPlanZh.noProfile}
+              />
+              <BindingLine
+                theme={theme}
+                label={teamPlanZh.bindings.fallback}
+                items={bindings.fallback}
+                emptyLabel={teamPlanZh.bindings.empty}
+              />
               {role.description ? (
                 <Text style={styles.meta} numberOfLines={2}>
                   {role.description}

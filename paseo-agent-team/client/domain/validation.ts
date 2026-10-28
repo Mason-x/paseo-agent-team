@@ -56,6 +56,36 @@ export function teamRoleWarnings(
   });
 }
 
+export type ProfileBinding = {
+  profileId: string;
+  /** Live name, then the saved snapshot, then the hint; null when no name is known. */
+  label: string | null;
+  missing: boolean;
+};
+
+export type RoleBindingLabels = {
+  preferred: ProfileBinding[];
+  fallback: ProfileBinding[];
+};
+
+/** Every stored binding, in saved order, with the project's live > snapshot > hint precedence. */
+export function profileBindingLabels(
+  role: Role,
+  profiles: readonly PaseoProfile[],
+): RoleBindingLabels {
+  const live = new Map(profiles.map((profile) => [profile.id, profile]));
+  const binding = (ref: Role["preferredProfiles"][number]): ProfileBinding => {
+    const profile = live.get(ref.profileId);
+    if (profile) return { profileId: ref.profileId, label: profile.name, missing: false };
+    const label = ref.nameSnapshot?.trim() || ref.hint?.name?.trim() || null;
+    return { profileId: ref.profileId, label, missing: true };
+  };
+  return {
+    preferred: role.preferredProfiles.map(binding),
+    fallback: role.fallbackProfiles.map(binding),
+  };
+}
+
 export function preferredProfileLabel(
   role: Role,
   profiles: readonly PaseoProfile[],
