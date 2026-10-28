@@ -17,6 +17,7 @@ import { parseSymrefHead } from "../server/version/remote";
 import { main, runRequest } from "../server/version/runner.mjs";
 import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
+import { VERSION_PROCESS_TIMEOUT_MS } from "./setup/load-timeouts";
 
 const HOME = path.join("C:\\", "paseo-dev");
 const PLUGIN = path.join("C:\\", "repo", "paseo-agent-team");
@@ -492,70 +493,79 @@ describe("version flow", () => {
     expect(boot.packageVersion).toBe("0.3.0");
   });
 
-  test("a real commit written by boot confirmation lets the runner succeed", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-git-"));
-    roots.push(directory);
-    const plugin = path.join(directory, "plugin");
-    const git = (args: string[], cwd = plugin) =>
-      spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", ...args], {
-        cwd,
-        encoding: "utf8",
+  test(
+    "a real commit written by boot confirmation lets the runner succeed",
+    async () => {
+      const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-git-"));
+      roots.push(directory);
+      const plugin = path.join(directory, "plugin");
+      const git = (args: string[], cwd = plugin) =>
+        spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", ...args], {
+          cwd,
+          encoding: "utf8",
+        });
+      git(["init"], directory);
+      await nodeFiles().writeAtomic(path.join(plugin, "README.md"), "fixture\n");
+      git(["add", "README.md"]);
+      git(["commit", "-m", "fixture"]);
+      const commit = git(["rev-parse", "HEAD"]).stdout.trim();
+      const { request, jobFile } = await stage(directory, {
+        mode: "managed-git",
+        pluginDir: plugin,
+        targetSha: commit,
+        targetVersion: "0.3.0",
       });
-    git(["init"], directory);
-    await nodeFiles().writeAtomic(path.join(plugin, "README.md"), "fixture\n");
-    git(["add", "README.md"]);
-    git(["commit", "-m", "fixture"]);
-    const commit = git(["rev-parse", "HEAD"]).stdout.trim();
-    const { request, jobFile } = await stage(directory, {
-      mode: "managed-git",
-      pluginDir: plugin,
-      targetSha: commit,
-      targetVersion: "0.3.0",
-    });
-    await nodeFiles().writeAtomic(path.join(directory, "server-id"), "server-1");
-    await nodeFiles().writeAtomic(
-      path.join(storeRoot(directory, "server-1"), "active.lock"),
-      JSON.stringify({ jobId: request.jobId, ownerPid: 1, acquiredAt: "2026-10-25T00:00:00.000Z" }),
-    );
-    const running = {
-      ...JSON.parse(await nodeFiles().readText(jobFile, 100000)),
-      state: "running",
-      phase: "verifying_runtime",
-    };
-    await nodeFiles().writeAtomic(jobFile, JSON.stringify(running));
-    await nodeFiles().writeAtomic(
-      path.join(plugin, "package.json"),
-      JSON.stringify({ version: "0.3.0" }),
-    );
-    await nodeFiles().writeAtomic(
-      path.join(path.dirname(jobFile), "request.json"),
-      JSON.stringify(request),
-    );
-    await confirmPendingBoot({
-      env: { PASEO_HOME: directory, GIT_DIR: directory },
-      files: nodeFiles(),
-      bootId: "boot-new",
-      log: () => {},
-    });
-    const boot = JSON.parse(
-      await nodeFiles().readText(path.join(storeRoot(directory, "server-1"), "boot.json"), 10000),
-    );
-    expect(boot.commit).toBe(commit);
-    await runRequest(request, {
-      git: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-      exec: async () => ({
-        exitCode: 0,
-        stdout: JSON.stringify({ status: "running" }),
-        stderr: "",
-      }),
-      now: () => "2026-10-25T00:09:00.000Z",
-      sleep: async () => {},
-      attempts: 2,
-      verifyTimeoutMs: 1_000,
-      intervalMs: 10,
-    });
-    expect(JSON.parse(await nodeFiles().readText(jobFile, 100000)).state).toBe("succeeded");
-  }, 30_000);
+      await nodeFiles().writeAtomic(path.join(directory, "server-id"), "server-1");
+      await nodeFiles().writeAtomic(
+        path.join(storeRoot(directory, "server-1"), "active.lock"),
+        JSON.stringify({
+          jobId: request.jobId,
+          ownerPid: 1,
+          acquiredAt: "2026-10-25T00:00:00.000Z",
+        }),
+      );
+      const running = {
+        ...JSON.parse(await nodeFiles().readText(jobFile, 100000)),
+        state: "running",
+        phase: "verifying_runtime",
+      };
+      await nodeFiles().writeAtomic(jobFile, JSON.stringify(running));
+      await nodeFiles().writeAtomic(
+        path.join(plugin, "package.json"),
+        JSON.stringify({ version: "0.3.0" }),
+      );
+      await nodeFiles().writeAtomic(
+        path.join(path.dirname(jobFile), "request.json"),
+        JSON.stringify(request),
+      );
+      await confirmPendingBoot({
+        env: { PASEO_HOME: directory, GIT_DIR: directory },
+        files: nodeFiles(),
+        bootId: "boot-new",
+        log: () => {},
+        gitTimeoutMs: VERSION_PROCESS_TIMEOUT_MS,
+      });
+      const boot = JSON.parse(
+        await nodeFiles().readText(path.join(storeRoot(directory, "server-1"), "boot.json"), 10000),
+      );
+      expect(boot.commit).toBe(commit);
+      await runRequest(request, {
+        git: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        exec: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify({ status: "running" }),
+          stderr: "",
+        }),
+        now: () => "2026-10-25T00:09:00.000Z",
+        sleep: async () => {},
+        attempts: 2,
+        verifyTimeoutMs: 1_000,
+        intervalMs: 10,
+      });
+      expect(JSON.parse(await nodeFiles().readText(jobFile, 100000)).state).toBe("succeeded");
+    },
+    VERSION_PROCESS_TIMEOUT_MS,
+  );
 
   test("boot confirmation with a different commit makes the runner fail", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-mismatch-"));
@@ -583,64 +593,72 @@ describe("version flow", () => {
     );
   });
 
-  test("boot confirmation skips a quiet home and survives a broken checkout", async () => {
-    const messages: string[] = [];
-    await confirmPendingBoot({
-      env: {},
-      bootId: "boot-new",
-      log: (message) => messages.push(message),
-    });
-    const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-broken-"));
-    roots.push(directory);
-    const { request, jobFile } = await stage(directory);
-    await nodeFiles().writeAtomic(path.join(directory, "server-id"), "server-1");
-    await nodeFiles().writeAtomic(
-      path.join(storeRoot(directory, "server-1"), "active.lock"),
-      JSON.stringify({ jobId: request.jobId, ownerPid: 1, acquiredAt: "2026-10-25T00:00:00.000Z" }),
-    );
-    const running = {
-      ...JSON.parse(await nodeFiles().readText(jobFile, 100000)),
-      state: "running",
-      phase: "reloading",
-    };
-    await nodeFiles().writeAtomic(jobFile, JSON.stringify(running));
-    await nodeFiles().writeAtomic(
-      path.join(path.dirname(jobFile), "request.json"),
-      JSON.stringify(request),
-    );
-    await nodeFiles().writeAtomic(path.join(request.pluginDir, "package.json"), "{");
-    await confirmPendingBoot({
-      env: { PASEO_HOME: directory, GIT_DIR: directory, GIT_CONFIG_KEY_0: "remote.origin.url" },
-      files: nodeFiles(),
-      bootId: "boot-broken",
-      log: (message) => messages.push(message),
-    });
-    const boot = JSON.parse(
-      await nodeFiles().readText(path.join(storeRoot(directory, "server-1"), "boot.json"), 10000),
-    );
-    expect(boot.packageVersion).toBeNull();
-    expect(boot.commit).toBeNull();
-    expect(messages).toEqual([]);
-    const hanging = path.join(directory, "hang.mjs");
-    await nodeFiles().writeAtomic(hanging, "setTimeout(() => {}, 30_000);\n");
-    const started = Date.now();
-    await confirmPendingBoot({
-      env: { PASEO_HOME: directory },
-      files: nodeFiles(),
-      bootId: "boot-timeout",
-      gitPath: process.execPath,
-      gitTimeoutMs: 50,
-    });
-    expect(Date.now() - started).toBeLessThan(8_000);
-    await confirmPendingBoot({
-      env: { PASEO_HOME: directory },
-      files: nodeFiles(),
-      bootId: "boot-missing-git",
-      gitPath: path.join(directory, "missing-git"),
-      log: (message) => messages.push(message),
-    });
-    expect(messages).toEqual([]);
-  });
+  test(
+    "boot confirmation skips a quiet home and survives a broken checkout",
+    async () => {
+      const messages: string[] = [];
+      await confirmPendingBoot({
+        env: {},
+        bootId: "boot-new",
+        log: (message) => messages.push(message),
+      });
+      const directory = await mkdtemp(path.join(tmpdir(), "agent-team-boot-broken-"));
+      roots.push(directory);
+      const { request, jobFile } = await stage(directory);
+      await nodeFiles().writeAtomic(path.join(directory, "server-id"), "server-1");
+      await nodeFiles().writeAtomic(
+        path.join(storeRoot(directory, "server-1"), "active.lock"),
+        JSON.stringify({
+          jobId: request.jobId,
+          ownerPid: 1,
+          acquiredAt: "2026-10-25T00:00:00.000Z",
+        }),
+      );
+      const running = {
+        ...JSON.parse(await nodeFiles().readText(jobFile, 100000)),
+        state: "running",
+        phase: "reloading",
+      };
+      await nodeFiles().writeAtomic(jobFile, JSON.stringify(running));
+      await nodeFiles().writeAtomic(
+        path.join(path.dirname(jobFile), "request.json"),
+        JSON.stringify(request),
+      );
+      await nodeFiles().writeAtomic(path.join(request.pluginDir, "package.json"), "{");
+      await confirmPendingBoot({
+        env: { PASEO_HOME: directory, GIT_DIR: directory, GIT_CONFIG_KEY_0: "remote.origin.url" },
+        files: nodeFiles(),
+        bootId: "boot-broken",
+        log: (message) => messages.push(message),
+      });
+      const boot = JSON.parse(
+        await nodeFiles().readText(path.join(storeRoot(directory, "server-1"), "boot.json"), 10000),
+      );
+      expect(boot.packageVersion).toBeNull();
+      expect(boot.commit).toBeNull();
+      expect(messages).toEqual([]);
+      const hanging = path.join(directory, "hang.mjs");
+      await nodeFiles().writeAtomic(hanging, "setTimeout(() => {}, 30_000);\n");
+      const started = Date.now();
+      await confirmPendingBoot({
+        env: { PASEO_HOME: directory },
+        files: nodeFiles(),
+        bootId: "boot-timeout",
+        gitPath: process.execPath,
+        gitTimeoutMs: 50,
+      });
+      expect(Date.now() - started).toBeLessThan(8_000);
+      await confirmPendingBoot({
+        env: { PASEO_HOME: directory },
+        files: nodeFiles(),
+        bootId: "boot-missing-git",
+        gitPath: path.join(directory, "missing-git"),
+        log: (message) => messages.push(message),
+      });
+      expect(messages).toEqual([]);
+    },
+    VERSION_PROCESS_TIMEOUT_MS,
+  );
 
   test("npm resolution checks configured, Node, and PATH candidates", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "agent-team-npm-"));

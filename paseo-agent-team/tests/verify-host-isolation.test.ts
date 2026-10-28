@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
+import { VERIFY_HOST_COMPILE_TIMEOUT_MS } from "./setup/load-timeouts";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.join(import.meta.dirname, "..");
@@ -43,19 +44,27 @@ test("vitest setupFiles redirects PASEO_HOME away from the inherited home", () =
   expect(existsSync(home ?? "")).toBe(true);
 });
 
-test("verify:package ignores an inherited sentinel PASEO_HOME", async () => {
-  const sentinel = await emptySentinel();
-  const { stdout, stderr } = await execFileAsync(
-    process.execPath,
-    [path.join("scripts", "verify-host-compile.mjs")],
-    {
-      cwd: pluginRoot,
-      env: { ...process.env, PASEO_HOME: sentinel },
-      maxBuffer: 10 * 1024 * 1024,
-    },
-  );
-  const output = `${stdout}\n${stderr}`;
-  expect(await readdir(sentinel)).toEqual([]);
-  expect(output).not.toContain(sentinel);
-  expect(output).not.toMatch(/design ledger initialization failed/u);
-}, 90_000);
+test(
+  "verify:package ignores an inherited sentinel PASEO_HOME",
+  async () => {
+    const sentinel = await emptySentinel();
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [path.join("scripts", "verify-host-compile.mjs")],
+      {
+        cwd: pluginRoot,
+        env: { ...process.env, PASEO_HOME: sentinel },
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    );
+    const output = `${stdout}\n${stderr}`;
+    expect(await readdir(sentinel)).toEqual([]);
+    expect(output).not.toContain(sentinel);
+    expect(output).not.toMatch(/design ledger initialization failed/u);
+    // Re-runs the real verify-host-compile.mjs (esbuild + host load). Idle is
+    // 30–60s; under parallel load it has reached 176s. 300s is the measured
+    // ceiling, not a reuse of a previous compile artifact — the point of this
+    // test is that a fresh compile still ignores the inherited sentinel home.
+  },
+  VERIFY_HOST_COMPILE_TIMEOUT_MS,
+);
