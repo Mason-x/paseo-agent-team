@@ -36,7 +36,7 @@ function BindingLine({
         <Text key={item.profileId} style={item.missing ? danger : muted}>
           {item.missing
             ? item.label === null
-              ? teamPlanZh.noProfile
+              ? teamPlanZh.bindings.missingUnnamed
               : teamPlanZh.bindings.missing(item.label)
             : item.label}
           {index === shown.length - 1 ? "" : "、"}

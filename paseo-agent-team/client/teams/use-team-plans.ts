@@ -1,12 +1,14 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AppState } from "react-native";
 import type { ModelFamilyHint } from "../../shared/domain/model-summary";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import { teamPlanRpc } from "../../shared/rpc/team-plan";
 import type { Team } from "../../shared/schemas/team";
 import {
-  buildTeamSummary,
+  buildTeamSummaries,
   createTeamPlanClient,
+  scopeSignature,
   type TeamPlanBatchView,
   type TeamPlanClient,
   type TeamPlanDraftRequest,
@@ -40,6 +42,7 @@ export type UseTeamPlansResult = TeamPlanBatchView & {
   planClient: TeamPlanClient;
   invalidate: () => void;
   retry: () => void;
+  refresh: () => void;
 };
 
 export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
@@ -58,47 +61,82 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
   useEffect(() => client.subscribe(() => setView(client.getBatchView())), [client]);
 
   useEffect(() => {
+    client.setActive(options.active);
+    if (!options.active) return;
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") client.refreshIfStale();
+    });
+    return () => subscription.remove();
+  }, [client, options.active]);
+
+  const lifecycleKey = useMemo(
+    () =>
+      `${scopeSignature({
+        hostId: options.hostId,
+        profiles: options.profiles,
+        revisions: options.revisions,
+      })}|${options.teams.map((team) => team.id).join(",")}`,
+    [options.hostId, options.profiles, options.revisions, options.teams],
+  );
+  const lastLifecycle = useRef("");
+  useEffect(() => {
+    if (!options.active) {
+      lastLifecycle.current = "";
+      return;
+    }
+    if (lifecycleKey === lastLifecycle.current) return;
+    lastLifecycle.current = lifecycleKey;
     client.setScope({
       hostId: options.hostId,
       profiles: options.profiles,
       revisions: options.revisions,
     });
-  }, [client, options.hostId, options.profiles, options.revisions]);
-
-  useEffect(() => {
-    if (!options.active) return;
     if (options.teams.length === 0) client.probe();
     else client.planTeams(options.teams);
-  }, [client, options.active, options.teams]);
+  }, [
+    client,
+    options.active,
+    lifecycleKey,
+    options.hostId,
+    options.profiles,
+    options.revisions,
+    options.teams,
+  ]);
 
-  const summaries = useMemo(() => {
-    const built = new Map<string, TeamSummaryView>();
-    for (const [key, result] of view.results) {
-      built.set(
-        key,
-        buildTeamSummary({
-          result,
-          hasContext: view.hasContext,
-          ...(options.familyHints === undefined ? {} : { hints: options.familyHints }),
-        }),
-      );
-    }
-    return built;
-  }, [view.results, view.hasContext, options.familyHints]);
+  useEffect(() => {
+    // Deferred so a StrictMode remount does not kill the shared client.
+    const timer = setTimeout(() => client.destroy(), 0);
+    return () => clearTimeout(timer);
+  }, [client]);
+
+  const summaries = useMemo(
+    () =>
+      buildTeamSummaries({
+        results: view.results,
+        failedKeys: view.failedKeys,
+        hasContext: view.hasContext,
+        error: view.error,
+        ...(options.familyHints === undefined ? {} : { hints: options.familyHints }),
+      }),
+    [view.results, view.failedKeys, view.hasContext, view.error, options.familyHints],
+  );
 
   return {
     ...view,
     summaries,
     planClient: client,
-    invalidate: () => {
-      client.invalidate();
-      if (options.teams.length === 0) client.probe();
-      else client.planTeams(options.teams);
-    },
+    invalidate: () => client.invalidate(),
     retry: () => {
-      if (options.teams.length === 0) client.probe();
-      else client.planTeams(options.teams);
+      if (client.modeContract() !== "v2") {
+        // Re-ask a daemon that may have been upgraded in place.
+        client.renegotiate();
+      } else if (options.teams.length === 0) {
+        client.probe();
+      } else {
+        client.planTeams(options.teams);
+      }
     },
+    refresh: () => client.refresh(),
   };
 }
 
@@ -122,15 +160,25 @@ export function useTeamDraftPlan(options: UseTeamDraftPlanOptions): UseTeamDraft
 
   useEffect(() => {
     if (!client) return;
+    if (!options.active) {
+      client.cancelDraft(sessionId);
+      setState({ status: "idle" });
+      return;
+    }
     setState(client.getDraftState(sessionId));
-    return client.subscribe(() => setState(client.getDraftState(sessionId)));
-  }, [client, sessionId]);
+    const unsubscribe = client.subscribe(() => setState(client.getDraftState(sessionId)));
+    return () => {
+      unsubscribe();
+      client.cancelDraft(sessionId);
+    };
+  }, [client, sessionId, options.active]);
 
   const latest = useRef(options.request);
   latest.current = options.request;
 
   useEffect(() => {
     if (!client || !options.active || !options.request) return;
+    if (client.modeContract() === "legacy") return;
     client.requestDraft(options.request);
   }, [client, options.active, options.request]);
 

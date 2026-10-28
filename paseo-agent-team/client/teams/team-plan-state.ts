@@ -25,6 +25,7 @@ import {
 } from "../../shared/schemas/team-mode";
 import {
   TEAM_PLAN_MAX_ITEMS,
+  type TeamPlanContext,
   type TeamPlanInput,
   type TeamPlanOutput,
   type TeamPlanResult,
@@ -44,6 +45,8 @@ import { formatLaunchBudget } from "../shared/budget-format";
 
 export const TEAM_PLAN_DEBOUNCE_MS = 200;
 export const TEAM_PLAN_CACHE_TTL_MS = 60_000;
+/** Maximum age of a visible plan/availability snapshot before an automatic refetch. */
+export const TEAM_PLAN_REFRESH_MS = 60_000;
 export const TEAM_PLAN_MAX_CONCURRENT_CHUNKS = 2;
 export const TEAM_PLAN_MAX_DRAFT_MEMBERS = 64;
 
@@ -81,6 +84,7 @@ export type TeamPlanDraftState =
 export type TeamPlanBatchView = {
   results: ReadonlyMap<string, TeamPlanResult>;
   hasContext: boolean;
+  context: TeamPlanContext | null;
   failedKeys: ReadonlySet<string>;
   modeContract: ModeContractSupport;
   loaded: boolean;
@@ -94,10 +98,19 @@ export type TeamPlanClient = {
   planTeams(teams: readonly Team[]): void;
   probe(): void;
   requestDraft(request: TeamPlanDraftRequest): void;
+  cancelDraft(sessionId: string): void;
   getBatchView(): TeamPlanBatchView;
   getDraftState(sessionId: string): TeamPlanDraftState;
   modeContract(): ModeContractSupport;
   subscribe(listener: () => void): () => void;
+  /** Mark the tab visible/hidden: a visible tab refreshes at most every refreshMs. */
+  setActive(active: boolean): void;
+  /** Clear and immediately replan the last saved list (or probe an empty one). */
+  refresh(): void;
+  /** Refresh only if the last successful snapshot is older than refreshMs. */
+  refreshIfStale(): void;
+  /** Drop a cached capability and probe again (e.g. after a same-host daemon upgrade). */
+  renegotiate(): void;
   invalidate(): void;
   destroy(): void;
 };
@@ -109,6 +122,7 @@ type ClientOptions = {
   ttlMs?: number;
   chunkSize?: number;
   maxConcurrent?: number;
+  refreshMs?: number;
   schedule?: (run: () => void, ms: number) => unknown;
   cancel?: (handle: unknown) => void;
 };
@@ -295,6 +309,44 @@ export function buildTeamSummary(input: {
   };
 }
 
+/** Global plan error is shown even with no cards; per-card failures cover a healthy v2 list. */
+export function shouldShowPlanError(input: {
+  modeContract: ModeContractSupport;
+  error: string | null;
+  summaryCount: number;
+}): boolean {
+  return (
+    input.modeContract !== "legacy" &&
+    input.error !== null &&
+    (input.modeContract === "unknown" || input.summaryCount === 0)
+  );
+}
+
+export function buildTeamSummaries(input: {
+  results: ReadonlyMap<string, TeamPlanResult>;
+  failedKeys: ReadonlySet<string>;
+  hasContext: boolean;
+  error: string | null;
+  hints?: readonly ModelFamilyHint[];
+}): Map<string, TeamSummaryView> {
+  const built = new Map<string, TeamSummaryView>();
+  for (const [key, result] of input.results) {
+    built.set(
+      key,
+      buildTeamSummary({
+        result,
+        hasContext: input.hasContext,
+        ...(input.hints === undefined ? {} : { hints: input.hints }),
+      }),
+    );
+  }
+  for (const key of input.failedKeys) {
+    if (built.has(key)) continue;
+    built.set(key, { kind: "unavailable", text: input.error ?? teamPlanZh.loadFailed });
+  }
+  return built;
+}
+
 export type TeamBindingTarget =
   | { kind: "role"; roleId: string; profileId?: string }
   | { kind: "economy"; layer: "standard" | "allSeats"; route?: string };
@@ -308,6 +360,8 @@ export type TeamModelRowView = {
   instanceLabel: string | null;
   enabled: boolean;
   profileName: string | null;
+  /** Why there is no runnable selection; null when a Profile is selected or the seat is disabled. */
+  profileStatus: string | null;
   profileMeta: string | null;
   source: string;
   budget: string;
@@ -360,6 +414,15 @@ const BINDING_REASONS: Readonly<Record<string, true>> = {
  * The two entry points a problem row may offer. Pool/route problems never open the Role editor
  * alone; economy-all targets the all-seats layer and standard targets the standard pool.
  */
+function rowRoute(row: TeamPlanRow): string | undefined {
+  if (row.route !== undefined) return row.route;
+  for (const issue of row.issues) {
+    const route = issue.params.route;
+    if (typeof route === "string" && route !== "") return route;
+  }
+  return undefined;
+}
+
 function rowActions(row: TeamPlanRow, mode: TeamPlanResult["effectiveMode"]): TeamBindingTarget[] {
   if (!row.enabled) return [];
   const actions: TeamBindingTarget[] = [];
@@ -370,20 +433,22 @@ function rowActions(row: TeamPlanRow, mode: TeamPlanResult["effectiveMode"]): Te
     unresolved === "route-unavailable" ||
     unresolved === "no-cheap-profile" ||
     unresolved === "policy";
+  const routeValue = rowRoute(row);
   if (economyNeeded) {
-    const route = row.route === undefined ? null : AllSeatsRouteSchema.safeParse(row.route);
+    const route = routeValue === undefined ? null : AllSeatsRouteSchema.safeParse(routeValue);
     actions.push({
       kind: "economy",
-      layer: mode === "economy-all" || row.route !== undefined ? "allSeats" : "standard",
+      layer: mode === "economy-all" || routeValue !== undefined ? "allSeats" : "standard",
       ...(route?.success ? { route: route.data } : {}),
     });
   }
-  const bindingProblem =
-    row.issues.some(
-      (issue) => issue.code === "MODE_PROFILE_UNRESOLVED" || issue.code === "MODE_ROLE_DISABLED",
-    ) ||
-    (unresolved !== null && BINDING_REASONS[unresolved] === true);
-  if (row.roleId !== null && bindingProblem) {
+  // A cheap-route outage is never a Role-binding problem: only a real binding issue/fact may open
+  // the Role editor, and a pool reason (provider unavailable etc.) must never add one implicitly.
+  const explicitBinding = row.issues.some(
+    (issue) => issue.code === "MODE_PROFILE_UNRESOLVED" || issue.code === "MODE_ROLE_DISABLED",
+  );
+  const bindingByFact = !poolIssue && unresolved !== null && BINDING_REASONS[unresolved] === true;
+  if (row.roleId !== null && (explicitBinding || bindingByFact)) {
     const profileId = row.profile?.id ?? row.configuredProfiles[0]?.id;
     actions.push({
       kind: "role",
@@ -401,6 +466,14 @@ export function buildTeamModelRows(input: {
 }): TeamModelRowView[] {
   return input.result.rows.map((row, index) => {
     const profile = row.profile;
+    const unresolved = profile === null ? unresolvedReasonOf(row) : null;
+    const unbound =
+      profile === null &&
+      row.issues.some(
+        (issue) =>
+          issue.code === "MODE_PROFILE_UNRESOLVED" &&
+          (issue.params.reason === "no-candidates" || issue.params.reason === "unbound"),
+      );
     return {
       key: `${row.rowKey}:${row.seatId ?? row.logicalSeatId ?? index}`,
       rowKey: row.rowKey,
@@ -410,11 +483,19 @@ export function buildTeamModelRows(input: {
       instanceLabel: input.labels?.get(row.rowKey) ?? null,
       enabled: row.enabled,
       profileName: profile?.name ?? null,
+      profileStatus:
+        profile !== null || !row.enabled
+          ? null
+          : unbound
+            ? teamPlanZh.noProfile
+            : teamPlanZh.noSelection,
       profileMeta:
         profile === null
           ? null
           : `${profile.provider}${profile.model === undefined ? "" : `/${profile.model}`}`,
-      source: SOURCE_LABELS[row.source] ?? row.source,
+      source: Object.hasOwn(SOURCE_LABELS, row.source)
+        ? (SOURCE_LABELS[row.source] as string)
+        : row.source,
       budget: formatLaunchBudget(row.budget, row.budgetBasis),
       availability: row.availability,
       availabilityLabel: AVAILABILITY_LABELS[row.availability],
@@ -437,6 +518,17 @@ export function buildTeamPlanIssues(
   result: TeamPlanResult,
 ): { text: string; severity: "warning" | "blocker" }[] {
   return result.issues.map((issue) => ({ text: issueText(issue), severity: issue.severity }));
+}
+
+/** One meta line for a row: a blocked row still shows source/budget/availability. */
+export function modelRowMeta(view: TeamModelRowView): string {
+  return (
+    view.profileName === null
+      ? [view.source, view.budget, view.availabilityLabel]
+      : [view.profileMeta, view.source, view.budget, view.availabilityLabel]
+  )
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
 }
 
 export function draftRowKey(member: { seatId?: string }, index: number): string {
@@ -490,14 +582,19 @@ function savedInput(teams: readonly Team[]): TeamPlanInput {
 export function isMethodNotFound(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
-  return (
-    lower.includes("method not found") ||
-    lower.includes("unknown method") ||
-    lower.includes("no such method") ||
+  // A missing method is only proven when the error names the method/RPC AND says it is absent.
+  // "host not registered" is a transport failure, not an older daemon.
+  const mentionsMethod =
+    lower.includes("team.plan") || lower.includes("method") || lower.includes("rpc");
+  const absent =
+    lower.includes("not found") ||
+    lower.includes("not exist") ||
+    lower.includes("unknown") ||
+    lower.includes("no such") ||
     lower.includes("not registered") ||
-    lower.includes("method_not_found") ||
-    lower.includes("method-not-found")
-  );
+    lower.includes("not_found") ||
+    lower.includes("not-found");
+  return mentionsMethod && absent;
 }
 
 export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
@@ -506,6 +603,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
   const ttlMs = options.ttlMs ?? TEAM_PLAN_CACHE_TTL_MS;
   const chunkSize = options.chunkSize ?? TEAM_PLAN_MAX_ITEMS;
   const maxConcurrent = options.maxConcurrent ?? TEAM_PLAN_MAX_CONCURRENT_CHUNKS;
+  const refreshMs = options.refreshMs ?? TEAM_PLAN_REFRESH_MS;
   const schedule = options.schedule ?? ((run, ms) => setTimeout(run, ms));
   const cancel =
     options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -517,6 +615,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
   let loaded = false;
   let checkedAt: string | null = null;
   let hasContext = false;
+  let context: TeamPlanContext | null = null;
   let batchError: string | null = null;
   let batchRequest = 0;
   let running = 0;
@@ -535,13 +634,19 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       results: Map<string, TeamPlanResult>;
       checkedAt: string | null;
       hasContext: boolean;
+      context: TeamPlanContext | null;
     }
   >();
   let probedScope = "";
+  let lastSavedTeams: readonly Team[] = [];
+  let lastRefreshAt: number | null = null;
+  let active = false;
+  let refreshTimer: { handle: unknown } | null = null;
   const draftTimers = new Map<string, { handle: unknown }>();
   const draftSeq = new Map<string, number>();
   const draftScheduled = new Map<string, string>();
   const draftStates = new Map<string, TeamPlanDraftState>();
+  const lastDraftRequests = new Map<string, TeamPlanDraftRequest>();
   const listeners = new Set<() => void>();
   const timers = new Set<{ handle: unknown }>();
   let destroyed = false;
@@ -564,6 +669,20 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     if (request !== batchRequest || destroyed) return;
     checkedAt = output.checkedAt;
     hasContext = output.context !== null;
+    const previous = context;
+    context = output.context;
+    if (
+      previous !== null &&
+      context !== null &&
+      (previous.profilesFingerprint !== context.profilesFingerprint ||
+        previous.availabilityFingerprint !== context.availabilityFingerprint ||
+        previous.revisions.roles !== context.revisions.roles ||
+        previous.revisions.teams !== context.revisions.teams ||
+        previous.revisions.preferences !== context.revisions.preferences)
+    ) {
+      // A new host snapshot invalidates every cached plan, not only this batch.
+      cache.clear();
+    }
     setMode(
       modeContractSupport({
         kind: "capabilities",
@@ -586,12 +705,14 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     results: Map<string, TeamPlanResult>;
     checkedAt: string | null;
     hasContext: boolean;
+    context: TeamPlanContext | null;
   }): void {
     results.clear();
     failedKeys.clear();
     for (const [key, result] of cached.results) results.set(key, result);
     checkedAt = cached.checkedAt;
     hasContext = cached.hasContext;
+    context = cached.context;
     batchError = null;
     loaded = true;
   }
@@ -601,12 +722,14 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     if (pendingDone < pendingTotal) return;
     pending = false;
     inFlightKey = null;
+    lastRefreshAt = now();
     if (batchError === null && failedKeys.size === 0 && cacheKey !== null) {
       cache.set(cacheKey, {
         at: now(),
         results: new Map(results),
         checkedAt,
         hasContext,
+        context,
       });
     }
     cacheKey = null;
@@ -630,7 +753,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
             applyOutput(output, chunk.request, keys);
           },
           (error: unknown) => {
-            if (requestEpoch !== epoch) return;
+            if (requestEpoch !== epoch || chunk.request !== batchRequest) return;
             if (isMethodNotFound(error)) {
               setMode("legacy");
               loaded = true;
@@ -653,18 +776,266 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     pending = running > 0 || pendingChunks.length > 0;
   }
 
-  function clearDraft(sessionId: string): void {
+  function clearDraftTimer(sessionId: string): void {
     const timer = draftTimers.get(sessionId);
     if (timer) cancel(timer.handle);
     draftTimers.delete(sessionId);
     draftScheduled.delete(sessionId);
+  }
+
+  function resetDraftSession(sessionId: string): void {
+    clearDraftTimer(sessionId);
     draftStates.delete(sessionId);
+  }
+
+  function cancelDraftSession(sessionId: string): void {
+    draftSeq.set(sessionId, (draftSeq.get(sessionId) ?? 0) + 1);
+    resetDraftSession(sessionId);
+    lastDraftRequests.delete(sessionId);
+  }
+
+  function clearRefresh(): void {
+    if (refreshTimer) cancel(refreshTimer.handle);
+    refreshTimer = null;
+  }
+
+  function scheduleRefresh(delayMs = refreshMs): void {
+    clearRefresh();
+    if (!active || destroyed) return;
+    refreshTimer = {
+      handle: schedule(() => {
+        refreshTimer = null;
+        if (!active || destroyed) return;
+        reload(false);
+        scheduleRefresh();
+      }, delayMs),
+    };
+  }
+
+  function enqueueDraft(request: TeamPlanDraftRequest): void {
+    if (destroyed || scope === null) return;
+    if (modeContract === "legacy") {
+      clearDraftTimer(request.sessionId);
+      lastDraftRequests.delete(request.sessionId);
+      draftStates.set(request.sessionId, { status: "idle" });
+      notify();
+      return;
+    }
+    const problem = draftInputProblem(request);
+    const nextSeq = (draftSeq.get(request.sessionId) ?? 0) + 1;
+    const requestKey = `${request.sessionId}:${nextSeq}`;
+    if (problem !== null) {
+      clearDraftTimer(request.sessionId);
+      lastDraftRequests.delete(request.sessionId);
+      draftSeq.set(request.sessionId, nextSeq);
+      draftStates.set(request.sessionId, {
+        status: "error",
+        key: requestKey,
+        reason: "invalid",
+        message:
+          problem === "reserved-coordinator"
+            ? teamPlanZh.reservedRowKey
+            : problem === "duplicate-row-key"
+              ? teamPlanZh.duplicateRowKey
+              : teamPlanZh.tooManyMembers(TEAM_PLAN_MAX_DRAFT_MEMBERS),
+      });
+      notify();
+      return;
+    }
+    const scheduled = stableJson({ ...request, sessionId: undefined });
+    if (draftScheduled.get(request.sessionId) === scheduled) return;
+    clearDraftTimer(request.sessionId);
+    draftScheduled.set(request.sessionId, scheduled);
+    draftSeq.set(request.sessionId, nextSeq);
+    lastDraftRequests.set(request.sessionId, request);
+    draftStates.set(request.sessionId, { status: "pending", key: requestKey });
+    const requestEpoch = epoch;
+    const timer = {
+      handle: schedule(() => {
+        timers.delete(timer);
+        draftTimers.delete(request.sessionId);
+        if (destroyed || epoch !== requestEpoch) return;
+        if (draftSeq.get(request.sessionId) !== nextSeq) return;
+        if (modeContract === "legacy") {
+          draftStates.set(request.sessionId, { status: "idle" });
+          notify();
+          return;
+        }
+        void Promise.resolve()
+          .then(() => options.send(draftInput(request, requestKey)))
+          .then(
+            (output) => {
+              if (destroyed || epoch !== requestEpoch) return;
+              if (draftSeq.get(request.sessionId) !== nextSeq) return;
+              if (modeContract === "legacy") {
+                draftStates.set(request.sessionId, { status: "idle" });
+                notify();
+                return;
+              }
+              const result = output.results[0];
+              if (!result || result.key !== requestKey) {
+                draftStates.set(request.sessionId, {
+                  status: "error",
+                  key: requestKey,
+                  reason: "failed",
+                  message: teamPlanZh.loadFailed,
+                });
+              } else {
+                draftStates.set(request.sessionId, {
+                  status: "result",
+                  key: requestKey,
+                  result,
+                });
+                setMode(
+                  modeContractSupport({
+                    kind: "capabilities",
+                    modeContract: output.capabilities.modeContract,
+                  }),
+                );
+              }
+              notify();
+            },
+            (error: unknown) => {
+              if (destroyed || epoch !== requestEpoch) return;
+              if (draftSeq.get(request.sessionId) !== nextSeq) return;
+              if (isMethodNotFound(error)) {
+                setMode("legacy");
+                draftStates.set(request.sessionId, {
+                  status: "error",
+                  key: requestKey,
+                  reason: "legacy",
+                  message: teamPlanZh.legacyUnavailable,
+                });
+              } else {
+                draftStates.set(request.sessionId, {
+                  status: "error",
+                  key: requestKey,
+                  reason: "failed",
+                  message: teamPlanZh.loadFailed,
+                });
+              }
+              notify();
+            },
+          );
+      }, debounceMs),
+    };
+    timers.add(timer);
+    draftTimers.set(request.sessionId, timer);
+    notify();
+  }
+
+  function rescheduleDrafts(): void {
+    for (const request of lastDraftRequests.values()) {
+      draftScheduled.delete(request.sessionId);
+      enqueueDraft(request);
+    }
+  }
+
+  function sendSaved(teams: readonly Team[]): void {
+    lastSavedTeams = [...teams];
+    if (destroyed || scope === null || teams.length === 0) return;
+    if (modeContract === "legacy") return;
+    const input = savedInput(teams);
+    const key = `${scopeKey}|${stableJson(input)}`;
+    if (inFlightKey === key) return;
+    const cached = cache.get(key);
+    if (cached && now() - cached.at <= ttlMs) {
+      applyCached(cached);
+      notify();
+      return;
+    }
+    batchRequest += 1;
+    const request = batchRequest;
+    results.clear();
+    failedKeys.clear();
+    batchError = null;
+    pendingChunks = [];
+    pendingTotal = 0;
+    pendingDone = 0;
+    const items = [...input.items];
+    for (let index = 0; index < items.length; index += chunkSize) {
+      pendingChunks.push({ request, items: items.slice(index, index + chunkSize) });
+    }
+    pendingTotal = pendingChunks.length;
+    cacheKey = key;
+    inFlightKey = key;
+    pump();
+    notify();
+  }
+
+  function sendProbe(): void {
+    if (destroyed || scope === null || probedScope === scopeKey) return;
+    probedScope = scopeKey;
+    const requestEpoch = epoch;
+    void Promise.resolve()
+      .then(() => options.send({ items: [] }))
+      .then(
+        (output) => {
+          if (requestEpoch !== epoch) return;
+          setMode(
+            modeContractSupport({
+              kind: "capabilities",
+              modeContract: output.capabilities.modeContract,
+            }),
+          );
+          loaded = true;
+          lastRefreshAt = now();
+          notify();
+        },
+        (error: unknown) => {
+          if (requestEpoch !== epoch) return;
+          if (isMethodNotFound(error)) {
+            setMode("legacy");
+          } else {
+            setMode("unknown");
+            batchError = teamPlanZh.loadFailed;
+            // A failed transport is retryable; the next probe must be allowed to run.
+            probedScope = "";
+          }
+          loaded = true;
+          lastRefreshAt = now();
+          notify();
+        },
+      );
+  }
+
+  function reload(renegotiateSupport: boolean): void {
+    epoch += 1;
+    results.clear();
+    failedKeys.clear();
+    cache.clear();
+    batchError = null;
+    pendingChunks = [];
+    pending = false;
+    pendingTotal = 0;
+    pendingDone = 0;
+    cacheKey = null;
+    inFlightKey = null;
+    checkedAt = null;
+    hasContext = false;
+    context = null;
+    probedScope = "";
+    if (renegotiateSupport) {
+      modeContract = "unknown";
+      loaded = false;
+    }
+    for (const sessionId of new Set([...draftTimers.keys(), ...draftScheduled.keys()])) {
+      resetDraftSession(sessionId);
+    }
+    if (lastSavedTeams.length === 0) {
+      if (modeContract === "unknown") sendProbe();
+    } else {
+      sendSaved(lastSavedTeams);
+    }
+    rescheduleDrafts();
+    notify();
   }
 
   return {
     setScope(next) {
       const nextKey = scopeSignature(next);
       if (nextKey === scopeKey) return;
+      const hostChanged = scope !== null && scope.hostId !== next.hostId;
       scope = next;
       scopeKey = nextKey;
       epoch += 1;
@@ -679,171 +1050,44 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       inFlightKey = null;
       checkedAt = null;
       hasContext = false;
+      context = null;
       probedScope = "";
-      for (const sessionId of new Set([...draftTimers.keys(), ...draftScheduled.keys()])) {
-        clearDraft(sessionId);
+      lastRefreshAt = null;
+      if (hostChanged) {
+        modeContract = "unknown";
+        loaded = false;
+        lastSavedTeams = [];
+        for (const sessionId of new Set([...lastDraftRequests.keys(), ...draftSeq.keys()])) {
+          cancelDraftSession(sessionId);
+        }
+      } else {
+        for (const sessionId of new Set([...draftTimers.keys(), ...draftScheduled.keys()])) {
+          resetDraftSession(sessionId);
+        }
+        rescheduleDrafts();
+        if (active) {
+          // A revision/Profile change refreshes the visible list without waiting for a re-render.
+          if (lastSavedTeams.length === 0) sendProbe();
+          else sendSaved(lastSavedTeams);
+        }
       }
       notify();
     },
 
     planTeams(teams) {
-      if (destroyed || scope === null || teams.length === 0) return;
-      if (modeContract === "legacy") return;
-      const input = savedInput(teams);
-      const key = `${scopeKey}|${stableJson(input)}`;
-      if (inFlightKey === key) return;
-      const cached = cache.get(key);
-      if (cached && now() - cached.at <= ttlMs) {
-        applyCached(cached);
-        notify();
-        return;
-      }
-      batchRequest += 1;
-      const request = batchRequest;
-      results.clear();
-      failedKeys.clear();
-      batchError = null;
-      pendingChunks = [];
-      pendingTotal = 0;
-      pendingDone = 0;
-      const items = [...input.items];
-      for (let index = 0; index < items.length; index += chunkSize) {
-        pendingChunks.push({ request, items: items.slice(index, index + chunkSize) });
-      }
-      pendingTotal = pendingChunks.length;
-      cacheKey = key;
-      inFlightKey = key;
-      pump();
-      notify();
+      sendSaved(teams);
     },
 
     probe() {
-      if (destroyed || scope === null || probedScope === scopeKey) return;
-      probedScope = scopeKey;
-      const requestEpoch = epoch;
-      void Promise.resolve()
-        .then(() => options.send({ items: [] }))
-        .then(
-          (output) => {
-            if (requestEpoch !== epoch) return;
-            setMode(
-              modeContractSupport({
-                kind: "capabilities",
-                modeContract: output.capabilities.modeContract,
-              }),
-            );
-            loaded = true;
-            notify();
-          },
-          (error: unknown) => {
-            if (requestEpoch !== epoch) return;
-            if (isMethodNotFound(error)) {
-              setMode("legacy");
-            } else {
-              setMode("unknown");
-              batchError = teamPlanZh.loadFailed;
-              // A failed transport is retryable; the next probe must be allowed to run.
-              probedScope = "";
-            }
-            loaded = true;
-            notify();
-          },
-        );
+      sendProbe();
     },
 
     requestDraft(request) {
-      if (destroyed || scope === null) return;
-      const problem = draftInputProblem(request);
-      const nextSeq = (draftSeq.get(request.sessionId) ?? 0) + 1;
-      const requestKey = `${request.sessionId}:${nextSeq}`;
-      if (problem !== null) {
-        const pendingTimer = draftTimers.get(request.sessionId);
-        if (pendingTimer) cancel(pendingTimer.handle);
-        draftTimers.delete(request.sessionId);
-        draftScheduled.delete(request.sessionId);
-        draftStates.set(request.sessionId, {
-          status: "error",
-          key: requestKey,
-          reason: "invalid",
-          message:
-            problem === "reserved-coordinator"
-              ? teamPlanZh.reservedRowKey
-              : problem === "duplicate-row-key"
-                ? teamPlanZh.duplicateRowKey
-                : teamPlanZh.tooManyMembers(TEAM_PLAN_MAX_DRAFT_MEMBERS),
-        });
-        notify();
-        return;
-      }
-      const scheduled = stableJson({ ...request, sessionId: undefined });
-      if (draftScheduled.get(request.sessionId) === scheduled) return;
-      const previous = draftTimers.get(request.sessionId);
-      if (previous) cancel(previous.handle);
-      draftScheduled.set(request.sessionId, scheduled);
-      draftSeq.set(request.sessionId, nextSeq);
-      draftStates.set(request.sessionId, { status: "pending", key: requestKey });
-      const requestEpoch = epoch;
-      const timer = {
-        handle: schedule(() => {
-          timers.delete(timer);
-          draftTimers.delete(request.sessionId);
-          if (destroyed || epoch !== requestEpoch) return;
-          const seq = draftSeq.get(request.sessionId);
-          if (seq !== nextSeq) return;
-          void Promise.resolve()
-            .then(() => options.send(draftInput(request, requestKey)))
-            .then(
-              (output) => {
-                if (destroyed || epoch !== requestEpoch) return;
-                if (draftSeq.get(request.sessionId) !== nextSeq) return;
-                const result = output.results[0];
-                if (!result) {
-                  draftStates.set(request.sessionId, {
-                    status: "error",
-                    key: requestKey,
-                    reason: "failed",
-                    message: teamPlanZh.loadFailed,
-                  });
-                } else {
-                  draftStates.set(request.sessionId, {
-                    status: "result",
-                    key: requestKey,
-                    result,
-                  });
-                  setMode(
-                    modeContractSupport({
-                      kind: "capabilities",
-                      modeContract: output.capabilities.modeContract,
-                    }),
-                  );
-                }
-                notify();
-              },
-              (error: unknown) => {
-                if (destroyed || epoch !== requestEpoch) return;
-                if (isMethodNotFound(error)) {
-                  setMode("legacy");
-                  draftStates.set(request.sessionId, {
-                    status: "error",
-                    key: requestKey,
-                    reason: "legacy",
-                    message: teamPlanZh.legacyUnavailable,
-                  });
-                } else {
-                  draftStates.set(request.sessionId, {
-                    status: "error",
-                    key: requestKey,
-                    reason: "failed",
-                    message: teamPlanZh.loadFailed,
-                  });
-                }
-                notify();
-              },
-            );
-        }, debounceMs),
-      };
-      timers.add(timer);
-      draftTimers.set(request.sessionId, timer);
+      enqueueDraft(request);
+    },
+
+    cancelDraft(sessionId) {
+      cancelDraftSession(sessionId);
       notify();
     },
 
@@ -851,6 +1095,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       return {
         results: new Map(results),
         hasContext,
+        context,
         failedKeys: new Set(failedKeys),
         modeContract,
         loaded,
@@ -873,29 +1118,48 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       return () => listeners.delete(listener);
     },
 
-    invalidate() {
-      epoch += 1;
-      results.clear();
-      failedKeys.clear();
-      cache.clear();
-      batchError = null;
-      pendingChunks = [];
-      pending = false;
-      pendingTotal = 0;
-      pendingDone = 0;
-      cacheKey = null;
-      inFlightKey = null;
-      checkedAt = null;
-      hasContext = false;
-      probedScope = "";
-      for (const sessionId of new Set([...draftTimers.keys(), ...draftScheduled.keys()])) {
-        clearDraft(sessionId);
+    setActive(next) {
+      if (active === next) return;
+      active = next;
+      if (active) {
+        const stale = lastRefreshAt !== null && now() - lastRefreshAt >= refreshMs;
+        if (stale) reload(false);
+        scheduleRefresh(
+          stale || lastRefreshAt === null
+            ? refreshMs
+            : Math.max(0, refreshMs - (now() - lastRefreshAt)),
+        );
+      } else {
+        clearRefresh();
       }
-      notify();
+    },
+
+    refresh() {
+      reload(false);
+      scheduleRefresh();
+    },
+
+    refreshIfStale() {
+      if (lastRefreshAt === null || now() - lastRefreshAt >= refreshMs) {
+        reload(false);
+        scheduleRefresh();
+      }
+    },
+
+    renegotiate() {
+      reload(true);
+      scheduleRefresh();
+    },
+
+    invalidate() {
+      reload(false);
+      scheduleRefresh();
     },
 
     destroy() {
       destroyed = true;
+      active = false;
+      clearRefresh();
       epoch += 1;
       for (const timer of timers) cancel(timer.handle);
       timers.clear();

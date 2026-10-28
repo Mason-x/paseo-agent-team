@@ -139,7 +139,12 @@ export function TeamEditor({
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
 
-  const planSessionId = `team-editor:${team?.id ?? "new"}`;
+  const planSessionToken = useRef<string | null>(null);
+  if (planSessionToken.current === null) {
+    planSessionToken.current =
+      globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  const planSessionId = `team-editor:${team?.id ?? "new"}:${planSessionToken.current}`;
   const planRequest = useMemo<TeamPlanDraftRequest | null>(() => {
     if (!planClient) return null;
     const nextCollaboration = buildCollaboration(

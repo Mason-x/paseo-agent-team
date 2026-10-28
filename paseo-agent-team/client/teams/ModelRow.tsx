@@ -1,7 +1,7 @@
 import { Pressable, Text, View } from "react-native";
 import { teamPlanZh } from "../../shared/zh/team-plan";
 import type { PluginTheme } from "../shared/theme";
-import type { TeamBindingTarget, TeamModelRowView } from "./team-plan-state";
+import { modelRowMeta, type TeamBindingTarget, type TeamModelRowView } from "./team-plan-state";
 
 /**
  * One physical planned seat: coordinator and member rows share it. A blocked row never shows a
@@ -90,16 +90,19 @@ export function ModelRow({
         {view.activationLabel ? <Text style={styles.meta}>{view.activationLabel}</Text> : null}
       </View>
       {view.profileName === null ? (
-        <Text style={view.enabled ? styles.danger : styles.meta}>{teamPlanZh.noProfile}</Text>
+        <>
+          {view.profileStatus ? <Text style={styles.danger}>{view.profileStatus}</Text> : null}
+          <Text style={styles.meta} numberOfLines={2}>
+            {modelRowMeta(view)}
+          </Text>
+        </>
       ) : (
         <>
           <Text style={styles.name} numberOfLines={1}>
             {view.profileName}
           </Text>
           <Text style={styles.meta} numberOfLines={2}>
-            {[view.profileMeta, view.source, view.budget, view.availabilityLabel]
-              .filter((part): part is string => Boolean(part))
-              .join(" · ")}
+            {modelRowMeta(view)}
           </Text>
         </>
       )}

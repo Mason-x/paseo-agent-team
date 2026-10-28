@@ -52,6 +52,7 @@ export const teamPlanZh = {
   otherSeats: "其他席位",
   configured: (names: string) => `候选：${names}`,
   noProfile: "未绑定",
+  noSelection: "当前无可运行的选中 Profile",
   rebind: "去绑定",
   configureEconomy: "配置经济池",
 
@@ -65,6 +66,7 @@ export const teamPlanZh = {
     empty: "无备选",
     missing: (name: string) => `缺失 Profile「${name}」`,
     expand: (count: number) => `+${count}`,
+    missingUnnamed: "缺失 Profile（未命名）",
     collapse: "收起",
   },
   roleFocusProfile: (name: string) => `已定位 Profile「${name}」：在首选或备选中调整。`,

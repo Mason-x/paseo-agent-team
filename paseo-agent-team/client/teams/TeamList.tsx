@@ -9,7 +9,7 @@ import { teamRoleWarnings } from "../domain/validation";
 import { GhostIconButton } from "../shared/buttons";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginTheme } from "../shared/theme";
-import type { TeamSummaryView } from "./team-plan-state";
+import { shouldShowPlanError, type TeamSummaryView } from "./team-plan-state";
 
 export type TeamListPlans = {
   summaries: ReadonlyMap<string, TeamSummaryView>;
@@ -162,11 +162,18 @@ export function TeamList({
     return haystack.includes(query.trim().toLowerCase());
   });
 
-  if (filtered.length === 0) return null;
+  const planErrorVisible =
+    plans !== undefined &&
+    shouldShowPlanError({
+      modeContract: plans.modeContract,
+      error: plans.error,
+      summaryCount: plans.summaries.size,
+    });
+  if (filtered.length === 0 && !planErrorVisible) return null;
 
   return (
     <View style={styles.list}>
-      {plans?.modeContract === "unknown" && plans.error ? (
+      {planErrorVisible && plans ? (
         <View style={{ padding: 10, gap: 4 }}>
           <Text style={styles.warning}>{plans.error}</Text>
           {plans.onRetry ? (
