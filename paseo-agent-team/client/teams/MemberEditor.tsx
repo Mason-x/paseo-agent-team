@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Switch, Text, View } from "react-native";
 import type { Role } from "../../shared/schemas/role";
 import type { TeamMember } from "../../shared/schemas/team";
@@ -18,6 +19,7 @@ export function MemberEditor({
   onDuplicate,
   onRemove,
   revision,
+  modelRows,
 }: {
   theme: PluginTheme;
   member: TeamMember;
@@ -28,6 +30,8 @@ export function MemberEditor({
   onDuplicate: () => void;
   onRemove: () => void;
   revision?: string | number;
+  /** Planned model rows for this member (one per physical seat); absent until the plan arrives. */
+  modelRows?: ReactNode;
 }) {
   const memberRoles = roles.filter(
     (role) => role.id !== coordinatorRoleId || role.id === member.roleId,
@@ -99,6 +103,7 @@ export function MemberEditor({
           onValueChange={(enabled) => onChange({ ...member, enabled })}
         />
       </View>
+      {modelRows}
     </View>
   );
 }
