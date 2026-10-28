@@ -4,6 +4,7 @@ import {
   eligibleSeats,
   nextQualityFailure,
   planDispatch,
+  planDispatchWithReasons,
   rankCandidates,
   type SchedulerContext,
   type SeatRuntime,
@@ -99,7 +100,23 @@ describe("scheduler eligibility and ordering", () => {
     expect(economy.blocked).toBe("no-seat");
   });
 
-  test("ranking is total and stable; a higher tier seat wins only after load/rework", () => {
+  test("tier matching is exact; an idle S seat never replaces a B seat for L1", () => {
+    const b = seat({ seatId: "seat-b1", order: 1 });
+    const s = { ...b, seatId: "seat-s1", order: 0 };
+    const l1 = record({
+      tasks: [taskRecord(spec("T1", "Small", { level: "L1" }), { state: "ready" })],
+    });
+    expect(eligibleSeats(l1, "T1", ctx({ seats: [s, b] })).candidates.map((c) => c.seatId)).toEqual(
+      ["seat-b1"],
+    );
+    const onlyS = planDispatchWithReasons(l1, ctx({ seats: [s] }));
+    expect(onlyS.proposals).toEqual([]);
+    expect(onlyS.blocked).toEqual([
+      { taskId: "T1", decision: "D1", reasons: [{ seatId: "seat-s1", reason: "tier" }] },
+    ]);
+  });
+
+  test("ranking is total and stable", () => {
     const low = { ...seat(), seatId: "seat-b1", load: 1, qualityRework: 0, order: 0 };
     const highRework = { ...seat(), seatId: "seat-a1", load: 0, qualityRework: 2, order: 1 };
     const best = { ...seat(), seatId: "seat-a2", load: 0, qualityRework: 0, order: 2 };
@@ -125,34 +142,37 @@ describe("scheduler eligibility and ordering", () => {
       ],
     });
     const before = JSON.stringify(input);
-    const proposals = planDispatch(input, ctx({ seats: [seat({ seatId: "seat-b1", order: 1 })] }));
-    expect(proposals).toEqual([
+    const single = planDispatchWithReasons(
+      input,
+      ctx({ seats: [seat({ seatId: "seat-b1", order: 1 })] }),
+    );
+    expect(single.proposals).toEqual([
       {
         taskId: "T1",
         seatId: "seat-b1",
         profileId: "profile-haiku",
         qualification: "tier=B,load=0,rework=0",
       },
-      {
-        taskId: "T2",
-        seatId: "seat-b1",
-        profileId: "profile-haiku",
-        qualification: "tier=B,load=0,rework=0",
-      },
     ]);
+    expect(single.blocked).toMatchObject([{ taskId: "T2", decision: "D1" }]);
+    expect(planDispatch(input, ctx({ seats: [seat({ order: 1 })] }))).toHaveLength(1);
     expect(JSON.stringify(input)).toBe(before);
   });
 
   test("generated labels are deterministic and bump a collision suffix", () => {
     expect(dispatchLabels("run-abcdef123456", "task-1", 2, 1)).toEqual({
-      branchName: "re-runabcdef1-task-1-a2-1",
-      worktreeSlug: "re-runabcdef1-task-1-a2-1",
-      workspaceName: "re-runabcdef1-task-1-a2-1",
+      branchName: "re-abcdef1234-task-1-a2-1",
+      worktreeSlug: "re-abcdef1234-task-1-a2-1",
+      workspaceName: "re-abcdef1234-task-1-a2-1",
     });
     expect(
-      dispatchLabels("run-abcdef123456", "task-1", 2, 1, new Set(["re-runabcdef1-task-1-a2-1"]))
+      dispatchLabels("run-abcdef123456", "task-1", 2, 1, new Set(["re-abcdef1234-task-1-a2-1"]))
         .branchName,
-    ).toBe("re-runabcdef1-task-1-a2-2");
+    ).toBe("re-abcdef1234-task-1-a2-2");
+    const labels = ["T1", "A1", "B1"].map((id) => dispatchLabels("run-abcdef123456", id, 1, 1));
+    expect(new Set(labels.map((entry) => entry.branchName)).size).toBe(3);
+    expect(labels[0]?.branchName).toContain("-t1-");
+    expect(dispatchLabels("run-abcdef123456", "登录", 1, 1).branchName).toContain("task-");
   });
 
   test("quality failure is the single rework/escalate/D3/D4 rule", () => {
@@ -171,6 +191,19 @@ describe("scheduler eligibility and ordering", () => {
     ).toEqual({ kind: "blocked", decision: "D3", reason: "S-quality-failure" });
     expect(
       nextQualityFailure({ tier: "A", qualityFailures: 3, escalations: 0, attempts: 6 }, policy),
+    ).toEqual({ kind: "blocked", decision: "D4", reason: "implementation-attempts" });
+    const capNine = { ...policy, perTask: { ...policy.perTask, implementationAttempts: 9 } };
+    const capTen = { ...policy, perTask: { ...policy.perTask, implementationAttempts: 10 } };
+    for (const policyWithCap of [capNine, capTen]) {
+      expect(
+        nextQualityFailure(
+          { tier: "S", qualityFailures: 9, escalations: 2, attempts: 9 },
+          policyWithCap,
+        ),
+      ).toEqual({ kind: "blocked", decision: "D3", reason: "S-quality-failure" });
+    }
+    expect(
+      nextQualityFailure({ tier: "A", qualityFailures: 6, escalations: 1, attempts: 6 }, policy),
     ).toEqual({ kind: "blocked", decision: "D4", reason: "implementation-attempts" });
   });
 });

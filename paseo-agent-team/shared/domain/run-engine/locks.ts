@@ -9,13 +9,10 @@ type RunResourceClaim = z.infer<typeof RunResourceClaimSchema>;
  */
 export type VerifiedScope = {
   repoId: string;
-  kind: "file" | "directory";
+  kind: RunResourceClaim["kind"];
   path: string;
   access: "read" | "write";
   verified: boolean;
-  /** Optional repo-level hotspot/tool key; a shared hot key is a write/write conflict. */
-  hotKey?: string;
-  toolKey?: string;
 };
 
 export type PathRejection =
@@ -37,7 +34,7 @@ export type LockConflict = {
   taskId: string;
   repoId: string;
   path: string;
-  kind: "file" | "directory";
+  kind: RunResourceClaim["kind"];
   access: "read" | "write";
   reason: "path" | "frozen";
 };
@@ -52,9 +49,13 @@ export type LockCheck =
   | { ok: true; conflicts: readonly LockConflict[] }
   | { ok: false; reason: "unverified-scope" | "invalid-path"; path: string };
 
-/** ASCII lower-case fold; non-ASCII stays as-is (host adapter owns filesystem alias checks). */
+/**
+ * NFC + Unicode lower-case. NFC unifies canonically equivalent spellings without the
+ * compatibility folding (NFKC) that would rewrite distinct names; toLowerCase is locale-free,
+ * unlike localeCompare/toLocaleLowerCase. Host-specific 8.3/short-name rules stay in R05.
+ */
 function fold(value: string): string {
-  return value.replace(/[A-Z]/gu, (char) => char.toLowerCase());
+  return value.normalize("NFC").toLowerCase().normalize("NFC");
 }
 
 /**
@@ -95,31 +96,29 @@ export function scopeCovers(
   directory: { path: string; caseFold?: boolean },
   file: { path: string; caseFold?: boolean },
 ): boolean {
-  const foldPaths = directory.caseFold === true || file.caseFold === true;
+  const foldPaths = directory.caseFold !== false && file.caseFold !== false;
   const dir = foldPaths ? fold(directory.path) : directory.path;
   const target = foldPaths ? fold(file.path) : file.path;
   return covers(dir, target);
 }
 
 export function lockConflicts(
-  a: Pick<RunResourceClaim, "repoId" | "kind" | "path" | "access" | "frozen"> & {
-    hotKey?: string;
-    toolKey?: string;
-  },
-  b: Pick<VerifiedScope, "repoId" | "kind" | "path" | "access" | "hotKey" | "toolKey">,
-  caseFold = false,
+  a: Pick<RunResourceClaim, "repoId" | "kind" | "path" | "access" | "frozen">,
+  b: Pick<VerifiedScope, "repoId" | "kind" | "path" | "access">,
+  caseFold = true,
 ): "none" | "read" | "write" {
   if (a.repoId !== b.repoId) return "none";
-  if (a.toolKey !== undefined && a.toolKey === b.toolKey) return "write";
-  if (
-    a.hotKey !== undefined &&
-    a.hotKey === b.hotKey &&
-    (a.access === "write" || b.access === "write")
-  ) {
-    return "write";
+  // hot/tool are named repo resources: exact kind+name only, no directory/path semantics.
+  const aNamed = a.kind === "hot" || a.kind === "tool";
+  const bNamed = b.kind === "hot" || b.kind === "tool";
+  if (aNamed || bNamed) {
+    return a.kind === b.kind && a.path === b.path ? "write" : "none";
   }
-  const aPath = caseFold ? fold(a.path) : a.path;
-  const bPath = caseFold ? fold(b.path) : b.path;
+  const aNormalized = normalizeLogicalPath(a.path);
+  const bNormalized = normalizeLogicalPath(b.path);
+  if (!aNormalized.ok || !bNormalized.ok) return "write";
+  const aPath = caseFold ? fold(aNormalized.path) : aNormalized.path;
+  const bPath = caseFold ? fold(bNormalized.path) : bNormalized.path;
   const aCovers = a.kind === "directory" && covers(aPath, bPath);
   const bCovers = b.kind === "directory" && covers(bPath, aPath);
   if (aPath !== bPath && !aCovers && !bCovers) return "none";
@@ -136,24 +135,26 @@ export function findLockConflicts(
   request: LockRequest,
   options: { caseFold?: boolean } = {},
 ): LockCheck {
+  const resolved: VerifiedScope[] = [];
   for (const scope of request.scopes) {
+    const named = scope.kind === "hot" || scope.kind === "tool";
+    if (named) {
+      if (scope.path.length === 0) return { ok: false, reason: "invalid-path", path: scope.path };
+      resolved.push(scope);
+      continue;
+    }
     if (!scope.verified) return { ok: false, reason: "unverified-scope", path: scope.path };
     const normalized = normalizeLogicalPath(scope.path);
     if (!normalized.ok) return { ok: false, reason: "invalid-path", path: scope.path };
+    resolved.push({ ...scope, path: normalized.path });
   }
+  const caseFold = options.caseFold ?? true;
   const conflicts: LockConflict[] = [];
   for (const claim of record.resources) {
-    for (const scope of request.scopes) {
-      const sameTaskHandoff =
-        claim.taskId === request.taskId &&
-        !claim.frozen &&
-        (request.phase === "review" || request.phase === "smoke");
-      if (sameTaskHandoff) continue;
-      const kind = lockConflicts(
-        claim as RunResourceClaim & { hotKey?: string; toolKey?: string },
-        scope,
-        options.caseFold,
-      );
+    for (const scope of resolved) {
+      // A task re-applying in a later phase keeps its own non-frozen claim; frozen still blocks.
+      if (claim.taskId === request.taskId && !claim.frozen) continue;
+      const kind = lockConflicts(claim, scope, caseFold);
       if (kind === "none") continue;
       conflicts.push({
         claimId: claim.claimId,

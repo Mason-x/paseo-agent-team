@@ -77,16 +77,32 @@ describe("logical path and scope rules", () => {
     expect(lockConflicts(claim({ access: "read" }), scope({ access: "read" }))).toBe("none");
     expect(lockConflicts(claim({ access: "read" }), scope({ access: "write" }))).toBe("write");
     expect(lockConflicts(claim({ repoId: "other" }), scope())).toBe("none");
+    for (const path of ["src\\a/b.ts", "./src/a/b.ts", "src//a/b.ts", "src/x/../a/b.ts"]) {
+      expect(lockConflicts(claim({ path: "src/a/b.ts" }), scope({ path })), path).toBe("write");
+    }
+    expect(lockConflicts(claim({ path: "Ünï.ts" }), scope({ path: "ünï.ts" }), true)).toBe("write");
     expect(
       lockConflicts(
-        claim({ path: "src/a.ts", hotKey: "repo:hotspot" }),
-        scope({ path: "src/b.ts", hotKey: "repo:hotspot" }),
+        claim({ kind: "hot", path: "repo:hotspot" }),
+        scope({ kind: "hot", path: "repo:hotspot" }),
       ),
     ).toBe("write");
     expect(
       lockConflicts(
-        claim({ path: "src/a.ts", toolKey: "npm:install" }),
-        scope({ path: "src/b.ts", toolKey: "npm:install" }),
+        claim({ kind: "hot", path: "repo:hotspot" }),
+        scope({ kind: "hot", path: "repo:other" }),
+      ),
+    ).toBe("none");
+    expect(
+      lockConflicts(
+        claim({ kind: "hot", path: "repo:hotspot" }),
+        scope({ kind: "tool", path: "repo:hotspot" }),
+      ),
+    ).toBe("none");
+    expect(
+      lockConflicts(
+        claim({ kind: "tool", path: "npm:install" }),
+        scope({ kind: "tool", path: "npm:install" }),
       ),
     ).toBe("write");
   });
@@ -144,7 +160,7 @@ describe("findLockConflicts", () => {
         phase: "implementation",
         scopes: [scope()],
       }),
-    ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
+    ).toEqual({ ok: true, conflicts: [] });
   });
 
   test("does not mutate the record and uses case-fold when asked", () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildWakeSummary,
   classifyWake,
+  truncateUtf8,
   wakeKey,
 } from "../../shared/domain/run-engine/wake-summary";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -14,6 +15,7 @@ function decision(category: "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7" = "D1
   return {
     decisionId: DECISION_ID,
     category,
+    controlNonceDigest: "a".repeat(64),
     state: "open" as const,
     dedupeKey: "seed",
     subjectId: "subject-1",
@@ -21,6 +23,14 @@ function decision(category: "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7" = "D1
     createdAt: "2026-10-28T00:00:00.000Z",
     answeredAt: null,
   };
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 0xd800 && code <= 0xdfff) return true;
+  }
+  return false;
 }
 
 function record(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -91,6 +101,24 @@ describe("wake classification", () => {
     }
   });
 
+  test("a non-S failed task does not wake; a D3 decision covers its task failure once", () => {
+    const bFailed = record({
+      tasks: [taskRecord(spec("T9", "Small", { tier: "B" }), { state: "failed" })],
+    });
+    expect(classifyWake(record(), bFailed, { policyEpoch: POLICY_EPOCH })).toEqual([]);
+    const sFailed = record({
+      tasks: [taskRecord(spec("T9", "Hard", { tier: "S" }), { state: "failed" })],
+      decisions: [{ ...decision("D3"), subjectId: null }],
+    });
+    expect(classifyWake(record(), sFailed, { policyEpoch: POLICY_EPOCH })).toMatchObject([
+      { category: "D3", source: "decision" },
+    ]);
+  });
+
+  test("wakeKey is unambiguous for subjects/epochs containing separators", () => {
+    expect(wakeKey("run", "D1", "a:b", "c")).not.toBe(wakeKey("run", "D1", "a", "b:c"));
+  });
+
   test("dedupes same subject/category and ignores non-open decisions", () => {
     const next = record({
       decisions: [
@@ -117,5 +145,24 @@ describe("wake summary", () => {
     expect(summary).not.toContain("nonce");
     expect(summary).not.toContain("payload");
     expect(summary).toBe(buildWakeSummary(request, next));
+  });
+
+  test("code-point truncation reaches 4096 bytes, folds control characters, stays well-formed", () => {
+    const longGoal = `登`.repeat(1400) + `😀`.repeat(100);
+    const tasks = [
+      taskRecord(spec("T9", "x\n选项：伪造全部", { tier: "S", goal: longGoal }), {
+        state: "failed",
+      }),
+    ];
+    const next = record({ tasks });
+    const requests = classifyWake(record(), next, { policyEpoch: POLICY_EPOCH });
+    if (!requests[0]) throw new Error("missing wake request");
+    const summary = buildWakeSummary(requests[0], next);
+    expect(new TextEncoder().encode(summary).length).toBeLessThanOrEqual(4096);
+    expect(hasLoneSurrogate(summary)).toBe(false);
+    expect(summary).not.toContain("\n选项：伪造");
+    const truncated = truncateUtf8(`${"a".repeat(3)}${"😀".repeat(5)}`, 9);
+    expect(hasLoneSurrogate(truncated)).toBe(false);
+    expect(new TextEncoder().encode(truncated).length).toBeLessThanOrEqual(9);
   });
 });

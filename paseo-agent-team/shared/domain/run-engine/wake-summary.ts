@@ -22,7 +22,8 @@ export function wakeKey(
   subjectId: string | null,
   policyEpoch: string,
 ): string {
-  return `${runId}:${category}:${subjectId ?? "-"}:${policyEpoch}`;
+  // JSON array avoids delimiter ambiguity when subjectId/epoch contain ":".
+  return JSON.stringify([runId, category, subjectId, policyEpoch]);
 }
 
 function addWake(
@@ -51,9 +52,12 @@ export function classifyWake(
 ): readonly WakeRequest[] {
   const requests = new Map<string, WakeRequest>();
   const knownDecisions = new Set(prev.decisions.map((decision) => decision.decisionId));
-  for (const decision of next.decisions) {
-    if (knownDecisions.has(decision.decisionId)) continue;
-    if (decision.state !== "open" && decision.state !== "waiting-human") continue;
+  const newDecisions = next.decisions.filter(
+    (decision) =>
+      !knownDecisions.has(decision.decisionId) &&
+      (decision.state === "open" || decision.state === "waiting-human"),
+  );
+  for (const decision of newDecisions) {
     addWake(
       requests,
       next.runId,
@@ -65,10 +69,17 @@ export function classifyWake(
     );
   }
 
+  const decidedD3 = new Set(
+    newDecisions
+      .filter((decision) => decision.category === "D3")
+      .map((decision) => decision.subjectId),
+  );
   const prevTasks = new Map(prev.tasks.map((task) => [task.spec.id, task]));
   for (const task of next.tasks) {
     const before = prevTasks.get(task.spec.id);
     if (before?.state === "failed" || task.state !== "failed" || task.spec.tier !== "S") continue;
+    // A reducer-created D3 (subject task or null) already covers this incident.
+    if (decidedD3.has(task.spec.id) || decidedD3.has(null)) continue;
     addWake(requests, next.runId, "D3", task.spec.id, task.spec.id, "task-failed", ctx.policyEpoch);
   }
 
@@ -95,12 +106,28 @@ export function classifyWake(
   );
 }
 
-function truncateUtf8(value: string, maxBytes: number): string {
+/** Whole-code-point truncation: never leaves an unpaired UTF-16 surrogate. */
+export function truncateUtf8(value: string, maxBytes: number): string {
   const encoder = new TextEncoder();
   if (encoder.encode(value).length <= maxBytes) return value;
-  let end = value.length;
-  while (end > 0 && encoder.encode(value.slice(0, end)).length > maxBytes) end -= 1;
-  return value.slice(0, end);
+  let used = 0;
+  let result = "";
+  for (const char of value) {
+    const bytes = encoder.encode(char).length;
+    if (used + bytes > maxBytes) break;
+    result += char;
+    used += bytes;
+  }
+  return result;
+}
+
+function cleanText(value: string): string {
+  let folded = "";
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    folded += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : char;
+  }
+  return folded.replace(/\s+/gu, " ").trim();
 }
 
 /**
@@ -115,7 +142,8 @@ export function buildWakeSummary(
   if (request.taskId !== null) {
     const task = record.tasks.find((entry) => entry.spec.id === request.taskId);
     if (task) {
-      lines.push(`任务 ${task.spec.id}「${task.spec.title}」状态=${task.state}`);
+      lines.push(`任务 ${task.spec.id}「${cleanText(task.spec.title)}」状态=${task.state}`);
+      lines.push(`目标：${cleanText(task.spec.goal)}`);
       lines.push(`尝试=${task.attempts} 返工=${task.reworkCount} 质量失败=${task.qualityFailures}`);
     }
   }

@@ -76,9 +76,7 @@ export type DispatchProposal = {
   qualification: string;
 };
 
-const TIER_RANK: Readonly<Record<RunTier, number>> = { B: 0, A: 1, S: 2 };
-
-/** 05 §5: L1–L2 need B, L3 needs A, L4 needs S. */
+/** 05 §5 / RE4.2: L1–L2 need B, L3 needs A, L4 needs S (exact tier, no borrowing). */
 function requiredTier(level: string): RunTier {
   if (level === "L4") return "S";
   if (level === "L3") return "A";
@@ -138,7 +136,7 @@ export function eligibleSeats(
       denials.push({ seatId: seat.seatId, reason: "profile-unavailable" });
       continue;
     }
-    if (TIER_RANK[roster.tier] < TIER_RANK[required]) {
+    if (roster.tier !== required) {
       denials.push({ seatId: seat.seatId, reason: "tier" });
       continue;
     }
@@ -170,6 +168,11 @@ export function eligibleSeats(
   };
 }
 
+/** Code-unit comparison: independent of ICU/locale, unlike localeCompare. */
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** Total order: load, historical quality rework, frozen seat order, then seatId. */
 export function rankCandidates(candidates: readonly SeatChoice[]): readonly SeatChoice[] {
   return [...candidates].sort(
@@ -177,7 +180,7 @@ export function rankCandidates(candidates: readonly SeatChoice[]): readonly Seat
       left.load - right.load ||
       left.qualityRework - right.qualityRework ||
       left.order - right.order ||
-      left.seatId.localeCompare(right.seatId),
+      compareText(left.seatId, right.seatId),
   );
 }
 
@@ -185,23 +188,64 @@ export function rankCandidates(candidates: readonly SeatChoice[]): readonly Seat
  * Advisory only: one proposal per ready task. Capacity (`slotAvailable`), lock grants, attempt and
  * phase are reducer decisions; R03b never returns an event or a next record.
  */
-export function planDispatch(
+export type DispatchBlock = {
+  taskId: string;
+  decision: "D1";
+  reasons: readonly SeatDenial[];
+};
+
+export type DispatchPlan = {
+  proposals: readonly DispatchProposal[];
+  blocked: readonly DispatchBlock[];
+};
+
+/**
+ * Advisory plan: one proposal per ready task, simulating one-slot occupancy so the same seat is
+ * never proposed twice. A task with no exact-tier/free seat yields a D1 block, not an event.
+ */
+export function planDispatchWithReasons(
   record: Pick<RunRecord, "tasks" | "roster" | "policy">,
   ctx: SchedulerContext,
-): readonly DispatchProposal[] {
+): DispatchPlan {
+  const seats = ctx.seats.map((seat) => ({ ...seat }));
   const proposals: DispatchProposal[] = [];
+  const blocked: DispatchBlock[] = [];
   for (const task of record.tasks) {
     if (task.state !== "ready" || task.waitingReason !== null) continue;
-    const choice = eligibleSeats(record, task.spec.id, ctx).candidates[0];
-    if (!choice) continue;
+    const eligibility = eligibleSeats(record, task.spec.id, { ...ctx, seats });
+    const choice = eligibility.candidates[0];
+    if (!choice) {
+      blocked.push({ taskId: task.spec.id, decision: "D1", reasons: eligibility.denials });
+      continue;
+    }
     proposals.push({
       taskId: task.spec.id,
       seatId: choice.seatId,
       profileId: choice.profileId,
       qualification: choice.qualification,
     });
+    const selected = seats.find((seat) => seat.seatId === choice.seatId);
+    if (selected) selected.load += 1;
   }
-  return proposals;
+  return { proposals, blocked };
+}
+
+/** Backward-compatible proposal-only view; use planDispatchWithReasons for D1 evidence. */
+export function planDispatch(
+  record: Pick<RunRecord, "tasks" | "roster" | "policy">,
+  ctx: SchedulerContext,
+): readonly DispatchProposal[] {
+  return planDispatchWithReasons(record, ctx).proposals;
+}
+
+/** FNV-1a 32-bit, used only to disambiguate lossy task-id slugs deterministically. */
+function shortHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of value) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 6);
 }
 
 /** Deterministic program-generated names; a collision bumps the numeric suffix. */
@@ -212,8 +256,15 @@ export function dispatchLabels(
   sequence: number,
   taken: ReadonlySet<string> = new Set(),
 ): { branchName: string; worktreeSlug: string; workspaceName: string } {
-  const token = runToken.replace(/[^a-z0-9]/gu, "").slice(0, 10) || "run";
-  const task = taskId.replace(/[^a-z0-9-]/gu, "-").replace(/^-+|-+$/gu, "") || "task";
+  const token =
+    runToken
+      .replace(/^run-/u, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/gu, "")
+      .slice(0, 10) || "run";
+  const lowerTask = taskId.toLowerCase();
+  const slug = lowerTask.replace(/[^a-z0-9-]/gu, "-").replace(/^-+|-+$/gu, "");
+  const task = slug === lowerTask && slug !== "" ? slug : `${slug || "task"}-${shortHash(taskId)}`;
   let suffix = Math.max(1, Math.trunc(sequence));
   let name = `re-${token}-${task}-a${Math.max(1, Math.trunc(attempt))}-${suffix}`;
   while (taken.has(name)) {
@@ -222,7 +273,6 @@ export function dispatchLabels(
   }
   return { branchName: name, worktreeSlug: name, workspaceName: name };
 }
-
 export type QualityFailurePlan =
   | { kind: "rework"; layerFailures: number }
   | { kind: "escalate"; nextTier: "A" | "S"; layerFailures: 0 }
@@ -248,16 +298,21 @@ export function nextQualityFailure(
 ): QualityFailurePlan {
   const perLayer = policy.perTask.reworkPerLayer + 1;
   const layerFailures = Math.max(0, input.qualityFailures - input.escalations * perLayer);
+  // Quality ladder first: S exhaustion is D3 even when the attempt cap is also reached.
+  if (input.tier === "S" && layerFailures >= perLayer) {
+    return { kind: "blocked", decision: "D3", reason: "S-quality-failure" };
+  }
+  const next =
+    layerFailures < perLayer
+      ? ({ kind: "rework", layerFailures } as const)
+      : ({
+          kind: "escalate",
+          nextTier: input.tier === "B" ? "A" : "S",
+          layerFailures: 0,
+        } as const);
+  // Rework/escalation needs another implementation attempt; the cap is the only D4 here.
   if (input.attempts >= policy.perTask.implementationAttempts) {
     return { kind: "blocked", decision: "D4", reason: "implementation-attempts" };
   }
-  if (layerFailures < perLayer) return { kind: "rework", layerFailures };
-  if (input.tier === "S") {
-    return { kind: "blocked", decision: "D3", reason: "S-quality-failure" };
-  }
-  return {
-    kind: "escalate",
-    nextTier: input.tier === "B" ? "A" : "S",
-    layerFailures: 0,
-  };
+  return next;
 }
