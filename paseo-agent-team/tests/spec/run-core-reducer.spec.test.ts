@@ -985,23 +985,16 @@ describe("R03a gate details and invariant boundaries", () => {
 });
 
 describe("R01f cancellation authorization and refresh evidence", () => {
-  type R01fEvidence = RunCancellationEvidence & {
-    refresh?: { agentId: string; status: string; activeTurn: boolean; observedAt: string };
-  };
-  type R01fDecision = (typeof NORMAL_RUN_LEDGER.decisions)[number] & {
-    answer?: { action: string; taskIds: string[]; answeredAt: string } | null;
-  };
-
   const refresh = {
     agentId: "agent-b1",
-    status: "idle",
-    activeTurn: false,
+    status: "idle" as const,
+    activeTurn: false as const,
     observedAt: AT_UPDATED,
   };
 
   function cancellationRecord(
-    decisionOverrides: Partial<R01fDecision> = {},
-    evidenceOverrides: Partial<R01fEvidence> = {},
+    decisionOverrides: Partial<RunRecord["decisions"][number]> = {},
+    evidenceOverrides: Partial<RunCancellationEvidence> = {},
     recipient = "agent-b1",
   ) {
     const record = structuredClone(NORMAL_RUN_LEDGER);
@@ -1051,13 +1044,13 @@ describe("R01f cancellation authorization and refresh evidence", () => {
         answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
         cancelIntentId: INTENT_CANCEL,
         ...decisionOverrides,
-      } as R01fDecision,
+      } as RunRecord["decisions"][number],
     ];
     const evidence = {
       ...QUIESCENT_CANCELLATION,
       refresh,
       ...evidenceOverrides,
-    } as R01fEvidence;
+    } as RunCancellationEvidence;
     return { record, evidence };
   }
 
@@ -1074,7 +1067,9 @@ describe("R01f cancellation authorization and refresh evidence", () => {
     expect(result.next.resources).toEqual([]);
   });
 
-  const freezeCases: Array<[string, () => { record: RunRecord; evidence: R01fEvidence }]> = [
+  const freezeCases: Array<
+    [string, () => { record: RunRecord; evidence: RunCancellationEvidence }]
+  > = [
     [
       "missing refresh",
       () => {
@@ -1083,8 +1078,20 @@ describe("R01f cancellation authorization and refresh evidence", () => {
         return base;
       },
     ],
-    ["agent busy", () => cancellationRecord({}, { refresh: { ...refresh, status: "busy" } })],
-    ["active turn", () => cancellationRecord({}, { refresh: { ...refresh, activeTurn: true } })],
+    [
+      "agent busy",
+      () =>
+        cancellationRecord({}, {
+          refresh: { ...refresh, status: "busy" },
+        } as unknown as Partial<RunCancellationEvidence>),
+    ],
+    [
+      "active turn",
+      () =>
+        cancellationRecord({}, {
+          refresh: { ...refresh, activeTurn: true },
+        } as unknown as Partial<RunCancellationEvidence>),
+    ],
     ["wrong intent recipient", () => cancellationRecord({}, {}, "agent-other")],
     ["D1 still open", () => cancellationRecord({ state: "open", answeredAt: null, answer: null })],
     [
