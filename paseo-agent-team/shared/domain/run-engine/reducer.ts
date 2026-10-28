@@ -17,6 +17,7 @@ import {
   occupiesExecutionSlot,
   type RunInvariantViolation,
 } from "./invariants";
+import { executionTier, reviewRequirement } from "./tier";
 import {
   type RunReducerEvent,
   type RunStoredReview,
@@ -222,21 +223,22 @@ function quiescent(record: RunRecord, taskId: string): boolean {
   }
   if (assignment.turnId === null || evidence.lastTurnId !== assignment.turnId) return false;
   if (evidence.endedEventKey === null) return false;
-  const ended = record.eventReceipts.find(
+  const endedIndex = record.eventReceipts.findIndex(
     (receipt) =>
       receipt.eventKey === evidence.endedEventKey &&
       receipt.kind === "turn_ended" &&
       receipt.agentId === assignment.agentId &&
       receipt.turnId === assignment.turnId,
   );
+  const ended = endedIndex < 0 ? undefined : record.eventReceipts[endedIndex];
   if (ended === undefined || evidence.observationSeq < ended.seq) return false;
   const endedAt = ended.receivedAt;
   if (Date.parse(evidence.refreshObservedAt) < Date.parse(endedAt)) return false;
   const laterStarted = record.eventReceipts.some(
-    (receipt) =>
+    (receipt, index) =>
+      index > endedIndex &&
       receipt.kind === "turn_started" &&
-      receipt.agentId === assignment.agentId &&
-      receipt.seq > ended.seq,
+      receipt.agentId === assignment.agentId,
   );
   return !laterStarted;
 }
@@ -496,56 +498,90 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["assignment", "state"], "untrusted-assignment");
       }
-      const reviewRequiredTier =
-        task.spec.level === "L1" ? "B" : task.spec.level === "L4" ? "S" : "A";
-      const workerRequiredTier =
-        task.spec.level === "L1" || task.spec.level === "L2"
-          ? "B"
-          : task.spec.level === "L4"
-            ? "S"
-            : "A";
       const requiredTier =
-        reviewDispatch || smokeDispatch ? reviewRequiredTier : workerRequiredTier;
+        reviewDispatch || smokeDispatch ? reviewRequirement(task).tier : executionTier(task);
       if (event.assignment.tier !== requiredTier) {
         return reject("RUN_EVENT_INVALID", ["assignment", "tier"], "tier-mismatch");
       }
       if (!reviewDispatch && !smokeDispatch && event.assignment.attempt !== task.attempts + 1) {
         return reject("RUN_EVENT_INVALID", ["assignment", "attempt"], "attempt-mismatch");
       }
-      const claims = reviewDispatch || smokeDispatch ? [] : (event.claims ?? []);
-      if (workerDispatch && task.spec.execution === "write" && claims.length === 0) {
+      const requestedClaims = reviewDispatch || smokeDispatch ? [] : (event.claims ?? []);
+      const existingClaims = next.resources.filter((entry) => entry.taskId === event.taskId);
+      const reuseExisting =
+        (task.state === "rework" ||
+          (task.state === "review" && task.phase === "awaiting-rework")) &&
+        requestedClaims.length === 0;
+      const claims = reuseExisting ? existingClaims : requestedClaims;
+      const hasWorkerWrites =
+        workerDispatch && task.spec.scopes.some((scope) => scope.access === "write");
+      if (hasWorkerWrites && claims.length === 0 && !reuseExisting) {
         return reject("RUN_EVENT_INVALID", ["claims"], "claim-required");
       }
-      const claimIds = new Set(next.resources.map((claim) => claim.claimId));
-      for (const claim of claims) {
-        if (
-          claim.taskId !== event.taskId ||
-          claim.frozen ||
-          claimIds.has(claim.claimId) ||
-          !task.spec.scopes.some(
-            (scope) =>
-              (scope.repoId === claim.repoId &&
-                scope.access === claim.access &&
-                scope.kind === "file" &&
-                claim.kind === "file" &&
-                normalizeContainedPath(scope.path) === normalizeContainedPath(claim.path)) ||
-              (scope.kind === "directory" &&
-                (claim.kind === "file" || claim.kind === "directory") &&
-                (normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path) ||
+      const claimIds = new Set(
+        next.resources
+          .filter((entry) => reuseExisting || entry.taskId !== event.taskId)
+          .map((claim) => claim.claimId),
+      );
+      const writeScopes = task.spec.scopes.filter((scope) => scope.access === "write");
+      for (const claim of reuseExisting ? [] : claims) {
+        if (claim.taskId !== event.taskId || claim.frozen || claimIds.has(claim.claimId)) {
+          return reject("RUN_EVENT_INVALID", ["claims"], "claim-not-in-scope");
+        }
+        if (claim.kind === "hot" || claim.kind === "tool") {
+          if (claim.path.length === 0) {
+            return reject("RUN_EVENT_INVALID", ["claims"], "claim-not-in-scope");
+          }
+          claimIds.add(claim.claimId);
+          continue;
+        }
+        const claimPath = normalizeContainedPath(claim.path);
+        const matches = task.spec.scopes.some(
+          (scope) =>
+            scope.repoId === claim.repoId &&
+            scope.access === claim.access &&
+            (scope.kind === "file"
+              ? claim.kind === "file" && normalizeContainedPath(scope.path) === claimPath
+              : (claim.kind === "file" || claim.kind === "directory") &&
+                (claimPath === normalizeContainedPath(scope.path) ||
                   (normalizeContainedPath(scope.path) !== null &&
-                    normalizeContainedPath(claim.path)?.startsWith(
-                      `${normalizeContainedPath(scope.path)}/`,
-                    )))),
-          )
-        ) {
+                    claimPath?.startsWith(`${normalizeContainedPath(scope.path)}/`)))),
+        );
+        if (!matches) {
           return reject("RUN_EVENT_INVALID", ["claims"], "claim-not-in-scope");
         }
         claimIds.add(claim.claimId);
       }
+      if (workerDispatch && task.spec.execution === "write") {
+        for (const scope of writeScopes) {
+          const covered = claims.some(
+            (claim) =>
+              claim.repoId === scope.repoId &&
+              claim.access === scope.access &&
+              (claim.kind === "hot" || claim.kind === "tool"
+                ? false
+                : scope.kind === "file"
+                  ? claim.kind === "file" &&
+                    normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path)
+                  : (claim.kind === "file" || claim.kind === "directory") &&
+                    (normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path) ||
+                      (normalizeContainedPath(scope.path) !== null &&
+                        normalizeContainedPath(claim.path)?.startsWith(
+                          `${normalizeContainedPath(scope.path)}/`,
+                        )))),
+          );
+          if (!covered) {
+            return reject("RUN_EVENT_INVALID", ["claims"], "claim-coverage");
+          }
+        }
+      }
+      if (!reuseExisting) {
+        next.resources = next.resources.filter((entry) => entry.taskId !== event.taskId);
+      }
       next.assignments.push(event.assignment);
       next.nonceRegistry.push(event.nonce);
       next.outbox.push(event.intent);
-      next.resources.push(...claims);
+      if (!reuseExisting) next.resources.push(...claims);
       if (reviewDispatch || smokeDispatch) {
         task.waitingReason = null;
         task.currentAssignmentId = event.assignment.assignmentId;
@@ -775,6 +811,9 @@ function applyEvent(
       if (!validControlNonceDigest(event.controlNonceDigest)) {
         return reject("RUN_EVENT_INVALID", ["cancel", "controlNonceDigest"], "invalid-digest");
       }
+      if (event.taskIds.length !== 1) {
+        return reject("RUN_EVENT_INVALID", ["cancel", "taskIds"], "multi-task-cancel");
+      }
       const cancelIntent = next.outbox.find((intent) => intent.id === event.cancelIntentId);
       if (
         cancelIntent === undefined ||
@@ -937,7 +976,10 @@ function applyEvent(
       if (next.eventReceipts.some((entry) => entry.dedupeKey === event.receipt.dedupeKey)) {
         return null;
       }
-      next.eventReceipts.push(event.receipt);
+      next.eventReceipts.push({
+        ...event.receipt,
+        seq: next.counters.observationSeq + 1,
+      });
       next.counters.observationSeq += 1;
       return null;
     }

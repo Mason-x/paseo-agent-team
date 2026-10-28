@@ -767,7 +767,9 @@ describe("R03a gate details and invariant boundaries", () => {
   test("an escalation origin raises the required review tier", () => {
     const record = reviewReady();
     taskOf(record, "T2").spec = { ...taskOf(record, "T2").spec, level: "L1" };
-    taskOf(record, "T2").escalations = [{ level: "L3" }];
+    taskOf(record, "T2").escalations = [
+      { fromTier: "B", toTier: "A", atAttempt: 1, qualityFailures: 0, at: AT_UPDATED },
+    ];
     const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t2-r1");
     if (!reviewer) throw new Error("reviewer");
     reviewer.tier = "B";

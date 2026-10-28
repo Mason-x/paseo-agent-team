@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: fixture builders guarantee these indices.
 import { describe, expect, test } from "vitest";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
@@ -1086,7 +1087,7 @@ describe("reduceRun", () => {
           kind: "turn_started",
           agentId: "agent-b1",
           turnId: "turn-9",
-          seq: 8,
+          seq: 3,
           receivedAt: AT_UPDATED,
           dedupeKey: "agent-b1|turn-9|turn_started",
           disposition: "observed",
@@ -1243,5 +1244,342 @@ describe("reduceRun", () => {
     );
     expect(blocked.ok).toBe(true);
     if (blocked.ok) expect(taskOf(blocked.next, "T2").state).not.toBe("done");
+  });
+  test("a multi-task cancel request is rejected instead of half-binding one intent", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
+    const result = reduceRun(
+      record,
+      {
+        kind: "cancel-requested",
+        taskIds: ["T2", "T3"],
+        reason: "cancel",
+        cancelIntentId: INTENT_CANCEL,
+        controlNonceDigest: CONTROL_DIGEST,
+      },
+      facts,
+    );
+    expect(result).toMatchObject({ ok: false, params: { reason: "multi-task-cancel" } });
+  });
+  test("dispatch accepts hot/tool claims and rejects read-scope and uncovered write scopes", () => {
+    const base = structuredClone(NORMAL_RUN_LEDGER);
+    const t3 = taskOf(base, "T3");
+    t3.state = "ready";
+    t3.attempts = 0;
+    t3.spec = {
+      ...t3.spec,
+      deps: [],
+      scopes: [
+        { repoId: "repo-re-verify", kind: "file", path: "src/t3.ts", access: "write" },
+        { repoId: "repo-re-verify", kind: "file", path: "src/t3b.ts", access: "write" },
+      ],
+    };
+    const nonce = "abcdabcd-abcd-4abc-8abc-abcdabcdabcd";
+    const dispatch = (claims: ReturnType<typeof claim>[]) =>
+      reduceRun(
+        base,
+        {
+          kind: "task-dispatched",
+          taskId: "T3",
+          assignment: assignment({
+            assignmentId: "assignment-t3-a1",
+            taskId: "T3",
+            nonce,
+            messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          }),
+          nonce: {
+            nonce,
+            runId: base.runId,
+            taskId: "T3",
+            assignmentId: "assignment-t3-a1",
+            attempt: 1,
+            phase: "implementation",
+            agentId: "agent-b1",
+            seatId: "seat-b1",
+            issuedAt: AT_UPDATED,
+            acceptedAt: null,
+            acceptedEventKey: null,
+            revokedAt: null,
+            revokeReason: null,
+          },
+          intent: dispatchIntent({
+            id: "intent-t3-a1",
+            taskId: "T3",
+            assignmentId: "assignment-t3-a1",
+            messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          }),
+          claims,
+        },
+        facts,
+      );
+    const hot = dispatch([
+      claim({ claimId: "t3-file", taskId: "T3", path: "src/t3.ts" }),
+      claim({ claimId: "t3-file-b", taskId: "T3", path: "src/t3b.ts" }),
+      claim({ claimId: "t3-hot", taskId: "T3", kind: "hot", path: "repo:hot", access: "write" }),
+    ]);
+    expect(hot.ok).toBe(true);
+    if (hot.ok) expect(hot.next.resources.some((entry) => entry.claimId === "t3-hot")).toBe(true);
+    expect(
+      dispatch([claim({ claimId: "t3-file", taskId: "T3", path: "src/t3.ts" })]),
+    ).toMatchObject({ ok: false, params: { reason: "claim-coverage" } });
+
+    const read = structuredClone(base);
+    const readTask = taskOf(read, "T3");
+    readTask.state = "ready";
+    readTask.attempts = 0;
+    readTask.spec = {
+      ...readTask.spec,
+      scopes: [{ repoId: "repo-re-verify", kind: "directory", path: "docs", access: "read" }],
+    };
+    const readResult = reduceRun(
+      read,
+      {
+        kind: "task-dispatched",
+        taskId: "T3",
+        assignment: assignment({
+          assignmentId: "assignment-t3-read",
+          taskId: "T3",
+          nonce: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        }),
+        nonce: {
+          nonce: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          runId: read.runId,
+          taskId: "T3",
+          assignmentId: "assignment-t3-read",
+          attempt: 1,
+          phase: "implementation",
+          agentId: "agent-b1",
+          seatId: "seat-b1",
+          issuedAt: AT_UPDATED,
+          acceptedAt: null,
+          acceptedEventKey: null,
+          revokedAt: null,
+          revokeReason: null,
+        },
+        intent: dispatchIntent({
+          id: "intent-t3-read",
+          taskId: "T3",
+          assignmentId: "assignment-t3-read",
+          messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        }),
+        claims: [claim({ claimId: "t3-read", taskId: "T3", path: "docs/x", access: "write" })],
+      },
+      facts,
+    );
+    expect(readResult).toMatchObject({ ok: false, params: { reason: "claim-not-in-scope" } });
+  });
+
+  test("rework reuses existing claims without appending duplicates", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    const task = taskOf(record, "T2");
+    task.state = "rework";
+    task.attempts = 1;
+    const nonce = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const result = reduceRun(
+      record,
+      {
+        kind: "task-dispatched",
+        taskId: "T2",
+        assignment: assignment({
+          assignmentId: "assignment-t2-r2",
+          taskId: "T2",
+          attempt: 2,
+          nonce,
+          messageId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }),
+        nonce: {
+          nonce,
+          runId: record.runId,
+          taskId: "T2",
+          assignmentId: "assignment-t2-r2",
+          attempt: 2,
+          phase: "implementation",
+          agentId: "agent-b1",
+          seatId: "seat-b1",
+          issuedAt: AT_UPDATED,
+          acceptedAt: null,
+          acceptedEventKey: null,
+          revokedAt: null,
+          revokeReason: null,
+        },
+        intent: dispatchIntent({
+          id: "intent-t2-r2",
+          taskId: "T2",
+          assignmentId: "assignment-t2-r2",
+          messageId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }),
+      },
+      facts,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.next.resources.filter((entry) => entry.taskId === "T2")).toHaveLength(1);
+  });
+
+  test("run-finished rejects a claim and an unrelated open decision", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.tasks = [];
+    record.decisions = [];
+    record.outbox = [];
+    record.assignments = [];
+    record.nonceRegistry = [];
+    expect(reduceRun(record, { kind: "run-finished" }, facts).ok).toBe(false);
+    record.resources = [];
+    record.decisions = [
+      {
+        decisionId: DECISION_D1,
+        category: "D1",
+        controlNonceDigest: CONTROL_DIGEST,
+        state: "open",
+        dedupeKey: "other",
+        subjectId: null,
+        summary: "unresolved",
+        createdAt: AT_UPDATED,
+        answeredAt: null,
+      },
+    ];
+    expect(reduceRun(record, { kind: "run-finished" }, facts).ok).toBe(false);
+  });
+  test("dispatch requires claims, exact tier, and valid review nonce", () => {
+    const ready = structuredClone(NORMAL_RUN_LEDGER);
+    const t3 = taskOf(ready, "T3");
+    t3.state = "ready";
+    t3.attempts = 0;
+    t3.spec = { ...t3.spec, deps: [] };
+    const nonce = "12341234-1234-4123-8123-123412341234";
+    const event = (claims: ReturnType<typeof claim>[]) => ({
+      kind: "task-dispatched" as const,
+      taskId: "T3",
+      assignment: assignment({
+        assignmentId: "assignment-t3-a1",
+        taskId: "T3",
+        nonce,
+        messageId: "23452345-2345-4234-8234-234523452345",
+      }),
+      nonce: {
+        nonce,
+        runId: ready.runId,
+        taskId: "T3",
+        assignmentId: "assignment-t3-a1",
+        attempt: 1,
+        phase: "implementation" as const,
+        agentId: "agent-b1",
+        seatId: "seat-b1",
+        issuedAt: AT_UPDATED,
+        acceptedAt: null,
+        acceptedEventKey: null,
+        revokedAt: null,
+        revokeReason: null,
+      },
+      intent: dispatchIntent({
+        id: "intent-t3-a1",
+        taskId: "T3",
+        assignmentId: "assignment-t3-a1",
+        messageId: "23452345-2345-4234-8234-234523452345",
+      }),
+      claims,
+    });
+    expect(reduceRun(ready, event([]), facts)).toMatchObject({
+      ok: false,
+      params: { reason: "claim-required" },
+    });
+    const high = structuredClone(ready);
+    taskOf(high, "T3").spec = { ...taskOf(high, "T3").spec, level: "L4", tier: "S" };
+    expect(
+      reduceRun(high, event([claim({ claimId: "t3", taskId: "T3", path: "src/t3.ts" })]), facts),
+    ).toMatchObject({ ok: false, params: { reason: "tier-mismatch" } });
+
+    const reported = reduceRun(withReviewer(), { kind: "task-report", block: report() }, facts);
+    expect(reported.ok).toBe(true);
+    if (!reported.ok) return;
+    const reviewerNonce = reported.next.nonceRegistry.find(
+      (entry) => entry.assignmentId === "assignment-t2-r1",
+    );
+    if (!reviewerNonce) throw new Error("review nonce");
+    reviewerNonce.revokedAt = AT_UPDATED;
+    expect(
+      reduceRun(reported.next, { kind: "review-report", block: review() }, facts),
+    ).toMatchObject({ ok: false, params: { reason: "nonce-invalid" } });
+  });
+
+  test("cancel intent must belong to the task and D1 dedupe is bound", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T3",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
+    expect(
+      reduceRun(
+        record,
+        {
+          kind: "cancel-requested",
+          taskIds: ["T2"],
+          reason: "cancel",
+          cancelIntentId: INTENT_CANCEL,
+          controlNonceDigest: CONTROL_DIGEST,
+        },
+        facts,
+      ),
+    ).toMatchObject({ ok: false, params: { reason: "cancel-intent" } });
+
+    const valid = structuredClone(NORMAL_RUN_LEDGER);
+    valid.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
+    const frozen = reduceRun(
+      valid,
+      {
+        kind: "cancel-requested",
+        taskIds: ["T2"],
+        reason: "cancel",
+        cancelIntentId: INTENT_CANCEL,
+        controlNonceDigest: CONTROL_DIGEST,
+      },
+      facts,
+    );
+    expect(frozen.ok).toBe(true);
+    if (!frozen.ok) return;
+    const decisionId = frozen.next.decisions[0]?.decisionId;
+    if (!decisionId) throw new Error("decision");
+    const unrelated = structuredClone(frozen.next);
+    unrelated.decisions[0] = { ...unrelated.decisions[0]!, dedupeKey: "other" };
+    expect(
+      reduceRun(
+        unrelated,
+        {
+          kind: "cancellation-checked",
+          taskId: "T2",
+          decisionId,
+          evidence: QUIESCENT_CANCELLATION,
+        },
+        facts,
+      ),
+    ).toMatchObject({ ok: false, params: { reason: "decision-binding" } });
   });
 });

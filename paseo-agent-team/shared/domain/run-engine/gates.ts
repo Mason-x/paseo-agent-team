@@ -1,4 +1,5 @@
 import type { RunRecord, RunTaskRecord } from "../../schemas/run-engine/ledger";
+import { reviewRequirement } from "./tier";
 import { type RunStoredReview, type RunTaskWithEvidence, taskById } from "./transitions";
 
 export type GateIssue = {
@@ -84,29 +85,9 @@ function isIndependent(review: RunStoredReview, actors: ReadonlySet<string>): bo
   return !actors.has(review.reviewerAgentId) && !actors.has(review.reviewerSeatId);
 }
 
-const LEVEL_REVIEW_TIER: Record<string, "B" | "A" | "S"> = {
-  L1: "B",
-  L2: "A",
-  L3: "A",
-  L4: "S",
-};
-const TIER_RANK: Record<string, number> = { B: 0, A: 1, S: 2 };
-
-/**
- * The stricter of the task's original level mapping and its current known spec tier. R01 has no
- * typed escalation-record shape yet, so this deliberately does not guess arbitrary record keys.
- */
-function requiredReviewTier(task: RunTaskRecord): "B" | "A" | "S" {
-  let required = LEVEL_REVIEW_TIER[task.spec.level] ?? "S";
-  if (TIER_RANK[task.spec.tier] > TIER_RANK[required]) required = task.spec.tier;
-  for (const escalation of task.escalations) {
-    if (!isRecord(escalation) || typeof escalation.level !== "string") continue;
-    const escalated = LEVEL_REVIEW_TIER[escalation.level];
-    if (escalated !== undefined && TIER_RANK[escalated] > TIER_RANK[required]) {
-      required = escalated;
-    }
-  }
-  return required;
+/** Review strength is owned by R01d's tier.ts so dispatch and the gate cannot diverge. */
+function requiredReviewRequirement(task: RunTaskRecord): ReturnType<typeof reviewRequirement> {
+  return reviewRequirement(task);
 }
 
 function reviewAssignment(
@@ -140,9 +121,9 @@ function reviewerQualified(
 ): boolean {
   const assignment = reviewAssignment(record, task.spec.id, review);
   if (!assignment) return false;
-  const required = requiredReviewTier(task);
-  if (assignment.tier !== required) return false;
-  if (required !== "B") return true;
+  const requirement = requiredReviewRequirement(task);
+  if (assignment.tier !== requirement.tier) return false;
+  if (requirement.level !== "L1") return true;
   const implementerFamilies = new Set(
     record.assignments
       .filter(

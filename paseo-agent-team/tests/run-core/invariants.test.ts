@@ -132,3 +132,38 @@ describe("invariant denial matrix", () => {
     expect(checkLedgerInvariants(report).ok).toBe(false);
   });
 });
+
+describe("I3 opposite file/directory coverage", () => {
+  test("file claim and covering directory claim conflict in both directions", () => {
+    for (const first of ["file", "directory"] as const) {
+      const record = structuredClone(NORMAL_RUN_LEDGER);
+      const base = record.resources[0]!;
+      record.resources = [
+        {
+          ...base,
+          claimId: "first",
+          taskId: "T2",
+          kind: first,
+          path: first === "file" ? "src/a.ts" : "src",
+        },
+        {
+          ...base,
+          claimId: "second",
+          taskId: "T3",
+          kind: first === "file" ? "directory" : "file",
+          path: first === "file" ? "src" : "src/a.ts",
+        },
+      ];
+      record.tasks.find((entry) => entry.spec.id === "T3")!.state = "in_progress";
+      const reportValue = checkLedgerInvariants(record);
+      expect(reportValue.ok, first).toBe(false);
+      if (!reportValue.ok) {
+        expect(
+          reportValue.violations.some(
+            (entry) => entry.invariant === "I3" && entry.params.reason === "overlapping-claim",
+          ),
+        ).toBe(true);
+      }
+    }
+  });
+});
