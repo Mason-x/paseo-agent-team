@@ -227,6 +227,19 @@ describe("saved batch", () => {
     client.planTeams(teams(2));
     await flush();
     expect(port.calls).toHaveLength(2);
+
+    // A Profile runtime tuple change is its own cache key.
+    client.setScope({
+      ...scope,
+      profiles: [
+        ...profiles,
+        { id: "p-third", name: "Third", provider: "claude", model: "claude-haiku-4-5" },
+      ],
+    });
+    expect(client.getBatchView().results.size).toBe(0);
+    client.planTeams(teams(2));
+    await flush();
+    expect(port.calls).toHaveLength(3);
   });
 
   test("legacy is silent and unknown is retryable", async () => {
