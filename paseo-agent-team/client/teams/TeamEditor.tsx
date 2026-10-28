@@ -1,7 +1,7 @@
 import { settingsRpc } from "@getpaseo/plugin";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { JSONType } from "zod";
 import { createAutoSlug, slugify } from "../../shared/ids";
@@ -12,6 +12,7 @@ import { TeamSchema } from "../../shared/schemas/team";
 import type { TeamMode } from "../../shared/schemas/team-mode";
 import { TeamsDocumentSchema, teamsSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import { teamPlanZh } from "../../shared/zh/team-plan";
 import {
   type EditorDocumentSnapshot,
   type EditorParsed,
@@ -30,7 +31,9 @@ import { TeamModePicker } from "../shared/TeamModePicker";
 import { MEMBER_CREATION_OPTIONS, type MemberCreation } from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { MemberEditor } from "./MemberEditor";
+import { ModelRow } from "./ModelRow";
 import {
+  buildCollaboration,
   buildTeamModeFields,
   type CollaborationDraft,
   type CollaborationTouched,
@@ -41,6 +44,15 @@ import {
   readStoredTeamMode,
   usedSeatIds,
 } from "./team-mode-edit";
+import {
+  buildTeamModelRows,
+  buildTeamPlanIssues,
+  draftRowKey,
+  type TeamModelRowView,
+  type TeamPlanClient,
+  type TeamPlanDraftRequest,
+} from "./team-plan-state";
+import { useTeamDraftPlan } from "./use-team-plans";
 
 const teamsRead = settingsRpc(teamsSettings.id).read;
 const teamsWrite = settingsRpc(teamsSettings.id).write;
@@ -64,6 +76,9 @@ export function TeamEditor({
   existingIds,
   saving,
   onClose,
+  planClient,
+  onOpenRole,
+  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -74,6 +89,10 @@ export function TeamEditor({
   existingIds: ReadonlySet<string>;
   saving: boolean;
   onClose: () => void;
+  /** Shared Team-plan client; absent means the plan UI is not wired yet (I02 supplies it). */
+  planClient?: TeamPlanClient | null;
+  onOpenRole?: (roleId: string, profileId?: string) => void;
+  onConfigureEconomy?: (target: { layer: "standard" | "allSeats"; route?: string }) => void;
 }) {
   const readTeamsDoc = useRpc(teamsRead);
   const writeTeamsDoc = useRpc(teamsWrite);
@@ -119,6 +138,79 @@ export function TeamEditor({
   const idLocked = mode === "edit";
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
+
+  const planSessionToken = useRef<string | null>(null);
+  if (planSessionToken.current === null) {
+    planSessionToken.current =
+      globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  const planSessionId = `team-editor:${team?.id ?? "new"}:${planSessionToken.current}`;
+  const planRequest = useMemo<TeamPlanDraftRequest | null>(() => {
+    if (!planClient) return null;
+    const nextCollaboration = buildCollaboration(
+      baseline.current?.collaboration,
+      collaboration,
+      teamMode,
+      collaborationTouched,
+    );
+    return {
+      sessionId: planSessionId,
+      mode: modeUnknown ?? teamMode,
+      coordinatorRoleId,
+      ...(memberCreation === "" ? {} : { memberCreation }),
+      ...(nextCollaboration === undefined ? {} : { collaboration: nextCollaboration }),
+      members: members.map((member, index) => ({
+        rowKey: draftRowKey(member, index),
+        roleId: member.roleId,
+        ...(member.instanceLabel === undefined ? {} : { instanceLabel: member.instanceLabel }),
+        enabled: member.enabled,
+      })),
+    };
+  }, [
+    planClient,
+    planSessionId,
+    modeUnknown,
+    teamMode,
+    coordinatorRoleId,
+    memberCreation,
+    collaboration,
+    collaborationTouched,
+    members,
+  ]);
+  const draftPlan = useTeamDraftPlan({
+    client: planClient ?? null,
+    sessionId: planSessionId,
+    active: open,
+    request: planRequest,
+  });
+  const planResult = draftPlan.state.status === "result" ? draftPlan.state.result : null;
+  const planLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const [index, member] of members.entries()) {
+      const label = member.instanceLabel?.trim();
+      if (label) labels.set(draftRowKey(member, index), label);
+    }
+    return labels;
+  }, [members]);
+  const modelRows = useMemo(
+    () => (planResult ? buildTeamModelRows({ result: planResult, labels: planLabels }) : []),
+    [planResult, planLabels],
+  );
+  const coordinatorModel = modelRows.find((view) => view.kind === "coordinator") ?? null;
+  const rowsByKey = useMemo(() => {
+    const grouped = new Map<string, TeamModelRowView[]>();
+    for (const view of modelRows) {
+      if (view.kind !== "member") continue;
+      const group = grouped.get(view.rowKey) ?? [];
+      group.push(view);
+      grouped.set(view.rowKey, group);
+    }
+    return grouped;
+  }, [modelRows]);
+  const planIssues = useMemo(() => {
+    if (!planResult || planResult.effectiveMode === null) return [];
+    return buildTeamPlanIssues(planResult);
+  }, [planResult]);
 
   const seedTeam = useCallback(
     (next: Team | null) => {
@@ -297,6 +389,45 @@ export function TeamEditor({
       >
         <Modal.Content>
           <View style={{ gap: layout.compact ? 10 : 14 }}>
+            {planClient ? (
+              <View style={{ gap: 4 }}>
+                {draftPlan.state.status === "pending" ? (
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                    {teamPlanZh.pending}
+                  </Text>
+                ) : null}
+                {draftPlan.state.status === "error" ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>
+                      {draftPlan.state.message}
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={teamPlanZh.retry}
+                      onPress={draftPlan.retry}
+                    >
+                      <Text style={{ color: theme.colors.accent, fontSize: 12, fontWeight: "600" }}>
+                        {teamPlanZh.retry}
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+                {planIssues.map((issue) => (
+                  <Text
+                    key={`${issue.severity}:${issue.text}`}
+                    style={{
+                      color:
+                        issue.severity === "blocker"
+                          ? theme.colors.statusDanger
+                          : theme.colors.statusWarning,
+                      fontSize: 12,
+                    }}
+                  >
+                    {issue.text}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
             <TextField
               theme={theme}
               label={zh.name}
@@ -357,6 +488,14 @@ export function TeamEditor({
               error={errors.coordinatorRoleId}
               onChange={setCoordinatorRoleId}
             />
+            {coordinatorModel ? (
+              <ModelRow
+                theme={theme}
+                view={coordinatorModel}
+                onOpenRole={onOpenRole}
+                onConfigureEconomy={onConfigureEconomy}
+              />
+            ) : null}
             <Pressable
               accessibilityRole="button"
               accessibilityState={{ expanded: advancedOpen }}
@@ -502,38 +641,73 @@ export function TeamEditor({
             {errors.form ? (
               <Text style={{ color: theme.colors.statusDanger }}>{errors.form}</Text>
             ) : null}
-            {members.map((member, index) => (
-              <MemberEditor
-                key={member.seatId ?? `legacy-${index}`}
-                theme={theme}
-                revision={`${formSeed}:${member.seatId ?? `legacy-${index}`}`}
-                member={member}
-                roles={roles}
-                coordinatorRoleId={coordinatorRoleId}
-                onChange={(next) => {
-                  const copy = [...members];
-                  copy[index] = next;
-                  setMembers(copy);
-                }}
-                onMove={(direction) => {
-                  const target = index + direction;
-                  if (target < 0 || target >= members.length) return;
-                  const copy = [...members];
-                  const [item] = copy.splice(index, 1);
-                  if (item) copy.splice(target, 0, item);
-                  setMembers(copy);
-                }}
-                onDuplicate={() => {
-                  const role = roles.find((entry) => entry.id === member.roleId);
-                  const pair = duplicateMemberPair(member, role?.name ?? member.roleId, members);
-                  const next = [...members];
-                  next[index] = pair.original;
-                  next.splice(index + 1, 0, pair.copy);
-                  setMembers(next);
-                }}
-                onRemove={() => setMembers(members.filter((_, itemIndex) => itemIndex !== index))}
-              />
-            ))}
+            {members.map((member, index) => {
+              const memberRows = rowsByKey.get(draftRowKey(member, index)) ?? [];
+              return (
+                <MemberEditor
+                  key={member.seatId ?? `legacy-${index}`}
+                  theme={theme}
+                  revision={`${formSeed}:${member.seatId ?? `legacy-${index}`}`}
+                  member={member}
+                  roles={roles}
+                  coordinatorRoleId={coordinatorRoleId}
+                  onChange={(next) => {
+                    const copy = [...members];
+                    copy[index] = next;
+                    setMembers(copy);
+                  }}
+                  onMove={(direction) => {
+                    const target = index + direction;
+                    if (target < 0 || target >= members.length) return;
+                    const copy = [...members];
+                    const [item] = copy.splice(index, 1);
+                    if (item) copy.splice(target, 0, item);
+                    setMembers(copy);
+                  }}
+                  onDuplicate={() => {
+                    const role = roles.find((entry) => entry.id === member.roleId);
+                    const pair = duplicateMemberPair(member, role?.name ?? member.roleId, members);
+                    const next = [...members];
+                    next[index] = pair.original;
+                    next.splice(index + 1, 0, pair.copy);
+                    setMembers(next);
+                  }}
+                  onRemove={() => setMembers(members.filter((_, itemIndex) => itemIndex !== index))}
+                  modelRows={memberRows.map((view) => (
+                    <ModelRow
+                      key={view.key}
+                      theme={theme}
+                      view={view}
+                      onOpenRole={onOpenRole}
+                      onConfigureEconomy={onConfigureEconomy}
+                    />
+                  ))}
+                />
+              );
+            })}
+            {(() => {
+              const known = new Set(members.map((member, index) => draftRowKey(member, index)));
+              const other = modelRows.filter(
+                (view) => view.kind === "member" && !known.has(view.rowKey),
+              );
+              if (other.length === 0) return null;
+              return (
+                <View style={{ gap: 4 }}>
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+                    {teamPlanZh.otherSeats}
+                  </Text>
+                  {other.map((view) => (
+                    <ModelRow
+                      key={view.key}
+                      theme={theme}
+                      view={view}
+                      onOpenRole={onOpenRole}
+                      onConfigureEconomy={onConfigureEconomy}
+                    />
+                  ))}
+                </View>
+              );
+            })()}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={zh.addMember}
