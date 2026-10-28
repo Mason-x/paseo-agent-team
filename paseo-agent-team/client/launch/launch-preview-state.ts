@@ -1,3 +1,4 @@
+import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import type { LaunchTarget } from "../../shared/rpc";
 import type {
   LaunchPreviewResult,
@@ -25,6 +26,14 @@ export function previewTaskState(
 ): { task: string; pending: boolean } {
   const task = debouncedTask.trim();
   return { task, pending: composing || liveTask.trim() !== task };
+}
+
+/** A settled probe changes the cache key once; the old preview is no longer the same identity. */
+export function launchPreviewCacheKey(
+  input: LaunchPreviewKeyInput,
+  modeContract: ModeContractSupport,
+): readonly unknown[] {
+  return [...launchPreviewQueryKey(input), modeContract] as const;
 }
 
 /** A task change invalidates the previous preview immediately; trim is part of the contract. */
@@ -140,6 +149,8 @@ export function modeIssueText(issue: ModeIssueDto): string {
       return zh.modes.noExecutionCohort;
     case "MODE_LIMIT_CLAMPED":
       return zh.modes.limitClamped(Number(issue.params.limit));
+    case "MODE_PLAN_CHANGED":
+      return zh.modes.planChanged;
     default:
       return zh.modes.unknownFallback(issue.code);
   }

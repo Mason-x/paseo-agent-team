@@ -40,6 +40,7 @@ import { type LaunchRequest, subscribeLaunchRequests } from "./launch/events";
 import { LaunchDialog } from "./launch/LaunchDialog";
 import { resolveLaunchPrefill } from "./launch/launch-args";
 import { ImeTextInput } from "./shared/ImeTextInput";
+import { useTeamPlans } from "./teams/use-team-plans";
 
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 10;
@@ -222,6 +223,28 @@ export function AgentCrew({
   const [collapsedRunIds, setCollapsedRunIds] = useState<ReadonlySet<string>>(() => new Set());
   const [openRunDetails, setOpenRunDetails] = useState<ReadonlySet<string>>(() => new Set());
   const [launch, setLaunch] = useState<{ key: number; request: LaunchRequest } | null>(null);
+  const rolesRevision = roles.status === "ready" ? roles.revision : roles.status;
+  const teamsRevision = teams.status === "ready" ? teams.revision : teams.status;
+  const preferencesRevision =
+    preferences.status === "ready" ? preferences.revision : preferences.status;
+  const crewRevisions = useMemo(
+    () => ({
+      roles: rolesRevision,
+      teams: teamsRevision,
+      preferences: preferencesRevision,
+    }),
+    [rolesRevision, teamsRevision, preferencesRevision],
+  );
+  // The Crew panel is outside AgentTeamsScreen: it owns a probe-only client so a launch opened
+  // from a command can carry the host's real mode contract instead of being refused as legacy.
+  const crewPlans = useTeamPlans({
+    hostId: host.id,
+    profiles: [],
+    revisions: crewRevisions,
+    teams: [],
+    active: launch !== null,
+  });
+  const crewProbeSettled = crewPlans.loaded || crewPlans.error !== null;
   const [followUp, setFollowUp] = useState<FollowUpTarget | null>(null);
   const [highlightRunId, setHighlightRunId] = useState<string | null>(null);
 
@@ -1191,6 +1214,8 @@ export function AgentCrew({
           initialTeamId={launchPrefill?.teamId}
           initialTask={launchPrefill?.task}
           workspaceId={workspaceId}
+          modeContract={crewPlans.modeContract}
+          probeSettled={crewProbeSettled}
           onClose={closeLaunch}
           onLaunched={onLaunched}
         />

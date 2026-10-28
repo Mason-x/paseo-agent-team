@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   isPlanChanged,
   launchGate,
+  launchPreviewCacheKey,
   launchPreviewIdentity,
   launchPreviewQueryKey,
   launchSeatStatus,
@@ -116,6 +117,17 @@ describe("launch preview identity", () => {
 
   test("task whitespace does not create a new preview", () => {
     expect(launchPreviewIdentity({ ...input, task: "ship it" })).toBe(launchPreviewIdentity(input));
+  });
+
+  test("a probe upgrade changes the key once and invalidates the old preview", () => {
+    const unknownKey = JSON.stringify(launchPreviewCacheKey(input, "unknown"));
+    const v2Key = JSON.stringify(launchPreviewCacheKey(input, "v2"));
+    // One key before and one after: React Query refetches once and never starts a launch.
+    expect(new Set([unknownKey, v2Key]).size).toBe(2);
+    expect(gate({ previewIdentity: unknownKey, currentIdentity: v2Key })).toEqual({
+      disabled: true,
+      reason: zh.modes.previewPending,
+    });
   });
 
   test("task, target, and saved-mode changes all create a new identity", () => {
@@ -277,6 +289,9 @@ describe("preview lists and plan changes", () => {
     expect(
       modeIssueText({ code: "MODE_LIMIT_CLAMPED", severity: "warning", params: { limit: 8 } }),
     ).toBe(zh.modes.limitClamped(8));
+    expect(modeIssueText({ code: "MODE_PLAN_CHANGED", severity: "blocker", params: {} })).toBe(
+      zh.modes.planChanged,
+    );
     expect(modeIssueText({ code: "FUTURE_CODE", severity: "warning", params: {} })).toBe(
       zh.modes.unknownFallback("FUTURE_CODE"),
     );
