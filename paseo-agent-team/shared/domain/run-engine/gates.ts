@@ -23,17 +23,33 @@ function artifactKey(ref: unknown): string {
   return JSON.stringify(ref);
 }
 
-/** Logical relative paths only: reject absolute paths, drive letters and any `..` segment. */
+/** R03b-compatible lexical path normalization; realpath/short-name stays in R05. */
 export function normalizeContainedPath(value: string): string | null {
-  const raw = value.replaceAll("\\", "/").trim();
-  if (raw === "" || raw.startsWith("/") || /^[A-Za-z]:/u.test(raw)) return null;
-  const segments: string[] = [];
-  for (const segment of raw.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") return null;
-    segments.push(segment);
+  const raw = value.replaceAll("\\", "/");
+  if (raw.length === 0) return null;
+  if (raw.startsWith("//") || raw.startsWith("/")) return null;
+  if (/^[A-Za-z]:/u.test(raw)) return null;
+  if (raw.includes(":")) return null;
+  if (raw.includes("*") || raw.includes("?")) return null;
+  for (const char of raw) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f || '<>"|'.includes(char)) return null;
   }
-  return segments.length === 0 ? null : segments.join("/").toLowerCase();
+  const segments: string[] = [];
+  for (const part of raw.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (segments.length === 0) return null;
+      segments.pop();
+      continue;
+    }
+    if (part.endsWith(".") || part.endsWith(" ")) return null;
+    const base = part.split(".")[0]?.toUpperCase() ?? "";
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(base)) return null;
+    segments.push(part);
+  }
+  if (segments.length === 0) return null;
+  return segments.join("/").normalize("NFC").toLowerCase().normalize("NFC");
 }
 
 function withinRoot(root: string, path: string): boolean {
@@ -76,16 +92,18 @@ const LEVEL_REVIEW_TIER: Record<string, "B" | "A" | "S"> = {
 };
 const TIER_RANK: Record<string, number> = { B: 0, A: 1, S: 2 };
 
-/** The stricter of the task's current level and any recorded escalation origin. */
+/**
+ * The stricter of the task's original level mapping and its current known spec tier. R01 has no
+ * typed escalation-record shape yet, so this deliberately does not guess arbitrary record keys.
+ */
 function requiredReviewTier(task: RunTaskRecord): "B" | "A" | "S" {
   let required = LEVEL_REVIEW_TIER[task.spec.level] ?? "S";
-  for (const entry of task.escalations) {
-    if (!isRecord(entry)) continue;
-    for (const key of ["from", "fromLevel", "level"] as const) {
-      const value = entry[key];
-      if (typeof value !== "string") continue;
-      const tier = LEVEL_REVIEW_TIER[value];
-      if (tier !== undefined && TIER_RANK[tier] > TIER_RANK[required]) required = tier;
+  if (TIER_RANK[task.spec.tier] > TIER_RANK[required]) required = task.spec.tier;
+  for (const escalation of task.escalations) {
+    if (!isRecord(escalation) || typeof escalation.level !== "string") continue;
+    const escalated = LEVEL_REVIEW_TIER[escalation.level];
+    if (escalated !== undefined && TIER_RANK[escalated] > TIER_RANK[required]) {
+      required = escalated;
     }
   }
   return required;
@@ -273,15 +291,27 @@ export function checkReviewGate(record: RunRecord, taskValue: RunTaskRecord): Ga
   }
   const actors = implementationActors(record, task.spec.id);
   const reviews = task.reviews ?? [];
-  const valid = reviews.some((review) => {
+  const current = reviews.filter((review) => {
     if (!isRecord(review)) return false;
     if (typeof review.reviewerAgentId !== "string" || review.reviewerAgentId === "") return false;
     if (typeof review.reviewerSeatId !== "string" || review.reviewerSeatId === "") return false;
-    if (review.verdict !== "可合入") return false;
-    if (!Array.isArray(review.blockers) || review.blockers.length !== 0) return false;
     if (artifactKey(review.reviewedRef) !== artifactKey(task.ref)) return false;
     return isIndependent(review, actors) && reviewerQualified(record, task, review);
   });
+  if (
+    current.some(
+      (review) =>
+        review.verdict !== "可合入" ||
+        !Array.isArray(review.blockers) ||
+        review.blockers.length !== 0,
+    )
+  ) {
+    return fail("review", ["tasks", task.spec.id, "reviews"], "blocked-review");
+  }
+  const valid = current.some(
+    (review) =>
+      review.verdict === "可合入" && Array.isArray(review.blockers) && review.blockers.length === 0,
+  );
   return valid ? OK : fail("review", ["tasks", task.spec.id, "reviews"], "no-valid-review");
 }
 
@@ -294,18 +324,111 @@ function realHomeLike(value: string): boolean {
   return path.includes("/.paseo") || path.endsWith("/.paseo");
 }
 
+function ipv4Number(value: string): number | null {
+  const parts = value.split(".");
+  if (parts.length === 0 || parts.length > 4) return null;
+  const numbers: number[] = [];
+  for (const part of parts) {
+    if (part === "") return null;
+    const parsed = /^0x[0-9a-f]+$/iu.test(part) ? Number.parseInt(part, 16) : Number(part);
+    if (!Number.isInteger(parsed) || parsed < 0) return null;
+    numbers.push(parsed);
+  }
+  let result = 0;
+  const widths =
+    numbers.length === 1
+      ? [32]
+      : numbers.length === 2
+        ? [8, 24]
+        : numbers.length === 3
+          ? [8, 8, 16]
+          : [8, 8, 8, 8];
+  for (let index = 0; index < numbers.length; index += 1) {
+    const valuePart = numbers[index];
+    if (valuePart === undefined) return null;
+    const width = widths[index] ?? 8;
+    if (valuePart > 2 ** width - 1) return null;
+    result = result * 2 ** width + valuePart;
+  }
+  return result;
+}
+
+function ipv4Loopback(value: string): boolean {
+  const number = ipv4Number(value);
+  if (number === null) return false;
+  const first = Math.floor(number / 2 ** 24);
+  return first === 127 || number === 0;
+}
+
+function ipv6Groups(value: string): number[] | null {
+  const zone = value.split("%")[0] ?? value;
+  const halves = zone.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string): number[] => {
+    if (part === "") return [];
+    const groups: number[] = [];
+    for (const piece of part.split(":")) {
+      if (piece === "") return [];
+      if (piece.includes(".")) {
+        const number = ipv4Number(piece);
+        if (number === null) return [];
+        groups.push(Math.floor(number / 65536), number % 65536);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/iu.test(piece)) return [];
+        groups.push(Number.parseInt(piece, 16));
+      }
+    }
+    return groups;
+  };
+  const left = parse(halves[0] ?? "");
+  const right = parse(halves[1] ?? "");
+  if (left.length === 0 && right.length === 0 && halves.length === 1)
+    return [0, 0, 0, 0, 0, 0, 0, 0];
+  const missing = 8 - left.length - right.length;
+  if (missing < 0) return null;
+  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
+}
+
+function ipv6Loopback(value: string): boolean {
+  const groups = ipv6Groups(value);
+  if (groups === null) return false;
+  const isZero = groups.every((group) => group === 0);
+  if (isZero) return true;
+  if (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) return true;
+  return (
+    groups.slice(0, 5).every((group) => group === 0) &&
+    groups[5] === 0xffff &&
+    groups[6] !== undefined &&
+    groups[7] !== undefined &&
+    ipv4Loopback(`${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`)
+  );
+}
+
 function canonicalDevHost(value: string): string {
-  let host = value.trim().toLowerCase();
-  host = host.replace(/^https?:\/\//u, "").replace(/\/.*$/u, "");
-  if (/^\d+$/u.test(host)) return `loopback:${host}`;
-  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/u.exec(host);
-  const plain = /^([^:]+)(?::(\d+))?$/u.exec(host);
-  const name = bracketed?.[1] ?? plain?.[1] ?? host;
-  const rawPort = bracketed?.[2] ?? plain?.[2] ?? "";
-  const port = rawPort === "" ? "" : String(Number(rawPort));
+  let raw = value.trim().toLowerCase();
+  raw = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//u, "");
+  raw = raw.replace(/^.*@/u, "");
+  raw = raw.split(/[/?#]/u)[0] ?? raw;
+  let host = raw;
+  let rawPort = "";
+  const bracketed = /^\[([^\]]+)\](?::([^/]+))?$/u.exec(raw);
+  if (bracketed) {
+    host = bracketed[1] ?? "";
+    rawPort = bracketed[2] ?? "";
+  } else if (raw.includes(":")) {
+    const index = raw.lastIndexOf(":");
+    host = raw.slice(0, index);
+    rawPort = raw.slice(index + 1);
+    if (host.includes(":")) {
+      host = raw;
+      rawPort = "";
+    }
+  }
+  host = host.replace(/\.$/u, "");
+  const port = rawPort === "" ? "6767" : String(Number(rawPort));
   const loopback =
-    name === "localhost" || name === "127.0.0.1" || name === "::1" || name === "0.0.0.0";
-  return `${loopback ? "loopback" : name}:${port}`;
+    host === "localhost" || (host.includes(":") ? ipv6Loopback(host) : ipv4Loopback(host));
+  return `${loopback ? "loopback" : host}:${port}`;
 }
 
 function defaultDevHost(value: string): boolean {

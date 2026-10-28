@@ -6,7 +6,12 @@ import {
   type RunTaskSpec,
 } from "../../schemas/run-engine/ledger";
 import type { RunReviewReportBlock } from "../../schemas/run-engine/protocol";
-import { checkEvidenceGate, checkReviewGate, checkSmokeGate } from "./gates";
+import {
+  checkEvidenceGate,
+  checkReviewGate,
+  checkSmokeGate,
+  normalizeContainedPath,
+} from "./gates";
 import {
   checkLedgerInvariants,
   occupiesExecutionSlot,
@@ -65,6 +70,27 @@ function decisionOf(record: RunRecord, decisionId: string) {
   return record.decisions.find((entry) => entry.decisionId === decisionId);
 }
 
+function reportNonce(
+  record: RunRecord,
+  block: { nonce: string; taskId: string; attempt: number; assignmentId: string },
+  assignment: { agentId: string; seatId: string },
+  phase: "implementation" | "review" | "smoke",
+) {
+  const entry = record.nonceRegistry.find(
+    (candidate) =>
+      candidate.nonce === block.nonce &&
+      candidate.runId === record.runId &&
+      candidate.taskId === block.taskId &&
+      candidate.assignmentId === block.assignmentId &&
+      candidate.attempt === block.attempt &&
+      candidate.phase === phase &&
+      candidate.agentId === assignment.agentId &&
+      candidate.seatId === assignment.seatId,
+  );
+  if (entry === undefined || entry.revokedAt !== null) return null;
+  return entry;
+}
+
 function validControlNonceDigest(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 }
@@ -90,6 +116,11 @@ function releaseClaims(next: RunRecord, taskId: string): void {
 function markCancelled(next: RunRecord, taskId: string, reason: string, facts: ReduceFacts): void {
   const task = taskOf(next, taskId);
   if (!task) return;
+  for (const decision of next.decisions) {
+    if (decision.dedupeKey !== `cancel:${taskId}` || decision.state !== "open") continue;
+    decision.state = "answered";
+    decision.answeredAt = facts.now;
+  }
   const assignment = task.currentAssignmentId
     ? assignmentOf(next, task.currentAssignmentId)
     : undefined;
@@ -115,6 +146,7 @@ function freezeTask(
   reason: string,
   facts: ReduceFacts,
   controlNonceDigest: string,
+  cancelIntentId?: string,
 ): void {
   const task = taskOf(next, taskId);
   if (!task) return;
@@ -145,6 +177,7 @@ function freezeTask(
       summary: `Cancellation of ${taskId} needs explicit quiescence confirmation.`,
       createdAt: facts.now,
       answeredAt: null,
+      ...(cancelIntentId === undefined ? {} : { cancelIntentId }),
     });
   }
 }
@@ -156,34 +189,11 @@ function quiescent(record: RunRecord, taskId: string): boolean {
     : undefined;
   const evidence = assignment?.cancellation;
   if (!assignment || !evidence) return false;
-  if (
-    evidence.assignmentId !== assignment.assignmentId ||
-    assignment.turnId === null ||
-    evidence.lastTurnId !== assignment.turnId ||
-    evidence.endedEventKey === null
-  ) {
-    return false;
-  }
+  if (evidence.assignmentId !== assignment.assignmentId) return false;
   if (evidence.receipt.kind === "none" || evidence.receipt.confirmedAt === null) return false;
   if (evidence.observationSeq === 0 || evidence.observationSeq > record.counters.observationSeq) {
     return false;
   }
-  const ended = record.eventReceipts.find(
-    (receipt) =>
-      receipt.eventKey === evidence.endedEventKey &&
-      receipt.kind === "turn_ended" &&
-      receipt.agentId === assignment.agentId &&
-      receipt.turnId === assignment.turnId,
-  );
-  if (ended === undefined || evidence.observationSeq < ended.seq) return false;
-  const endedEvent = record.events.find(
-    (event) =>
-      event.kind === "turn_ended" &&
-      event.payload.taskId === taskId &&
-      event.payload.turnId === assignment.turnId,
-  );
-  const endedAt = endedEvent?.at ?? ended.receivedAt;
-  if (Date.parse(evidence.refreshObservedAt) < Date.parse(endedAt)) return false;
   const cancelIntent = record.outbox.find((intent) => intent.id === evidence.cancelIntentId);
   if (
     cancelIntent === undefined ||
@@ -196,14 +206,39 @@ function quiescent(record: RunRecord, taskId: string): boolean {
   ) {
     return false;
   }
-  for (const event of record.events) {
-    if (event.seq <= ended.seq) continue;
-    if (event.kind !== "turn_started") continue;
-    if (event.payload.taskId === taskId || event.payload.assignmentId === assignment.assignmentId) {
-      return false;
-    }
+  const startedOrEnded =
+    assignment.turnId !== null || evidence.lastTurnId !== null || evidence.endedEventKey !== null;
+  if (!startedOrEnded) {
+    // A never-started assignment has no turn to end. Require a fresh observation and no
+    // started-turn receipt for this agent after the assignment was created.
+    if (Date.parse(evidence.refreshObservedAt) < Date.parse(assignment.createdAt)) return false;
+    const started = record.eventReceipts.some(
+      (receipt) =>
+        receipt.kind === "turn_started" &&
+        receipt.agentId === assignment.agentId &&
+        Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt),
+    );
+    return !started;
   }
-  return true;
+  if (assignment.turnId === null || evidence.lastTurnId !== assignment.turnId) return false;
+  if (evidence.endedEventKey === null) return false;
+  const ended = record.eventReceipts.find(
+    (receipt) =>
+      receipt.eventKey === evidence.endedEventKey &&
+      receipt.kind === "turn_ended" &&
+      receipt.agentId === assignment.agentId &&
+      receipt.turnId === assignment.turnId,
+  );
+  if (ended === undefined || evidence.observationSeq < ended.seq) return false;
+  const endedAt = ended.receivedAt;
+  if (Date.parse(evidence.refreshObservedAt) < Date.parse(endedAt)) return false;
+  const laterStarted = record.eventReceipts.some(
+    (receipt) =>
+      receipt.kind === "turn_started" &&
+      receipt.agentId === assignment.agentId &&
+      receipt.seq > ended.seq,
+  );
+  return !laterStarted;
 }
 
 function recomputeReady(next: RunRecord): void {
@@ -232,6 +267,7 @@ function appendReview(
   const assignment = assignmentOf(record, block.assignmentId);
   const review: RunStoredReview = {
     assignmentId: block.assignmentId,
+    phase: task.phase === "smoke" ? "smoke" : "review",
     reviewerAgentId: assignment?.agentId ?? "",
     reviewerSeatId: assignment?.seatId ?? "",
     verdict: block.verdict,
@@ -300,8 +336,12 @@ function applyEvent(
           lifecycle: next.lifecycle,
         });
       }
-      if (event.block.dagRevision !== 1) {
-        return reject("RUN_EVENT_INVALID", ["dag", "dagRevision"], "initial-revision");
+      if (
+        event.block.dagRevision !== 1 ||
+        event.block.expectedDagRevision !== 0 ||
+        event.block.budgetRequests.length > 0
+      ) {
+        return reject("RUN_EVENT_INVALID", ["dag"], "initial-revision");
       }
       const ids = new Set<string>();
       for (const spec of event.block.tasks) {
@@ -310,6 +350,13 @@ function applyEvent(
         ids.add(spec.id);
       }
       next.tasks = event.block.tasks.map((spec) => newTask(spec, facts));
+      for (const taskId of event.block.cancelTaskIds) {
+        const task = taskOf(next, taskId);
+        if (!task) {
+          return reject("RUN_EVENT_INVALID", ["dag", "cancelTaskIds"], "unknown-task");
+        }
+        markCancelled(next, taskId, "dag-accepted", facts);
+      }
       next.dagRevision = event.block.dagRevision;
       next.lifecycle = "active";
       recomputeReady(next);
@@ -329,7 +376,8 @@ function applyEvent(
       }
       if (
         event.block.expectedDagRevision !== next.dagRevision ||
-        event.block.dagRevision !== next.dagRevision + 1
+        event.block.dagRevision !== next.dagRevision + 1 ||
+        event.block.budgetRequests.length > 0
       ) {
         return reject("RUN_EVENT_INVALID", ["dag", "expectedDagRevision"], "stale-dag");
       }
@@ -364,7 +412,11 @@ function applyEvent(
             nextTasks.push({ ...task, spec });
           }
           incoming.delete(task.spec.id);
-        } else if (task.state === "done" || task.state === "cancelled") {
+        } else if (
+          task.state === "done" ||
+          task.state === "cancelled" ||
+          event.block.cancelTaskIds.includes(task.spec.id)
+        ) {
           nextTasks.push(task);
         } else {
           return reject("RUN_INVALID_TRANSITION", ["tasks", task.spec.id], "active-task-removed");
@@ -375,10 +427,15 @@ function applyEvent(
       next.dagRevision = event.block.dagRevision;
       next.lifecycle = "active";
       for (const taskId of event.block.cancelTaskIds) {
-        if (!taskOf(next, taskId)) {
+        const task = taskOf(next, taskId);
+        if (!task) {
           return reject("RUN_EVENT_INVALID", ["dag", "cancelTaskIds"], "unknown-task");
         }
-        if (quiescent(next, taskId)) markCancelled(next, taskId, "dag-revised", facts);
+        const active =
+          task.currentAssignmentId !== null ||
+          next.resources.some((claim) => claim.taskId === taskId);
+        if (!active) markCancelled(next, taskId, "dag-revised", facts);
+        else if (quiescent(next, taskId)) markCancelled(next, taskId, "dag-revised", facts);
         else freezeTask(next, taskId, "dag-revised", facts, event.controlNonceDigest);
       }
       recomputeReady(next);
@@ -391,13 +448,26 @@ function applyEvent(
         });
       }
       const task = taskOf(next, event.taskId);
-      if (!task || (task.state !== "ready" && task.state !== "rework")) {
-        return invalidTransition(event.taskId, task?.state ?? "missing", "assigned");
+      if (!task) return invalidTransition(event.taskId, "missing", "assigned");
+      const purpose = event.assignment.purpose;
+      const reviewDispatch =
+        purpose === "reviewer" && task.state === "review" && task.phase === "review";
+      const smokeDispatch =
+        purpose === "smoker" && task.state === "review" && task.phase === "smoke";
+      const awaitingRework =
+        task.state === "review" &&
+        task.phase === "awaiting-rework" &&
+        (purpose === "member" || purpose === "coordinator" || purpose === "reopen");
+      const workerDispatch =
+        (task.state === "ready" || task.state === "rework" || awaitingRework) &&
+        (purpose === "member" || purpose === "coordinator" || purpose === "reopen");
+      if (!reviewDispatch && !smokeDispatch && !workerDispatch) {
+        return invalidTransition(event.taskId, task.state, "assigned");
       }
       const activeOthers = next.tasks.filter(
         (entry) => entry.spec.id !== event.taskId && occupiesExecutionSlot(next, entry),
       ).length;
-      if (task.state === "ready" && activeOthers >= next.policy.configuredConcurrency) {
+      if (workerDispatch && activeOthers >= next.policy.configuredConcurrency) {
         return reject("RUN_INVALID_TRANSITION", ["tasks", event.taskId, "state"], "capacity");
       }
       if (
@@ -410,44 +480,113 @@ function applyEvent(
         event.assignment.attempt !== event.nonce.attempt ||
         event.nonce.assignmentId !== event.assignment.assignmentId ||
         event.nonce.taskId !== event.taskId ||
-        event.intent.taskId !== event.taskId ||
-        (event.claims ?? []).some((claim) => claim.taskId !== event.taskId)
+        event.intent.taskId !== event.taskId
       ) {
         return reject("RUN_EVENT_INVALID", ["assignment", "taskId"], "assignment-mismatch");
       }
-      if (event.assignment.attempt !== task.attempts + 1) {
+      if (
+        event.assignment.state !== "assigned" ||
+        event.assignment.startedAt !== null ||
+        event.assignment.endedAt !== null ||
+        event.assignment.turnId !== null ||
+        (event.assignment.cancellation !== undefined && event.assignment.cancellation !== null) ||
+        event.nonce.acceptedAt !== null ||
+        event.nonce.acceptedEventKey !== null ||
+        event.nonce.revokedAt !== null
+      ) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "state"], "untrusted-assignment");
+      }
+      const reviewRequiredTier =
+        task.spec.level === "L1" ? "B" : task.spec.level === "L4" ? "S" : "A";
+      const workerRequiredTier =
+        task.spec.level === "L1" || task.spec.level === "L2"
+          ? "B"
+          : task.spec.level === "L4"
+            ? "S"
+            : "A";
+      const requiredTier =
+        reviewDispatch || smokeDispatch ? reviewRequiredTier : workerRequiredTier;
+      if (event.assignment.tier !== requiredTier) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "tier"], "tier-mismatch");
+      }
+      if (!reviewDispatch && !smokeDispatch && event.assignment.attempt !== task.attempts + 1) {
         return reject("RUN_EVENT_INVALID", ["assignment", "attempt"], "attempt-mismatch");
+      }
+      const claims = reviewDispatch || smokeDispatch ? [] : (event.claims ?? []);
+      if (workerDispatch && task.spec.execution === "write" && claims.length === 0) {
+        return reject("RUN_EVENT_INVALID", ["claims"], "claim-required");
+      }
+      const claimIds = new Set(next.resources.map((claim) => claim.claimId));
+      for (const claim of claims) {
+        if (
+          claim.taskId !== event.taskId ||
+          claim.frozen ||
+          claimIds.has(claim.claimId) ||
+          !task.spec.scopes.some(
+            (scope) =>
+              (scope.repoId === claim.repoId &&
+                scope.access === claim.access &&
+                scope.kind === "file" &&
+                claim.kind === "file" &&
+                normalizeContainedPath(scope.path) === normalizeContainedPath(claim.path)) ||
+              (scope.kind === "directory" &&
+                (claim.kind === "file" || claim.kind === "directory") &&
+                (normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path) ||
+                  (normalizeContainedPath(scope.path) !== null &&
+                    normalizeContainedPath(claim.path)?.startsWith(
+                      `${normalizeContainedPath(scope.path)}/`,
+                    )))),
+          )
+        ) {
+          return reject("RUN_EVENT_INVALID", ["claims"], "claim-not-in-scope");
+        }
+        claimIds.add(claim.claimId);
       }
       next.assignments.push(event.assignment);
       next.nonceRegistry.push(event.nonce);
       next.outbox.push(event.intent);
-      next.resources.push(...(event.claims ?? []));
-      task.attempts = event.assignment.attempt;
-      task.state = "assigned";
-      task.phase = "implementation";
-      task.waitingReason = null;
-      task.currentAssignmentId = event.assignment.assignmentId;
-      task.frozenClaimId = null;
+      next.resources.push(...claims);
+      if (reviewDispatch || smokeDispatch) {
+        task.waitingReason = null;
+        task.currentAssignmentId = event.assignment.assignmentId;
+      } else {
+        task.attempts = event.assignment.attempt;
+        task.state = "assigned";
+        task.phase = "implementation";
+        task.waitingReason = null;
+        task.currentAssignmentId = event.assignment.assignmentId;
+        task.frozenClaimId = null;
+      }
       return null;
     }
     case "turn-started": {
       const assignment = assignmentOf(next, event.assignmentId);
       const task = assignment ? taskOf(next, assignment.taskId) : undefined;
-      if (!assignment || !task || task.currentAssignmentId !== assignment.assignmentId) {
+      if (
+        !assignment ||
+        !task ||
+        task.currentAssignmentId !== assignment.assignmentId ||
+        assignment.state === "cancelled"
+      ) {
         return reject(
           "RUN_EVENT_INVALID",
           ["assignments", event.assignmentId],
           "unknown-assignment",
         );
       }
-      if (task.state !== "assigned") {
+      const reviewTurn =
+        task.state === "review" &&
+        (assignment.purpose === "reviewer" || assignment.purpose === "smoker");
+      if (task.state !== "assigned" && !reviewTurn) {
         return invalidTransition(task.spec.id, task.state, "in_progress");
       }
       if (event.agentId !== assignment.agentId) {
         return reject("RUN_EVENT_INVALID", ["turn-started", event.assignmentId], "agent-mismatch");
       }
-      task.state = "in_progress";
-      task.phase = "implementation";
+      if (!reviewTurn) {
+        task.state = "in_progress";
+        task.phase = "implementation";
+      }
       assignment.state = "in_progress";
       assignment.startedAt = facts.now;
       assignment.turnId = event.turnId;
@@ -455,7 +594,7 @@ function applyEvent(
     }
     case "turn-ended": {
       const assignment = assignmentOf(next, event.assignmentId);
-      if (!assignment) {
+      if (!assignment || assignment.state === "cancelled" || event.endedEventKey.trim() === "") {
         return reject(
           "RUN_EVENT_INVALID",
           ["assignments", event.assignmentId],
@@ -532,8 +671,9 @@ function applyEvent(
     case "review-report": {
       const block = event.block;
       const task = taskOf(next, block.taskId);
-      if (task?.state !== "review")
+      if (task?.state !== "review" || (task.phase !== "review" && task.phase !== "smoke")) {
         return invalidTransition(block.taskId, task?.state ?? "missing", "review");
+      }
       const assignment = assignmentOf(next, block.assignmentId);
       if (
         !assignment ||
@@ -545,6 +685,10 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["review-report", block.taskId], "identity-mismatch");
       }
+      const reviewNonce = reportNonce(next, block, assignment, "review");
+      if (reviewNonce === null) {
+        return reject("RUN_EVENT_INVALID", ["review-report", "nonce"], "nonce-invalid");
+      }
       const evidence = checkEvidenceGate(next, task);
       if (!evidence.ok) {
         return reject(
@@ -553,6 +697,8 @@ function applyEvent(
           String(evidence.issues[0]?.params.reason ?? "evidence"),
         );
       }
+      reviewNonce.acceptedAt = facts.now;
+      reviewNonce.acceptedEventKey = `${block.taskId}|${block.attempt}|${block.nonce}`;
       appendReview(task, block, next);
       const gate = checkReviewGate(next, task);
       if (!gate.ok) {
@@ -562,6 +708,10 @@ function applyEvent(
             ["tasks", task.spec.id, "reviews"],
             String(gate.issues[0]?.params.reason ?? "review"),
           );
+        }
+        if (task.phase === "smoke") {
+          task.waitingReason = String(gate.issues[0]?.params.reason ?? "blocked-review");
+          return null;
         }
         afterGateFailure(next, task, String(gate.issues[0]?.params.reason ?? "review"));
         return null;
@@ -591,6 +741,10 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["smoke-report", block.taskId], "identity-mismatch");
       }
+      const smokeNonce = reportNonce(next, block, assignment, "smoke");
+      if (smokeNonce === null) {
+        return reject("RUN_EVENT_INVALID", ["smoke-report", "nonce"], "nonce-invalid");
+      }
       const evidence = checkEvidenceGate(next, task);
       if (!evidence.ok) {
         return reject(
@@ -599,6 +753,8 @@ function applyEvent(
           String(evidence.issues[0]?.params.reason ?? "evidence"),
         );
       }
+      smokeNonce.acceptedAt = facts.now;
+      smokeNonce.acceptedEventKey = `${block.taskId}|${block.attempt}|${block.nonce}`;
       task.smokeReport = block;
       const review = checkReviewGate(next, task);
       const smoke = checkSmokeGate(next, task);
@@ -612,12 +768,20 @@ function applyEvent(
       return null;
     }
     case "decision":
-      // Raw decision replies need the control-nonce digest that A-batch RunDecisionPoint lacks.
-      // R01c supplies it; until then every reply is rejected explicitly rather than half-validated.
+      // R01c now stores controlNonceDigest, but B batch does not wire decision responses yet;
+      // C batch must validate against the recorded decision/nonce and consume it exactly once.
       return reject("RUN_EVENT_INVALID", ["decision"], "unsupported-in-batch-b");
     case "cancel-requested": {
       if (!validControlNonceDigest(event.controlNonceDigest)) {
         return reject("RUN_EVENT_INVALID", ["cancel", "controlNonceDigest"], "invalid-digest");
+      }
+      const cancelIntent = next.outbox.find((intent) => intent.id === event.cancelIntentId);
+      if (
+        cancelIntent === undefined ||
+        (cancelIntent.kind !== "wake" && cancelIntent.kind !== "archive") ||
+        !event.taskIds.includes(cancelIntent.taskId)
+      ) {
+        return reject("RUN_EVENT_INVALID", ["cancel", "cancelIntentId"], "cancel-intent");
       }
       for (const taskId of event.taskIds) {
         if (!taskOf(next, taskId)) {
@@ -631,7 +795,14 @@ function applyEvent(
           Boolean(task.currentAssignmentId) ||
           next.resources.some((claim) => claim.taskId === taskId);
         if (active) {
-          freezeTask(next, taskId, event.reason, facts, event.controlNonceDigest);
+          freezeTask(
+            next,
+            taskId,
+            event.reason,
+            facts,
+            event.controlNonceDigest,
+            event.cancelIntentId,
+          );
         } else {
           markCancelled(next, taskId, event.reason, facts);
         }
@@ -654,8 +825,18 @@ function applyEvent(
       if (decision.state !== "open") {
         return reject("RUN_EVENT_INVALID", ["decision", event.decisionId], "decision-not-open");
       }
-      if (decision.category !== "D1" || decision.subjectId !== event.taskId) {
+      if (
+        decision.category !== "D1" ||
+        decision.subjectId !== event.taskId ||
+        decision.dedupeKey !== `cancel:${event.taskId}`
+      ) {
         return reject("RUN_EVENT_INVALID", ["decision", event.decisionId], "decision-binding");
+      }
+      if (
+        typeof decision.cancelIntentId === "string" &&
+        decision.cancelIntentId !== event.evidence.cancelIntentId
+      ) {
+        return reject("RUN_EVENT_INVALID", ["decision", event.decisionId], "cancel-intent-binding");
       }
       if (
         task.state !== "blocked" &&
@@ -710,10 +891,12 @@ function applyEvent(
           intent.state === "sending" ||
           intent.state === "outcome-unknown",
       );
-      if (unsettled || openIntent || next.resources.length > 0) {
+      const openDecision = next.decisions.some((decision) => decision.state !== "answered");
+      if (unsettled || openIntent || openDecision || next.resources.length > 0) {
         return reject("RUN_INVALID_TRANSITION", ["lifecycle"], "run-not-finished", {
           tasks: unsettled ? 1 : 0,
           intents: openIntent ? 1 : 0,
+          decisions: openDecision ? 1 : 0,
           claims: next.resources.length,
         });
       }
@@ -734,8 +917,16 @@ function applyEvent(
       next.lifecycle = "cancelled";
       for (const task of next.tasks) {
         if (task.state === "done" || task.state === "cancelled") continue;
-        if (quiescent(next, task.spec.id)) markCancelled(next, task.spec.id, event.reason, facts);
-        else freezeTask(next, task.spec.id, event.reason, facts, event.controlNonceDigest);
+        const active =
+          task.currentAssignmentId !== null ||
+          next.resources.some((claim) => claim.taskId === task.spec.id);
+        if (!active) {
+          markCancelled(next, task.spec.id, event.reason, facts);
+        } else if (quiescent(next, task.spec.id)) {
+          markCancelled(next, task.spec.id, event.reason, facts);
+        } else {
+          freezeTask(next, task.spec.id, event.reason, facts, event.controlNonceDigest);
+        }
       }
       return null;
     }

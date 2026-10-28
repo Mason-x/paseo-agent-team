@@ -210,13 +210,19 @@ export function occupiesExecutionSlot(
 
 function checkI4(record: RunRecord): RunInvariantViolation[] {
   const active = record.tasks.filter((task) => occupiesExecutionSlot(record, task)).length;
-  const effective = Math.max(record.policy.configuredConcurrency, active);
+  const frozen = record.tasks.filter(
+    (task) =>
+      (task.state === "blocked" || task.state === "failed") &&
+      record.resources.some((claim) => claim.taskId === task.spec.id),
+  ).length;
+  const effective = record.policy.configuredConcurrency + frozen;
   if (active > effective) {
     return [
       violation("I4", ["tasks"], "capacity-over-effective", {
         active,
         effective,
         limit: record.policy.configuredConcurrency,
+        frozen,
       }),
     ];
   }

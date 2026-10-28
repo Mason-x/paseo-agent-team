@@ -22,6 +22,8 @@ export type RunStoredReview = Pick<RunReviewReportBlock, "reviewedRef" | "verdic
   reviewerSeatId: string;
   /** The reviewer assignment; omitted only for legacy fixtures/records created before R03a. */
   assignmentId?: string;
+  /** Which gate phase produced this review; a smoke-phase block still blocks done. */
+  phase?: "review" | "smoke";
   probes?: RunReviewReportBlock["probes"];
 };
 export type RunStoredSmokeReport = RunSmokeReportBlock;

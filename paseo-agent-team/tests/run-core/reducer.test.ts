@@ -129,8 +129,8 @@ function withReviewer(record: RunRecord = structuredClone(NORMAL_RUN_LEDGER)): R
     agentId: reviewer.agentId,
     seatId: reviewer.seatId,
     issuedAt: AT_UPDATED,
-    acceptedAt: AT_UPDATED,
-    acceptedEventKey: "agent-b2|turn-8|turn_ended",
+    acceptedAt: null,
+    acceptedEventKey: null,
     revokedAt: null,
     revokeReason: null,
   });
@@ -255,6 +255,17 @@ describe("reduceRun", () => {
 
   test("cancel-requested freezes an in-flight task even with quiescent evidence", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
     const assignmentValue = record.assignments.find(
       (entry) => entry.assignmentId === ASSIGNMENT_T2,
     );
@@ -401,8 +412,8 @@ describe("reduceRun", () => {
       agentId: "agent-b2",
       seatId: "seat-b2",
       issuedAt: AT_UPDATED,
-      acceptedAt: AT_UPDATED,
-      acceptedEventKey: "agent-b2|turn-8|turn_ended",
+      acceptedAt: null,
+      acceptedEventKey: null,
       revokedAt: null,
       revokeReason: null,
     });
@@ -415,21 +426,38 @@ describe("reduceRun", () => {
         blockers: [],
       },
     ];
+    const smokeNonce = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     record.assignments.push(
       assignment({
         assignmentId: "assignment-t2-smoke",
         seatId: "seat-b3",
         agentId: "agent-b3",
         purpose: "smoker",
+        nonce: smokeNonce,
         messageId: null,
       }),
     );
+    record.nonceRegistry.push({
+      nonce: smokeNonce,
+      runId: record.runId,
+      taskId: "T2",
+      assignmentId: "assignment-t2-smoke",
+      attempt: 1,
+      phase: "smoke",
+      agentId: "agent-b3",
+      seatId: "seat-b3",
+      issuedAt: AT_UPDATED,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    });
     const block = {
       protocolVersion: 1,
       runId: record.runId,
       taskId: "T2",
       attempt: 1,
-      nonce: NONCE_T2,
+      nonce: smokeNonce,
       assignmentId: "assignment-t2-smoke",
       testedRef: { kind: "git-commit", value: "9f3c1a7" },
       devHost: "127.0.0.1:6799",
@@ -668,7 +696,7 @@ describe("reduceRun", () => {
     if (!decisionId) throw new Error("missing decision");
     const badEvidence = {
       ...QUIESCENT_CANCELLATION,
-      cancelIntentId: "missing-intent",
+      cancelIntentId: INTENT_CANCEL,
       receipt: { kind: "none" as const, confirmedAt: AT_UPDATED, externalId: null },
       observationSeq: 0,
       refreshObservedAt: "2020-01-01T00:00:00.000Z",
@@ -907,6 +935,17 @@ describe("reduceRun", () => {
   });
   test("control digests are required and persisted on created decisions", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
     const missing = reduceRun(
       record,
       {
@@ -936,6 +975,17 @@ describe("reduceRun", () => {
 
   test("cancellation-checked rejects a decision for another task or category", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
     const frozen = reduceRun(
       record,
       {
@@ -995,5 +1045,203 @@ describe("reduceRun", () => {
         ),
       ).toBe(true);
     }
+  });
+  test("a later observed turn_started keeps cancellation frozen", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
+    const assignmentValue = record.assignments.find(
+      (entry) => entry.assignmentId === ASSIGNMENT_T2,
+    );
+    if (!assignmentValue) throw new Error("missing assignment");
+    assignmentValue.turnId = "turn-7";
+    const frozen = reduceRun(
+      record,
+      {
+        kind: "cancel-requested",
+        taskIds: ["T2"],
+        reason: "cancel",
+        cancelIntentId: INTENT_CANCEL,
+        controlNonceDigest: CONTROL_DIGEST,
+      },
+      facts,
+    );
+    expect(frozen.ok).toBe(true);
+    if (!frozen.ok) return;
+    const observed = reduceRun(
+      frozen.next,
+      {
+        kind: "observation-recorded",
+        receipt: {
+          eventKey: "agent-b1|turn-9|turn_started",
+          kind: "turn_started",
+          agentId: "agent-b1",
+          turnId: "turn-9",
+          seq: 8,
+          receivedAt: AT_UPDATED,
+          dedupeKey: "agent-b1|turn-9|turn_started",
+          disposition: "observed",
+        },
+      },
+      facts,
+    );
+    expect(observed.ok).toBe(true);
+    if (!observed.ok) return;
+    const decisionId = observed.next.decisions[0]?.decisionId;
+    if (!decisionId) throw new Error("missing decision");
+    const checked = reduceRun(
+      observed.next,
+      {
+        kind: "cancellation-checked",
+        taskId: "T2",
+        decisionId,
+        evidence: { ...QUIESCENT_CANCELLATION, observationSeq: 8 },
+      },
+      facts,
+    );
+    expect(checked.ok).toBe(true);
+    if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("blocked");
+  });
+
+  test("a never-started assignment can be cancelled after a confirmed receipt", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "wake",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        messageId: MESSAGE_CANCEL,
+        state: "sending",
+        confirmedAt: null,
+      }),
+    );
+    const frozen = reduceRun(
+      record,
+      {
+        kind: "cancel-requested",
+        taskIds: ["T2"],
+        reason: "cancel",
+        cancelIntentId: INTENT_CANCEL,
+        controlNonceDigest: CONTROL_DIGEST,
+      },
+      facts,
+    );
+    expect(frozen.ok).toBe(true);
+    if (!frozen.ok) return;
+    const decisionId = frozen.next.decisions[0]?.decisionId;
+    if (!decisionId) throw new Error("missing decision");
+    const evidence = {
+      ...QUIESCENT_CANCELLATION,
+      lastTurnId: null,
+      endedEventKey: null,
+      observationSeq: 7,
+      refreshObservedAt: AT_UPDATED,
+    };
+    const checked = reduceRun(
+      frozen.next,
+      { kind: "cancellation-checked", taskId: "T2", decisionId, evidence },
+      facts,
+    );
+    expect(checked.ok).toBe(true);
+    if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("cancelled");
+  });
+
+  test("dag-revised cancels an unstarted pending task without D1", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    const result = reduceRun(
+      record,
+      {
+        kind: "dag-revised",
+        controlNonceDigest: CONTROL_DIGEST,
+        block: {
+          protocolVersion: 1,
+          runId: record.runId,
+          taskId: "_dag",
+          attempt: 1,
+          nonce: NONCE_T2,
+          dagRevision: record.dagRevision + 1,
+          expectedDagRevision: record.dagRevision,
+          tasks: [
+            spec("T1", "Core API surface"),
+            spec("T2", "Core implementation"),
+            spec("T3", "Operator docs", { group: "docs", deps: ["T2"] }),
+          ],
+          cancelTaskIds: ["T3"],
+          budgetRequests: [],
+        },
+      },
+      facts,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(taskOf(result.next, "T3").state).toBe("cancelled");
+    expect(result.next.decisions).toHaveLength(0);
+  });
+
+  test("a smoke-phase blocking review prevents done", () => {
+    const record = withReviewer();
+    const task = taskOf(record, "T2");
+    task.spec = { ...task.spec, devSmoke: true, smokeChecklist: ["open"] };
+    task.state = "review";
+    task.phase = "review";
+    task.ref = { kind: "git-commit", value: "9f3c1a7" };
+    task.report = report();
+    const pass = reduceRun(record, { kind: "review-report", block: review() }, facts);
+    expect(pass.ok).toBe(true);
+    if (!pass.ok) return;
+    expect(taskOf(pass.next, "T2").phase).toBe("smoke");
+    const second = pass.next;
+    const reviewer2 = assignment({
+      assignmentId: "assignment-t2-r2",
+      seatId: "seat-b2",
+      agentId: "agent-b2",
+      purpose: "reviewer",
+      tier: "A",
+      family: "codex",
+      nonce: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      messageId: null,
+    });
+    second.assignments.push(reviewer2);
+    second.nonceRegistry.push({
+      nonce: reviewer2.nonce,
+      runId: second.runId,
+      taskId: "T2",
+      assignmentId: reviewer2.assignmentId,
+      attempt: 1,
+      phase: "review",
+      agentId: reviewer2.agentId,
+      seatId: reviewer2.seatId,
+      issuedAt: AT_UPDATED,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    });
+    const blocked = reduceRun(
+      second,
+      {
+        kind: "review-report",
+        block: {
+          ...review(),
+          assignmentId: reviewer2.assignmentId,
+          nonce: reviewer2.nonce,
+          verdict: "不可合入",
+          blockers: [{ id: "B-1", summary: "blocking", path: "src/t2.ts" }],
+        },
+      },
+      facts,
+    );
+    expect(blocked.ok).toBe(true);
+    if (blocked.ok) expect(taskOf(blocked.next, "T2").state).not.toBe("done");
   });
 });
