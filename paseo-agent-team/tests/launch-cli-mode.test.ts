@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
@@ -9,6 +11,7 @@ const {
   buildLaunchRequest,
   buildStatusRequest,
   DEPRECATED_ECONOMY_NOTICE,
+  formatRequestedMode,
   MODE_VALUES,
   modeNotice,
   resolveMode,
@@ -28,6 +31,7 @@ const base = {
 describe("launch CLI modes", () => {
   test("maps the five accepted spellings to the wire values", () => {
     expect(resolveMode(undefined)).toEqual({ ok: true, mode: undefined, deprecated: false });
+    expect(resolveMode("")).toEqual({ ok: true, mode: undefined, deprecated: false });
     expect(resolveMode("sota")).toEqual({ ok: true, mode: "sota", deprecated: false });
     expect(resolveMode("collaborative")).toEqual({
       ok: true,
@@ -46,7 +50,7 @@ describe("launch CLI modes", () => {
   });
 
   test("rejects unknown values, including near-misses and case variants", () => {
-    for (const value of ["", "Standard", "standard ", "flagship", "all-seats", "sota,economy"]) {
+    for (const value of ["Standard", "standard ", "flagship", "all-seats", "sota,economy"]) {
       expect(resolveMode(value)).toEqual({ ok: false });
     }
   });
@@ -79,9 +83,20 @@ describe("launch CLI modes", () => {
     for (const value of MODE_VALUES) expect(usage).toContain(value);
     expect(usage).toContain("advanced override for");
     expect(usage).toContain("scripts and tests only");
-    expect(usage).toContain("legacy spelling of standard");
+    expect(usage).toContain("legacy spelling of 标准");
     expect(usage).toContain("contractVersion 2");
+    expect(usage).toContain("旗舰（SOTA）");
+    expect(usage).toContain("标准");
     expect(usage).toContain("经济");
+    expect(usage).toContain("协作");
+    expect(usage).toContain("全席位");
+  });
+
+  test("preview names match the --mode / UI labels", () => {
+    expect(formatRequestedMode("sota")).toBe("旗舰（SOTA）（sota）");
+    expect(formatRequestedMode("economy")).toBe("标准（economy）");
+    expect(formatRequestedMode("economy-all")).toBe("经济（economy-all）");
+    expect(formatRequestedMode("collaborative")).toBe("协作（collaborative）");
   });
 
   test("--help prints the usage without connecting anywhere", async () => {
@@ -117,5 +132,26 @@ describe("launch CLI modes", () => {
       code: 1,
       stderr: expect.stringContaining("--mode must be one of sota, standard, economy, economy-all"),
     });
+  });
+
+  test("a directory junction still runs the CLI", async () => {
+    const tempRoot = await mkdtemp(path.join(tmpdir(), "paseo-d03-junction-"));
+    const linkDir = path.join(tempRoot, "scripts-link");
+    try {
+      await symlink(
+        path.join(PLUGIN_ROOT, "scripts"),
+        linkDir,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        [path.join(linkDir, "launch-team.mjs"), "--help"],
+        { cwd: tempRoot },
+      );
+      expect(stdout).toContain("Usage: node scripts/launch-team.mjs");
+      expect(stderr).toBe("");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
   });
 });

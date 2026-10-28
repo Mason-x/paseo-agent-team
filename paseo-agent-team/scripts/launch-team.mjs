@@ -7,6 +7,7 @@
 //     --project <projectId> --title "Billing" "Add Stripe billing"
 //
 // --host is required and has no default, so a launch never lands on a daemon by accident.
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -29,9 +30,9 @@ export const usage = `Usage: node scripts/launch-team.mjs --host <host:port> --t
 The Team's saved mode is used unless --mode is passed. --mode is an advanced override for
 scripts and tests only (never written back to the Team):
   sota          旗舰（SOTA）: keep every Role's original binding
-  standard      standard: decision keeps its binding, execution uses the standard pool
-  economy       legacy spelling of standard; a notice is printed and the mode stays standard
-  economy-all   经济（全席位）: every seat uses only eligible cheap Profiles per route; a route
+  standard      标准: decision keeps its binding, execution uses the standard pool
+  economy       legacy spelling of 标准; a notice is printed and the mode stays 标准
+  economy-all   经济: every seat uses only eligible cheap Profiles per route (全席位); a route
                 without a qualified candidate blocks the launch
   collaborative 协作: execution seats fan out across families
 
@@ -42,8 +43,22 @@ economy-all and its before-override access gate; older daemons ignore the field.
  * Maps a CLI spelling to the wire value. `standard` and the legacy `economy` both mean the
  * stored `economy` mode (shown as 标准); only `economy-all` is the all-seats mode.
  */
+/** UI names for stored / wire mode values (same as the settings page). */
+export const MODE_LABELS = {
+  sota: "旗舰（SOTA）",
+  economy: "标准",
+  "economy-all": "经济",
+  collaborative: "协作",
+};
+
+/** Preview line: 标准（economy）, matching --mode / README names. */
+export function formatRequestedMode(stored) {
+  const label = MODE_LABELS[stored];
+  return label === undefined ? String(stored) : `${label}（${stored}）`;
+}
+
 export function resolveMode(raw) {
-  if (raw === undefined) return { ok: true, mode: undefined, deprecated: false };
+  if (raw === undefined || raw === "") return { ok: true, mode: undefined, deprecated: false };
   if (raw === "standard") return { ok: true, mode: "economy", deprecated: false };
   if (raw === "economy") return { ok: true, mode: "economy", deprecated: true };
   if (raw === "sota" || raw === "economy-all" || raw === "collaborative") {
@@ -157,7 +172,7 @@ function main() {
       } else {
         const plan = preview.preview;
         out(
-          `mode ${plan.requestedMode}; seats ${plan.counts.physical} ` +
+          `mode ${formatRequestedMode(plan.requestedMode)}; seats ${plan.counts.physical} ` +
             `(${plan.counts.eager} eager, ${plan.counts.deferred} deferred, ` +
             `${plan.counts.escalation} standby); budget economy=${plan.budget.economy} ` +
             `sota=${plan.budget.sota} unknown=${plan.budget.unknown}`,
@@ -227,7 +242,14 @@ function main() {
   })();
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url).toLowerCase() === path.resolve(process.argv[1]).toLowerCase();
-if (invokedDirectly) main();
+function sameInvokedPath(metaUrl, argv1) {
+  if (argv1 === undefined) return false;
+  const fromMeta = fileURLToPath(metaUrl);
+  try {
+    return fs.realpathSync(fromMeta).toLowerCase() === fs.realpathSync(argv1).toLowerCase();
+  } catch {
+    return path.resolve(fromMeta).toLowerCase() === path.resolve(argv1).toLowerCase();
+  }
+}
+
+if (sameInvokedPath(import.meta.url, process.argv[1])) main();
