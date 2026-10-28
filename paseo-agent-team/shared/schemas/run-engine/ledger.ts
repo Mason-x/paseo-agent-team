@@ -55,10 +55,16 @@ export const RunTaskStateSchema = z.enum(RUN_TASK_STATES);
 export type RunTaskState = z.infer<typeof RunTaskStateSchema>;
 
 /**
- * Waiting sub-states inside `review`. `review/awaiting-rework` is `state:"review"` +
- * `phase:"awaiting-rework"` (no separate state value); R03/R05/R07 must read it this way.
+ * Waiting sub-states. `review/awaiting-rework` is `state:"review"` + `phase:"awaiting-rework"`;
+ * `blocked/frozen` is `state:"blocked"` + `phase:"frozen"` with a frozen claim and D1.
  */
-export const RUN_TASK_PHASES = ["implementation", "review", "smoke", "awaiting-rework"] as const;
+export const RUN_TASK_PHASES = [
+  "implementation",
+  "review",
+  "smoke",
+  "awaiting-rework",
+  "frozen",
+] as const;
 export const RunTaskPhaseSchema = z.enum(RUN_TASK_PHASES);
 export type RunTaskPhase = z.infer<typeof RunTaskPhaseSchema>;
 
