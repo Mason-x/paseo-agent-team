@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "vitest";
-import { createDesignPlanner } from "../server/designer/planning";
+import { describe, expect, test, vi } from "vitest";
+import { describeModeRouting } from "../server/designer/context";
+import { checkGapEconomyEligibility, createDesignPlanner } from "../server/designer/planning";
 import { createLaunchService } from "../server/launch-service";
 import type { DesignPlanningInput } from "../shared/domain/design-planning";
 import { validateDesign } from "../shared/domain/design-validation";
+import type * as LaunchPlanModule from "../shared/domain/launch-plan";
 import { LAUNCH_RUNTIME_CAPABILITIES } from "../shared/domain/launch-runtime";
+import { normalizeEconomyPolicy } from "../shared/domain/mode-resolver";
 import type { ModeIssue } from "../shared/domain/role-execution";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type { DesignProposal } from "../shared/schemas/design";
+import { DesignRoleGapSchema } from "../shared/schemas/design";
 import { ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
 import type { Preferences } from "../shared/schemas/preferences";
 import { PreferencesSchema } from "../shared/schemas/preferences";
@@ -15,6 +19,19 @@ import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
 import { fakePort, healthyConfig, ready } from "./fakes";
 import { allAvailable, claudeOpus, codexXhigh, NOW } from "./fixtures";
+
+// Count-only passthrough: proves the design planner has exactly one planner call site.
+const launchPlanCalls = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../shared/domain/launch-plan", async (importOriginal) => {
+  const actual = await importOriginal<typeof LaunchPlanModule>();
+  return {
+    ...actual,
+    buildLaunchPlan: (input: Parameters<typeof actual.buildLaunchPlan>[0]) => {
+      launchPlanCalls.count += 1;
+      return actual.buildLaunchPlan(input);
+    },
+  };
+});
 
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
 const MAX_MEMBERS = 8;
@@ -522,5 +539,220 @@ describe("design planning", () => {
     if (result.ok) return;
     expect(result.launchBlockers.length).toBeGreaterThan(0);
     expect(codes(result.issues)).toContain("MODE_JUDGE_REQUIRED");
+  });
+
+  test("planDesign consumes the shared planner exactly once", () => {
+    launchPlanCalls.count = 0;
+    const result = createDesignPlanner(ALL_CAPABILITIES).plan(input("sota"));
+    expect(result.ok).toBe(true);
+    expect(launchPlanCalls.count).toBe(1);
+  });
+});
+
+const GAP_PROFILES: PaseoProfile[] = [
+  { id: "haiku", name: "Haiku", provider: "claude", model: "claude-haiku-4-5" },
+  { id: "deepseek", name: "DeepSeek", provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+  { id: "sonnet", name: "Sonnet", provider: "claude", model: "claude-sonnet-5" },
+];
+const GAP_AVAILABILITY: ProviderAvailability[] = [
+  { provider: "claude", available: true },
+  { provider: "omp", available: true },
+];
+const GAP_ENTRIES = [
+  {
+    profileId: "haiku",
+    enabled: true,
+    costClass: "low",
+    family: "haiku",
+    boundModel: { provider: "claude", model: "claude-haiku-4-5" },
+  },
+  {
+    profileId: "deepseek",
+    enabled: true,
+    costClass: "low",
+    family: "deepseek",
+    boundModel: { provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
+  },
+];
+const GAP_ROUTES = {
+  coordinator: ["haiku"],
+  decision: ["haiku"],
+  execution: ["deepseek"],
+  escalation: ["haiku"],
+  retain: ["haiku"],
+};
+
+function gapRouting(
+  availability: ProviderAvailability[] = GAP_AVAILABILITY,
+  routes: Record<string, string[]> = GAP_ROUTES,
+) {
+  const policy = normalizeEconomyPolicy(
+    {
+      pool: [],
+      taskOrder: {},
+      profileBudget: {},
+      allSeats: { version: 1, profiles: GAP_ENTRIES, routes },
+    },
+    GAP_PROFILES,
+  );
+  if (!policy.ok) throw new Error("unexpected policy failure");
+  return describeModeRouting({
+    profiles: GAP_PROFILES,
+    availability,
+    economy: policy.value,
+  });
+}
+
+function gapFixture(overrides: Record<string, unknown> = {}) {
+  return DesignRoleGapSchema.parse({
+    kind: "missing-role",
+    responsibility: "负责数据库迁移与回滚",
+    reason: "目录没有承担迁移的 Role",
+    use: "member",
+    profiles: { kind: "existing", profileIds: ["deepseek"] },
+    suggestedRole: {
+      id: "eng-data",
+      name: "【工程】数据迁移",
+      responsibilities: ["编写可回滚的迁移脚本"],
+      executionPolicy: { tier: "execution", taskKind: "coding" },
+    },
+    ...overrides,
+  });
+}
+
+describe("gap economy eligibility", () => {
+  test("accepts a suggested Profile that sits in the gap's own route", () => {
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: gapFixture(),
+        routing: gapRouting(),
+      }),
+    ).toEqual([]);
+  });
+
+  test("rejects a Profile outside the route with a repair issue", () => {
+    const issues = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: gapFixture({ profiles: { kind: "existing", profileIds: ["sonnet"] } }),
+      routing: gapRouting(),
+      path: ["gaps", 0],
+    });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "DESIGN_MODE_PLAN_INVALID",
+      severity: "error",
+      path: ["gaps", 0, "profiles", "profileIds", 0],
+      action: "repair",
+      params: {
+        modeCode: "MODE_CHEAP_PROFILE_INVALID",
+        route: "execution",
+        profileId: "sonnet",
+        reason: "outside-list",
+      },
+    });
+  });
+
+  test("rejects a candidate the planner finds unavailable", () => {
+    const issues = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: gapFixture(),
+      routing: gapRouting([
+        { provider: "claude", available: true },
+        { provider: "omp", available: false },
+      ]),
+    });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_PROFILE_INVALID",
+      reason: "unavailable",
+    });
+  });
+
+  test("uses the coordinator route for a coordinator gap", () => {
+    const coordinator = gapFixture({ use: "coordinator" });
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: gapFixture({
+          use: "coordinator",
+          profiles: { kind: "existing", profileIds: ["haiku"] },
+        }),
+        routing: gapRouting(),
+      }),
+    ).toEqual([]);
+    const issues = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: coordinator,
+      routing: gapRouting(),
+    });
+    expect(issues[0]?.params).toMatchObject({ route: "coordinator", profileId: "deepseek" });
+  });
+
+  test("a structured none gap is the legal exit for every broken route state", () => {
+    const none = gapFixture({ profiles: { kind: "none", reason: "host 无合格 Profile" } });
+    expect(
+      checkGapEconomyEligibility({ mode: "economy-all", gap: none, routing: gapRouting() }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({ mode: "economy-all", gap: none, routing: { status: "absent" } }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: none,
+        routing: { status: "invalid", reason: "unknown-version" },
+      }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: none,
+        routing: gapRouting(GAP_AVAILABILITY, { retain: ["deepseek"] }),
+      }),
+    ).toEqual([]);
+    // Undefined routing means the caller forgot to pass the snapshot: an internal error, not a
+    // model-fixable one, so it stays a distinct reason.
+    const unwired = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: none,
+      routing: undefined,
+    });
+    expect(unwired[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_POLICY_REQUIRED",
+      reason: "routing-missing",
+    });
+  });
+
+  test("a missing policy blocks an existing Profile suggestion as a policy problem", () => {
+    const issues = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: gapFixture(),
+      routing: { status: "absent" },
+    });
+    expect(issues[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_POLICY_REQUIRED",
+      reason: "absent",
+    });
+  });
+
+  test("legacy modes and unlaunchable gaps skip the check", () => {
+    expect(
+      checkGapEconomyEligibility({ mode: "economy", gap: gapFixture(), routing: gapRouting() }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: DesignRoleGapSchema.parse({
+          kind: "unlaunchable-role",
+          roleId: "eng-data",
+          responsibility: "负责数据库迁移与回滚",
+          reason: "该 Role 的绑定不可用",
+          use: "member",
+          profiles: { kind: "existing", profileIds: ["deepseek"] },
+        }),
+        routing: gapRouting(),
+      }),
+    ).toEqual([]);
   });
 });

@@ -1,13 +1,24 @@
-import { finalizeDesignIssues } from "../../shared/domain/design-validation";
+import {
+  type AllSeatsRoute,
+  type CheapInvalidReason,
+  evaluateCheapCandidate,
+  orderedRouteIds,
+} from "../../shared/domain/cheap-routing";
+import {
+  type DesignRoleLaunchTables,
+  type DesignRoleLaunchVerdict,
+  finalizeDesignIssues,
+} from "../../shared/domain/design-validation";
 import {
   type EconomyPolicy,
   type HostSnapshot,
   normalizeEconomyPolicy,
+  resolveCoordinatorProfile,
   resolveModeProfile,
   selectCollaborationProfiles,
 } from "../../shared/domain/mode-resolver";
 import { resolveProfile } from "../../shared/domain/profile-resolver";
-import { resolveRoleExecution } from "../../shared/domain/role-execution";
+import { type ModeIssue, resolveRoleExecution } from "../../shared/domain/role-execution";
 import type { ProviderAvailability } from "../../shared/paseo/adapter";
 import { asRecord, type PaseoProfile, profilesFromConfig } from "../../shared/paseo/adapter";
 import type { DesignAdapter, DesignWorkspaceSummary } from "../../shared/paseo/design-port";
@@ -15,22 +26,214 @@ import type { DesignBaseRevisions, DesignIssue, DesignJob } from "../../shared/s
 import type { Preferences } from "../../shared/schemas/preferences";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
-import type { TeamMode } from "../../shared/schemas/team-mode";
+import type { TaskKind, TeamMode } from "../../shared/schemas/team-mode";
 import type { RolesDocument, TeamsDocument } from "../../shared/settings";
 
 const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 const MAX_UNAVAILABLE_PROFILE_IDS = 5;
+const ROUTE_ORDER: readonly AllSeatsRoute[] = [
+  "coordinator",
+  "decision",
+  "execution",
+  "escalation",
+  "retain",
+];
+const ROUTE_TASK_KINDS: readonly TaskKind[] = [
+  "coding",
+  "testing",
+  "acceptance",
+  "codebase",
+  "ops",
+  "general",
+];
 
 export type RoleLaunchability = {
   launchable: boolean;
   unavailableProfileIds: readonly string[];
 };
 
+/** One route candidate exactly as the planner judges it. */
+export type DesignRouteCandidate = {
+  profileId: string;
+  family: string | null;
+  eligible: boolean;
+  reason?: CheapInvalidReason;
+  /**
+   * True when the planner reports this rejection as an issue. A candidate outside the allowlist
+   * is only counted, so it must not be surfaced as a Role verdict.
+   */
+  reported: boolean;
+};
+
+export type DesignRouteRow = {
+  route: AllSeatsRoute;
+  /** Execution rows vary by task kind; every other route keeps one row. */
+  taskKind: TaskKind | null;
+  candidates: readonly DesignRouteCandidate[];
+};
+
+/** The economy-all route view; the prompt summary and the gap check both read this one table. */
+export type DesignModeRouting =
+  | { status: "ready"; routes: readonly DesignRouteRow[] }
+  | { status: "absent" }
+  | { status: "invalid"; reason: string };
+
 /**
- * Per-Role host capability for the kickoff. It reuses T2's seat resolution for the launchable
- * flag (including the economy pool for execution seats) and T2's Profile resolver for the exact
- * unusable bindings. The list is bounded because the Role index is required at every compression
- * level.
+ * Enumerates the all-seats routes once per context read. This is presentation and gap evidence
+ * only: it mirrors `resolveCheapSeat`'s single pass and never selects a seat, so launched plans
+ * still come from D02 alone.
+ */
+export function describeModeRouting(input: {
+  profiles: readonly PaseoProfile[];
+  availability: readonly ProviderAvailability[];
+  economy: EconomyPolicy;
+}): DesignModeRouting {
+  const policy = input.economy.allSeats;
+  if (policy === undefined || policy.status === "absent") return { status: "absent" };
+  if (policy.status === "invalid") return { status: "invalid", reason: policy.reason };
+  const order = { routes: policy.routes, executionTaskOrder: policy.executionTaskOrder };
+  const live = new Map(input.profiles.map((profile) => [profile.id, profile]));
+  const entries = new Map(policy.profiles.map((entry) => [entry.profileId, entry]));
+  const routes: DesignRouteRow[] = [];
+  for (const route of ROUTE_ORDER) {
+    for (const taskKind of route === "execution" ? ROUTE_TASK_KINDS : [null]) {
+      const ids = orderedRouteIds(order, route, taskKind ?? undefined);
+      const candidates = ids.map((profileId): DesignRouteCandidate => {
+        const entry = entries.get(profileId);
+        if (entry === undefined) {
+          return {
+            profileId,
+            family: null,
+            eligible: false,
+            reason: "outside-list",
+            reported: false,
+          };
+        }
+        const profile = live.get(profileId);
+        if (profile === undefined) {
+          return {
+            profileId,
+            family: entry.family,
+            eligible: false,
+            reason: "outside-list",
+            reported: true,
+          };
+        }
+        const budget = input.economy.profileBudget[profileId];
+        const check = evaluateCheapCandidate({
+          entry,
+          live: profile,
+          route,
+          ...(budget === undefined ? {} : { profileBudget: budget }),
+          availability: input.availability,
+        });
+        return check.ok
+          ? { profileId, family: check.family, eligible: true, reported: false }
+          : {
+              profileId,
+              family: entry.family,
+              eligible: false,
+              reason: check.reason,
+              reported: true,
+            };
+      });
+      routes.push({ route, taskKind, candidates });
+    }
+  }
+  return { status: "ready", routes };
+}
+
+/** The economy-all verdict: ids and reasons come from the planner's own issues. */
+function cheapVerdict(issues: readonly ModeIssue[], launchable: boolean): DesignRoleLaunchVerdict {
+  if (launchable) {
+    return { launchable: true, unavailableProfileIds: [], verified: true };
+  }
+  const failed: string[] = [];
+  for (const issue of issues) {
+    if (issue.code !== "MODE_CHEAP_PROFILE_INVALID") continue;
+    const profileId = issue.profileId;
+    if (typeof profileId !== "string" || failed.includes(profileId)) continue;
+    if (failed.length >= MAX_UNAVAILABLE_PROFILE_IDS) break;
+    failed.push(profileId);
+  }
+  const policyRequired = issues.some((issue) => issue.code === "MODE_CHEAP_POLICY_REQUIRED");
+  const routeFailure = issues.find((issue) => issue.code === "MODE_CHEAP_ROUTE_UNAVAILABLE");
+  const routeUnproven =
+    routeFailure !== undefined &&
+    (Number(routeFailure.params.candidates ?? 0) === 0 ||
+      Number(routeFailure.params.unverified ?? 0) > 0);
+  return { launchable, unavailableProfileIds: failed, verified: !policyRequired && !routeUnproven };
+}
+
+/** Legacy member verdict, unchanged from T2 so v1 text and old hosts behave exactly as before. */
+function legacyMemberLaunchable(
+  role: Role,
+  mode: TeamMode,
+  host: HostSnapshot,
+  economy: EconomyPolicy,
+): boolean {
+  // Match the planner: old SOTA teams keep launching disabled Roles with a warning and ignore
+  // an explicit tier. Collaborative execution seats use the same cohort/fallback path.
+  const roleForPlan = mode === "sota" && !role.enabled ? { ...role, enabled: true } : role;
+  const roleForResolution =
+    mode === "sota" ? { ...roleForPlan, executionPolicy: undefined } : roleForPlan;
+  const execution = resolveRoleExecution(roleForResolution, "member");
+  if (mode === "collaborative" && execution.ok && execution.value.tier === "execution") {
+    const cohort = selectCollaborationProfiles({
+      role: roleForPlan,
+      host,
+      economy,
+      requestedReplicas: 2,
+    });
+    return cohort.ok && cohort.value.selections.length > 0;
+  }
+  const resolved = resolveModeProfile({
+    mode,
+    role: roleForResolution,
+    kind: "member",
+    host,
+    economy,
+  });
+  return resolved.ok && !resolved.value.unavailable;
+}
+
+/** The legacy binding verdict: the same resolver the planner uses for original bindings. */
+function unavailableBindingIds(
+  role: Role,
+  profiles: readonly PaseoProfile[],
+  availability: readonly ProviderAvailability[],
+): string[] {
+  const unavailable = new Set<string>();
+  for (const ref of [...role.preferredProfiles, ...role.fallbackProfiles]) {
+    if (unavailable.size >= MAX_UNAVAILABLE_PROFILE_IDS) break;
+    const single: Role = { ...role, preferredProfiles: [ref], fallbackProfiles: [] };
+    if (!resolveProfile(single, profiles, availability).ok) unavailable.add(ref.profileId);
+  }
+  return [...unavailable];
+}
+
+/**
+ * A verdict is verified when every candidate that exists has an availability row. A missing
+ * Profile is a definite fact; a missing availability row means the host cannot be checked at all.
+ */
+function bindingsVerified(
+  role: Role,
+  profiles: readonly PaseoProfile[],
+  availability: readonly ProviderAvailability[],
+): boolean {
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  const providers = new Set<string>();
+  for (const ref of [...role.preferredProfiles, ...role.fallbackProfiles]) {
+    const profile = byId.get(ref.profileId);
+    if (profile !== undefined) providers.add(profile.provider);
+  }
+  return [...providers].every((provider) => availability.some((row) => row.provider === provider));
+}
+
+/**
+ * Per-Role, per-use host capability. `member` and `coordinator` never infer one from the other:
+ * a Role can launch as a member and fail as coordinator. The member projection stays exactly the
+ * old shape for the prompt (04 §4.3), while both tables carry `verified` for gap validation.
  */
 export function computeRoleLaunchability(input: {
   mode: TeamMode;
@@ -38,53 +241,53 @@ export function computeRoleLaunchability(input: {
   profiles: readonly PaseoProfile[];
   availability: readonly ProviderAvailability[];
   economy: EconomyPolicy;
-}): Record<string, RoleLaunchability> {
+}): DesignRoleLaunchTables {
   const host: HostSnapshot = {
     status: "ready",
     profiles: input.profiles,
     availability: input.availability,
   };
-  const result: Record<string, RoleLaunchability> = {};
+  const member: Record<string, DesignRoleLaunchVerdict> = {};
+  const coordinator: Record<string, DesignRoleLaunchVerdict> = {};
   for (const role of input.roles) {
-    // Match the planner: old SOTA teams keep launching disabled Roles with a warning and ignore
-    // an explicit tier. Collaborative execution seats use the same cohort/fallback path.
-    const roleForPlan = input.mode === "sota" && !role.enabled ? { ...role, enabled: true } : role;
-    const roleForResolution =
-      input.mode === "sota" ? { ...roleForPlan, executionPolicy: undefined } : roleForPlan;
-    const execution = resolveRoleExecution(roleForResolution, "member");
-    let launchable = false;
-    if (input.mode === "collaborative" && execution.ok && execution.value.tier === "execution") {
-      const cohort = selectCollaborationProfiles({
-        role: roleForPlan,
-        host,
-        economy: input.economy,
-        requestedReplicas: 2,
-      });
-      launchable = cohort.ok && cohort.value.selections.length > 0;
-    } else {
-      const resolved = resolveModeProfile({
+    const resolvedCoordinator = resolveCoordinatorProfile({
+      mode: input.mode,
+      role,
+      host,
+      economy: input.economy,
+    });
+    if (input.mode === "economy-all") {
+      const resolvedMember = resolveModeProfile({
         mode: input.mode,
-        role: roleForResolution,
+        role,
         kind: "member",
         host,
         economy: input.economy,
       });
-      launchable = resolved.ok && !resolved.value.unavailable;
+      const memberIssues = resolvedMember.ok
+        ? [...(resolvedMember.issues ?? []), ...resolvedMember.value.issues]
+        : resolvedMember.issues;
+      const memberLaunchable = resolvedMember.ok && !resolvedMember.value.unavailable;
+      member[role.id] = cheapVerdict(memberIssues, memberLaunchable);
+      coordinator[role.id] = resolvedCoordinator.ok
+        ? cheapVerdict([], true)
+        : cheapVerdict(resolvedCoordinator.issues, false);
+      continue;
     }
-    const unavailableProfileIds = new Set<string>();
-    for (const ref of [...role.preferredProfiles, ...role.fallbackProfiles]) {
-      if (unavailableProfileIds.size >= MAX_UNAVAILABLE_PROFILE_IDS) break;
-      const single: Role = { ...role, preferredProfiles: [ref], fallbackProfiles: [] };
-      if (!resolveProfile(single, input.profiles, input.availability).ok) {
-        unavailableProfileIds.add(ref.profileId);
-      }
-    }
-    result[role.id] = {
-      launchable,
-      unavailableProfileIds: [...unavailableProfileIds],
+    const unavailableProfileIds = unavailableBindingIds(role, input.profiles, input.availability);
+    const verified = bindingsVerified(role, input.profiles, input.availability);
+    member[role.id] = {
+      launchable: legacyMemberLaunchable(role, input.mode, host, input.economy),
+      unavailableProfileIds,
+      verified,
+    };
+    coordinator[role.id] = {
+      launchable: resolvedCoordinator.ok,
+      unavailableProfileIds,
+      verified,
     };
   }
-  return result;
+  return { member, coordinator };
 }
 
 export type DesignContextCapabilities = {
@@ -121,8 +324,15 @@ export type DesignContextSnapshot = {
   revisions: DesignBaseRevisions;
   profiles: readonly PaseoProfile[];
   availability: readonly ProviderAvailability[];
-  /** Per-Role launchability computed with the same T2 resolution used by seat planning. */
+  /**
+   * Legacy member projection kept for the current service (04 §4.3). C03 switches to
+   * `roleLaunchTables` and removes this field; both come from one computation.
+   */
   roleLaunch: Readonly<Record<string, RoleLaunchability>>;
+  /** Per-use verdicts injected into gap validation; never inferred across uses. */
+  roleLaunchTables: DesignRoleLaunchTables;
+  /** The economy-all route view; absent for the legacy modes. */
+  modeRouting?: DesignModeRouting;
   daemonConfig: unknown;
   carrierWorkspace: DesignWorkspaceSummary;
   targetWorkspace: DesignWorkspaceSummary | null;
@@ -396,6 +606,13 @@ export async function readDesignContext(
   const preferences = preferencesResult.value.values;
   const normalizedEconomy = normalizeEconomyPolicy(preferences.economy, profiles);
   const economy = normalizedEconomy.ok ? normalizedEconomy.value : EMPTY_ECONOMY;
+  const roleLaunchTables = computeRoleLaunchability({
+    mode: job.mode,
+    roles: rolesResult.value.values.roles,
+    profiles,
+    availability: availabilityResult.value,
+    economy,
+  });
   return {
     ok: true,
     context: {
@@ -411,13 +628,17 @@ export async function readDesignContext(
       },
       profiles,
       availability: availabilityResult.value,
-      roleLaunch: computeRoleLaunchability({
-        mode: job.mode,
-        roles: rolesResult.value.values.roles,
-        profiles,
-        availability: availabilityResult.value,
-        economy,
-      }),
+      roleLaunch: roleLaunchTables.member,
+      roleLaunchTables,
+      ...(job.mode === "economy-all"
+        ? {
+            modeRouting: describeModeRouting({
+              profiles,
+              availability: availabilityResult.value,
+              economy,
+            }),
+          }
+        : {}),
       daemonConfig: configResult.value,
       carrierWorkspace: carrierResult.workspace,
       targetWorkspace: targetResult.kind === "ok" ? targetResult.workspace : null,
