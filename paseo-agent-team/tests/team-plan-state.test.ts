@@ -4,10 +4,12 @@ import {
   buildTeamPlanIssues,
   buildTeamSummaries,
   buildTeamSummary,
+  createClientLifecycle,
   createTeamPlanClient,
   draftInputProblem,
   draftRowKey,
   familyHintsFromEconomy,
+  isAppStateActive,
   isMethodNotFound,
   modelRowMeta,
   shouldShowPlanError,
@@ -669,7 +671,7 @@ describe("family hints", () => {
 });
 
 describe("rework 1 regressions", () => {
-  test("I1: a scope change replans the same saved list without a new array", async () => {
+  test("I1/R1: the first sync sends one batch (no empty probe) and a scope change re-syncs once", async () => {
     const fake = clock();
     const port = autoSend();
     const client = createTeamPlanClient({
@@ -680,14 +682,138 @@ describe("rework 1 regressions", () => {
     });
     client.setScope(scope);
     client.setActive(true);
-    const list = teams(3);
+    const list = teams(10);
     client.planTeams(list);
     await flush();
     expect(port.calls).toHaveLength(1);
+    expect(port.calls[0]?.items).toHaveLength(10);
+
+    // The hook's lifecycle effect calls setScope then planTeams; the client never probes by itself.
     client.setScope({ ...scope, revisions: { ...revisions, preferences: "p2" } });
+    client.planTeams(list);
     await flush();
     expect(port.calls).toHaveLength(2);
-    expect(client.getBatchView().results.size).toBe(3);
+    expect(port.calls[1]?.items).toHaveLength(10);
+    expect(client.getBatchView().results.size).toBe(10);
+  });
+
+  test("B1: a StrictMode detach/attach cancels destroy; a real detach stops refresh and kills the client", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.planTeams(teams(2));
+    await flush();
+    expect(port.calls).toHaveLength(1);
+
+    const life = createClientLifecycle(client, {
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    life.attach();
+    life.detach(); // simulated StrictMode cleanup
+    life.attach(); // remount before the destroy timer runs
+    fake.advance(0);
+    await flush();
+    client.invalidate();
+    fake.advance(200);
+    client.planTeams(teams(2));
+    await flush();
+    expect(port.calls.length).toBeGreaterThanOrEqual(2);
+
+    life.detach(); // real unmount
+    fake.advance(0);
+    await flush();
+    const before = port.calls.length;
+    client.planTeams(teams(3));
+    await flush();
+    expect(port.calls).toHaveLength(before);
+  });
+
+  test("R3: duplicate stale refresh events coalesce while a request is in flight", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.planTeams(teams(2));
+    await flush();
+    port.resolve(0, output(port.calls[0]?.items.map((item) => result(item.key)) ?? []));
+    await flush();
+
+    fake.advance(60_000);
+    await flush();
+    expect(port.calls).toHaveLength(2);
+    client.refreshIfStale();
+    client.refreshIfStale();
+    await flush();
+    expect(port.calls).toHaveLength(2);
+    port.resolve(1, output(port.calls[1]?.items.map((item) => result(item.key)) ?? []));
+    await flush();
+    expect(port.calls).toHaveLength(2);
+  });
+
+  test("R6: destroying a client with queued chunks stops starting new sends", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+      chunkSize: 2,
+      maxConcurrent: 2,
+    });
+    client.setScope(scope);
+    client.planTeams(teams(6));
+    await flush();
+    expect(port.calls).toHaveLength(2);
+    client.destroy();
+    port.resolve(0, output(port.calls[0]?.items.map((item) => result(item.key)) ?? []));
+    await flush();
+    expect(port.calls).toHaveLength(2);
+  });
+
+  test("R5: the first draft that discovers legacy goes idle instead of reporting an error", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    fake.advance(200);
+    await flush();
+    port.reject(0, new Error("method not found: agent-team.team.plan"));
+    await flush();
+    expect(client.modeContract()).toBe("legacy");
+    expect(client.getDraftState("editor")).toEqual({ status: "idle" });
+  });
+
+  test("R4: RPC transport with an unknown host is retryable, not legacy", () => {
+    expect(isMethodNotFound(new Error("RPC transport: unknown host"))).toBe(false);
+    expect(isMethodNotFound(new Error("RPC transport: host not registered"))).toBe(false);
+    expect(isMethodNotFound(new Error("DNS: unknown host"))).toBe(false);
+    expect(isMethodNotFound(new Error("method not found: agent-team.team.plan"))).toBe(true);
+    expect(isMethodNotFound(new Error("unknown method team.plan"))).toBe(true);
   });
 
   test("I2: invalidate re-requests the active draft", async () => {
@@ -1080,5 +1206,38 @@ describe("rework 1 regressions", () => {
     client.planTeams(teams(2));
     await flush();
     expect(call).toBe(3);
+  });
+
+  test("S1: a probe in flight blocks duplicate stale refreshes and timer ticks", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.probe();
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    client.refreshIfStale();
+    client.refreshIfStale();
+    fake.advance(60_000);
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    port.resolve(0, output([]));
+    await flush();
+    expect(client.modeContract()).toBe("v2");
+  });
+
+  test("S2: unknown host app states count as active; background/inactive do not", () => {
+    expect(isAppStateActive(null)).toBe(true);
+    expect(isAppStateActive(undefined)).toBe(true);
+    expect(isAppStateActive("unknown")).toBe(true);
+    expect(isAppStateActive("active")).toBe(true);
+    expect(isAppStateActive("background")).toBe(false);
+    expect(isAppStateActive("inactive")).toBe(false);
   });
 });
