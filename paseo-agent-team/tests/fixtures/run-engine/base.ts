@@ -276,7 +276,7 @@ export function policy(
 
 export function modelPlan(overrides: Record<string, unknown> = {}) {
   return {
-    launchPlanFingerprint: DIGEST_1,
+    p1PlanHash: DIGEST_1,
     mode: "economy-all",
     targetWorkspaceId: null,
     task: "Baseline launch task",
@@ -366,7 +366,7 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   schemaVersion: 1,
   runId: RUN_ID,
   revision: 7,
-  previousDigest: DIGEST_A,
+  previousDigest: `sha256:${DIGEST_A}`,
   createdAt: AT_CREATED,
   updatedAt: AT_UPDATED,
   hostBinding: { serverId: "srv-dev-1" },
@@ -383,7 +383,7 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
     rawMode: "economy-all",
     modeContract: 2,
     plannerVersion: 2,
-    modelPlanHash: DIGEST_C,
+    modelPlanHash: DIGEST_1,
   },
   lifecycle: "active",
   policy: policy(),
