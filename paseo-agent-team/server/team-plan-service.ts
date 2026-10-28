@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../shared/domain/catalog-content";
+import { routeOf } from "../shared/domain/cheap-routing";
 import { LAUNCH_RUNTIME_CAPABILITIES } from "../shared/domain/launch-runtime";
 import { MODE_CONTRACT_VERSION, TEAM_MODES } from "../shared/domain/mode-contract";
 import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
@@ -199,6 +200,11 @@ function coordinatorRow(input: {
       : [...modelPlan.coordinator.issues];
   return {
     ...base,
+    // The failed coordinator still belongs to the coordinator route; same routeOf source as the
+    // planner, only when the role policy is readable (otherwise the planner has no route either).
+    ...(modelPlan.effectiveMode === "economy-all" && policy.tier !== null
+      ? { route: routeOf("coordinator", policy.tier) }
+      : {}),
     profile: null,
     source: "unavailable",
     budget: "unknown",
@@ -247,10 +253,11 @@ function memberPlaceholderRow(input: {
   logicalSeatId: string | undefined;
   role: Role | null;
   host: HostSnapshot;
+  mode: TeamPlanResult["effectiveMode"];
   issues: readonly ModeIssue[];
   enabled: boolean;
 }): TeamPlanRow {
-  const { rowKey, member, logicalSeatId, role, host, issues, enabled } = input;
+  const { rowKey, member, logicalSeatId, role, host, mode, issues, enabled } = input;
   const policy = rolePolicy(role, "member");
   return {
     rowKey,
@@ -260,6 +267,11 @@ function memberPlaceholderRow(input: {
     roleName: role?.name ?? (member.roleId || zh.missing),
     tier: policy.tier,
     ...(policy.taskKind === undefined ? {} : { taskKind: policy.taskKind }),
+    // An enabled economy-all seat has a route even when no cheap candidate resolved; standard,
+    // legacy, and disabled rows keep the previous shape.
+    ...(mode === "economy-all" && enabled && policy.tier !== null
+      ? { route: routeOf("member", policy.tier) }
+      : {}),
     enabled,
     profile: null,
     source: "unavailable",
@@ -419,6 +431,18 @@ function fingerprint(input: {
   );
 }
 
+/** A stored seatId repeated across members is a blocker; its rows still need unique keys. */
+function hasDuplicateStoredSeatIds(members: TeamPlanningFields["members"]): boolean {
+  const seen = new Set<string>();
+  for (const member of members) {
+    const seatId = member.seatId?.trim();
+    if (!seatId) continue;
+    if (seen.has(seatId)) return true;
+    seen.add(seatId);
+  }
+  return false;
+}
+
 function planTeam(input: {
   key: string;
   team: TeamPlanningFields;
@@ -442,6 +466,30 @@ function planTeam(input: {
     if (logicalId && !logicalIndex.has(logicalId)) logicalIndex.set(logicalId, index);
   }
 
+  const uniqueKeys = hasDuplicateStoredSeatIds(team.members);
+  const usedRowKeys = new Set<string>();
+  function claimRowKey(base: string, memberIndex: number | undefined): string {
+    if (!uniqueKeys) return base;
+    if (!usedRowKeys.has(base)) {
+      usedRowKeys.add(base);
+      return base;
+    }
+    const fallback =
+      memberIndex === undefined ? `member:${usedRowKeys.size}` : `member:${memberIndex}`;
+    if (!usedRowKeys.has(fallback)) {
+      usedRowKeys.add(fallback);
+      return fallback;
+    }
+    let suffix = 2;
+    let candidate = `${fallback}#${suffix}`;
+    while (usedRowKeys.has(candidate)) {
+      suffix += 1;
+      candidate = `${fallback}#${suffix}`;
+    }
+    usedRowKeys.add(candidate);
+    return candidate;
+  }
+
   const seatsByMember = new Map<number, PlannedSeat[]>();
   const unassigned: PlannedSeat[] = [];
   for (const seat of modelPlan.seatPlan.seats) {
@@ -454,26 +502,31 @@ function planTeam(input: {
     }
   }
 
+  const coordinatorBase = "coordinator";
   const rows: TeamPlanRow[] = [
-    coordinatorRow({
-      team,
-      role: team.coordinatorRoleId ? (roleById.get(team.coordinatorRoleId) ?? null) : null,
-      modelPlan,
-      host: snapshot.host,
-    }),
+    {
+      ...coordinatorRow({
+        team,
+        role: team.coordinatorRoleId ? (roleById.get(team.coordinatorRoleId) ?? null) : null,
+        modelPlan,
+        host: snapshot.host,
+      }),
+      rowKey: claimRowKey(coordinatorBase, undefined),
+    },
   ];
   for (const [index, member] of team.members.entries()) {
-    const rowKey = rowKeys[index] ?? `member:${index}`;
+    const baseRowKey = rowKeys[index] ?? `member:${index}`;
     const role = roleById.get(member.roleId) ?? null;
     const group = seatsByMember.get(index) ?? [];
     if (group.length === 0) {
       rows.push(
         memberPlaceholderRow({
-          rowKey,
+          rowKey: claimRowKey(baseRowKey, index),
           member,
           logicalSeatId: logicalIds[index] || undefined,
           role,
           host: snapshot.host,
+          mode: modelPlan.effectiveMode,
           issues: issuesAttachedTo(modelPlan.issues, logicalIds[index] || undefined),
           enabled: member.enabled,
         }),
@@ -481,13 +534,22 @@ function planTeam(input: {
       continue;
     }
     for (const seat of group) {
-      rows.push(seatRow({ rowKey, seat, role, host: snapshot.host }));
+      // A duplicated stored seatId maps several physical seats to one member; each row still needs
+      // its own key. Normal collaboration rows intentionally share the member key.
+      rows.push(
+        seatRow({
+          rowKey: uniqueKeys ? claimRowKey(baseRowKey, index) : baseRowKey,
+          seat,
+          role,
+          host: snapshot.host,
+        }),
+      );
     }
   }
   for (const seat of unassigned) {
     rows.push(
       seatRow({
-        rowKey: `seat:${seat.seatId}`,
+        rowKey: claimRowKey(`seat:${seat.seatId}`, undefined),
         seat,
         role: roleById.get(seat.roleId) ?? null,
         host: snapshot.host,
@@ -550,10 +612,15 @@ function planTeam(input: {
 
 function savedRowKeys(team: TeamPlanningFields): string[] {
   // The row key comes from the stored member only (never from a derived seat id), and a disabled
-  // member keeps the key it would have when enabled so the editor can bind the row.
+  // member keeps the key it would have when enabled so the editor can bind the row. A duplicated
+  // stored seatId (already a MODE_SEAT_DUPLICATE blocker) falls back to the unique member index;
+  // otherwise two rows would share one client binding key.
+  const seen = new Set<string>();
   return team.members.map((member, index) => {
     const seatId = member.seatId?.trim();
-    return seatId ? `seat:${seatId}` : `member:${index}`;
+    if (!seatId || seen.has(seatId)) return `member:${index}`;
+    seen.add(seatId);
+    return `seat:${seatId}`;
   });
 }
 
