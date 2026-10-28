@@ -8,6 +8,7 @@ import type {
   RunPolicySnapshot,
   RunRecord,
   RunResourceClaim,
+  RunTaskEscalation,
   RunTaskRecord,
   RunTaskSpec,
 } from "./types";
@@ -113,6 +114,19 @@ export function taskRecord(
     escalations: [],
     frozenClaimId: null,
     releaseDecisionId: null,
+    ...overrides,
+  };
+}
+
+export function escalation(
+  overrides: Partial<RunTaskEscalation> & Record<string, unknown> = {},
+): RunTaskEscalation {
+  return {
+    fromTier: "B",
+    toTier: "A",
+    atAttempt: 3,
+    qualityFailures: 3,
+    at: AT_UPDATED,
     ...overrides,
   };
 }
