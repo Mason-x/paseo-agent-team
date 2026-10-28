@@ -9,7 +9,11 @@ import { teamRoleWarnings } from "../domain/validation";
 import { GhostIconButton } from "../shared/buttons";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginTheme } from "../shared/theme";
-import { shouldShowPlanError, type TeamSummaryView } from "./team-plan-state";
+import {
+  shouldShowPlanError,
+  type TeamBindingTarget,
+  type TeamSummaryView,
+} from "./team-plan-state";
 
 export type TeamListPlans = {
   summaries: ReadonlyMap<string, TeamSummaryView>;
@@ -26,12 +30,14 @@ function PlanSummaryLines({
   pending,
   onRetry,
   onRefreshTeams,
+  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   summary: TeamSummaryView | undefined;
   pending: boolean;
   onRetry?: () => void;
   onRefreshTeams?: () => void;
+  onConfigureEconomy?: (target: Extract<TeamBindingTarget, { kind: "economy" }>) => void;
 }) {
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
   const warning = { color: theme.colors.statusWarning, fontSize: 12, fontWeight: "600" as const };
@@ -54,6 +60,20 @@ function PlanSummaryLines({
             <Text style={summary.tone === "warning" ? warning : muted} numberOfLines={2}>
               {summary.unresolvedText}
             </Text>
+          ) : null}
+          {onConfigureEconomy && summary.actions.length > 0 ? (
+            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              {summary.actions.map((action) => (
+                <Pressable
+                  key={`${action.layer}:${action.route ?? ""}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={teamPlanZh.configureEconomy}
+                  onPress={() => onConfigureEconomy(action)}
+                >
+                  <Text style={link}>{teamPlanZh.configureEconomy}</Text>
+                </Pressable>
+              ))}
+            </View>
           ) : null}
         </>
       );
@@ -102,6 +122,7 @@ export function TeamList({
   onCopy,
   onDelete,
   plans,
+  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   teams: readonly Team[];
@@ -113,6 +134,7 @@ export function TeamList({
   onDelete: (team: Team) => void;
   /** Model-plan summaries; absent/legacy hides the new display without changing the list. */
   plans?: TeamListPlans;
+  onConfigureEconomy?: (target: Extract<TeamBindingTarget, { kind: "economy" }>) => void;
 }) {
   const warnings = useMemo(() => teamRoleWarnings(teams, roles), [teams, roles]);
   const warningById = new Map(warnings.map((warning) => [warning.teamId, warning]));
@@ -223,6 +245,7 @@ export function TeamList({
                 <PlanSummaryLines
                   theme={theme}
                   summary={plans.summaries.get(team.id)}
+                  onConfigureEconomy={onConfigureEconomy}
                   pending={plans.pending}
                   onRetry={plans.onRetry}
                   onRefreshTeams={plans.onRefreshTeams}

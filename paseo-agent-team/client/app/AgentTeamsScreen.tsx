@@ -1013,6 +1013,12 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   onRetry: plans.retry,
                   onRefreshTeams: () => void teams.reload(),
                 }}
+                onConfigureEconomy={(target) => {
+                  const focus = economyFocusForConfigure(target);
+                  if (!focus) return;
+                  setEconomyFocus(focus);
+                  setEconomyOpen(true);
+                }}
               />
             </View>
             {tab === "roles" ? importView : null}

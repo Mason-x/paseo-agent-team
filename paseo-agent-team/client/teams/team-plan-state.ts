@@ -246,6 +246,8 @@ export type TeamSummaryView =
       groupsText: string;
       unresolvedText: string | null;
       tone: "neutral" | "warning";
+      /** Pool/route remedies for the card itself; rows keep their own actions in the editor. */
+      actions: readonly Extract<TeamBindingTarget, { kind: "economy" }>[];
     }
   | { kind: "unknown-mode"; text: string }
   | { kind: "missing-team"; text: string }
@@ -257,6 +259,27 @@ function issueText(issue: ModeIssueDto): string {
   return issue.code.startsWith("MODE_CHEAP_")
     ? cheapIssueText(issue as ModeIssue)
     : modeIssueText(issue);
+}
+
+/**
+ * The card-level pool/route remedies. One per layer/route, in row order; a Team whose only
+ * problems are Role bindings gets none (those stay on the row's "rebind" entry).
+ */
+export function economyActionsForResult(
+  result: TeamPlanResult,
+): Extract<TeamBindingTarget, { kind: "economy" }>[] {
+  const seen = new Set<string>();
+  const actions: Extract<TeamBindingTarget, { kind: "economy" }>[] = [];
+  for (const row of result.rows) {
+    for (const action of rowActions(row, result.effectiveMode)) {
+      if (action.kind !== "economy") continue;
+      const key = `${action.layer}:${action.route ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      actions.push(action);
+    }
+  }
+  return actions;
 }
 
 export function buildTeamSummary(input: {
@@ -303,6 +326,7 @@ export function buildTeamSummary(input: {
     kind: "summary",
     total: summary.total,
     groupsText,
+    actions: economyActionsForResult(result),
     unresolvedText:
       summary.unresolved.count === 0
         ? null

@@ -48,6 +48,7 @@ import {
   buildTeamModelRows,
   buildTeamPlanIssues,
   draftRowKey,
+  economyActionsForResult,
   type TeamModelRowView,
   type TeamPlanClient,
   type TeamPlanDraftRequest,
@@ -211,6 +212,10 @@ export function TeamEditor({
     if (!planResult || planResult.effectiveMode === null) return [];
     return buildTeamPlanIssues(planResult);
   }, [planResult]);
+  const planEconomyActions = useMemo(
+    () => (planResult === null ? [] : economyActionsForResult(planResult)),
+    [planResult],
+  );
 
   const seedTeam = useCallback(
     (next: Team | null) => {
@@ -426,6 +431,22 @@ export function TeamEditor({
                     {issue.text}
                   </Text>
                 ))}
+                {onConfigureEconomy && planEconomyActions.length > 0 ? (
+                  <View style={{ flexDirection: "row", gap: 12, flexWrap: "wrap" }}>
+                    {planEconomyActions.map((action) => (
+                      <Pressable
+                        key={`${action.layer}:${action.route ?? ""}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={teamPlanZh.configureEconomy}
+                        onPress={() => onConfigureEconomy(action)}
+                      >
+                        <Text style={{ color: theme.colors.accent, fontSize: 12 }}>
+                          {teamPlanZh.configureEconomy}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
               </View>
             ) : null}
             <TextField
