@@ -882,6 +882,64 @@ describe("R01c decision nonce digest and frozen phase", () => {
   });
 });
 
+describe("R01d escalation chain", () => {
+  const a = {
+    fromTier: "B",
+    toTier: "A",
+    atAttempt: 3,
+    qualityFailures: 3,
+    at: NOW,
+  };
+  const sTier = { ...a, fromTier: "A", toTier: "S", atAttempt: 6, qualityFailures: 6 };
+
+  test("B→A and B→A→S chains parse; two entries are the maximum", () => {
+    expect(RunTaskRecordSchema.safeParse(taskRecord({ escalations: [a] })).success).toBe(true);
+    expect(RunTaskRecordSchema.safeParse(taskRecord({ escalations: [a, sTier] })).success).toBe(
+      true,
+    );
+    const tooMany = RunTaskRecordSchema.safeParse(taskRecord({ escalations: [a, sTier, a] }));
+    expect(tooMany.success).toBe(false);
+    if (!tooMany.success) {
+      expect(tooMany.error.issues.some((issue) => issue.path[0] === "escalations")).toBe(true);
+    }
+  });
+
+  test("wrong fromTier, skipped toTier, missing field and bad attempt are single defects", () => {
+    const cases: Array<{ value: unknown; path: (string | number)[] }> = [
+      {
+        value: taskRecord({ escalations: [{ ...a, fromTier: "A" }] }),
+        path: ["escalations", 0, "fromTier"],
+      },
+      {
+        value: taskRecord({ escalations: [{ ...a, toTier: "S" }] }),
+        path: ["escalations", 0, "toTier"],
+      },
+      {
+        value: taskRecord({ escalations: [a, { ...sTier, fromTier: "B" }] }),
+        path: ["escalations", 1, "fromTier"],
+      },
+      {
+        value: taskRecord({ escalations: [{ ...a, atAttempt: 0 }] }),
+        path: ["escalations", 0, "atAttempt"],
+      },
+      {
+        value: taskRecord({
+          escalations: [{ fromTier: "B", toTier: "A", atAttempt: 1, at: NOW }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+});
+
 describe("RunRecord persists through the real AtomicJsonCodec", () => {
   test("create/read/update/CAS keep the codec header and unknown fields", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "r01b-codec-"));

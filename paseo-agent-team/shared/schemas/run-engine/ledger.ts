@@ -587,6 +587,18 @@ export const RunModelPlanBasisSchema = z
   .passthrough();
 export type RunModelPlanBasis = z.infer<typeof RunModelPlanBasisSchema>;
 
+/** One B→A/A→S escalation. The chain is validated against the frozen spec tier. */
+export const RunTaskEscalationSchema = z
+  .object({
+    fromTier: RunTierSchema,
+    toTier: RunTierSchema,
+    atAttempt: z.number().int().min(1),
+    qualityFailures: z.number().int().nonnegative(),
+    at: RunTimeSchema,
+  })
+  .passthrough();
+export type RunTaskEscalation = z.infer<typeof RunTaskEscalationSchema>;
+
 export const RunTaskRecordSchema = z
   .object({
     spec: RunTaskSpecSchema,
@@ -601,7 +613,7 @@ export const RunTaskRecordSchema = z
     evidenceReturns: z.number().int().nonnegative(),
     reworkCount: z.number().int().nonnegative(),
     qualityFailures: z.number().int().nonnegative(),
-    escalations: z.array(z.record(z.string(), z.unknown())).max(16),
+    escalations: z.array(RunTaskEscalationSchema).max(2),
     frozenClaimId: RunIdRefSchema.nullable(),
     /** Explicit decision that released a frozen/blocked task (05 §4 B1); never implicit. */
     releaseDecisionId: z.string().uuid().nullable(),
@@ -621,6 +633,26 @@ export const RunTaskRecordSchema = z
         path: ["phase"],
         message: "awaiting-rework is only valid on a review task",
       });
+    }
+    let current = task.spec.tier;
+    for (const [index, escalation] of task.escalations.entries()) {
+      if (escalation.fromTier !== current) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "fromTier"],
+          message: `escalation must start from ${current}`,
+        });
+      }
+      const next = current === "B" ? "A" : current === "A" ? "S" : null;
+      if (next === null || escalation.toTier !== next) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "toTier"],
+          message: next === null ? "S cannot escalate" : `escalation must go to ${next}`,
+        });
+        break;
+      }
+      current = escalation.toTier;
     }
   });
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;
