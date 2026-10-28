@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type { DesignSettingsReaders } from "../server/designer/context";
 import { resolveDesignDataRoot } from "../server/designer/data-root";
 import { createDesignHooks } from "../server/designer/hooks";
+import type { DesignPromptContext } from "../server/designer/prompt";
 import { createDesignService, type DesignServiceDeps } from "../server/designer/service";
 import type { DesignJobStore, StoredDesignJob } from "../server/designer/store";
 import {
@@ -21,6 +22,7 @@ import type {
   DesignTimelinePage,
   DesignWorkspaceSummary,
 } from "../shared/paseo/design-port";
+import { DesignGapRetrySchema } from "../shared/schemas/design";
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
@@ -3823,6 +3825,407 @@ describe("design service ledger v2 (C03 first segment)", () => {
       expect(store.records.get(record.job.jobId)).toMatchObject({ roleGap: null, result: null });
       expect(store.records.get(record.job.jobId)?.job.state).not.toBe("failed");
       await service.dispose();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// C03 second segment: C02 wiring (per-use tables, mode routing, previousOutputKind, gap economy
+// eligibility) and the retry seed.
+// ---------------------------------------------------------------------------------------------
+
+type PromptCall = {
+  context: DesignPromptContext;
+  previousOutputKind?: "team" | "role-gap";
+};
+
+const promptCalls = vi.hoisted(() => [] as { kind: "kickoff" | "correction"; input: PromptCall }[]);
+
+vi.mock("../server/designer/prompt", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../server/designer/prompt")>();
+  return {
+    ...actual,
+    buildDesignKickoff: (input: Parameters<typeof actual.buildDesignKickoff>[0]) => {
+      promptCalls.push({ kind: "kickoff", input });
+      return actual.buildDesignKickoff(input);
+    },
+    buildDesignCorrection: (input: Parameters<typeof actual.buildDesignCorrection>[0]) => {
+      promptCalls.push({ kind: "correction", input });
+      return actual.buildDesignCorrection(input);
+    },
+  };
+});
+
+function lastCall(kind: "kickoff" | "correction") {
+  const calls = promptCalls.filter((call) => call.kind === kind);
+  const last = calls[calls.length - 1];
+  if (!last) throw new Error(`no ${kind} call`);
+  return last.input;
+}
+
+const CHEAP_PROFILE: PaseoProfile = {
+  id: "cheap-sonnet",
+  name: "Claude Sonnet",
+  provider: "claude",
+  model: "claude-sonnet-5",
+};
+
+function existingProfileGap(
+  record: StoredDesignJob,
+  profileId: string,
+  kind: "missing-role" | "unlaunchable-role" = "missing-role",
+  roleId = "developer",
+) {
+  const base = gapOutput(record);
+  const common = {
+    responsibility: "数据库迁移评审",
+    reason: "现有 Role 不承担迁移评审。",
+    use: "member",
+  };
+  return {
+    ...base,
+    gaps: [
+      kind === "missing-role"
+        ? {
+            ...base.gaps[0],
+            profiles: { kind: "existing", profileIds: [profileId] },
+          }
+        : {
+            ...common,
+            kind,
+            roleId,
+            profiles: { kind: "none", reason: "host 没有合适的 Profile。" },
+          },
+    ],
+  };
+}
+
+describe("design service ledger v2, second segment (C02 wiring)", () => {
+  describe("prompt context", () => {
+    test("a new job's kickoff carries the record's contract and rule and per-use verdicts", async () => {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      const context = lastCall("kickoff").context;
+      expect(context).toMatchObject({ outputContractVersion: 2, existingRolesOnly: true });
+      expect(context.modeRouting).toBeUndefined();
+      for (const role of context.roles) {
+        expect(typeof role.launchable).toBe("boolean");
+        expect(typeof role.coordinatorLaunchable).toBe("boolean");
+        expect(typeof role.launchVerified).toBe("boolean");
+        expect(typeof role.coordinatorLaunchVerified).toBe("boolean");
+      }
+      await service.dispose();
+    });
+
+    test("the explicit rule on the record is what the prompt sees, in both directions", async () => {
+      for (const existingRolesOnly of [true, false]) {
+        promptCalls.length = 0;
+        const store = new FakeStore();
+        const adapter = new FakeAdapter();
+        const service = createDesignService(serviceDeps(store, adapter));
+        await startAndDesign(service, store, { ...input(), existingRolesOnly, contractVersion: 2 });
+        expect(lastCall("kickoff").context.existingRolesOnly).toBe(existingRolesOnly);
+        await service.dispose();
+      }
+    });
+
+    test("an economy-all job gets the snapshot's route evidence, copied as is", async () => {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      await startAndDesign(service, store, ECONOMY_ALL_V2);
+      // No allSeats policy in the test preferences: the evidence says so and never invents routes.
+      expect(lastCall("kickoff").context.modeRouting).toMatchObject({ status: "absent" });
+      await service.dispose();
+    });
+
+    test("a version 1 record keeps (1, false) in every prompt, never the default for new requests", async () => {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const legacyId = "aaaaaaaa-3333-4333-8333-000000000001";
+      const seeded = seededJob(legacyId, "designing", {
+        ...legacyRecordBase(),
+        job: designJob({
+          jobId: legacyId,
+          state: "designing",
+          attempt: 1,
+          agentCreated: true,
+          agentId: legacyId,
+        }),
+      });
+      store.records.set(legacyId, seeded);
+      adapter.agents.set(legacyId, {
+        id: legacyId,
+        labels: retryRequestFor(legacyId).labels,
+        status: "idle",
+        activeTurn: false,
+        archivedAt: null,
+        requiresAttention: false,
+        attentionReason: null,
+        pendingPermissions: [],
+        lastError: null,
+        providerUnavailable: false,
+      });
+      adapter.entries = answerFor(seeded, { not: "a design" });
+      await service.onTurnEnded({
+        agent: { id: legacyId, labels: retryRequestFor(legacyId).labels },
+        outcome: { kind: "completed" },
+      });
+      await until(() => promptCalls.some((call) => call.kind === "correction"));
+      expect(lastCall("correction").context).toMatchObject({
+        outputContractVersion: 1,
+        existingRolesOnly: false,
+      });
+      await service.dispose();
+    });
+  });
+
+  describe("previousOutputKind", () => {
+    async function correctionFor(output: (record: StoredDesignJob) => unknown, start = input()) {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, { ...start, contractVersion: 2 });
+      adapter.entries = answerFor(record, output(record));
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => promptCalls.some((call) => call.kind === "correction"));
+      const call = lastCall("correction");
+      await service.dispose();
+      return call;
+    }
+
+    test("a team that failed validation is rewritten as a team", async () => {
+      const call = await correctionFor((record) => {
+        const proposal = proposalFor(record);
+        return {
+          ...proposal,
+          newRoles: [newDesignRole({ id: "eng-observability", name: "【工程】可观测" })],
+        };
+      });
+      expect(call.previousOutputKind).toBe("team");
+    });
+
+    test("a gap that failed validation is rewritten as a gap", async () => {
+      const call = await correctionFor((record) => existingProfileGap(record, "no-such-profile"));
+      expect(call.previousOutputKind).toBe("role-gap");
+    });
+
+    test("a block that could not be decoded passes nothing", async () => {
+      const call = await correctionFor(() => ({ not: "a design" }));
+      expect(call).not.toHaveProperty("previousOutputKind");
+    });
+  });
+
+  describe("gap validation sees the per-use verdicts", () => {
+    test("a Role the planner verified as unlaunchable is an accepted gap; a launchable one is a correction", async () => {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      // `developer` is bound to the codex Profile: take its provider down, the claude one stays up.
+      adapter.availabilityValue = [
+        { provider: "claude", available: true },
+        { provider: "codex", available: false },
+      ];
+
+      adapter.entries = answerFor(
+        record,
+        existingProfileGap(record, "", "unlaunchable-role", "architect"),
+      );
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => promptCalls.some((call) => call.kind === "correction"));
+      expect(store.records.get(record.job.jobId)?.roleGap).toBeNull();
+      const rejected = store.records.get(record.job.jobId)?.job.issues ?? [];
+      expect(rejected.some((issue) => issue.params.reason === "role-launchable")).toBe(true);
+      await service.dispose();
+    });
+
+    test("the verified unlaunchable claim ends the job with the server's names", async () => {
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      adapter.availabilityValue = [
+        { provider: "claude", available: true },
+        { provider: "codex", available: false },
+      ];
+      adapter.entries = answerFor(
+        record,
+        existingProfileGap(record, "", "unlaunchable-role", "developer"),
+      );
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => store.records.get(record.job.jobId)?.job.state === "failed");
+      expect(store.records.get(record.job.jobId)?.roleGap?.[0]).toMatchObject({
+        unlaunchableRole: { roleId: "developer", roleName: expect.any(String) },
+      });
+      await service.dispose();
+    });
+  });
+
+  describe("economy-all gap eligibility", () => {
+    test("a suggested Profile outside the route is a correction round, not a terminal gap", async () => {
+      promptCalls.length = 0;
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      adapter.profilesValue = [...profiles, CHEAP_PROFILE];
+      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      adapter.entries = answerFor(record, existingProfileGap(record, CHEAP_PROFILE.id));
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => promptCalls.some((call) => call.kind === "correction"));
+      const after = store.records.get(record.job.jobId);
+      expect(after?.roleGap).toBeNull();
+      expect(after?.job.state).not.toBe("failed");
+      expect(after?.job.issues).toEqual([
+        expect.objectContaining({
+          code: "DESIGN_MODE_PLAN_INVALID",
+          params: expect.objectContaining({ modeCode: "MODE_CHEAP_POLICY_REQUIRED" }),
+        }),
+      ]);
+      expect(lastCall("correction").previousOutputKind).toBe("role-gap");
+      await service.dispose();
+    });
+
+    test("naming no Profile (kind none) is always a legal way out", async () => {
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      adapter.entries = answerFor(record, gapOutput(record));
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => store.records.get(record.job.jobId)?.job.state === "failed");
+      expect(store.records.get(record.job.jobId)?.roleGap).toHaveLength(1);
+      await service.dispose();
+    });
+
+    test("the other modes never run the economy-all check", async () => {
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      adapter.profilesValue = [...profiles, CHEAP_PROFILE];
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      adapter.entries = answerFor(record, existingProfileGap(record, CHEAP_PROFILE.id));
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => store.records.get(record.job.jobId)?.job.state === "failed");
+      expect(store.records.get(record.job.jobId)?.roleGap).toHaveLength(1);
+      await service.dispose();
+    });
+  });
+
+  describe("retry seed (gapRetry)", () => {
+    async function gapJobRecord() {
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      adapter.entries = answerFor(record, gapOutput(record));
+      await finishTurn(service, adapter, record.job.jobId);
+      await until(() => store.records.get(record.job.jobId)?.job.state === "failed");
+      return { store, service, jobId: record.job.jobId };
+    }
+
+    test("a by-id read of a gap job carries the request and the Profile intent", async () => {
+      const { service, jobId } = await gapJobRecord();
+      const read = await service.status({ jobId, contractVersion: 2 });
+      expect(read).toMatchObject({
+        ok: true,
+        jobs: [
+          {
+            jobId,
+            gapRetry: {
+              request: "给后台做一次改版",
+              profileId: DESIGNER.id,
+              useDefaultProfileHints: false,
+            },
+          },
+        ],
+      });
+      await service.dispose();
+    });
+
+    test("it never appears in a list, a result, a mutation reply, or the ledger", async () => {
+      const { store, service, jobId } = await gapJobRecord();
+      const before = JSON.stringify(store.records.get(jobId));
+      const list = await service.status({ contractVersion: 2 });
+      const result = await service.result({ jobId, contractVersion: 2 });
+      const cancel = await service.cancel({ jobId, contractVersion: 2 });
+      for (const reply of [list, result, cancel]) {
+        expect(JSON.stringify(reply)).not.toContain("gapRetry");
+      }
+      await service.status({ jobId, contractVersion: 2 });
+      expect(JSON.stringify(store.records.get(jobId))).toBe(before);
+      expect(before).not.toContain("gapRetry");
+      await service.dispose();
+    });
+
+    test("a job without a gap has none, and a legacy caller never sees it", async () => {
+      const store = new FakeStore();
+      const adapter = new FakeAdapter();
+      const service = createDesignService(serviceDeps(store, adapter));
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      expect(
+        JSON.stringify(await service.status({ jobId: record.job.jobId, contractVersion: 2 })),
+      ).not.toContain("gapRetry");
+      await service.dispose();
+
+      const gap = await gapJobRecord();
+      const legacy = await gap.service.status({ jobId: gap.jobId });
+      expect(JSON.stringify(legacy)).not.toContain("gapRetry");
+      expect(JSON.stringify(legacy)).not.toContain("roleGap");
+      await gap.service.dispose();
+    });
+
+    test("a seed that cannot be trusted is left out, never repaired", async () => {
+      const { store, service, jobId } = await gapJobRecord();
+      const record = store.records.get(jobId);
+      if (!record) throw new Error("missing");
+      for (const mutate of [
+        (value: StoredDesignJob) => {
+          value.selectionIntent = "{not json";
+        },
+        (value: StoredDesignJob) => {
+          value.request = "界".repeat(4001);
+        },
+      ]) {
+        const broken = structuredClone(record);
+        mutate(broken);
+        store.records.set(jobId, broken);
+        const read = await service.status({ jobId, contractVersion: 2 });
+        expect(JSON.stringify(read)).not.toContain("gapRetry");
+        expect(read).toMatchObject({ ok: true });
+      }
+      await service.dispose();
+    });
+
+    test("the seed schema is bounded like the original request and does not rewrite it", () => {
+      const ok = { request: "界".repeat(4000), profileId: null, useDefaultProfileHints: false };
+      expect(DesignGapRetrySchema.safeParse(ok).success).toBe(true);
+      expect(DesignGapRetrySchema.parse(ok).request).toBe(ok.request);
+      for (const bad of [
+        { ...ok, request: "界".repeat(4001) },
+        { ...ok, request: "" },
+        { ...ok, request: "   " },
+        { ...ok, profileId: 3 },
+        { request: "需求", profileId: null },
+      ]) {
+        expect(DesignGapRetrySchema.safeParse(bad).success).toBe(false);
+      }
+      // Padding is kept as written: the seed is the stored request, not a normalized copy.
+      expect(
+        DesignGapRetrySchema.parse({
+          request: " 需求 ",
+          profileId: "p",
+          useDefaultProfileHints: true,
+        }).request,
+      ).toBe(" 需求 ");
     });
   });
 });
