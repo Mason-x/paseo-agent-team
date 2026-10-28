@@ -51,10 +51,15 @@ export const MODE_LABELS = {
   collaborative: "协作",
 };
 
-/** Preview line: 标准（economy）, matching --mode / README names. */
+/**
+ * Preview line: 标准（economy）, matching --mode / README names. A display name that already
+ * contains the stored value (case-insensitively, e.g. 旗舰（SOTA）) is not repeated.
+ */
 export function formatRequestedMode(stored) {
   const label = MODE_LABELS[stored];
-  return label === undefined ? String(stored) : `${label}（${stored}）`;
+  if (label === undefined) return String(stored);
+  const raw = String(stored);
+  return label.toLowerCase().includes(raw.toLowerCase()) ? label : `${label}（${raw}）`;
 }
 
 export function resolveMode(raw) {

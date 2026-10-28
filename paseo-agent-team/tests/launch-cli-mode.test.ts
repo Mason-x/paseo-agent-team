@@ -12,6 +12,7 @@ const {
   buildStatusRequest,
   DEPRECATED_ECONOMY_NOTICE,
   formatRequestedMode,
+  MODE_LABELS,
   MODE_VALUES,
   modeNotice,
   resolveMode,
@@ -92,11 +93,24 @@ describe("launch CLI modes", () => {
     expect(usage).toContain("全席位");
   });
 
-  test("preview names match the --mode / UI labels", () => {
-    expect(formatRequestedMode("sota")).toBe("旗舰（SOTA）（sota）");
-    expect(formatRequestedMode("economy")).toBe("标准（economy）");
-    expect(formatRequestedMode("economy-all")).toBe("经济（economy-all）");
-    expect(formatRequestedMode("collaborative")).toBe("协作（collaborative）");
+  test("preview names match the --mode / UI labels without repeating the stored value", () => {
+    const expected = {
+      sota: "旗舰（SOTA）",
+      standard: "标准（economy）",
+      economy: "标准（economy）",
+      "economy-all": "经济（economy-all）",
+      collaborative: "协作（collaborative）",
+    };
+    for (const [spelling, text] of Object.entries(expected)) {
+      const resolved = resolveMode(spelling);
+      expect(resolved.ok, spelling).toBe(true);
+      if (!resolved.ok) continue;
+      const output = formatRequestedMode(resolved.mode);
+      expect(output, spelling).toBe(text);
+    }
+    // The display name already carries SOTA; do not append the stored value again.
+    expect(formatRequestedMode("sota")).toBe(MODE_LABELS.sota);
+    expect(formatRequestedMode("sota")).not.toContain("（sota）");
   });
 
   test("--help prints the usage without connecting anywhere", async () => {
