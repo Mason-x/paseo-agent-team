@@ -3,6 +3,8 @@
  * switch and retry" flow. Kept out of `shared/zh/design.ts` and `shared/zh.ts` (I01 merges both).
  * Every gap text comes from the server-verified report; nothing here names a Profile or a Role.
  */
+import { modesZh } from "./modes";
+
 export const designGapZh = {
   switchLabel: "只用现有 Role",
   switchHintOn: "开启：设计师只能复用现有 Role，不会新增 Role；现有 Role 不够时会列出缺口。",
@@ -11,7 +13,7 @@ export const designGapZh = {
     "当前 host 版本不支持此选项，请升级插件后使用；本次按旧规则（最多 3 个新 Role）设计。",
   switchProbePending: "正在确认 host 版本，稍后再试；确认前按旧规则（最多 3 个新 Role）设计。",
 
-  modeNeedsUpgrade: "经济模式需要升级后的 host，请升级插件后再使用。",
+  modeNeedsUpgrade: `${modesZh.modeLabels.economy}模式需要升级后的 host，请升级插件后再使用。`,
   modeProbePending: "正在确认 host 是否支持此模式，请稍后重试。",
 
   rulesOnly: "规则：只用现有 Role",
@@ -41,8 +43,8 @@ export const designGapZh = {
 
   actionCreateRole: "去 Role 页补齐",
   actionOpenRole: "去绑定",
-  actionConfigureEconomy: "配置「经济：全席位」路由",
-  economyHint: "经济模式下，补救方法是调整「经济：全席位」路由，而不是修改 Role 的原绑定。",
+  actionConfigureEconomy: modesZh.economyPoolAction,
+  economyHint: `${modesZh.modeLabels.economy}模式下，补救方法是调整「${modesZh.economyAllTitle}」路由，而不是修改 Role 的原绑定。`,
 
   retry: "关闭开关并修改重试",
   retryBusy: "正在准备…",

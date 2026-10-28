@@ -29,6 +29,7 @@ export const modesZh = {
 
   standardPoolTitle: "标准：执行池",
   economyAllTitle: "经济：全席位",
+  economyPoolAction: "配置经济池",
   economyAllIntro:
     "经济模式下协调者、决策（含审查）、执行、升级（含待命）与保留层都只使用合格廉价 Profile；任一层缺合格候选即阻断启动。",
   economyAllEmpty: "经济名单为空；添加已核实低成本的 Profile 后经济模式才可启动。",
