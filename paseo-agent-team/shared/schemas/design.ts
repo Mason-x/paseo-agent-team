@@ -361,6 +361,27 @@ export type RoleGapReport = z.infer<typeof RoleGapReportSchema>;
 export type { ModeLaunchPreview };
 export { ModeLaunchPreviewSchema };
 
+/**
+ * The seed the UI needs to retry a Role-gap job without the switch (H3=B). It is the user's own
+ * request text, already stored in the same host's ledger, so it adds no trust boundary; it is
+ * bounded like the original request (4000 code points, 16KiB of UTF-8) and never trimmed or
+ * rewritten here. Strip object: a newer writer's extra keys do not reach a reader.
+ */
+export const DESIGN_GAP_RETRY_MAX_BYTES = 16 * 1024;
+export const DesignGapRetrySchema = z.object({
+  request: z
+    .string()
+    .refine(
+      (value) =>
+        checkDesignRequest(value).ok &&
+        new TextEncoder().encode(value).length <= DESIGN_GAP_RETRY_MAX_BYTES,
+      { message: "design.inputInvalid" },
+    ),
+  profileId: DesignIdSchema.nullable(),
+  useDefaultProfileHints: z.boolean(),
+});
+export type DesignGapRetry = z.infer<typeof DesignGapRetrySchema>;
+
 export const DesignJobSchema = z.object({
   jobId: DesignUuidSchema,
   clientRequestId: DesignUuidSchema,
@@ -376,6 +397,12 @@ export const DesignJobSchema = z.object({
   existingRolesOnly: z.boolean().optional(),
   outputContractVersion: DesignOutputContractVersionSchema.optional(),
   roleGap: z.array(RoleGapReportSchema).max(8).nullable().optional(),
+  /**
+   * Retry seed of a Role-gap job. Present only on `design.status({ jobId })` for a job that
+   * ended with a gap, never in a list, a result, or a mutation reply, and never stored in the
+   * ledger's Job copy. Absent from an older daemon: the client then falls back to its session.
+   */
+  gapRetry: DesignGapRetrySchema.optional(),
   createdAt: DesignTimeSchema,
   updatedAt: DesignTimeSchema,
   finishedAt: DesignTimeSchema.nullable(),

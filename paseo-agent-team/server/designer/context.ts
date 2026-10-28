@@ -325,8 +325,9 @@ export type DesignContextSnapshot = {
   profiles: readonly PaseoProfile[];
   availability: readonly ProviderAvailability[];
   /**
-   * Legacy member projection kept for the current service (04 §4.3). C03 switches to
-   * `roleLaunchTables` and removes this field; both come from one computation.
+   * Legacy member projection (04 §4.3), the same object as `roleLaunchTables.member`.
+   * @deprecated The service reads `roleLaunchTables`; this stays only because C02's tests still
+   * assert on it. Remove it together with those assertions.
    */
   roleLaunch: Readonly<Record<string, RoleLaunchability>>;
   /** Per-use verdicts injected into gap validation; never inferred across uses. */

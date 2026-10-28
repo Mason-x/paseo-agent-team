@@ -19,7 +19,12 @@ import type { TeamMode } from "../../shared/schemas/team-mode";
 //    DESIGN_MODE_UNAVAILABLE issue, so one new enum value can never break a baseline page's parse.
 
 /** Fields that exist only for a contract-2 reader; a baseline reader neither needs nor expects them. */
-const CONTRACT_2_JOB_FIELDS = ["existingRolesOnly", "outputContractVersion", "roleGap"] as const;
+const CONTRACT_2_JOB_FIELDS = [
+  "existingRolesOnly",
+  "outputContractVersion",
+  "roleGap",
+  "gapRetry",
+] as const;
 
 export type DesignContract = 1 | typeof MODE_CONTRACT_VERSION;
 

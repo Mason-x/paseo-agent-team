@@ -33,6 +33,7 @@ import {
 import type {
   DesignCancelInput,
   DesignContinueInput,
+  DesignGapRetry,
   DesignIssue,
   DesignJob,
   DesignMarkSavedInput,
@@ -45,7 +46,7 @@ import type {
   DesignTeamProposal,
   RoleGapReport,
 } from "../../shared/schemas/design";
-import { DesignResultSchema } from "../../shared/schemas/design";
+import { DesignGapRetrySchema, DesignResultSchema } from "../../shared/schemas/design";
 import type { Preferences } from "../../shared/schemas/preferences";
 import { ProfileRefSchema } from "../../shared/schemas/profile-ref";
 import {
@@ -63,6 +64,7 @@ import {
   readDesignContext,
 } from "./context";
 import { bindDesignerProfile, DESIGNER_SYSTEM_PROMPT } from "./definition";
+import { checkGapEconomyEligibility } from "./planning";
 import {
   buildDesignCorrection,
   buildDesignKickoff,
@@ -340,9 +342,18 @@ function promptContext(
 ): DesignPromptContext {
   const economy = economyOf(context);
   const roles = context.roles.map((role) => {
-    const launch = context.roleLaunch[role.id] ?? {
+    // Two separate planner verdicts: a Role can launch as a member and fail as coordinator, so
+    // neither is ever derived from the other. A Role the tables do not know is "cannot launch,
+    // unverified", never "launchable".
+    const launch = context.roleLaunchTables.member[role.id] ?? {
       launchable: false,
       unavailableProfileIds: [],
+      verified: false,
+    };
+    const coordinatorLaunch = context.roleLaunchTables.coordinator[role.id] ?? {
+      launchable: false,
+      unavailableProfileIds: [],
+      verified: false,
     };
     return {
       id: role.id,
@@ -354,6 +365,9 @@ function promptContext(
       fallbackProfileIds: role.fallbackProfiles.map((ref) => ref.profileId),
       launchable: launch.launchable,
       unavailableProfileIds: launch.unavailableProfileIds,
+      coordinatorLaunchable: coordinatorLaunch.launchable,
+      launchVerified: launch.verified,
+      coordinatorLaunchVerified: coordinatorLaunch.verified,
       ...(typeof role.executionPolicy?.tier === "string" &&
       typeof role.executionPolicy.taskKind === "string"
         ? { tier: role.executionPolicy.tier, taskKind: role.executionPolicy.taskKind }
@@ -380,6 +394,12 @@ function promptContext(
     occupiedRoleNames: context.roles.map((role) => role.name),
     occupiedTeams: context.teams.map((team) => ({ id: team.id, name: team.name })),
     expectedChoices,
+    // The record's own contract and rule, passed as stored: a version 1 record is (1, false) and
+    // must never go through the default for new requests (that would flip it to "on").
+    outputContractVersion: record.outputContractVersion,
+    existingRolesOnly: record.existingRolesOnly,
+    // economy-all route evidence, copied from the snapshot and never recomputed here.
+    ...(context.modeRouting === undefined ? {} : { modeRouting: context.modeRouting }),
   };
 }
 
@@ -405,6 +425,8 @@ function validationContext(
     targetWorkspaceId: context.targetWorkspaceId,
     capabilities: context.capabilities,
     hasher,
+    // Per-use verdicts from the same planner; `unlaunchable-role` is judged by the use it names.
+    roleLaunch: context.roleLaunchTables,
   };
 }
 
@@ -416,6 +438,30 @@ function validationContext(
  */
 function validationRules(record: StoredDesignJob): { existingRolesOnly: boolean } {
   return { existingRolesOnly: record.existingRolesOnly };
+}
+
+/**
+ * The retry seed of a Role-gap job, read from the record: its request text and the Profile intent
+ * of its selection. Anything that does not parse or fit the bounds yields no seed (the client then
+ * asks the user to re-enter the request); it is never guessed or truncated.
+ */
+function gapRetryOf(record: StoredDesignJob): DesignGapRetry | undefined {
+  if (record.roleGap === null) return undefined;
+  let intent: unknown;
+  try {
+    intent = JSON.parse(record.selectionIntent ?? "");
+  } catch {
+    return undefined;
+  }
+  if (!intent || typeof intent !== "object") return undefined;
+  const profileId = "profileId" in intent ? intent.profileId : null;
+  const hints = "useDefaultProfileHints" in intent ? intent.useDefaultProfileHints : false;
+  const parsed = DesignGapRetrySchema.safeParse({
+    request: record.request,
+    profileId: typeof profileId === "string" ? profileId : null,
+    useDefaultProfileHints: hints === true,
+  });
+  return parsed.success ? parsed.data : undefined;
 }
 
 function identityFor(
@@ -723,7 +769,29 @@ export function createDesignService(deps: DesignServiceDeps) {
         validationRules(record),
       );
       if (!gapValidation.ok) {
-        await handleFailure(record, context, gapValidation.issues, null, null, allowCorrection);
+        await handleFailure(
+          record,
+          context,
+          gapValidation.issues,
+          null,
+          null,
+          allowCorrection,
+          "role-gap",
+        );
+        return;
+      }
+      // economy-all: a suggested Profile must be a cheap candidate of the route its own use and
+      // tier pick. An issue is a correction round (same budget of 3), not a terminal state.
+      const eligibility = extracted.gap.gaps.flatMap((gap, index) =>
+        checkGapEconomyEligibility({
+          mode: record.mode,
+          gap,
+          routing: context.modeRouting,
+          path: ["gaps", index],
+        }),
+      );
+      if (eligibility.length > 0) {
+        await handleFailure(record, context, eligibility, null, null, allowCorrection, "role-gap");
         return;
       }
       await finishWithRoleGap(record.job.jobId, attempt, gapValidation.value.gaps);
@@ -732,7 +800,15 @@ export function createDesignService(deps: DesignServiceDeps) {
     const proposal = extracted.proposal;
     const identityResult = identityFor(record, proposal, context);
     if (!identityResult.ok) {
-      await handleFailure(record, context, identityResult.issues, proposal, null, allowCorrection);
+      await handleFailure(
+        record,
+        context,
+        identityResult.issues,
+        proposal,
+        null,
+        allowCorrection,
+        "team",
+      );
       return;
     }
     const validation = validateDesign(
@@ -750,6 +826,7 @@ export function createDesignService(deps: DesignServiceDeps) {
         proposal,
         validation.choiceMismatches ?? null,
         allowCorrection,
+        "team",
       );
       return;
     }
@@ -778,7 +855,15 @@ export function createDesignService(deps: DesignServiceDeps) {
       validationRules(record),
     );
     if (!rematerialized.ok) {
-      await handleFailure(record, context, rematerialized.issues, proposal, null, allowCorrection);
+      await handleFailure(
+        record,
+        context,
+        rematerialized.issues,
+        proposal,
+        null,
+        allowCorrection,
+        "team",
+      );
       return;
     }
     await updateRecord(record.job.jobId, (current) => ({
@@ -807,7 +892,7 @@ export function createDesignService(deps: DesignServiceDeps) {
     if (profileIssues.length === 0) return null;
     const roles = new Set<string>();
     for (const role of context.roles) {
-      if (context.roleLaunch[role.id]?.launchable === false) {
+      if (context.roleLaunchTables.member[role.id]?.launchable === false) {
         roles.add(`${role.name} (${role.id})`);
       }
     }
@@ -841,6 +926,12 @@ export function createDesignService(deps: DesignServiceDeps) {
         }[]
       | null,
     allowCorrection: boolean,
+    /**
+     * What the decoded output was (team or role-gap), so the correction round keeps its template.
+     * Undefined when decoding itself failed (fence, JSON, schema, identity): the correction then
+     * uses the same default template set as the kickoff.
+     */
+    previousOutputKind?: "team" | "role-gap",
   ) {
     const profileFailure = profileResolutionFailure(inputIssues, context);
     let issues = inputIssues;
@@ -919,6 +1010,7 @@ export function createDesignService(deps: DesignServiceDeps) {
       issues: finalized.issues,
       context: promptContext(record, context, expectedChoices),
       expectedChoices,
+      ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
     });
     if (!correction.ok) {
       await failJob(
@@ -1811,10 +1903,12 @@ export function createDesignService(deps: DesignServiceDeps) {
               log("design reconcile failed", cause),
             );
           }
+          // The retry seed rides on this by-id read only; a list never carries request text.
+          const gapRetry = gapRetryOf(record);
           return {
             ok: true as const,
             scopeId,
-            jobs: [record.job],
+            jobs: [gapRetry === undefined ? record.job : { ...record.job, gapRetry }],
             truncated: false,
             discoveryIssues: [],
           };
