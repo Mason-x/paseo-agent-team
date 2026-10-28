@@ -1,6 +1,8 @@
 // C04 designer UI specification: pure submission/switch/contract/gap/retry behavior from the
 // public client modules. No React renderer is used; component-only wiring is noted in the report.
 // Expectations come from 01 AC-0c.1/3/8–11/13–14, 04 §6.3 (H2=A, H3=B) and 89 K1–K7.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { resolveStartBlock } from "../../client/designer/card-state";
 import {
@@ -17,6 +19,7 @@ import {
   applyDesignPrefill,
   buildDesignRoleGapViews,
   buildDesignStartInput,
+  createDesignRetryCache,
   createDesignSubmissionState,
   designJobRulesLabel,
   editDesignDraft,
@@ -29,7 +32,12 @@ import {
 } from "../../client/designer/submission-state";
 import { withContractOnSaveRpcs } from "../../client/designer/use-design-save";
 import { checkDesignRequest } from "../../shared/domain/design-request";
-import type { DesignJob, DesignStartInput, RoleGapReport } from "../../shared/schemas/design";
+import {
+  type DesignJob,
+  DesignJobSchema,
+  type DesignStartInput,
+  type RoleGapReport,
+} from "../../shared/schemas/design";
 import { designGapZh } from "../../shared/zh/design-gap";
 import { DESIGN_CLIENT_REQUEST_ID, designJob } from "../design-fixtures";
 
@@ -454,9 +462,91 @@ describe("AC-0c.3 / AC-0c.13 / AC-0c.14: legacy DTO and gap terminal safety", ()
   });
 });
 
-test.todo(
-  "AC-0c.8 / Q2-B: gapRetry server seed survives refresh once C03 second segment adds it to DesignJobSchema; today only the session cache path exists",
-);
+describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
+  const seed = {
+    request: "原始需求全文",
+    profileId: "p-sonnet",
+    useDefaultProfileHints: false,
+  };
+
+  test("a v2 status job carries the seed and it survives refresh/host/cache loss", () => {
+    const job = gapJob({ gapRetry: seed });
+    const parsed = DesignJobSchema.parse(job);
+    expect(parsed.gapRetry).toEqual(seed);
+    const source = readGapRetrySeed(parsed);
+    expect(source).toEqual(seed);
+
+    // A fresh client has an empty session cache; only the job seed remains.
+    const cache = createDesignRetryCache();
+    expect(cache.get(parsed.jobId)).toBeNull();
+    const plan = planDesignGapRetry(parsed, source, () => "server-seed-nonce");
+    if (!plan.ok) throw new Error("server seed missing");
+    expect(plan.prefill).toEqual({
+      nonce: "server-seed-nonce",
+      text: "原始需求全文",
+      workspaceId: "ws-target",
+      mode: "sota",
+      profileChoice: "p-sonnet",
+      existingRolesOnly: false,
+      confirmReplace: true,
+    });
+    const prefilled = applyDesignPrefill(createDesignSubmissionState(), {
+      request: plan.prefill.text,
+      workspaceId: plan.prefill.workspaceId,
+      mode: plan.prefill.mode,
+      profileChoice: plan.prefill.profileChoice,
+      existingRolesOnly: plan.prefill.existingRolesOnly,
+    });
+    expect(prefilled.draftState.draft).toMatchObject({
+      request: "原始需求全文",
+      workspaceId: "ws-target",
+      existingRolesOnly: false,
+    });
+    expect(prefilled.submitting).toBe(false);
+  });
+
+  test("a legacy job has no server seed and falls back to the session cache only", () => {
+    const legacy = gapJob();
+    expect(DesignJobSchema.parse(legacy).gapRetry).toBeUndefined();
+    expect(readGapRetrySeed(legacy)).toBeNull();
+
+    const cache = createDesignRetryCache();
+    cache.remember(legacy.jobId, {
+      clientRequestId: legacy.clientRequestId,
+      request: "会话缓存里的需求",
+      mode: legacy.mode,
+      profileId: "p-sonnet",
+    });
+    const fromCache = planDesignGapRetry(legacy, cache.get(legacy.jobId), () => "cache-nonce");
+    if (!fromCache.ok) throw new Error("cache fallback missing");
+    expect(fromCache.prefill.text).toBe("会话缓存里的需求");
+
+    cache.clear();
+    expect(planDesignGapRetry(legacy, cache.get(legacy.jobId))).toEqual({
+      ok: false,
+      reason: "request-unavailable",
+    });
+  });
+
+  test("the client routes v2 through status({jobId}) and a missing seed asks for a new request", () => {
+    const root = path.join(import.meta.dirname, "..", "..");
+    const jobs = readFileSync(path.join(root, "client", "designer", "use-design-jobs.ts"), "utf8");
+    expect(jobs).toMatch(
+      /modeContract === "v2"[\s\S]{0,260}statusCall\(withDesignContract\(\{ jobId: job\.jobId \}/,
+    );
+    expect(jobs).toMatch(/return retryCache\.current\.get\(job\.jobId\)/);
+
+    const panel = readFileSync(
+      path.join(root, "client", "designer", "DesignJobsPanel.tsx"),
+      "utf8",
+    );
+    expect(panel).toContain("designGapZh.retryUnavailable");
+    expect(planDesignGapRetry(gapJob(), null)).toEqual({
+      ok: false,
+      reason: "request-unavailable",
+    });
+  });
+});
 
 test("the retry seed reader accepts the future server shape and rejects malformed values", () => {
   // The shape is already agreed with C03-2; the schema field itself is not in this build.
