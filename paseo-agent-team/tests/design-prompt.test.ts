@@ -1109,6 +1109,52 @@ describe("design output contract", () => {
     expect(seen).toContain("index-only-minimal");
   });
 
+  test("prototype keys in a request are not treated as stop words", () => {
+    for (const term of ["constructor", "toString", "__proto__"]) {
+      const roles = [
+        role(0, {
+          id: "proto-target",
+          name: `领域 ${term}`,
+          mission: `负责 ${term} 相关的领域工作。`,
+          responsibilities: [`实现 ${term}`],
+        }),
+        ...Array.from({ length: 40 }, (_, index) =>
+          role(100 + index, {
+            id: `filler-${index}`,
+            name: `填充 Role ${index}`,
+            mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。".repeat(8),
+            responsibilities: Array.from({ length: 6 }, () =>
+              "实现功能开发内容，完成团队任务并输出相关材料。".repeat(3),
+            ),
+          }),
+        ),
+      ];
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request: term,
+          roles,
+          occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+            id: `team-${index}`,
+            name: `Team ${index}`,
+          })),
+          profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        }),
+      });
+      expect(result.ok, term).toBe(true);
+      if (!result.ok) continue;
+      const index = roleEntries(result.text);
+      expect(
+        index.find((entry) => entry.id === "proto-target"),
+        term,
+      ).toHaveProperty("mission");
+    }
+  });
+
   test("the 45-Role synthetic directory stays under budget for four requests", () => {
     const roles = [
       ...Array.from({ length: 15 }, (_, index) =>

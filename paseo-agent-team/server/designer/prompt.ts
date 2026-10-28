@@ -811,6 +811,11 @@ const REQUEST_STOP_TERMS: Record<string, true> = {
   mode: true,
 };
 
+/** Prototype keys (constructor, toString, __proto__) must not count as stop words. */
+function isStopTerm(term: string): boolean {
+  return Object.hasOwn(REQUEST_STOP_TERMS, term);
+}
+
 /** Recipe roles plus Roles whose name/mission/responsibilities share a request term. */
 function relevantRoleIds(
   context: DesignPromptContext,
@@ -826,8 +831,8 @@ function relevantRoleIds(
   );
   const terms = new Set<string>();
   const request = context.request.toLowerCase();
-  for (const word of request.match(/[a-z0-9]{2,}/gu) ?? []) {
-    if (!REQUEST_STOP_TERMS[word]) terms.add(word);
+  for (const word of request.match(/[a-z0-9_]{2,}/gu) ?? []) {
+    if (!isStopTerm(word)) terms.add(word);
   }
   let domainText = request;
   for (const stop of Object.keys(REQUEST_STOP_TERMS)) {
@@ -836,7 +841,7 @@ function relevantRoleIds(
   for (const run of domainText.match(/[\u3400-\u9fff]+/gu) ?? []) {
     for (let index = 0; index + 1 < run.length; index += 1) {
       const term = run.slice(index, index + 2);
-      if (!REQUEST_STOP_TERMS[term]) terms.add(term);
+      if (!isStopTerm(term)) terms.add(term);
     }
   }
   const ranked = context.roles
