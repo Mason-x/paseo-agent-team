@@ -485,7 +485,7 @@ export type DesignResultView = {
   teamLabel: string;
   targetLabel: string;
   reuse: readonly { roleId: string; reason: string }[];
-  newRoles: readonly { id: string; name: string }[];
+  newRoles: readonly { id: string; name: string; noveltyReason: string | null }[];
   seats: readonly DesignSeatRow[];
   coordinator: DesignCoordinatorRow | null;
   logicalCount: number;
@@ -745,7 +745,11 @@ export function resolveDesignResultView(
     teamLabel: result.team.name,
     targetLabel: result.targetWorkspaceId ?? designZh.resultNoTarget,
     reuse: result.reuse.map((entry) => ({ roleId: entry.roleId, reason: entry.reason })),
-    newRoles: result.newRoles.map((role) => ({ id: role.id, name: role.name })),
+    newRoles: result.newRoles.map((role) => ({
+      id: role.id,
+      name: role.name,
+      noveltyReason: role.noveltyReason ?? null,
+    })),
     seats,
     coordinator,
     logicalCount: preview?.counts.logical ?? 0,

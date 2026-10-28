@@ -140,7 +140,9 @@ export type PromptCompression =
   | "recipe-notes-off"
   | "relevant-only"
   | "index-only"
-  | "recipes-compact";
+  | "recipes-compact"
+  | "index-only-6"
+  | "index-only-minimal";
 
 export type PromptBuildResult =
   | {
@@ -532,6 +534,8 @@ type PromptDetail = {
   relevantOnly: boolean;
   /** v2 only: keep a bounded summary for relevant Roles, names/states for the rest. */
   roleDetail: "full" | "index-only";
+  /** v2 only: number of relevant Role summaries while roleDetail is index-only. */
+  indexOnlyLimit: number;
   /** v2 only: recipes keep id/name/member role ids instead of full payloads. */
   recipes: "full" | "compact";
 };
@@ -542,6 +546,7 @@ const FULL_DETAIL: PromptDetail = {
   recipeNotes: true,
   relevantOnly: false,
   roleDetail: "full",
+  indexOnlyLimit: 12,
   recipes: "full",
 };
 
@@ -655,7 +660,7 @@ function omissionsFor(
       ...(hidden > 0 ? [`unrelated-role-details:${hidden}`] : []),
     ];
   }
-  const relevant = relevantRoleIds(context);
+  const relevant = relevantRoleIds(context, rules, detail.indexOnlyLimit);
   const hidden = context.roles.filter(
     (role) =>
       !roleSelectable(role, rules) ||
@@ -671,6 +676,10 @@ function omissionsFor(
     ...(hidden > 0 ? [`unrelated-role-details:${hidden}`] : []),
     ...(detail.roleDetail === "index-only" ? ["role-summaries-index-only"] : []),
     ...(detail.recipes === "compact" ? ["recipes-compact"] : []),
+    ...(detail.roleDetail === "index-only" && detail.indexOnlyLimit === 6 ? ["index-only-6"] : []),
+    ...(detail.roleDetail === "index-only" && detail.indexOnlyLimit === 0
+      ? ["role-summaries-none"]
+      : []),
   ];
 }
 
@@ -754,10 +763,48 @@ function roleIndexEntry(
   };
 }
 
-const RELEVANT_ROLE_LIMIT = 12;
+const REQUEST_STOP_TERMS: Record<string, true> = {
+  设计: true,
+  团队: true,
+  一个: true,
+  需要: true,
+  功能: true,
+  开发: true,
+  实现: true,
+  负责: true,
+  任务: true,
+  成员: true,
+  角色: true,
+  使用: true,
+  可以: true,
+  以及: true,
+  并且: true,
+  支持: true,
+  管理: true,
+  系统: true,
+  提供: true,
+  进行: true,
+  相关: true,
+  工作: true,
+  内容: true,
+  现有: true,
+  后台: true,
+  改版: true,
+  完成: true,
+  确保: true,
+  覆盖: true,
+  输出: true,
+  建议: true,
+  新增: true,
+};
 
 /** Recipe roles plus Roles whose name/mission/responsibilities share a request term. */
-function relevantRoleIds(context: DesignPromptContext): ReadonlySet<string> {
+function relevantRoleIds(
+  context: DesignPromptContext,
+  rules: PromptRules,
+  limit: number,
+): ReadonlySet<string> {
+  if (limit <= 0) return new Set<string>();
   const recipeIds = new Set<string>(
     TEAM_DESIGN_RECIPES.flatMap((recipe) => [
       recipe.coordinatorRoleId,
@@ -767,21 +814,38 @@ function relevantRoleIds(context: DesignPromptContext): ReadonlySet<string> {
   const terms = new Set<string>();
   const request = context.request.toLowerCase();
   for (const word of request.match(/[a-z0-9]{2,}/gu) ?? []) terms.add(word);
-  for (const run of request.match(/[\u3400-\u9fff]+/gu) ?? []) {
-    for (let index = 0; index + 1 < run.length; index += 1) terms.add(run.slice(index, index + 2));
+  let domainText = request;
+  for (const stop of Object.keys(REQUEST_STOP_TERMS)) {
+    domainText = domainText.split(stop).join(" ");
   }
-  const ranked = context.roles.map((role, index) => {
-    const text = `${role.name}\n${role.mission}\n${role.responsibilities.join("\n")}`.toLowerCase();
-    const score = [...terms].filter((term) => text.includes(term)).length;
-    return { id: role.id, index, recipe: recipeIds.has(role.id), score };
-  });
-  return new Set(
-    ranked
-      .filter((entry) => entry.recipe || entry.score > 0)
-      .sort((a, b) => Number(b.recipe) - Number(a.recipe) || b.score - a.score || a.index - b.index)
-      .slice(0, RELEVANT_ROLE_LIMIT)
-      .map((entry) => entry.id),
-  );
+  for (const run of domainText.match(/[\u3400-\u9fff]+/gu) ?? []) {
+    for (let index = 0; index + 1 < run.length; index += 1) {
+      const term = run.slice(index, index + 2);
+      if (!REQUEST_STOP_TERMS[term]) terms.add(term);
+    }
+  }
+  const ranked = context.roles
+    .map((role, index) => {
+      const text =
+        `${role.name}\n${role.mission}\n${role.responsibilities.join("\n")}`.toLowerCase();
+      const score = [...terms].filter((term) => text.includes(term)).length;
+      return {
+        id: role.id,
+        index,
+        recipe: recipeIds.has(role.id),
+        score,
+        selectable: roleSelectable(role, rules),
+      };
+    })
+    .filter((entry) => entry.selectable);
+  // Request matches must never be crowded out by the static recipes. Matches sort first by
+  // overlap; recipe-only Roles fill the remaining slots in stable catalog order.
+  const matched = ranked
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const recipes = ranked.filter((entry) => entry.score === 0 && entry.recipe);
+  recipes.sort((a, b) => a.index - b.index);
+  return new Set([...matched, ...recipes].slice(0, limit).map((entry) => entry.id));
 }
 
 function roleSelectable(role: DesignPromptRoleSummary, rules: PromptRules): boolean {
@@ -798,7 +862,24 @@ function roleDirectoryEntry(
   detail: PromptDetail,
   relevant: ReadonlySet<string>,
 ): Record<string, unknown> {
-  if (!roleSelectable(role, rules)) return { id: role.id, name: role.name };
+  if (rules.version === 2 && !role.enabled) {
+    return {
+      id: role.id,
+      name: role.name,
+      enabled: false,
+      memberLaunch: "blocked",
+      coordinatorLaunch: "blocked",
+    };
+  }
+  if (rules.version === 2 && !roleSelectable(role, rules)) {
+    return {
+      id: role.id,
+      name: role.name,
+      memberLaunch: launchState(role.launchable, role.launchVerified),
+      coordinatorLaunch: launchState(role.coordinatorLaunchable, role.coordinatorLaunchVerified),
+      unavailableProfileIds: stringIds(role.unavailableProfileIds),
+    };
+  }
   if (rules.version === 2 && detail.roleDetail === "index-only" && !relevant.has(role.id)) {
     return {
       id: role.id,
@@ -814,6 +895,7 @@ function roleDirectoryEntry(
     ...index,
     mission: summary.mission,
     responsibilities: summary.responsibilities,
+    taskKind: summary.taskKind,
   };
 }
 
@@ -827,10 +909,12 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   // notes the unverified availability.
   const launchRule =
     "memberLaunch/coordinatorLaunch 是该用途判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=可用性未核实（照常使用该 Role 并在 reuse.reason 注明；不得声称 Role 缺失或不可启动，只有确实无 Role 承担时才报 missing-role，profiles.none 只表示不提供 Profile）。用途不可互推。";
+  const directoryLegend =
+    "条目形态：完整条目含 mission/responsibilities/taskKind；只有 id/name/tier 且无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
   if (routing !== undefined) {
-    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${launchRule}`;
+    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${directoryLegend}${launchRule}`;
   }
-  return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
+  return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${directoryLegend}${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
 }
 
 function recipeInstruction(rules: PromptRules): string {
@@ -848,7 +932,7 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
   const rules = promptRules(context);
   const routing = rules.version === 2 ? context.modeRouting : undefined;
   const v2 = rules.version === 2;
-  const relevant = v2 ? relevantRoleIds(context) : new Set<string>();
+  const relevant = v2 ? relevantRoleIds(context, rules, detail.indexOnlyLimit) : new Set<string>();
   const target = context.target
     ? { id: context.target.id, name: context.target.name, path: context.target.path ?? null }
     : null;
@@ -982,6 +1066,12 @@ function compressed(
   }
   if (rules.version === 2 && detail.recipes === "full") {
     return { detail: { ...detail, recipes: "compact" }, compression: "recipes-compact" };
+  }
+  if (rules.version === 2 && detail.indexOnlyLimit > 6) {
+    return { detail: { ...detail, indexOnlyLimit: 6 }, compression: "index-only-6" };
+  }
+  if (rules.version === 2 && detail.indexOnlyLimit > 0) {
+    return { detail: { ...detail, indexOnlyLimit: 0 }, compression: "index-only-minimal" };
   }
   return null;
 }

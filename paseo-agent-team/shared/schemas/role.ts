@@ -95,7 +95,7 @@ export const RoleSchema = z
     // Team-designer provenance. A damaged block drops only the origin; the Role stays editable.
     designer: StoredDesignerOriginSchema.optional().catch(undefined),
     /** Required on a designer-created Role; ordinary Roles omit it. */
-    noveltyReason: z.string().trim().min(1).max(600).optional(),
+    noveltyReason: z.string().trim().min(1).max(600).optional().catch(undefined),
     // A damaged preset origin drops only that block for the same reason.
     preset: PresetOriginSchema.optional().catch(undefined),
   })

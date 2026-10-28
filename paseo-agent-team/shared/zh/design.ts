@@ -34,7 +34,7 @@ export const designZh = {
   workspaceUnavailable: "所选或承载工作区已不可用",
   profileUnavailable: "设计师Profile缺失或不可用，请重新选择",
   inputTooLarge:
-    "设计上下文过大（Role {roles} 个、Team {teams} 个，共 {bytes}B，上限 {limit}B）；请停用无关 Role、精简说明或分批设计后重试",
+    "请停用无关 Role 或分批设计（当前 Role {roles} 个、Team {teams} 个，共 {bytes}B，上限 {limit}B）；也可精简说明后重试",
   outputMissing: "本轮没有完整的设计JSON块",
   outputMultiple: "本轮包含多个设计块，请只输出一个完整方案",
   outputTooLarge: "方案超过大小限制，请精简角色内容",
@@ -146,6 +146,7 @@ export const designZh = {
   resultMode: "模式",
   resultTeamLine: (name: string, id: string) => `${name} · ${id}`,
   resultNewRoleLine: (name: string, id: string) => `${name} · ${id}`,
+  resultNoveltyReason: "新增原因",
   resultTargetLabel: "目标工作区",
   resultNoTarget: "未指定目标工作区（不会自动使用承载工作区）",
   resultReuse: "复用 Role",
