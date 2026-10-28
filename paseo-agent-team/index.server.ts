@@ -11,6 +11,7 @@ import { createDesignPlanner } from "./server/designer/planning";
 import { createDesignService } from "./server/designer/service";
 import { createDesignJobStore, type DesignJobStore } from "./server/designer/store";
 import { createLaunchService } from "./server/launch-service";
+import { createTeamPlanService } from "./server/team-plan-service";
 import { exampleCatalog, previewDefaultCatalog } from "./server/templates";
 import { confirmPendingBoot } from "./server/version/boot";
 import { createVersionService } from "./server/version/service";
@@ -31,6 +32,8 @@ import {
   launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
+  projectLaunchJobForLegacyPeer,
+  teamPlanRpc,
 } from "./shared/rpc";
 import { preferencesSettings, rolesSettings, teamsSettings } from "./shared/settings";
 import {
@@ -98,6 +101,9 @@ export default function contribute(server: PluginServerContext) {
     );
   };
 
+  // Same settings handles as the launch service; team.plan is read-only and owns no cache.
+  const teamPlans = createTeamPlanService({ readers: settings, log });
+
   // The ledger never falls back to the default home: a missing or relative PASEO_HOME leaves the
   // store uninitialized, and every design RPC answers DESIGN_STORAGE_UNAVAILABLE.
   const store = createDesignJobStore({ home: process.env.PASEO_HOME });
@@ -155,7 +161,10 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(launchPreviewRpc, (input, { paseo }) => launches.preview(input, paseo));
   server.handle(launchStartRpc, (input, { paseo }) => launches.start(input, paseo));
-  server.handle(launchStatusRpc, ({ runId }) => ({ job: launches.status(runId) }));
+  server.handle(launchStatusRpc, ({ runId, contractVersion }) => ({
+    job: projectLaunchJobForLegacyPeer(launches.status(runId), contractVersion),
+  }));
+  server.handle(teamPlanRpc, (input, { paseo }) => teamPlans.plan(input, paseo));
   server.handle(exampleCatalogRpc, async (_input, { paseo }) => {
     const profiles = await createPaseoAdapter(paseo).listProfiles();
     return exampleCatalog(profiles, new Date().toISOString());

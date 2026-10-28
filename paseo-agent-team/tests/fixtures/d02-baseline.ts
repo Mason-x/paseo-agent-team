@@ -1,5 +1,8 @@
 // Generated from .notes/30b-d02-baseline.md and 30c-d02-coordinator-baseline.md (fa58137).
 // These are golden literals: T1b compares the whole object with toEqual, including array order.
+// Intentional deviation (AC-0d.21): the two collaboration blockers now use the renamed display
+// copy "旗舰（SOTA）或标准模式" instead of the old fa58137 "SOTA 或标准模式"; choices, thresholds,
+// issue codes, and hashes are unchanged.
 
 export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
   {
@@ -719,7 +722,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
     issues: [
       { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
     ],
-    warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+    warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
     blockers: [],
     preview: {
       requestedMode: "economy",
@@ -782,7 +785,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
       issues: [
         { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
       ],
-      warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+      warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
       planHash: "a9f5157edcf483130c996e87811b35ca3e9d391c2fd4068a2310e1dce7e275a8",
     },
     fingerprint: "a9f5157edcf483130c996e87811b35ca3e9d391c2fd4068a2310e1dce7e275a8",
@@ -820,7 +823,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
         seatId: "seat-2",
       },
     ],
-    warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+    warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
     blockers: ["无法解析 Developer (Backend) 的 Profile（provider-unavailable）。"],
     preview: {
       requestedMode: "economy",
@@ -873,7 +876,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
           seatId: "seat-2",
         },
       ],
-      warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+      warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
       planHash: "04a928449ec6f5e864dc5ac9f1f5d2373b9142bdbf8fbfd4e0899fac6ac01a95",
     },
     fingerprint: "04a928449ec6f5e864dc5ac9f1f5d2373b9142bdbf8fbfd4e0899fac6ac01a95",
@@ -959,7 +962,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
         seatId: "seat-2",
       },
     ],
-    warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+    warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
     blockers: ["Role「Developer (Backend)」已禁用。"],
     preview: {
       requestedMode: "economy",
@@ -1012,7 +1015,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
           seatId: "seat-2",
         },
       ],
-      warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+      warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
       planHash: "b36f532883d6a536fcfa89054c7b6ad8e0b125b4adbe21aedbc541204ae852d7",
     },
     fingerprint: "b36f532883d6a536fcfa89054c7b6ad8e0b125b4adbe21aedbc541204ae852d7",
@@ -1064,7 +1067,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
         seatId: "seat-2",
       },
     ],
-    warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+    warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
     blockers: ["实例标签 id「backend」已被使用。"],
     preview: {
       requestedMode: "economy",
@@ -1130,7 +1133,7 @@ export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
           seatId: "seat-2",
         },
       ],
-      warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+      warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
       planHash: "6f7a09933b7ed91cd4d33e6b0c0c177cb36d7a83d35632e01249786cee07873b",
     },
     fingerprint: "6f7a09933b7ed91cd4d33e6b0c0c177cb36d7a83d35632e01249786cee07873b",
@@ -1815,7 +1818,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
       { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
     ],
     warnings: [
-      "按需创建尚未启用，本次经济模式启动时全部创建成员。",
+      "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
       "Provider claude 不可用。",
       "首选 Profile 缺失或不可用，改用备选 Codex xhigh。",
     ],
@@ -1856,7 +1859,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
         { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
       ],
       warnings: [
-        "按需创建尚未启用，本次经济模式启动时全部创建成员。",
+        "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
         "Provider claude 不可用。",
         "首选 Profile 缺失或不可用，改用备选 Codex xhigh。",
       ],
@@ -1884,7 +1887,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
     issues: [
       { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
     ],
-    warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+    warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
     blockers: ["无法解析协调者 Profile（provider-unavailable）。"],
     preview: {
       requestedMode: "economy",
@@ -1919,7 +1922,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
       issues: [
         { code: "MODE_ONDEMAND_FALLBACK_EAGER", severity: "warning", params: { mode: "economy" } },
       ],
-      warnings: ["按需创建尚未启用，本次经济模式启动时全部创建成员。"],
+      warnings: ["按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。"],
       planHash: "009c2535a49a166c53c45403e0373e469bcb3aebe07cfb8e55007d77df9be332",
     },
     fingerprint: "009c2535a49a166c53c45403e0373e469bcb3aebe07cfb8e55007d77df9be332",
@@ -1949,7 +1952,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
       },
     ],
     warnings: ["Provider claude 不可用。", "首选 Profile 缺失或不可用，改用备选 Codex xhigh。"],
-    blockers: ["协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。"],
+    blockers: ["协作模式需要后续版本的运行能力；当前版本请使用旗舰（SOTA）或标准模式。"],
     preview: {
       requestedMode: "collaborative",
       coordinator: {
@@ -2020,7 +2023,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
     ],
     warnings: [],
     blockers: [
-      "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。",
+      "协作模式需要后续版本的运行能力；当前版本请使用旗舰（SOTA）或标准模式。",
       "无法解析协调者 Profile（provider-unavailable）。",
     ],
     preview: {

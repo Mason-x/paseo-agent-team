@@ -43,6 +43,7 @@ afterAll(() => {
 /** Stands in for the daemon's plugin context and records what the plugin registers. */
 function fakeServer() {
   const settings: string[] = [];
+  const readCounts: Record<string, number> = {};
   const handlers = new Map<string, Handler>();
   const hooks = new Map<string, HookHandler[]>();
   const revisions: Record<string, string> = {};
@@ -58,11 +59,14 @@ function fakeServer() {
     registerSettings: vi.fn((definition: { id: string }) => {
       settings.push(definition.id);
       return {
-        read: async () => ({
-          status: "ready" as const,
-          revision: revisions[definition.id] ?? "r1",
-          values: documents[definition.id],
-        }),
+        read: async () => {
+          readCounts[definition.id] = (readCounts[definition.id] ?? 0) + 1;
+          return {
+            status: "ready" as const,
+            revision: revisions[definition.id] ?? "r1",
+            values: documents[definition.id],
+          };
+        },
         subscribe: () => () => {},
       };
     }),
@@ -87,6 +91,7 @@ function fakeServer() {
     hooks,
     documents,
     revisions,
+    readCounts,
   };
 }
 
@@ -113,6 +118,7 @@ describe("server entry", () => {
       "agent-team.launch.preview",
       "agent-team.launch.start",
       "agent-team.launch.status",
+      "agent-team.team.plan",
       "agent-team.templates.defaults.preview",
       "agent-team.templates.examples",
       "agent-team.version.check",
@@ -121,14 +127,45 @@ describe("server entry", () => {
       "agent-team.version.update.start",
       "agent-team.version.update.status",
     ]);
-    expect([...handlers.keys()]).toHaveLength(18);
-    expect(handle).toHaveBeenCalledTimes(18);
-    expect(new Set(handle.mock.calls.map(([contract]) => contract.name)).size).toBe(18);
+    expect([...handlers.keys()]).toHaveLength(19);
+    expect(handle).toHaveBeenCalledTimes(19);
+    expect(new Set(handle.mock.calls.map(([contract]) => contract.name)).size).toBe(19);
     expect([...hooks.keys()]).toEqual(["agent.turn_ended"]);
     expect(hooks.get("agent.turn_ended")).toHaveLength(1);
     expect(server.before).not.toHaveBeenCalled();
     expect(typeof cleanup).toBe("function");
     await cleanup();
+  });
+
+  test("team.plan is registered once and its probe reads neither settings nor host facts", async () => {
+    const { server, handle, handlers, readCounts } = fakeServer();
+    const cleanup = contribute(server);
+    try {
+      expect(
+        handle.mock.calls.filter(([contract]) => contract.name === "agent-team.team.plan"),
+      ).toHaveLength(1);
+      const { port } = fakePort();
+      const output = (await handler(handlers, "agent-team.team.plan")(
+        { items: [] },
+        { paseo: port },
+      )) as {
+        schemaVersion: number;
+        capabilities: { modeContract: number; designRolePolicy: number };
+        context: unknown;
+        results: unknown[];
+      };
+      expect(output.schemaVersion).toBe(1);
+      expect(output.capabilities.modeContract).toBe(2);
+      expect(output.capabilities.designRolePolicy).toBe(1);
+      expect(output.context).toBeNull();
+      expect(output.results).toEqual([]);
+      // 76: the handler forwards without pre-reading; the probe touches no settings or adapter.
+      expect(readCounts).toEqual({});
+      expect(port.config.get).not.toHaveBeenCalled();
+      expect(port.providers.listAvailable).not.toHaveBeenCalled();
+    } finally {
+      await cleanup();
+    }
   });
 
   test("version RPCs stay local when PASEO_HOME is absent", async () => {
