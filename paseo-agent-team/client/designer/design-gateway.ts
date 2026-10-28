@@ -1,4 +1,9 @@
 import type { ZodType } from "zod";
+import {
+  MODE_CONTRACT_VERSION,
+  type ModeContractSupport,
+  modeMinContract,
+} from "../../shared/domain/mode-contract";
 import type {
   DesignMarkSavedInput,
   DesignMarkSavedOutput,
@@ -6,9 +11,11 @@ import type {
   DesignPrepareSaveOutput,
   DesignSaveFailedInput,
   DesignSaveFailedOutput,
+  DesignStartInput,
 } from "../../shared/schemas/design";
 import type { Preferences } from "../../shared/schemas/preferences";
 import { PreferencesSchema } from "../../shared/schemas/preferences";
+import type { TeamMode } from "../../shared/schemas/team-mode";
 import {
   type RolesDocument,
   RolesDocumentSchema,
@@ -16,6 +23,51 @@ import {
   TeamsDocumentSchema,
 } from "../../shared/settings";
 import { designZh } from "../../shared/zh/design";
+
+/**
+ * What the capability probe (`team.plan` with no items) said about the host. Only an explicit
+ * `"v2"` lets the designer speak contract 2; anything else is the baseline contract, so a new App
+ * never sends a daemon fields its strict input schemas would reject.
+ */
+export type DesignModeContract = ModeContractSupport;
+
+/** `contractVersion: 2` for a confirmed v2 host; nothing at all otherwise. */
+export function designContractFields(support: DesignModeContract): { contractVersion?: 2 } {
+  return support === "v2" ? { contractVersion: MODE_CONTRACT_VERSION } : {};
+}
+
+/** One place that adds the contract to any of the eight design RPC inputs. */
+export function withDesignContract<T extends object>(
+  input: T,
+  support: DesignModeContract,
+): T & { contractVersion?: 2 } {
+  return { ...input, ...designContractFields(support) };
+}
+
+/**
+ * Start input for the host's contract. A v2 host gets the contract and the explicit rule (the
+ * default is true, never omitted); a baseline host gets neither new field, because its strict
+ * input schema would refuse them and the rule does not exist there.
+ */
+export function prepareDesignStartInput(
+  input: DesignStartInput,
+  support: DesignModeContract,
+): DesignStartInput {
+  if (support === "v2") {
+    return {
+      ...input,
+      existingRolesOnly: input.existingRolesOnly !== false,
+      ...designContractFields(support),
+    };
+  }
+  const { existingRolesOnly: _rule, contractVersion: _contract, ...baseline } = input;
+  return baseline;
+}
+
+/** True when the draft's mode cannot be requested from a host that is not confirmed as v2. */
+export function designModeNeedsV2(mode: TeamMode, support: DesignModeContract): boolean {
+  return support !== "v2" && modeMinContract(mode) > 1;
+}
 
 /** The host's settings write answer, before transport failures are folded in. */
 export type DesignWriteResult = "saved" | "conflict" | "invalid" | "failed";
