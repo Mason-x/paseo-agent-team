@@ -342,7 +342,6 @@ export const QUIESCENT_CANCELLATION: RunCancellationEvidence = {
     activeTurn: false,
     observedAt: AT_UPDATED,
   },
-  refreshObservedAt: AT_UPDATED,
   observationSeq: 7,
   cancelIntentId: INTENT_CANCEL,
   receipt: { kind: "archive", confirmedAt: AT_UPDATED, externalId: "archive-1" },

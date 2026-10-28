@@ -37,6 +37,7 @@ import {
 } from "../shared/schemas/run-engine/protocol";
 import {
   RUN_HISTORY_CURSOR_EXPIRED,
+  RUN_READ_FAILURE_CODES,
   RunControlInputSchema,
   type RunDetailView,
   RunDetailViewSchema,
@@ -895,7 +896,6 @@ describe("R01f cancellation refresh and decision answer", () => {
       activeTurn: false,
       observedAt: NOW,
     },
-    refreshObservedAt: NOW,
     observationSeq: 1,
     cancelIntentId: "intent-cancel",
     receipt: { kind: "archive", confirmedAt: NOW, externalId: "archive-1" },
@@ -917,7 +917,12 @@ describe("R01f cancellation refresh and decision answer", () => {
     expect(RunCancellationEvidenceSchema.safeParse(evidence).success).toBe(true);
     expect(RunDecisionPointSchema.safeParse(answered).success).toBe(true);
     expect(
-      RunDecisionPointSchema.safeParse({ ...answered, state: "open", answer: null }).success,
+      RunDecisionPointSchema.safeParse({
+        ...answered,
+        state: "open",
+        answer: null,
+        answeredAt: null,
+      }).success,
     ).toBe(true);
 
     const badEvidence = [
@@ -964,6 +969,32 @@ describe("R01f cancellation refresh and decision answer", () => {
     if (!parsedAction.success) {
       expect(parsedAction.error.issues).toHaveLength(1);
       expect(parsedAction.error.issues[0]?.path).toEqual(["answer", "action"]);
+    }
+    const timestampCases: Array<{ value: unknown; path: (string | number)[] }> = [
+      {
+        value: { ...answered, answeredAt: null },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, answeredAt: "2026-10-27T13:00:00.000Z" },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, createdAt: "2026-12-01T00:00:00.000Z" },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, state: "open", answeredAt: NOW },
+        path: ["answer"],
+      },
+    ];
+    for (const entry of timestampCases) {
+      const parsed = RunDecisionPointSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
     }
   });
 });
@@ -1438,6 +1469,7 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
   });
 
   test("run.get returns unchanged or a redacted view with no nonce/prompt fields", () => {
+    expect(RUN_READ_FAILURE_CODES).toContain("run-projection-invalid");
     expect(
       RunGetOutputSchema.parse({ runContractVersion: 1, status: "unchanged", revision: 3 }),
     ).toMatchObject({ status: "unchanged" });
@@ -1510,6 +1542,7 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
           subjectId: null,
           summary: "A decision",
           createdAt: NOW,
+          answeredAction: null,
           controlNonceDigest: "d".repeat(64),
           nonce: "raw-control-nonce",
         },
@@ -1534,6 +1567,21 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
       issues: [],
     };
     const parsed = RunDetailViewSchema.parse(view);
+    expect(parsed.capabilities).toMatchObject({ observationOnly: true, enabled: false });
+    expect(parsed.tasks[0]).toMatchObject({
+      currentTier: "B",
+      qualityFailures: 2,
+      blockedBy: null,
+    });
+    const wrongTier = RunDetailViewSchema.safeParse({
+      ...view,
+      tasks: [{ ...view.tasks[0], currentTier: "S" }],
+    });
+    expect(wrongTier.success).toBe(false);
+    if (!wrongTier.success) {
+      expect(wrongTier.error.issues).toHaveLength(1);
+      expect(wrongTier.error.issues[0]?.path).toEqual(["tasks", 0, "currentTier"]);
+    }
     const ready = RunGetOutputSchema.parse({
       runContractVersion: 1,
       status: "ready",

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { RunIdRefSchema, RunIdSchema, RunPathSchema } from "./ledger";
+import {
+  RunDecisionAnswerActionSchema,
+  RunIdRefSchema,
+  RunIdSchema,
+  RunPathSchema,
+} from "./ledger";
 
 /**
  * Run Engine RPC contracts (05 §8). Shapes only: nothing here registers a handler.
@@ -61,17 +66,22 @@ export const RunTaskEscalationViewSchema = z.object({
   at: z.string().datetime(),
 });
 
-/** Structured source of a task block; ref is a task/lock/decision/channel id when known. */
+/**
+ * Structured block source derived by R06 from the ledger (never parsed from waitingReason):
+ * dependency→first unfinished dep taskId; decision→open decision id or null;
+ * permission→agentId; lock→claimId; capacity/channel/seat as follows; other→null.
+ * `channel` carries channelId; `seat`/`capacity` carry null; `other` carries null.
+ */
 export const RunTaskBlockedBySchema = z.object({
   kind: z.enum([
     "dependency",
+    "decision",
+    "other",
+    "permission",
     "lock",
     "capacity",
-    "permission",
-    "decision",
     "channel",
     "seat",
-    "other",
   ]),
   ref: Text(128).nullable(),
 });
@@ -102,7 +112,7 @@ export const RunTaskViewSchema = z.object({
   reworkCount: z.number().int().nonnegative(),
   qualityFailures: z.number().int().nonnegative(),
   /** executionTier: last escalation's toTier, else the frozen spec tier. */
-  currentTier: Text(1),
+  currentTier: z.enum(["B", "A", "S"]),
   escalations: z.array(RunTaskEscalationViewSchema).max(2),
   /** Structured reason; waitingReason remains human-readable fallback. */
   blockedBy: RunTaskBlockedBySchema.nullable(),
@@ -151,6 +161,7 @@ export const RUN_READ_FAILURE_CODES = [
   "run-missing",
   "run-corrupt",
   "run-unknown-version",
+  "run-projection-invalid",
 ] as const;
 export type RunHistoryPage = z.infer<typeof RunHistoryPageSchema>;
 
@@ -187,6 +198,8 @@ export const RunDecisionViewSchema = z.object({
   subjectId: RunIdRefSchema.nullable(),
   summary: Text(4096),
   createdAt: z.string().datetime(),
+  /** The accepted action when answered; null while open. */
+  answeredAction: RunDecisionAnswerActionSchema.nullable(),
 });
 
 export const RunChannelViewSchema = z.object({
@@ -238,6 +251,8 @@ export const RunDetailViewSchema = z
     channels: z.array(RunChannelViewSchema).max(256),
     alerts: z.array(RunAlertViewSchema).max(1024),
     metrics: RunMetricsViewSchema,
+    /** B always declares observation-only and no write controls; R07 renders read-only. */
+    capabilities: RunCapabilitiesSchema,
     issues: z.array(RunIssueViewSchema).max(100),
   })
   .superRefine((view, ctx) => {
@@ -300,6 +315,16 @@ export const RunDetailViewSchema = z
             message: "dependency must reference an existing task",
           });
         }
+      }
+    }
+    for (const [index, task] of view.tasks.entries()) {
+      const expected = task.escalations.at(-1)?.toTier ?? task.tier;
+      if (task.currentTier !== expected) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tasks", index, "currentTier"],
+          message: "currentTier must match the last escalation or spec tier",
+        });
       }
     }
     for (const id of rows.keys()) {

@@ -8,6 +8,7 @@ import { RunGetInputSchema } from "../../../shared/schemas/run-engine/rpc";
 import {
   BLOCKED_LEDGER,
   buildOversizedLedger,
+  CANCELLATION_AUTHORIZED_FROZEN_LEDGER,
   CANCELLING_LEDGER,
   CLOSED_AFTER_REPORT_LEDGER,
   CLOSED_WHILE_ASSIGNED_LEDGER,
@@ -54,6 +55,7 @@ const NAMED_LEDGERS: { id: string; ledger: LedgerFixture }[] = [
   { id: "normal-ledger", ledger: NORMAL_RUN_LEDGER },
   { id: "outcome-unknown-ledger", ledger: OUTCOME_UNKNOWN_LEDGER },
   { id: "cancelling-ledger", ledger: CANCELLING_LEDGER },
+  { id: "cancellation-authorized-frozen", ledger: CANCELLATION_AUTHORIZED_FROZEN_LEDGER },
   { id: "quiescent-cancelled-ledger", ledger: QUIESCENT_CANCELLED_LEDGER },
   { id: "blocked-ledger", ledger: BLOCKED_LEDGER },
   { id: "lock-conflict-run-a", ledger: LOCK_CONFLICT_RUN_A },
@@ -184,8 +186,8 @@ describe("run engine fixtures against R01 schemas", () => {
   });
 
   test("legal samples parse and negative samples reject for their declared cause", () => {
-    expect(NAMED_LEDGERS.length, "named ledger count").toBe(27);
-    expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(40);
+    expect(NAMED_LEDGERS.length, "named ledger count").toBe(28);
+    expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(41);
     expect(INVALID.length, "illegal ledger count").toBe(8);
     expect(VALID_REPORTS.length, "legal report count").toBe(5);
     expect(INVALID_REPORTS.length, "illegal report count").toBe(1);

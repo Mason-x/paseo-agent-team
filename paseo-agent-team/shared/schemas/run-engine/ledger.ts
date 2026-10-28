@@ -296,7 +296,6 @@ export const RunCancellationEvidenceSchema = z
         observedAt: RunTimeSchema,
       })
       .passthrough(),
-    refreshObservedAt: RunTimeSchema,
     /** Must be ≥ the observationSeq at the refresh that produced this evidence. */
     observationSeq: RunSeqSchema,
     cancelIntentId: RunIdRefSchema,
@@ -549,11 +548,43 @@ export const RunDecisionPointSchema = z
   })
   .passthrough()
   .superRefine((decision, ctx) => {
-    if (decision.state === "answered" && decision.answer === null) {
+    if (decision.state === "answered") {
+      if (decision.answer === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["answer"],
+          message: "an answered decision must record its answer",
+        });
+      } else {
+        if (decision.answeredAt === null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "an answered decision must record answeredAt",
+          });
+        } else if (decision.answeredAt !== decision.answer.answeredAt) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must equal answer.answeredAt",
+          });
+        }
+        if (
+          decision.answeredAt !== null &&
+          Date.parse(decision.answeredAt) < Date.parse(decision.createdAt)
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must not predate createdAt",
+          });
+        }
+      }
+    } else if (decision.answer !== null || decision.answeredAt !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["answer"],
-        message: "an answered decision must record its answer",
+        message: "only answered decisions may carry an answer/answeredAt",
       });
     }
   });
