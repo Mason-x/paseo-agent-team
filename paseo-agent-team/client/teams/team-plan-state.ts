@@ -601,6 +601,14 @@ export function isMethodNotFound(error: unknown): boolean {
  * by attach) cancels the pending destroy; only a real unmount reaches destroy. Detach stops the
  * refresh loop immediately, so a fast unmount never leaves a timer polling.
  */
+/**
+ * Host shims may report null/undefined/"unknown" before the app state is known; only background
+ * and inactive mean "not visible". Everything else starts (and resumes) the visible refresh loop.
+ */
+export function isAppStateActive(state: string | null | undefined): boolean {
+  return state !== "background" && state !== "inactive";
+}
+
 export function createClientLifecycle(
   client: TeamPlanClient,
   options: {
@@ -855,6 +863,11 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       handle: schedule(() => {
         refreshTimer = null;
         if (!active || destroyed) return;
+        if (pending || inFlightKey !== null || probeInFlight) {
+          // A request is already in flight; the next tick will refresh after it settles.
+          scheduleRefresh();
+          return;
+        }
         reload(false);
         scheduleRefresh();
       }, delayMs),
@@ -1012,11 +1025,13 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
   function sendProbe(): void {
     if (destroyed || scope === null || probedScope === scopeKey) return;
     probedScope = scopeKey;
+    probeInFlight = true;
     const requestEpoch = epoch;
     void Promise.resolve()
       .then(() => options.send({ items: [] }))
       .then(
         (output) => {
+          probeInFlight = false;
           if (requestEpoch !== epoch) return;
           setMode(
             modeContractSupport({
@@ -1029,6 +1044,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
           notify();
         },
         (error: unknown) => {
+          probeInFlight = false;
           if (requestEpoch !== epoch) return;
           if (isMethodNotFound(error)) {
             setMode("legacy");
@@ -1061,6 +1077,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     hasContext = false;
     context = null;
     probedScope = "";
+    probeInFlight = false;
     if (renegotiateSupport) {
       modeContract = "unknown";
       loaded = false;
@@ -1098,6 +1115,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       hasContext = false;
       context = null;
       probedScope = "";
+      probeInFlight = false;
       lastRefreshAt = null;
       if (hostChanged) {
         modeContract = "unknown";

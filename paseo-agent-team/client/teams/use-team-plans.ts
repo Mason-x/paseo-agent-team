@@ -9,6 +9,7 @@ import {
   buildTeamSummaries,
   createClientLifecycle,
   createTeamPlanClient,
+  isAppStateActive,
   scopeSignature,
   type TeamPlanBatchView,
   type TeamPlanClient,
@@ -61,10 +62,10 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
 
   useEffect(() => client.subscribe(() => setView(client.getBatchView())), [client]);
 
-  const [appActive, setAppActive] = useState(() => AppState.currentState === "active");
+  const [appActive, setAppActive] = useState(() => isAppStateActive(AppState.currentState));
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) =>
-      setAppActive(state === "active"),
+      setAppActive(isAppStateActive(state)),
     );
     return () => subscription.remove();
   }, []);

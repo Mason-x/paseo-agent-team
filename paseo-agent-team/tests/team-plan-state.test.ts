@@ -9,6 +9,7 @@ import {
   draftInputProblem,
   draftRowKey,
   familyHintsFromEconomy,
+  isAppStateActive,
   isMethodNotFound,
   modelRowMeta,
   shouldShowPlanError,
@@ -1205,5 +1206,38 @@ describe("rework 1 regressions", () => {
     client.planTeams(teams(2));
     await flush();
     expect(call).toBe(3);
+  });
+
+  test("S1: a probe in flight blocks duplicate stale refreshes and timer ticks", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.probe();
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    client.refreshIfStale();
+    client.refreshIfStale();
+    fake.advance(60_000);
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    port.resolve(0, output([]));
+    await flush();
+    expect(client.modeContract()).toBe("v2");
+  });
+
+  test("S2: unknown host app states count as active; background/inactive do not", () => {
+    expect(isAppStateActive(null)).toBe(true);
+    expect(isAppStateActive(undefined)).toBe(true);
+    expect(isAppStateActive("unknown")).toBe(true);
+    expect(isAppStateActive("active")).toBe(true);
+    expect(isAppStateActive("background")).toBe(false);
+    expect(isAppStateActive("inactive")).toBe(false);
   });
 });
