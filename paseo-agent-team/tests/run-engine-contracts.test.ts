@@ -13,6 +13,8 @@ import {
   RUN_MAX_TASKS,
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
+  RUN_TASK_PHASES,
+  RunDecisionPointSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
   RunHistoryCheckpointSchema,
@@ -21,6 +23,9 @@ import {
   type RunRecord,
   RunRecordSchema,
   RunReopenGrantSchema,
+  RunResourceClaimSchema,
+  RunTaskPhaseSchema,
+  RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
 import {
   RunDecisionBlockSchema,
@@ -775,6 +780,108 @@ describe("protocol blocks are strict and identity-bound", () => {
   });
 });
 
+describe("R01c decision nonce digest and frozen phase", () => {
+  const decision = {
+    decisionId: "55555555-5555-4555-8555-555555555555",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "open",
+    dedupeKey: "run: D1: decision",
+    subjectId: null,
+    summary: "A decision needs a reply.",
+    createdAt: NOW,
+    answeredAt: null,
+  };
+
+  test("a decision carries a bare 64hex control nonce digest", () => {
+    expect(RunDecisionPointSchema.safeParse(decision).success).toBe(true);
+    const invalid = [
+      { ...decision, controlNonceDigest: "A".repeat(64) },
+      { ...decision, controlNonceDigest: `sha256:${"a".repeat(64)}` },
+      { ...decision, controlNonceDigest: "11111111-1111-4111-8111-111111111111" },
+      { ...decision, controlNonceDigest: "a".repeat(63) },
+      (() => {
+        const { controlNonceDigest: _omit, ...missing } = decision;
+        return missing;
+      })(),
+    ];
+    for (const value of invalid) {
+      const parsed = RunDecisionPointSchema.safeParse(value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
+      }
+    }
+  });
+
+  test("hot/tool claims are legal enum values and conflict semantics stay out of the schema", () => {
+    const base = {
+      claimId: "claim-hot-1",
+      taskId: "T1",
+      repoId: "repo-1",
+      path: "repo:hotspot",
+      access: "write",
+      frozen: false,
+      createdAt: NOW,
+    };
+    for (const kind of ["hot", "tool"] as const) {
+      expect(RunResourceClaimSchema.safeParse({ ...base, kind }).success).toBe(true);
+    }
+    const invalid = RunResourceClaimSchema.safeParse({ ...base, kind: "glob" });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) {
+      expect(invalid.error.issues).toHaveLength(1);
+      expect(invalid.error.issues[0]?.path).toEqual(["kind"]);
+    }
+    const readOnly = RunResourceClaimSchema.safeParse({ ...base, kind: "hot", access: "read" });
+    expect(readOnly.success).toBe(false);
+    if (!readOnly.success) {
+      expect(readOnly.error.issues).toHaveLength(1);
+      expect(readOnly.error.issues[0]?.path).toEqual(["access"]);
+    }
+  });
+
+  test("frozen is a legal phase and an unknown phase is a single-defect rejection", () => {
+    expect(RUN_TASK_PHASES).toContain("frozen");
+    expect(RunTaskPhaseSchema.safeParse("frozen").success).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: undefined })).success,
+    ).toBe(true);
+    const invalidPhases = [
+      { state: "ready", phase: "frozen" },
+      { state: "in_progress", phase: "frozen" },
+      { state: "review", phase: "frozen" },
+      { state: "done", phase: "frozen" },
+      { state: "cancelled", phase: "frozen" },
+      { state: "done", phase: "awaiting-rework" },
+      { state: "blocked", phase: "awaiting-rework" },
+    ];
+    for (const value of invalidPhases) {
+      const invalid = RunTaskRecordSchema.safeParse(taskRecord(value));
+      expect(invalid.success).toBe(false);
+      if (!invalid.success) {
+        expect(invalid.error.issues).toHaveLength(1);
+        expect(invalid.error.issues[0]?.path).toEqual(["phase"]);
+      }
+    }
+    const unknown = RunTaskRecordSchema.safeParse(
+      taskRecord({ state: "review", phase: "holding" }),
+    );
+    expect(unknown.success).toBe(false);
+    if (!unknown.success) {
+      expect(unknown.error.issues).toHaveLength(1);
+      expect(unknown.error.issues[0]?.path).toEqual(["phase"]);
+    }
+  });
+});
+
 describe("RunRecord persists through the real AtomicJsonCodec", () => {
   test("create/read/update/CAS keep the codec header and unknown fields", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "r01b-codec-"));
@@ -1010,10 +1117,40 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
           frozen: false,
         },
       ],
-      locks: [],
+      locks: [
+        {
+          claimId: "claim-hot",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "hot",
+          path: "repo:hotspot",
+          access: "write",
+          frozen: false,
+        },
+        {
+          claimId: "claim-tool",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "tool",
+          path: "npm:install",
+          access: "write",
+          frozen: false,
+        },
+      ],
       capacity: { configuredLimit: 4, effectiveLimit: 4, inUse: 1 },
       budgets: [],
-      decisions: [],
+      decisions: [
+        {
+          decisionId: "66666666-6666-4666-8666-666666666666",
+          category: "D1",
+          state: "open",
+          subjectId: null,
+          summary: "A decision",
+          createdAt: NOW,
+          controlNonceDigest: "d".repeat(64),
+          nonce: "raw-control-nonce",
+        },
+      ],
       channels: [],
       alerts: [],
       metrics: {
@@ -1047,9 +1184,11 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
       issues: [],
     });
     const serialized = JSON.stringify(ready);
-    for (const forbidden of ["nonce", "prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
+    for (const forbidden of ["prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
       expect(serialized).not.toContain(forbidden);
     }
+    expect(serialized).not.toMatch(/nonce/iu);
+    expect(serialized).not.toContain("d".repeat(64));
     expect(parsed.tasks[0]).toMatchObject({ phase: "awaiting-rework", frozen: false });
 
     // Q1: ready always carries run+history; the failure branches never do.

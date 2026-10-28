@@ -172,6 +172,7 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
     {
       decisionId: DECISION_D1,
       category: "D1",
+      controlNonceDigest: "e".repeat(64),
       state: "open",
       dedupeKey: "run-rec0re-cla|D1|closed-while-assigned|T2",
       subjectId: "T2",
