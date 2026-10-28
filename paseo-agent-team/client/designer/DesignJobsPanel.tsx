@@ -7,15 +7,18 @@ import { formatDesignIssue } from "../../shared/domain/design-output";
 import type { DesignJob } from "../../shared/schemas/design";
 import type { Team } from "../../shared/schemas/team";
 import { designZh } from "../../shared/zh/design";
+import { designGapZh } from "../../shared/zh/design-gap";
 import { DesignJobCard } from "./DesignJobCard";
 import { DesignResultCard } from "./DesignResultCard";
-import type { DesignLaunchSeed } from "./design-screen-state";
+import type { DesignGapConfigureEconomy, DesignGapOpenRole } from "./DesignRoleGapCard";
+import type { DesignerPrefill, DesignLaunchSeed } from "./design-screen-state";
 import {
   designLaunchSeed,
   designSaveAttemptKey,
   shouldAutoSaveDesignJob,
   shouldCleanupDesignJob,
 } from "./design-screen-state";
+import { planDesignGapRetry } from "./submission-state";
 import type { UseDesignJobsResult } from "./use-design-jobs";
 import { type UseDesignSaveResult, useDesignSave } from "./use-design-save";
 
@@ -28,6 +31,16 @@ export type DesignJobsPanelProps = {
   clientId: string;
   navigation: PluginScreenProps["navigation"];
   onPreviewLaunch: (seed: DesignLaunchSeed) => void;
+  /** The host's mode contract from the `team.plan` probe (I02 passes it; absent = baseline). */
+  modeContract?: "v2" | "legacy" | "unknown";
+  /**
+   * Role-gap exits, passed straight through to the card. The screen wires them (I02); a missing
+   * callback hides its button.
+   */
+  onGapRetry?: (prefill: DesignerPrefill) => void;
+  onOpenRole?: (target: DesignGapOpenRole) => void;
+  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
+  onCreateRole?: () => void;
 };
 
 function DesignJobSection({
@@ -45,6 +58,10 @@ function DesignJobSection({
   cleanupNotice,
   onSaveNotice,
   onPreviewLaunch,
+  onGapRetry,
+  onOpenRole,
+  onConfigureEconomy,
+  onCreateRole,
 }: {
   theme: PluginScreenProps["theme"];
   hostId: string;
@@ -60,8 +77,16 @@ function DesignJobSection({
   cleanupNotice: string | undefined;
   onSaveNotice: (jobId: string, message: string) => void;
   onPreviewLaunch: (seed: DesignLaunchSeed) => void;
+  onGapRetry?: (prefill: DesignerPrefill) => void;
+  onOpenRole?: (target: DesignGapOpenRole) => void;
+  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
+  onCreateRole?: () => void;
 }) {
   const [actionPending, setActionPending] = useState(false);
+  const [gapRetry, setGapRetry] = useState<{ busy: boolean; notice: string | null }>({
+    busy: false,
+    notice: null,
+  });
   const unknownWrite = save.unknownWrites.has(job.jobId);
   const attemptKey = designSaveAttemptKey(job);
 
@@ -142,6 +167,27 @@ function DesignJobSection({
     }
   }
 
+  /**
+   * Fills the designer form with the original request, the same mode, target, and Profile intent,
+   * and the switch off. Nothing is started and the job keeps its gaps.
+   */
+  async function retryWithoutRule() {
+    if (gapRetry.busy || !onGapRetry) return;
+    setGapRetry({ busy: true, notice: null });
+    try {
+      const source = await jobs.retrySourceFor(job);
+      const plan = planDesignGapRetry(job, source);
+      if (!plan.ok) {
+        setGapRetry({ busy: false, notice: designGapZh.retryUnavailable });
+        return;
+      }
+      onGapRetry(plan.prefill);
+      setGapRetry({ busy: false, notice: null });
+    } catch {
+      setGapRetry({ busy: false, notice: designGapZh.retryUnavailable });
+    }
+  }
+
   async function cancelDesign() {
     if (actionPending) return;
     setActionPending(true);
@@ -200,6 +246,12 @@ function DesignJobSection({
         onCancel={() => void cancelDesign()}
         onRetrySave={() => void retrySave()}
         onContinue={(_current, action) => void continueDesign(action)}
+        onGapRetry={onGapRetry ? () => void retryWithoutRule() : undefined}
+        gapRetryBusy={gapRetry.busy}
+        gapRetryNotice={gapRetry.notice}
+        onOpenRole={onOpenRole}
+        onConfigureEconomy={onConfigureEconomy}
+        onCreateRole={onCreateRole}
       />
       {saveNotice ? <Text style={warning}>{saveNotice}</Text> : null}
       {cleanupNotice ? <Text style={warning}>{cleanupNotice}</Text> : null}
@@ -229,6 +281,11 @@ export function DesignJobsPanel({
   clientId,
   navigation,
   onPreviewLaunch,
+  modeContract,
+  onGapRetry,
+  onOpenRole,
+  onConfigureEconomy,
+  onCreateRole,
 }: DesignJobsPanelProps) {
   const toast = useToast();
   const [saveNotices, setSaveNotices] = useState<Record<string, string>>({});
@@ -238,6 +295,7 @@ export function DesignJobsPanel({
   const save = useDesignSave({
     hostId,
     clientId,
+    ...(modeContract === undefined ? {} : { modeContract }),
     onOutcome: (jobId, outcome) => {
       if (outcome.status === "saved") {
         setSaveNotices((current) => ({ ...current, [jobId]: "" }));
@@ -292,6 +350,10 @@ export function DesignJobsPanel({
             setSaveNotices((current) => ({ ...current, [jobId]: message }))
           }
           onPreviewLaunch={onPreviewLaunch}
+          onGapRetry={onGapRetry}
+          onOpenRole={onOpenRole}
+          onConfigureEconomy={onConfigureEconomy}
+          onCreateRole={onCreateRole}
         />
       ))}
     </View>
