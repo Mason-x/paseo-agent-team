@@ -397,12 +397,17 @@ export const RunSeatSnapshotSchema = z
   .passthrough();
 export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
 
+/**
+ * `hot`/`tool` are repo-level named resources persisted as claims. They conflict only by exact
+ * name equality: no directory coverage and no path normalization/filesystem validation. R03b
+ * implements that behavior; the schema only carries the value.
+ */
 export const RunResourceClaimSchema = z
   .object({
     claimId: RunIdRefSchema,
     taskId: z.string().min(1).max(64),
     repoId: z.string().min(1).max(256),
-    kind: z.enum(["file", "directory"]),
+    kind: z.enum(["file", "directory", "hot", "tool"]),
     path: RunPathSchema,
     access: z.enum(["read", "write"]),
     frozen: z.boolean(),

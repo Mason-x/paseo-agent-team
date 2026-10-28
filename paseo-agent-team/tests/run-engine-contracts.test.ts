@@ -23,6 +23,7 @@ import {
   type RunRecord,
   RunRecordSchema,
   RunReopenGrantSchema,
+  RunResourceClaimSchema,
   RunTaskPhaseSchema,
   RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
@@ -809,6 +810,24 @@ describe("R01c decision nonce digest and frozen phase", () => {
       expect(parsed.success).toBe(false);
       if (!parsed.success) expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
     }
+  });
+
+  test("hot/tool claims are legal enum values and conflict semantics stay out of the schema", () => {
+    const base = {
+      claimId: "claim-hot-1",
+      taskId: "T1",
+      repoId: "repo-1",
+      path: "repo:hotspot",
+      access: "write",
+      frozen: false,
+      createdAt: NOW,
+    };
+    for (const kind of ["hot", "tool"] as const) {
+      expect(RunResourceClaimSchema.safeParse({ ...base, kind }).success).toBe(true);
+    }
+    const invalid = RunResourceClaimSchema.safeParse({ ...base, kind: "glob" });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) expect(invalid.error.issues[0]?.path).toEqual(["kind"]);
   });
 
   test("frozen is a legal phase and an unknown phase is a single-defect rejection", () => {
