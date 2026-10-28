@@ -3,7 +3,7 @@
 // an old reader rejects, even when the current schemas grew new optional fields.
 import { z } from "zod";
 
-const SlugSchema = z.string().regex(/^[a-z0-9][a-z0-9-]*$/);
+const SlugSchema = z.string().regex(/^[a-z][a-z0-9-]{1,47}$/);
 const ShortTextSchema = z.string().trim().min(1).max(40);
 const DescriptionSchema = z.string().trim().max(160);
 const StringListSchema = z.array(z.string().trim().min(1).max(500)).max(30);
@@ -251,7 +251,71 @@ const TeamSchema = z
     source: z.string().optional(),
     designer: StoredDesignerOriginSchema.optional().catch(undefined),
   })
-  .passthrough();
+  .passthrough()
+  .refine((team) => !team.members.some((member) => member.roleId === team.coordinatorRoleId), {
+    message: "协调者不能同时作为成员",
+  })
+  .refine(
+    (team) => {
+      const seen = new Map<string, number>();
+      for (const member of team.members) {
+        seen.set(member.roleId, (seen.get(member.roleId) ?? 0) + 1);
+      }
+      return team.members.every(
+        (member) => (seen.get(member.roleId) ?? 0) === 1 || member.instanceLabel,
+      );
+    },
+    { message: "重复的 Role 需要实例标签" },
+  );
+
+const controlFree = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .refine((value) => !/[\0\r\n]/.test(value), {
+      message: "control characters are not allowed",
+    });
+
+const McpEnvSchema = z
+  .record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), controlFree(4000))
+  .refine((env) => Object.keys(env).length <= 32, { message: "too many env vars" });
+
+const McpHeaderSchema = z
+  .record(z.string().regex(/^[A-Za-z0-9-]{1,64}$/), controlFree(4000))
+  .refine((headers) => Object.keys(headers).length <= 32, { message: "too many headers" });
+
+const StdioMcpServerSchema = z
+  .object({
+    type: z.literal("stdio").optional(),
+    command: z
+      .string()
+      .trim()
+      .min(1)
+      .max(300)
+      .refine((value) => !/[\0\r\n]/.test(value), {
+        message: "control characters are not allowed",
+      }),
+    args: z.array(controlFree(1000)).max(32).optional(),
+    env: McpEnvSchema.optional(),
+    alwaysLoad: z.boolean().optional(),
+  })
+  .strict();
+
+const RemoteMcpServerSchema = z
+  .object({
+    type: z.enum(["http", "sse"]),
+    url: z.string().trim().url().max(2000),
+    headers: McpHeaderSchema.optional(),
+    alwaysLoad: z.boolean().optional(),
+  })
+  .strict();
+
+const McpServersSchema = z
+  .record(
+    z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/),
+    z.union([StdioMcpServerSchema, RemoteMcpServerSchema]),
+  )
+  .refine((servers) => Object.keys(servers).length <= 8, { message: "at most 8 MCP servers" });
 
 const RoleSchema = z
   .object({
@@ -265,6 +329,7 @@ const RoleSchema = z
     outputContract: StringListSchema.default([]),
     preferredProfiles: z.array(ProfileRefSchema).min(1).max(5),
     fallbackProfiles: z.array(ProfileRefSchema).max(5).default([]),
+    mcpServers: McpServersSchema.optional(),
     color: z.string().max(32).optional(),
     icon: z.string().max(64).optional(),
     enabled: z.boolean().default(true),
