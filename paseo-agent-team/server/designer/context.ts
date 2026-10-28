@@ -145,6 +145,9 @@ export function describeModeRouting(input: {
 
 /** The economy-all verdict: ids and reasons come from the planner's own issues. */
 function cheapVerdict(issues: readonly ModeIssue[], launchable: boolean): DesignRoleLaunchVerdict {
+  if (launchable) {
+    return { launchable: true, unavailableProfileIds: [], verified: true };
+  }
   const failed: string[] = [];
   for (const issue of issues) {
     if (issue.code !== "MODE_CHEAP_PROFILE_INVALID") continue;
@@ -261,9 +264,11 @@ export function computeRoleLaunchability(input: {
         host,
         economy: input.economy,
       });
-      member[role.id] = resolvedMember.ok
-        ? cheapVerdict([], !resolvedMember.value.unavailable)
-        : cheapVerdict(resolvedMember.issues, false);
+      const memberIssues = resolvedMember.ok
+        ? [...(resolvedMember.issues ?? []), ...resolvedMember.value.issues]
+        : resolvedMember.issues;
+      const memberLaunchable = resolvedMember.ok && !resolvedMember.value.unavailable;
+      member[role.id] = cheapVerdict(memberIssues, memberLaunchable);
       coordinator[role.id] = resolvedCoordinator.ok
         ? cheapVerdict([], true)
         : cheapVerdict(resolvedCoordinator.issues, false);

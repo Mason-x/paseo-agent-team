@@ -689,17 +689,42 @@ describe("gap economy eligibility", () => {
     expect(issues[0]?.params).toMatchObject({ route: "coordinator", profileId: "deepseek" });
   });
 
-  test("accepts kind none with a reason and never invents a Profile", () => {
+  test("a structured none gap is the legal exit for every broken route state", () => {
+    const none = gapFixture({ profiles: { kind: "none", reason: "host 无合格 Profile" } });
+    expect(
+      checkGapEconomyEligibility({ mode: "economy-all", gap: none, routing: gapRouting() }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({ mode: "economy-all", gap: none, routing: { status: "absent" } }),
+    ).toEqual([]);
     expect(
       checkGapEconomyEligibility({
         mode: "economy-all",
-        gap: gapFixture({ profiles: { kind: "none", reason: "host 无合格 Profile" } }),
-        routing: gapRouting(),
+        gap: none,
+        routing: { status: "invalid", reason: "unknown-version" },
       }),
     ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: none,
+        routing: gapRouting(GAP_AVAILABILITY, { retain: ["deepseek"] }),
+      }),
+    ).toEqual([]);
+    // Undefined routing means the caller forgot to pass the snapshot: an internal error, not a
+    // model-fixable one, so it stays a distinct reason.
+    const unwired = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: none,
+      routing: undefined,
+    });
+    expect(unwired[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_POLICY_REQUIRED",
+      reason: "routing-missing",
+    });
   });
 
-  test("a missing policy blocks the suggestion as a policy problem", () => {
+  test("a missing policy blocks an existing Profile suggestion as a policy problem", () => {
     const issues = checkGapEconomyEligibility({
       mode: "economy-all",
       gap: gapFixture(),

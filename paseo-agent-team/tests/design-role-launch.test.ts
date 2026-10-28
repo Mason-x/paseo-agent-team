@@ -1,7 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { computeRoleLaunchability } from "../server/designer/context";
+import { type DesignRoleLaunchTables, validateRoleGap } from "../shared/domain/design-validation";
 import { type EconomyPolicy, normalizeEconomyPolicy } from "../shared/domain/mode-resolver";
-import type { PaseoProfile } from "../shared/paseo/adapter";
+import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
+import { DesignRoleGapProposalSchema } from "../shared/schemas/design";
+import { PreferencesSchema } from "../shared/schemas/preferences";
 import { type Role, RoleSchema } from "../shared/schemas/role";
 
 function role(id: string, overrides: Partial<Role> = {}): Role {
@@ -291,5 +294,132 @@ describe("role launchability", () => {
     // No execution candidates at all: the failure belongs to the policy, not to this Role.
     expect(emptyRoute.member.unavailableProfileIds).toEqual([]);
     expect(emptyRoute.member.verified).toBe(false);
+  });
+
+  test("a standby escalation seat keeps the planner's failure evidence", () => {
+    const esc = role("esc", {
+      executionPolicy: { tier: "escalation", taskKind: "coding" },
+    });
+    const policy = cheapPolicy({
+      coordinator: [DEEPSEEK.id],
+      execution: [DEEPSEEK.id],
+      escalation: [DEEPSEEK.id],
+    });
+    const unverified = table(
+      computeRoleLaunchability({
+        mode: "economy-all",
+        roles: [esc],
+        profiles: [DEEPSEEK],
+        availability: [],
+        economy: policy,
+      }),
+      "esc",
+    );
+    // D02 returns ok=true + unavailable=true for standby; its issues still prove nothing.
+    expect(unverified.member).toEqual({
+      launchable: false,
+      unavailableProfileIds: [DEEPSEEK.id],
+      verified: false,
+    });
+
+    const unavailable = table(
+      computeRoleLaunchability({
+        mode: "economy-all",
+        roles: [esc],
+        profiles: [DEEPSEEK],
+        availability: [{ provider: "omp", available: false }],
+        economy: policy,
+      }),
+      "esc",
+    );
+    expect(unavailable.member).toEqual({
+      launchable: false,
+      unavailableProfileIds: [DEEPSEEK.id],
+      verified: true,
+    });
+
+    const emptyRoute = table(
+      computeRoleLaunchability({
+        mode: "economy-all",
+        roles: [esc],
+        profiles: [DEEPSEEK],
+        availability: [{ provider: "omp", available: true }],
+        economy: cheapPolicy({ execution: [DEEPSEEK.id] }),
+      }),
+      "esc",
+    );
+    expect(emptyRoute.member).toEqual({
+      launchable: false,
+      unavailableProfileIds: [],
+      verified: false,
+    });
+  });
+
+  test("the verifier gate rejects an unverified standby claim and accepts a proven one", () => {
+    const esc = role("esc", {
+      executionPolicy: { tier: "escalation", taskKind: "coding" },
+    });
+    const policy = cheapPolicy({
+      coordinator: [DEEPSEEK.id],
+      execution: [DEEPSEEK.id],
+      escalation: [DEEPSEEK.id],
+    });
+    const proposal = DesignRoleGapProposalSchema.parse({
+      version: 2,
+      kind: "role-gap",
+      jobId: "11111111-1111-4111-8111-111111111111",
+      attempt: 1,
+      nonce: "0123456789abcdef0123456789abcdef",
+      summary: "现有 Role 不可启动",
+      gaps: [
+        {
+          kind: "unlaunchable-role",
+          roleId: esc.id,
+          responsibility: "负责上线判断",
+          reason: "该 Role 在待命位不可启动",
+          use: "member",
+          profiles: { kind: "none", reason: "无合适 Profile" },
+        },
+      ],
+    });
+    const gate = (availability: ProviderAvailability[]) => {
+      const tables: DesignRoleLaunchTables = computeRoleLaunchability({
+        mode: "economy-all",
+        roles: [esc],
+        profiles: [DEEPSEEK],
+        availability,
+        economy: policy,
+      });
+      return validateRoleGap(
+        proposal,
+        {
+          request: "上线",
+          mode: "economy-all",
+          jobId: "11111111-1111-4111-8111-111111111111",
+          attempt: 1,
+          nonce: "0123456789abcdef0123456789abcdef",
+          roles: [esc],
+          teams: [],
+          preferences: PreferencesSchema.parse({}),
+          host: { status: "ready", profiles: [DEEPSEEK], availability },
+          daemonConfig: {},
+          carrierWorkspaceId: "carrier",
+          targetWorkspaceId: null,
+          capabilities: { onDemand: true, expansion: false, collaboration: false },
+          roleLaunch: tables,
+        },
+        { existingRolesOnly: true },
+      );
+    };
+    const unverified = gate([]);
+    expect(unverified.ok).toBe(false);
+    if (unverified.ok) return;
+    expect(unverified.issues).toEqual([
+      expect.objectContaining({
+        code: "DESIGN_OUTPUT_SCHEMA",
+        params: expect.objectContaining({ reason: "role-launch-unverified" }),
+      }),
+    ]);
+    expect(gate([{ provider: "omp", available: false }]).ok).toBe(true);
   });
 });

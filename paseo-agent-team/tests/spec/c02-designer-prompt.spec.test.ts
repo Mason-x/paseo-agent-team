@@ -145,6 +145,7 @@ describe("C02 designer prompt contract", () => {
         }),
       );
     expect(correction(context())).not.toContain('"kind":"team"');
+    expect(correction(context(), "role-gap")).toBe(correction(context()));
     expect(correction(context({ outputContractVersion: 2, existingRolesOnly: false }))).toContain(
       '"kind":"team"',
     );
@@ -217,9 +218,10 @@ describe("C02 designer prompt contract", () => {
       }),
     );
     const index = indexOfBlock(rendered, "Role 索引") as Array<Record<string, unknown>>;
-    expect(index[0]).toMatchObject({ launchable: true, coordinatorLaunchable: false });
-    expect(index[1]).toMatchObject({ launchable: false, coordinatorLaunchable: true });
-    expect(index[1]).toMatchObject({ launchVerified: true, coordinatorLaunchVerified: false });
+    expect(index[0]).toMatchObject({ launchable: true, memberLaunch: "ok" });
+    expect(index[0]).toMatchObject({ coordinatorLaunch: "blocked" });
+    expect(index[1]).toMatchObject({ launchable: false, memberLaunch: "blocked" });
+    expect(index[1]).toMatchObject({ coordinatorLaunch: "ok" });
   });
 
   test("both switches stay inside the 30KiB target at catalog size", () => {
@@ -364,6 +366,25 @@ describe("C02 designer prompt contract", () => {
           },
         }),
         routing,
+      }),
+    ).toEqual([]);
+    expect(
+      checkGapEconomyEligibility({
+        mode: "economy-all",
+        gap: DesignRoleGapSchema.parse({
+          kind: "missing-role",
+          responsibility: "负责数据库迁移",
+          reason: "目录没有承担迁移的 Role",
+          use: "member",
+          profiles: { kind: "none", reason: "host 无合格 Profile" },
+          suggestedRole: {
+            id: "eng-data",
+            name: "【工程】数据迁移",
+            responsibilities: ["迁移"],
+            executionPolicy: { tier: "execution", taskKind: "coding" },
+          },
+        }),
+        routing: { status: "absent" },
       }),
     ).toEqual([]);
     expect(

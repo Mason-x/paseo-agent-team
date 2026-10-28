@@ -99,6 +99,14 @@ export function checkGapEconomyEligibility(input: {
   if (input.gap.kind !== "missing-role") return [];
   const path = input.path ?? [];
   const routing = input.routing;
+  // A `none` claim names no Profile, so it needs no route evidence; the non-empty reason is
+  // schema-enforced. Only a missing snapshot (wiring bug) stays an internal error: absent or
+  // invalid policies are exactly the cases the prompt tells the model to answer with `none`.
+  if (input.gap.profiles.kind === "none") {
+    return routing === undefined
+      ? [modePlanIssue(path, { modeCode: "MODE_CHEAP_POLICY_REQUIRED", reason: "routing-missing" })]
+      : [];
+  }
   if (routing === undefined || routing.status === "absent") {
     return [modePlanIssue(path, { modeCode: "MODE_CHEAP_POLICY_REQUIRED", reason: "absent" })];
   }
@@ -115,7 +123,6 @@ export function checkGapEconomyEligibility(input: {
   if (row === undefined || row.candidates.length === 0) {
     return [modePlanIssue(path, { modeCode: "MODE_CHEAP_ROUTE_UNAVAILABLE", route })];
   }
-  if (profiles.kind === "none") return [];
   const issues: DesignIssue[] = [];
   for (const [index, profileId] of profiles.profileIds.entries()) {
     const candidate = row.candidates.find((entry) => entry.profileId === profileId);

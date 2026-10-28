@@ -849,8 +849,11 @@ describe("economy-all route table witness", () => {
     const economy = routePolicy({
       profiles: [SONNET_ENTRY, MISSING_ENTRY, DEEPSEEK_ENTRY],
       routes: {
+        coordinator: ["sonnet", "missing", "deepseek"],
+        decision: ["sonnet", "missing", "deepseek"],
         execution: ["sonnet", "missing", "deepseek"],
         escalation: ["sonnet", "missing", "deepseek"],
+        retain: ["sonnet", "missing", "deepseek"],
       },
       profileBudget: { sonnet: "sota" },
     });
@@ -858,37 +861,40 @@ describe("economy-all route table witness", () => {
     const routing = describeModeRouting({ profiles: ROUTE_PROFILES, availability, economy });
     if (routing.status !== "ready") throw new Error("expected a ready routing");
     const host = { status: "ready" as const, profiles: ROUTE_PROFILES, availability };
-    const resolved = resolveModeProfile({
-      mode: "economy-all",
-      role: routeRole("execution", "coding"),
-      kind: "member",
-      host,
-      economy,
-    });
-    expect(resolved.ok).toBe(false);
-    if (resolved.ok) return;
-    const row = routing.routes.find(
-      (entry) => entry.route === "execution" && entry.taskKind === "coding",
-    );
-    expect(row).toBeDefined();
-    if (row === undefined) return;
-    expect(reportedRejections(row)).toEqual(plannerRejections(resolved.issues));
-
-    // A standby escalation seat stays blocked with the same evidence.
-    const standby = resolveModeProfile({
-      mode: "economy-all",
-      role: routeRole("escalation", "coding"),
-      kind: "member",
-      host,
-      economy,
-    });
-    expect(standby.ok && standby.value.unavailable).toBe(true);
-    const standbyRow = routing.routes.find(
-      (entry) => entry.route === "escalation" && entry.taskKind === null,
-    );
-    expect(standbyRow).toBeDefined();
-    if (standbyRow === undefined) return;
-    expect(reportedRejections(standbyRow)).toEqual(plannerRejections(standby.issues ?? []));
+    const rowFor = (route: (typeof ROUTES)[number]) =>
+      routing.routes.find(
+        (entry) =>
+          entry.route === route && entry.taskKind === (route === "execution" ? "coding" : null),
+      );
+    for (const route of ROUTES) {
+      const role = routeRole(route, "coding");
+      const row = rowFor(route);
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+      if (route === "coordinator") {
+        const resolved = resolveCoordinatorProfile({ mode: "economy-all", role, host, economy });
+        expect(resolved.ok).toBe(false);
+        if (resolved.ok) return;
+        // The coordinator entry must name the same rejected candidates the table reports.
+        expect(reportedRejections(row)).toEqual(plannerRejections(resolved.issues));
+        continue;
+      }
+      const resolved = resolveModeProfile({
+        mode: "economy-all",
+        role,
+        kind: "member",
+        host,
+        economy,
+      });
+      if (route === "escalation") {
+        // A standby seat stays blocked instead of disappearing, with the same evidence.
+        expect(resolved.ok && resolved.value.unavailable).toBe(true);
+      } else {
+        expect(resolved.ok).toBe(false);
+      }
+      // Member rejections match the table for budget-conflict, unverified and missing-live.
+      expect(reportedRejections(row)).toEqual(plannerRejections(resolved.issues ?? []));
+    }
   });
 
   test("a route id outside the allowlist is only counted, never reported", () => {

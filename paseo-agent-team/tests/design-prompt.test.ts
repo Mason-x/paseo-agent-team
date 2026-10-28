@@ -241,37 +241,7 @@ describe("v1 prompt golden snapshot", () => {
   });
 
   test("freezes the realistic correction byte for byte", () => {
-    const roles = expectedRoleContent.map((item, index) =>
-      role(index, {
-        id: item.id,
-        name: item.name,
-        mission: item.mission,
-        responsibilities: item.responsibilities,
-      }),
-    );
-    const realistic = context({
-      roles,
-      profiles: [profile(1)],
-      occupiedRoleIds: roles.map((item) => item.id),
-      occupiedRoleNames: roles.map((item) => item.name),
-      expectedChoices: [],
-    });
-    const result = buildDesignCorrection({
-      jobId: JOB_ID,
-      attempt: 2,
-      nonce: NONCE,
-      issues: [
-        {
-          code: "DESIGN_OUTPUT_IDENTITY",
-          severity: "error",
-          path: ["nonce"],
-          params: { field: "nonce" },
-          action: "repair",
-        },
-      ],
-      context: realistic,
-      expectedChoices: [],
-    });
+    const result = realisticCorrection(realisticCorrectionContext());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.utf8Bytes).toBe(4202);
@@ -279,7 +249,87 @@ describe("v1 prompt golden snapshot", () => {
       "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
     );
   });
+
+  test("v1 correction ignores previousOutputKind and every v2 field", () => {
+    const result = realisticCorrection(
+      realisticCorrectionContext({
+        outputContractVersion: 1,
+        existingRolesOnly: true,
+        modeRouting: {
+          status: "ready",
+          routes: [
+            {
+              route: "execution",
+              taskKind: "coding",
+              candidates: [
+                { profileId: "profile-1", family: "claude", eligible: true, reported: false },
+              ],
+            },
+          ],
+        },
+        roles: [
+          role(0, {
+            launchVerified: false,
+            coordinatorLaunchable: false,
+            coordinatorLaunchVerified: true,
+          }),
+        ],
+      }),
+      "role-gap",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).not.toContain("上一轮是角色缺口");
+    expect(result.utf8Bytes).toBe(4202);
+    expect(goldenSha(result.text)).toBe(
+      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+    );
+  });
 });
+
+function realisticCorrectionContext(
+  overrides: Partial<DesignPromptContext> = {},
+): DesignPromptContext {
+  const roles = expectedRoleContent.map((item, index) =>
+    role(index, {
+      id: item.id,
+      name: item.name,
+      mission: item.mission,
+      responsibilities: item.responsibilities,
+    }),
+  );
+  return context({
+    roles,
+    profiles: [profile(1)],
+    occupiedRoleIds: roles.map((item) => item.id),
+    occupiedRoleNames: roles.map((item) => item.name),
+    expectedChoices: [],
+    ...overrides,
+  });
+}
+
+function realisticCorrection(
+  promptContext: DesignPromptContext,
+  previousOutputKind?: "team" | "role-gap",
+) {
+  return buildDesignCorrection({
+    jobId: JOB_ID,
+    attempt: 2,
+    nonce: NONCE,
+    issues: [
+      {
+        code: "DESIGN_OUTPUT_IDENTITY",
+        severity: "error",
+        path: ["nonce"],
+        params: { field: "nonce" },
+        action: "repair",
+      },
+    ],
+    context: promptContext,
+    expectedChoices: [],
+    ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
+  });
+}
 
 describe("team design recipes", () => {
   test("copies all nine source lineups without inventing counts", () => {
@@ -471,23 +521,24 @@ describe("design output contract", () => {
     ];
     const v2 = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false, roles }));
     const index = jsonBlockAt(v2, "Role 索引") as Array<Record<string, unknown>>;
+    // A role usable as member but provably blocked as coordinator, and the reverse: one
+    // tri-state per use, never inferred across uses.
     expect(index[0]).toMatchObject({
       launchable: true,
-      coordinatorLaunchable: false,
-      launchVerified: true,
-      coordinatorLaunchVerified: true,
+      memberLaunch: "ok",
+      coordinatorLaunch: "blocked",
     });
     expect(index[1]).toMatchObject({
       launchable: false,
-      coordinatorLaunchable: true,
-      coordinatorLaunchVerified: false,
+      memberLaunch: "blocked",
+      coordinatorLaunch: "ok",
     });
     const v1Index = jsonBlockAt(
       textOf(kickoff({ outputContractVersion: 1, roles })),
       "Role 索引",
     ) as Array<Record<string, unknown>>;
-    expect(v1Index[0]).not.toHaveProperty("coordinatorLaunchable");
-    expect(v1Index[0]).not.toHaveProperty("launchVerified");
+    expect(v1Index[0]).not.toHaveProperty("memberLaunch");
+    expect(v1Index[0]).not.toHaveProperty("coordinatorLaunch");
   });
 
   test("economy-all v2 renders the route summary and explains the remedy", () => {
@@ -594,21 +645,15 @@ describe("design output contract", () => {
     });
   }
 
-  test("both switches stay within the 30KiB target at the real catalog size", () => {
-    const report: Record<string, unknown> = {};
+  test("both switches stay within the 30KiB target, including the 21-Role stress", () => {
+    // catalog / economy-all / 21-Role + 6000-char-notes stress; measured 24357/24668,
+    // 24838/25149 and 30461/30664 bytes (off/on, all <= 30720).
     const cases = [
-      ["catalog", {}, true],
-      ["economy-all", { requestedMode: "economy-all" as const, modeRouting: ROUTING }, true],
-      [
-        "stress",
-        {
-          roles: realScaleRoles(),
-          profiles: [profile(1, "说明".repeat(3000))],
-        },
-        false,
-      ],
+      {},
+      { requestedMode: "economy-all" as const, modeRouting: ROUTING },
+      { roles: realScaleRoles(), profiles: [profile(1, "说明".repeat(3000))] },
     ] as const;
-    for (const [label, overrides, withinTarget] of cases) {
+    for (const overrides of cases) {
       for (const on of [false, true]) {
         const ctx: DesignPromptContext = {
           ...realScaleContext(overrides),
@@ -624,9 +669,7 @@ describe("design output contract", () => {
         expect(result.ok).toBe(true);
         if (!result.ok) continue;
         expect(result.utf8Bytes).toBe(utf8ByteLength(result.text));
-        expect(result.utf8Bytes).toBeLessThanOrEqual(
-          withinTarget ? DESIGN_KICKOFF_TARGET_BYTES : DESIGN_KICKOFF_MAX_BYTES,
-        );
+        expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
         expect(result.text).toContain(NONCE);
         expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
         expect(result.text).toContain("## 字段合同");
@@ -641,20 +684,37 @@ describe("design output contract", () => {
         expect(repaired.ok).toBe(true);
         if (!repaired.ok) continue;
         expect(repaired.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
-        report[`${label}:${on ? "on" : "off"}`] = {
-          kickoff: result.utf8Bytes,
-          compression: result.compression,
-          omissions: result.omissions,
-          correction: repaired.utf8Bytes,
-        };
       }
     }
-    // Measured 2026-10-28 on the slim catalog (13 Roles, 7 Profiles, outputContractVersion 2):
-    //   catalog      off 24737 / on 25129 bytes, compression full, no omissions
-    //   economy-all  off 25244 / on 25636 bytes, compression full, no omissions
-    //   stress (21 Roles + 6000-char notes) off 31000 / on 31392, compression recipe-notes-off
-    // The stress case is intentionally above the 30KiB target but below the 60KiB hard cap.
-    expect(report["catalog:on"]).toBeDefined();
+  });
+
+  test("a v2 kickoff that cannot reach 30KiB fails instead of being sent", () => {
+    const roles = Array.from({ length: 40 }, (_, index) =>
+      role(index, { mission: "任".repeat(2000), responsibilities: ["责".repeat(300)] }),
+    );
+    const base = context({
+      outputContractVersion: 2,
+      existingRolesOnly: false,
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+    });
+    const result = buildDesignKickoff({ jobId: JOB_ID, attempt: 1, nonce: NONCE, context: base });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.issues[0]).toMatchObject({
+      code: "DESIGN_INPUT_TOO_LARGE",
+      params: { limit: DESIGN_KICKOFF_TARGET_BYTES },
+    });
+    // The same input under the legacy contract keeps its historical 60KiB escape.
+    const legacy = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: { ...base, outputContractVersion: 1 },
+    });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+    expect(legacy.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_MAX_BYTES);
   });
 });
 

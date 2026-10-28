@@ -229,12 +229,11 @@ const CONTRACT_GAP = {
     "reason 1–600",
     "use",
     "profiles",
-    "roleId（unlaunchable-role）或 suggestedRole（missing-role）",
+    "roleId 或 suggestedRole",
   ],
   kind: ["missing-role", "unlaunchable-role"],
   use: ["coordinator", "member"],
-  profiles:
-    "existing：{ profileIds: 1–3 }，每个 id 必须是该用途 route 内的合格 Profile；none：{ reason: 1–600 }",
+  profiles: "existing：profileIds 1–3，须为该用途 route 内合格 id；none：reason 1–600",
   suggestedRole: {
     id: "≤48 slug",
     name: "1–40，前缀按目录",
@@ -445,7 +444,7 @@ function outputTemplate(
   if (kind === "gap") {
     parts.push(`\`\`\`agent-team-design\n${JSON.stringify(gapSample(input))}\n\`\`\``);
     if (previous !== "role-gap") {
-      parts.push("复用-only 团队示例（newRoles 必须为空）：");
+      parts.push("复用-only 团队示例（newRoles=[]）：");
       parts.push(
         `\`\`\`agent-team-design\n${JSON.stringify(teamSample(input, rules, false))}\n\`\`\``,
       );
@@ -678,6 +677,18 @@ function routingPayload(routing: DesignModeRouting): Record<string, unknown> {
   };
 }
 
+/** What the model may claim for one use: usable now, provably blocked, or unproven. */
+type PromptLaunchState = "ok" | "blocked" | "unknown";
+
+function launchState(
+  launchable: boolean | undefined,
+  verified: boolean | undefined,
+): PromptLaunchState {
+  if (launchable === true) return "ok";
+  if (launchable === false && verified === true) return "blocked";
+  return "unknown";
+}
+
 function roleIndexEntry(
   role: DesignPromptRoleSummary,
   rules: PromptRules,
@@ -693,9 +704,11 @@ function roleIndexEntry(
     unavailableProfileIds: stringIds(role.unavailableProfileIds),
     ...(rules.version === 2
       ? {
-          coordinatorLaunchable: role.coordinatorLaunchable ?? null,
-          launchVerified: role.launchVerified ?? null,
-          coordinatorLaunchVerified: role.coordinatorLaunchVerified ?? null,
+          memberLaunch: launchState(role.launchable, role.launchVerified),
+          coordinatorLaunch: launchState(
+            role.coordinatorLaunchable,
+            role.coordinatorLaunchVerified,
+          ),
         }
       : {}),
   };
@@ -705,10 +718,12 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   if (rules.version === 1) {
     return "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
   }
+  const launchRule =
+    "memberLaunch/coordinatorLaunch 是该用途的判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=无法核实（不得报 unlaunchable-role，改报 missing-role 或 profiles.none）。两种用途不可互推。";
   if (routing !== undefined) {
-    return "Role 索引的 launchable/verified 是该 Role 作为成员的 route 判定；unavailableProfileIds 是这条 route 内不合格的候选 Profile（不是 Role 绑定），补救是调整「经济：全席位」路由。coordinatorLaunchable/coordinatorLaunchVerified 是协调者 route 的判定，两种用途不可互推；verified=false 表示无法核实，不得据此报 unlaunchable-role。";
+    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选 Profile（不是 Role 绑定），补救是调整「经济：全席位」路由。${launchRule}`;
   }
-  return "Role 索引的 launchable/verified 表示成员用途；coordinatorLaunchable/coordinatorLaunchVerified 表示协调者用途，两种用途不可互推；verified=false 表示无法核实，不得据此报 unlaunchable-role。优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 是不可用绑定，最多 5 个。";
+  return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
 }
 
 function recipeInstruction(rules: PromptRules): string {
@@ -856,12 +871,14 @@ function withinBudget(input: DesignPromptInput, limit: number): BudgetFit {
 }
 
 /**
- * Compresses toward 30KiB. When that target is unreachable, keeps the fully
- * compressed result if it is still within the 60KiB hard cap.
+ * Compresses toward 30KiB. The v2 contract may never exceed it (AC-0c.15): once every
+ * compression step is spent, an oversized prompt fails with INPUT_TOO_LARGE instead of being
+ * sent. The legacy 60KiB escape remains for v1 records only, whose contract predates the budget.
  */
 export function buildDesignKickoff(input: DesignPromptInput): PromptBuildResult {
+  const rules = promptRules(input.context);
   const fitted = withinBudget(input, DESIGN_KICKOFF_TARGET_BYTES);
-  if (fitted.ok || fitted.bytes <= DESIGN_KICKOFF_MAX_BYTES) {
+  if (fitted.ok) {
     return {
       ok: true,
       text: fitted.text,
@@ -870,7 +887,24 @@ export function buildDesignKickoff(input: DesignPromptInput): PromptBuildResult 
       compression: fitted.compression,
     };
   }
-  return { ok: false, issues: [inputTooLarge(fitted.bytes, DESIGN_KICKOFF_MAX_BYTES)] };
+  if (rules.version === 1 && fitted.bytes <= DESIGN_KICKOFF_MAX_BYTES) {
+    return {
+      ok: true,
+      text: fitted.text,
+      utf8Bytes: fitted.bytes,
+      omissions: fitted.omissions,
+      compression: fitted.compression,
+    };
+  }
+  return {
+    ok: false,
+    issues: [
+      inputTooLarge(
+        fitted.bytes,
+        rules.version === 1 ? DESIGN_KICKOFF_MAX_BYTES : DESIGN_KICKOFF_TARGET_BYTES,
+      ),
+    ],
+  };
 }
 
 function issuePayload(issue: DesignIssue): Record<string, unknown> {
@@ -905,7 +939,7 @@ export function buildDesignCorrection(input: {
     "## 修正",
     identityRequirement(input),
     "上一轮输出未通过校验。按下列聚合错误重写完整方案，只输出一个 agent-team-design fenced JSON 块，身份字段原样。不要复述上一轮全文，也不要重新列举 Role/Profile 上下文。",
-    ...(input.previousOutputKind === "role-gap"
+    ...(rules.version === 2 && rules.rolesOnly && input.previousOutputKind === "role-gap"
       ? [
           "上一轮是角色缺口（role-gap）：只重写 role-gap，或改为复用-only 的 team（newRoles 为空）；不要新增 Role。",
         ]
