@@ -589,6 +589,123 @@ describe("contract-1 projections against fully frozen 75ec305 DTOs", () => {
     await service.dispose();
   });
 
+  test("the fully frozen Result rejects the baseline Team, Role, and Slug constraints", () => {
+    const projected = projectResultForContract(designResult());
+    expect(projected).not.toBeNull();
+    if (!projected) return;
+    const mutate = (change: (copy: DesignResultMut) => void) => {
+      const copy = structuredClone(projected) as unknown as DesignResultMut;
+      change(copy);
+      return baselineResult.safeParse(copy).success;
+    };
+    for (const id of ["1team", "a", "a".repeat(49)]) {
+      expect(
+        mutate((copy) => (copy.team.id = id)),
+        id,
+      ).toBe(false);
+    }
+    expect(
+      mutate((copy) => {
+        copy.team.members[0].roleId = copy.team.coordinatorRoleId;
+      }),
+    ).toBe(false);
+    expect(
+      mutate((copy) => {
+        copy.team.members[0].roleId = copy.team.members[1].roleId;
+        delete copy.team.members[0].instanceLabel;
+        delete copy.team.members[1].instanceLabel;
+      }),
+    ).toBe(false);
+    expect(mutate((copy) => (copy.newRoles[0].mcpServers = 42))).toBe(false);
+    expect(
+      mutate((copy) => {
+        copy.newRoles[0].mcpServers = { server: { command: "echo\nbad" } };
+      }),
+    ).toBe(false);
+  });
+
+  test("the frozen Job, Failure, and Status reject a bad savedTeamId Slug", () => {
+    const job = projectJobForContract(designJob({ mode: "sota" }), 1);
+    for (const id of ["1team", "a", "a".repeat(49)]) {
+      const bad = { ...job, savedTeamId: id };
+      expect(baselineJob.safeParse(bad).success, id).toBe(false);
+      expect(
+        baselineFailure.safeParse({ ok: false, issues: [], issuesTruncated: 0, job: bad }).success,
+        id,
+      ).toBe(false);
+      expect(
+        baselineStatusSuccess.safeParse({
+          ok: true,
+          scopeId: DESIGN_JOB_ID,
+          jobs: [bad],
+          truncated: false,
+          discoveryIssues: [],
+        }).success,
+        id,
+      ).toBe(false);
+    }
+  });
+
+  test("the projected result still parses through a real service result call", async () => {
+    const request = "给后台做一次改版";
+    const result = designResult({ request });
+    const job = designJob({
+      mode: "sota",
+      state: "ready",
+      resultId: result.resultId,
+    });
+    const record: StoredDesignJob = {
+      schemaVersion: 2,
+      job,
+      request,
+      requestHash: DESIGN_HASH,
+      requestHashVersion: 2,
+      outputContractVersion: 2,
+      existingRolesOnly: false,
+      roleGap: null,
+      mode: "sota",
+      selectionIntent: null,
+      creation: null,
+      attempts: [],
+      proposal: null,
+      result,
+      reuseFingerprints: {},
+      leaseOwner: null,
+      receipts: {},
+      outcomeUnknown: false,
+    };
+    const store: DesignJobStore = {
+      initialize: async () => {},
+      dispose: async () => {},
+      list: async () => [record],
+      problems: async () => [],
+      get: async (jobId) => (jobId === job.jobId ? record : null),
+      findRequest: async () => null,
+      create: async () => {},
+      update: async () => {},
+    };
+    const service = createDesignService({
+      store,
+      readers: {} as never,
+      getAdapter: () => null,
+      planner: {} as never,
+      clock: { now: () => job.createdAt },
+      ids: { next: () => DESIGN_JOB_ID },
+      hasher: () => DESIGN_HASH,
+      capabilities: { onDemand: false, expansion: false, collaboration: false },
+    });
+    const status = await service.status({ contractVersion: 1 });
+    expect(status.ok && baselineStatusSuccess.safeParse(status).success).toBe(true);
+    const reply = await service.result({ jobId: job.jobId, contractVersion: 1 });
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(baselineJob.safeParse(reply.job).success).toBe(true);
+      expect(reply.result).not.toBeNull();
+      expect(baselineResult.safeParse(reply.result).success).toBe(true);
+    }
+    await service.dispose();
+  });
+
   test("the fully frozen Result rejects five shapes a widened copy accepted", () => {
     const projected = projectResultForContract(designResult());
     expect(projected).not.toBeNull();
@@ -618,6 +735,12 @@ describe("contract-1 projections against fully frozen 75ec305 DTOs", () => {
 
 type DesignResultMut = {
   request: string;
+  team: {
+    id: string;
+    coordinatorRoleId: string;
+    members: { roleId: string; instanceLabel?: string }[];
+  };
+  newRoles: { mcpServers?: unknown }[];
   preview: {
     requestedMode?: string;
     coordinator: { route?: string };
