@@ -1,7 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  applyGapRetry,
   designerPrefillFromEvent,
   designLaunchSeed,
+  designPrefillForHost,
+  designPrefillSlot,
   designSaveAttemptKey,
   designStartFailureMessage,
   economyFocusForConfigure,
@@ -75,6 +78,31 @@ describe("screen prefill", () => {
         createdAt: 1,
       }),
     ).toMatchObject({ workspaceId: "ws-1", mode: "economy" });
+  });
+});
+
+describe("gap retry slot", () => {
+  const prefill = {
+    nonce: "n-1",
+    text: "原需求",
+    workspaceId: "ws-target",
+    mode: "sota" as const,
+    existingRolesOnly: false,
+    confirmReplace: true,
+  };
+
+  test("shows the Teams tab and hands the card exactly the planned prefill", () => {
+    expect(applyGapRetry("host-a", prefill)).toEqual({
+      tab: "teams",
+      designPrefill: { hostId: "host-a", value: prefill },
+    });
+  });
+
+  test("a prefill made for another host is never delivered", () => {
+    const slot = designPrefillSlot("host-a", prefill);
+    expect(designPrefillForHost(slot, "host-a")).toBe(prefill);
+    expect(designPrefillForHost(slot, "host-b")).toBeUndefined();
+    expect(designPrefillForHost(null, "host-a")).toBeUndefined();
   });
 });
 
