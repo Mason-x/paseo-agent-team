@@ -1855,6 +1855,16 @@ export function validateRoleGap(
             roleId: gap.roleId,
           }),
         );
+      } else if (!role.enabled) {
+        // A disabled Role is not a launchability gap: the remedy is enabling/reusing another
+        // Role, not repairing its bindings. Keep the schema error so the model corrects it.
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "role-disabled",
+            roleId: gap.roleId,
+          }),
+        );
       } else if (!verdict?.verified) {
         // No verdict, or an availability query that failed: this proves nothing about the Role.
         // Reporting it as a gap would turn a config failure into a responsibility claim.

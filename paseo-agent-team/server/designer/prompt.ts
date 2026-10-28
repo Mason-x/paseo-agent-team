@@ -599,7 +599,11 @@ function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<s
     return {
       id: recipe.id,
       name: recipe.name,
-      members: recipe.members.map((member) => member.roleId),
+      members: recipe.members.map((member) => ({
+        roleId: member.roleId,
+        minInstances: member.minInstances,
+        maxInstances: member.maxInstances,
+      })),
     };
   }
   const notes = recipeNote(recipe);
@@ -796,6 +800,15 @@ const REQUEST_STOP_TERMS: Record<string, true> = {
   输出: true,
   建议: true,
   新增: true,
+  role: true,
+  roles: true,
+  dev: true,
+  team: true,
+  teams: true,
+  ai: true,
+  profile: true,
+  agent: true,
+  mode: true,
 };
 
 /** Recipe roles plus Roles whose name/mission/responsibilities share a request term. */
@@ -813,7 +826,9 @@ function relevantRoleIds(
   );
   const terms = new Set<string>();
   const request = context.request.toLowerCase();
-  for (const word of request.match(/[a-z0-9]{2,}/gu) ?? []) terms.add(word);
+  for (const word of request.match(/[a-z0-9]{2,}/gu) ?? []) {
+    if (!REQUEST_STOP_TERMS[word]) terms.add(word);
+  }
   let domainText = request;
   for (const stop of Object.keys(REQUEST_STOP_TERMS)) {
     domainText = domainText.split(stop).join(" ");
@@ -863,13 +878,7 @@ function roleDirectoryEntry(
   relevant: ReadonlySet<string>,
 ): Record<string, unknown> {
   if (rules.version === 2 && !role.enabled) {
-    return {
-      id: role.id,
-      name: role.name,
-      enabled: false,
-      memberLaunch: "blocked",
-      coordinatorLaunch: "blocked",
-    };
+    return { id: role.id, name: role.name, enabled: false };
   }
   if (rules.version === 2 && !roleSelectable(role, rules)) {
     return {
@@ -910,7 +919,7 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   const launchRule =
     "memberLaunch/coordinatorLaunch 是该用途判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=可用性未核实（照常使用该 Role 并在 reuse.reason 注明；不得声称 Role 缺失或不可启动，只有确实无 Role 承担时才报 missing-role，profiles.none 只表示不提供 Profile）。用途不可互推。";
   const directoryLegend =
-    "条目形态：完整条目含 mission/responsibilities/taskKind；只有 id/name/tier 且无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
+    "条目形态：完整条目含 mission/responsibilities/taskKind；无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用，停用 Role 不可选，也不属于 unlaunchable-role（缺职责时报 missing-role）；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
   if (routing !== undefined) {
     return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${directoryLegend}${launchRule}`;
   }

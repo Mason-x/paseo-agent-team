@@ -306,6 +306,19 @@ describe("unlaunchable-role uses the verified per-use verdict", () => {
     });
   });
 
+  test("a disabled Role is rejected instead of becoming an unlaunchable gap", () => {
+    const result = validateRoleGap(
+      gapProposal([unlaunchableGap("member")]),
+      context({
+        roles: [{ ...architect, enabled: false }, techLead, developer],
+        roleLaunch: tables({ member: { architect: verifiedUnavailable } }),
+      }),
+      ACCEPT,
+    );
+    expect(codes(result)).toEqual(["DESIGN_OUTPUT_SCHEMA"]);
+    if (!result.ok) expect(result.issues[0]?.params.reason).toBe("role-disabled");
+  });
+
   test("member and coordinator verdicts are judged separately", () => {
     const launchContext = context({
       roleLaunch: tables({

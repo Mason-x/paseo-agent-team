@@ -859,6 +859,47 @@ describe("design output contract", () => {
     }
   });
 
+  test("the DEV catalog with five disabled Roles still fits at full detail", () => {
+    const { roles, teams } = devCatalog();
+    const disabled = new Set([
+      "eng-frontend",
+      "eng-batch",
+      "content-technical",
+      "research-web",
+      "qa-acceptance",
+    ]);
+    const mutated = roles.map((entry) =>
+      disabled.has(entry.id) ? { ...entry, enabled: false } : entry,
+    );
+    const result = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: context({
+        outputContractVersion: 2,
+        existingRolesOnly: false,
+        requestedMode: "economy-all",
+        modeRouting: ROUTING,
+        roles: mutated,
+        occupiedTeams: teams,
+        occupiedRoleIds: mutated.map((entry) => entry.id),
+        occupiedRoleNames: mutated.map((entry) => entry.name),
+        profiles: [profile(1, "DEV Haiku"), profile(2, "DEV Luna"), profile(3)],
+      }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.compression).toBe("full");
+    expect(result.utf8Bytes, `bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+      DESIGN_KICKOFF_TARGET_BYTES,
+    );
+    const index = roleEntries(result.text);
+    for (const id of disabled) {
+      const entry = index.find((item) => item.id === id);
+      expect(entry).toEqual({ id, name: entry?.name, enabled: false });
+    }
+  });
+
   test("v2 entries keep taskKind and expose disabled/blocked states", () => {
     const roles = [
       role(0, { id: "ops-role", taskKind: "ops" }),
@@ -876,12 +917,9 @@ describe("design output contract", () => {
     const index = roleEntries(text);
     expect(index[0]).toMatchObject({ taskKind: "ops" });
     expect(index[0]).toHaveProperty("mission");
-    expect(index[1]).toMatchObject({
-      id: "off-role",
-      enabled: false,
-      memberLaunch: "blocked",
-      coordinatorLaunch: "blocked",
-    });
+    expect(index[1]).toMatchObject({ id: "off-role", enabled: false });
+    expect(index[1]).not.toHaveProperty("memberLaunch");
+    expect(index[1]).not.toHaveProperty("coordinatorLaunch");
     expect(index[1]).not.toHaveProperty("mission");
     expect(index[2]).toMatchObject({
       id: "blocked-role",
@@ -987,6 +1025,88 @@ describe("design output contract", () => {
       );
     }
     expect(selected.size).toBeGreaterThan(1);
+  });
+
+  test("ASCII template words do not steal summary slots from qa-security", () => {
+    const { roles, teams } = devCatalog();
+    const result = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: context({
+        outputContractVersion: 2,
+        existingRolesOnly: false,
+        request: "新增一个 Role 负责安全审计",
+        roles,
+        occupiedTeams: teams,
+        profiles: [profile(1), profile(2), profile(3)],
+      }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const index = roleEntries(result.text);
+    expect(index.find((entry) => entry.id === "qa-security")).toHaveProperty("mission");
+    for (const id of ["t02-coord", "v01b-unbound", "v01b-provider-down"]) {
+      expect(
+        index.find((entry) => entry.id === id),
+        id,
+      ).not.toHaveProperty("mission");
+    }
+  });
+
+  test("the index-only 6 and minimal tiers are reachable and used", () => {
+    const base = Array.from({ length: 15 }, (_, index) =>
+      role(index, {
+        id: `custom-${index}`,
+        name: `自定义领域 Role ${index}`,
+        mission: `负责第 ${index} 类领域工作，覆盖安全、迁移、前端、测试与文档。`,
+        responsibilities: ["输出领域方案", "完成实现与验证"],
+      }),
+    );
+    const seen = new Set<string>();
+    for (const fillers of [100, 110, 120, 130, 140, 150, 160]) {
+      const roles = [
+        ...base,
+        ...Array.from({ length: fillers }, (_, index) =>
+          role(1000 + index, {
+            id: `filler-${index}`,
+            name: `填充 Role ${index}`,
+            mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。".repeat(8),
+            responsibilities: Array.from({ length: 6 }, () =>
+              "实现功能开发内容，完成团队任务并输出相关材料。".repeat(3),
+            ),
+          }),
+        ),
+      ];
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request: "设计一个功能开发团队，需要安全审计与迁移",
+          roles,
+          occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+            id: `team-${index}`,
+            name: `Team ${index}`,
+          })),
+          profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        }),
+      });
+      if (!result.ok) continue;
+      expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+      if (
+        result.compression === "recipes-compact" ||
+        result.compression === "index-only-6" ||
+        result.compression === "index-only-minimal"
+      ) {
+        expect(result.text).toContain('"minInstances":2,"maxInstances":3');
+      }
+      seen.add(result.compression);
+    }
+    expect(seen).toContain("index-only-6");
+    expect(seen).toContain("index-only-minimal");
   });
 
   test("the 45-Role synthetic directory stays under budget for four requests", () => {

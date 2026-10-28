@@ -364,6 +364,20 @@ describe("result seats", () => {
     expect(view.coordinator).not.toBeNull();
   });
 
+  test("a new Role's noveltyReason reaches the result view", () => {
+    const reason = "现有 Role 没有覆盖这次改版的专职实现。";
+    const base = designResult();
+    const view = resolveDesignResultView(
+      designResult({
+        newRoles: base.newRoles.map((role, index) =>
+          index === 0 ? { ...role, noveltyReason: reason } : role,
+        ),
+      }),
+      null,
+    );
+    expect(view.newRoles[0]?.noveltyReason).toBe(reason);
+  });
+
   test("an invalid preview fails closed instead of inventing seats", () => {
     const view = resolveDesignResultView(designResult({ preview: undefined as never }), null);
     expect(view.seats).toEqual([]);
