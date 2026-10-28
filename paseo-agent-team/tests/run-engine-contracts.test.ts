@@ -904,6 +904,25 @@ describe("R01d escalation chain", () => {
     }
   });
 
+  test("A start can escalate only to S; S start cannot escalate at all", () => {
+    const aStart = taskRecord({
+      spec: taskSpec({ tier: "A" }),
+      escalations: [sTier],
+    });
+    expect(RunTaskRecordSchema.safeParse(aStart).success).toBe(true);
+
+    const sStart = taskRecord({
+      spec: taskSpec({ tier: "S" }),
+      escalations: [{ ...a, fromTier: "S", toTier: "S" }],
+    });
+    const rejected = RunTaskRecordSchema.safeParse(sStart);
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(rejected.error.issues).toHaveLength(1);
+      expect(rejected.error.issues[0]?.path).toEqual(["escalations", 0, "toTier"]);
+    }
+  });
+
   test("wrong fromTier, skipped toTier, missing field and bad attempt are single defects", () => {
     const cases: Array<{ value: unknown; path: (string | number)[] }> = [
       {
