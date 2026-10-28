@@ -399,8 +399,9 @@ export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
 
 /**
  * `hot`/`tool` are repo-level named resources persisted as claims. They conflict only by exact
- * name equality: no directory coverage and no path normalization/filesystem validation. R03b
- * implements that behavior; the schema only carries the value.
+ * (case-sensitive) name equality: no directory coverage and no path normalization/filesystem
+ * validation. For these kinds `path` carries the name (non-empty, <=512) and `access` must be
+ * write. R03b implements the conflict behavior; the schema only carries the value.
  */
 export const RunResourceClaimSchema = z
   .object({
@@ -413,7 +414,16 @@ export const RunResourceClaimSchema = z
     frozen: z.boolean(),
     createdAt: RunTimeSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((claim, ctx) => {
+    if ((claim.kind === "hot" || claim.kind === "tool") && claim.access !== "write") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access"],
+        message: "hot/tool claims must be write claims",
+      });
+    }
+  });
 
 export const RunBudgetEntrySchema = z
   .object({
@@ -596,7 +606,23 @@ export const RunTaskRecordSchema = z
     /** Explicit decision that released a frozen/blocked task (05 §4 B1); never implicit. */
     releaseDecisionId: z.string().uuid().nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((task, ctx) => {
+    if (task.phase === "frozen" && task.state !== "blocked") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "frozen is only valid while the task is blocked",
+      });
+    }
+    if (task.phase === "awaiting-rework" && task.state !== "review") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "awaiting-rework is only valid on a review task",
+      });
+    }
+  });
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;
 
 /**
