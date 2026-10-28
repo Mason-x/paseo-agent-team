@@ -7,6 +7,7 @@ import { teamPlanRpc } from "../../shared/rpc/team-plan";
 import type { Team } from "../../shared/schemas/team";
 import {
   buildTeamSummaries,
+  createClientLifecycle,
   createTeamPlanClient,
   scopeSignature,
   type TeamPlanBatchView,
@@ -60,14 +61,19 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
 
   useEffect(() => client.subscribe(() => setView(client.getBatchView())), [client]);
 
+  const [appActive, setAppActive] = useState(() => AppState.currentState === "active");
   useEffect(() => {
-    client.setActive(options.active);
-    if (!options.active) return;
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") client.refreshIfStale();
-    });
+    const subscription = AppState.addEventListener("change", (state) =>
+      setAppActive(state === "active"),
+    );
     return () => subscription.remove();
-  }, [client, options.active]);
+  }, []);
+  const effectiveActive = options.active && appActive;
+
+  useEffect(() => {
+    client.setActive(effectiveActive);
+    if (effectiveActive) client.refreshIfStale();
+  }, [client, effectiveActive]);
 
   const lifecycleKey = useMemo(
     () =>
@@ -80,7 +86,7 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
   );
   const lastLifecycle = useRef("");
   useEffect(() => {
-    if (!options.active) {
+    if (!effectiveActive) {
       lastLifecycle.current = "";
       return;
     }
@@ -95,7 +101,7 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
     else client.planTeams(options.teams);
   }, [
     client,
-    options.active,
+    effectiveActive,
     lifecycleKey,
     options.hostId,
     options.profiles,
@@ -103,11 +109,11 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
     options.teams,
   ]);
 
+  const lifecycle = useMemo(() => createClientLifecycle(client), [client]);
   useEffect(() => {
-    // Deferred so a StrictMode remount does not kill the shared client.
-    const timer = setTimeout(() => client.destroy(), 0);
-    return () => clearTimeout(timer);
-  }, [client]);
+    lifecycle.attach();
+    return lifecycle.detach;
+  }, [lifecycle]);
 
   const summaries = useMemo(
     () =>

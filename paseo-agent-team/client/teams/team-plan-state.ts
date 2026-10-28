@@ -466,7 +466,6 @@ export function buildTeamModelRows(input: {
 }): TeamModelRowView[] {
   return input.result.rows.map((row, index) => {
     const profile = row.profile;
-    const unresolved = profile === null ? unresolvedReasonOf(row) : null;
     const unbound =
       profile === null &&
       row.issues.some(
@@ -582,19 +581,55 @@ function savedInput(teams: readonly Team[]): TeamPlanInput {
 export function isMethodNotFound(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
-  // A missing method is only proven when the error names the method/RPC AND says it is absent.
-  // "host not registered" is a transport failure, not an older daemon.
-  const mentionsMethod =
-    lower.includes("team.plan") || lower.includes("method") || lower.includes("rpc");
-  const absent =
-    lower.includes("not found") ||
-    lower.includes("not exist") ||
-    lower.includes("unknown") ||
-    lower.includes("no such") ||
-    lower.includes("not registered") ||
-    lower.includes("not_found") ||
-    lower.includes("not-found");
-  return mentionsMethod && absent;
+  // A method-shaped phrase is required. A generic "RPC transport: unknown host" is a retryable
+  // transport failure even though it mentions "rpc" and "unknown".
+  if (
+    /method[ _-]?not[ _-]?found|unknown method|no such method|method_not_found|method-not-found|procedure not found/u.test(
+      lower,
+    )
+  ) {
+    return true;
+  }
+  // Some hosts only include the method name plus a missing/absent phrase; still require both.
+  return (
+    lower.includes("team.plan") && /not found|not registered|not exist|unknown|no such/u.test(lower)
+  );
+}
+
+/**
+ * Mount/unmount lifecycle for a shared client. A StrictMode remount (detach immediately followed
+ * by attach) cancels the pending destroy; only a real unmount reaches destroy. Detach stops the
+ * refresh loop immediately, so a fast unmount never leaves a timer polling.
+ */
+export function createClientLifecycle(
+  client: TeamPlanClient,
+  options: {
+    schedule?: (run: () => void, ms: number) => unknown;
+    cancel?: (handle: unknown) => void;
+  } = {},
+): { attach: () => void; detach: () => void } {
+  const schedule = options.schedule ?? ((run, ms) => setTimeout(run, ms));
+  const cancel =
+    options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  let destroyTimer: { handle: unknown } | null = null;
+  return {
+    attach() {
+      if (destroyTimer !== null) {
+        cancel(destroyTimer.handle);
+        destroyTimer = null;
+      }
+    },
+    detach() {
+      client.setActive(false);
+      if (destroyTimer !== null) cancel(destroyTimer.handle);
+      destroyTimer = {
+        handle: schedule(() => {
+          destroyTimer = null;
+          client.destroy();
+        }, 0),
+      };
+    },
+  };
 }
 
 export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
@@ -640,6 +675,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
   let probedScope = "";
   let lastSavedTeams: readonly Team[] = [];
   let lastRefreshAt: number | null = null;
+  let probeInFlight = false;
   let active = false;
   let refreshTimer: { handle: unknown } | null = null;
   const draftTimers = new Map<string, { handle: unknown }>();
@@ -662,6 +698,17 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       results.clear();
       failedKeys.clear();
       batchError = null;
+      // New-mode planning is hidden; never leave a draft error or an in-flight draft behind.
+      for (const sessionId of new Set([
+        ...lastDraftRequests.keys(),
+        ...draftTimers.keys(),
+        ...draftScheduled.keys(),
+      ])) {
+        clearDraftTimer(sessionId);
+        lastDraftRequests.delete(sessionId);
+        draftSeq.set(sessionId, (draftSeq.get(sessionId) ?? 0) + 1);
+        draftStates.set(sessionId, { status: "idle" });
+      }
     }
   }
 
@@ -737,6 +784,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
   }
 
   function pump(): void {
+    if (destroyed) return;
     while (running < maxConcurrent && pendingChunks.length > 0) {
       const chunk = pendingChunks.shift();
       if (!chunk) break;
@@ -769,6 +817,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
         )
         .finally(() => {
           running -= 1;
+          if (destroyed) return;
           if (chunk.request === batchRequest) completeChunk();
           pump();
         });
@@ -899,13 +948,10 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
               if (destroyed || epoch !== requestEpoch) return;
               if (draftSeq.get(request.sessionId) !== nextSeq) return;
               if (isMethodNotFound(error)) {
+                // The capability was discovered mid-flight: hide the new UI instead of showing a
+                // planning error for a method this daemon does not have.
                 setMode("legacy");
-                draftStates.set(request.sessionId, {
-                  status: "error",
-                  key: requestKey,
-                  reason: "legacy",
-                  message: teamPlanZh.legacyUnavailable,
-                });
+                draftStates.set(request.sessionId, { status: "idle" });
               } else {
                 draftStates.set(request.sessionId, {
                   status: "error",
@@ -1065,11 +1111,6 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
           resetDraftSession(sessionId);
         }
         rescheduleDrafts();
-        if (active) {
-          // A revision/Profile change refreshes the visible list without waiting for a re-render.
-          if (lastSavedTeams.length === 0) sendProbe();
-          else sendSaved(lastSavedTeams);
-        }
       }
       notify();
     },
@@ -1140,6 +1181,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     },
 
     refreshIfStale() {
+      if (pending || inFlightKey !== null || probeInFlight) return;
       if (lastRefreshAt === null || now() - lastRefreshAt >= refreshMs) {
         reload(false);
         scheduleRefresh();
@@ -1161,6 +1203,14 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       active = false;
       clearRefresh();
       epoch += 1;
+      batchRequest += 1;
+      pendingChunks = [];
+      pending = false;
+      pendingTotal = 0;
+      pendingDone = 0;
+      cacheKey = null;
+      inFlightKey = null;
+      probeInFlight = false;
       for (const timer of timers) cancel(timer.handle);
       timers.clear();
       draftTimers.clear();
