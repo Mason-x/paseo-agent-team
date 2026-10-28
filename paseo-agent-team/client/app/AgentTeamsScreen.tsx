@@ -40,7 +40,9 @@ import {
   type DesignerPrefill,
   designerPrefillFromEvent,
   economyFocusForConfigure,
+  planSettledForHost,
   roleEditorTargetForGap,
+  teamPlanActive,
 } from "../designer/design-screen-state";
 import { subscribeDesignPrefills } from "../designer/events";
 import { createDesignClientRequestId, DESIGN_JOB_MAX_ATTEMPTS } from "../designer/submission-state";
@@ -155,17 +157,25 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     () => (preferenceValues ? familyHintsFromEconomy(preferenceValues.economy, profileList) : []),
     [preferenceValues, profileList],
   );
+  const settingsReady =
+    roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const plans = useTeamPlans({
     hostId: host.id,
     profiles: profileList,
     revisions: planningRevisions,
     teams: teams.status === "ready" ? teams.values.teams : [],
-    active: tab === "teams" || launch !== null,
+    active: teamPlanActive({
+      teamsTab: tab === "teams",
+      launchOpen: launch !== null,
+      settingsReady,
+      profilesLoading: hostProfiles.status === "loading",
+    }),
     familyHints,
   });
   // Success and failure both settle the probe; before that neither design polling nor a launch
-  // preview may go out with a guessed contract (W-I2-1).
-  const plansSettled = plans.loaded || plans.error !== null;
+  // preview may go out with a guessed contract (W-I2-1). The host identity makes the settled
+  // flag fail closed for the first render after switching hosts.
+  const plansSettled = planSettledForHost(plans, host.id);
   const designJobs = useDesignJobs({
     hostId: host.id,
     active: tab === "teams" && plansSettled,

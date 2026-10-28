@@ -125,3 +125,30 @@ export function shouldWarnOnlyWorkspace(
 ): boolean {
   return selectedId !== "" && workspaceIds.length === 1 && workspaceIds[0] === selectedId;
 }
+
+/**
+ * A probe result is authoritative only for the host that produced it. The first render after a
+ * host prop change still holds the previous host's view, so identity must be compared explicitly.
+ */
+export function planSettledForHost(
+  view: { scopeHostId?: string | null; loaded: boolean; error: string | null },
+  hostId: string,
+): boolean {
+  return view.scopeHostId === hostId && (view.loaded || view.error !== null);
+}
+
+/**
+ * The Team screen owns one probe/batch. Until all three settings are readable, an empty Teams
+ * array means "not loaded", not "empty catalog": probing then would burn the first-screen RPC
+ * budget before the real batch. The launch entry may probe as soon as settings are ready.
+ */
+export function teamPlanActive(input: {
+  teamsTab: boolean;
+  launchOpen: boolean;
+  settingsReady: boolean;
+  profilesLoading: boolean;
+}): boolean {
+  if (!input.settingsReady) return false;
+  if (input.launchOpen) return true;
+  return input.teamsTab && !input.profilesLoading;
+}

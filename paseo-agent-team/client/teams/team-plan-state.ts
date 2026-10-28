@@ -82,6 +82,8 @@ export type TeamPlanDraftState =
   | { status: "error"; key: string; reason: "legacy" | "failed" | "invalid"; message: string };
 
 export type TeamPlanBatchView = {
+  /** The host whose scope produced this view; consumers must compare before trusting the contract. */
+  scopeHostId?: string | null;
   results: ReadonlyMap<string, TeamPlanResult>;
   hasContext: boolean;
   context: TeamPlanContext | null;
@@ -652,6 +654,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
     options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
   let scope: TeamPlanScope | null = null;
+  let scopeHostId: string | null = null;
   let scopeKey = "";
   let epoch = 0;
   let modeContract: ModeContractSupport = "unknown";
@@ -1100,6 +1103,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
       if (nextKey === scopeKey) return;
       const hostChanged = scope !== null && scope.hostId !== next.hostId;
       scope = next;
+      scopeHostId = next.hostId;
       scopeKey = nextKey;
       epoch += 1;
       results.clear();
@@ -1152,6 +1156,7 @@ export function createTeamPlanClient(options: ClientOptions): TeamPlanClient {
 
     getBatchView() {
       return {
+        scopeHostId,
         results: new Map(results),
         hasContext,
         context,

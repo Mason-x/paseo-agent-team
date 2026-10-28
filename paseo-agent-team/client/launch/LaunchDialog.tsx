@@ -143,7 +143,7 @@ export function LaunchDialog({
   onLaunched,
   onEditTeam,
   modeContract = "legacy",
-  probeSettled = true,
+  probeSettled = false,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;

@@ -90,6 +90,6 @@ export function launchStartRequest(
 export function launchStatusRequest(
   runId: string,
   modeContract: ModeContractSupport = "legacy",
-): { runId: string; contractVersion?: number } {
-  return modeContract === "v2" ? { runId, contractVersion: 2 } : { runId };
+): { runId: string; contractVersion?: 2 } {
+  return { runId, ...contractField(modeContract) };
 }

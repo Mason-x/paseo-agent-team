@@ -36,6 +36,7 @@ import { FollowUpDialog, type FollowUpTarget } from "./crew/FollowUpDialog";
 import { RunDetail } from "./crew/RunDetail";
 import { RunHeader } from "./crew/RunHeader";
 import { type CrewListItem, crewListItems, roleLine, runIdOf } from "./crew/run-rows";
+import { planSettledForHost, teamPlanActive } from "./designer/design-screen-state";
 import { type LaunchRequest, subscribeLaunchRequests } from "./launch/events";
 import { LaunchDialog } from "./launch/LaunchDialog";
 import { resolveLaunchPrefill } from "./launch/launch-args";
@@ -237,14 +238,21 @@ export function AgentCrew({
   );
   // The Crew panel is outside AgentTeamsScreen: it owns a probe-only client so a launch opened
   // from a command can carry the host's real mode contract instead of being refused as legacy.
+  const crewSettingsReady =
+    roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const crewPlans = useTeamPlans({
     hostId: host.id,
     profiles: [],
     revisions: crewRevisions,
     teams: [],
-    active: launch !== null,
+    active: teamPlanActive({
+      teamsTab: false,
+      launchOpen: launch !== null,
+      settingsReady: crewSettingsReady,
+      profilesLoading: false,
+    }),
   });
-  const crewProbeSettled = crewPlans.loaded || crewPlans.error !== null;
+  const crewProbeSettled = planSettledForHost(crewPlans, host.id);
   const [followUp, setFollowUp] = useState<FollowUpTarget | null>(null);
   const [highlightRunId, setHighlightRunId] = useState<string | null>(null);
 

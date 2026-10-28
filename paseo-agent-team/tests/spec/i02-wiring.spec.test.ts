@@ -8,7 +8,9 @@ import { describe, expect, test } from "vitest";
 import { designContractFields, designModeNeedsV2 } from "../../client/designer/design-gateway";
 import {
   economyFocusForConfigure,
+  planSettledForHost,
   roleEditorTargetForGap,
+  teamPlanActive,
 } from "../../client/designer/design-screen-state";
 import {
   launchPreviewRequest,
@@ -183,12 +185,67 @@ describe("acceptance additions: probe-settled gating and preview identity", () =
     expect(gate.reason).not.toBeNull();
   });
 
+  test("a settled v2 view from host A never authorizes host B", () => {
+    const hostA = { scopeHostId: "A", loaded: true, error: null };
+    expect(planSettledForHost(hostA, "A")).toBe(true);
+    expect(planSettledForHost(hostA, "B")).toBe(false);
+    expect(planSettledForHost({ ...hostA, scopeHostId: "B", loaded: false }, "B")).toBe(false);
+    expect(planSettledForHost({ ...hostA, scopeHostId: "B", error: "offline" }, "B")).toBe(true);
+    expect(planSettledForHost({ scopeHostId: null, loaded: true, error: null }, "A")).toBe(false);
+  });
+
+  test("cold loading never probes; the first ready screen plans the real list", () => {
+    expect(
+      teamPlanActive({
+        teamsTab: true,
+        launchOpen: false,
+        settingsReady: false,
+        profilesLoading: false,
+      }),
+    ).toBe(false);
+    expect(
+      teamPlanActive({
+        teamsTab: true,
+        launchOpen: false,
+        settingsReady: true,
+        profilesLoading: true,
+      }),
+    ).toBe(false);
+    expect(
+      teamPlanActive({
+        teamsTab: true,
+        launchOpen: false,
+        settingsReady: true,
+        profilesLoading: false,
+      }),
+    ).toBe(true);
+    expect(
+      teamPlanActive({
+        teamsTab: false,
+        launchOpen: true,
+        settingsReady: true,
+        profilesLoading: true,
+      }),
+    ).toBe(true);
+    expect(
+      teamPlanActive({
+        teamsTab: false,
+        launchOpen: true,
+        settingsReady: false,
+        profilesLoading: false,
+      }),
+    ).toBe(false);
+  });
+
   test("the screen and dialog do not poll or preview before the probe settles", () => {
     const root = path.join(import.meta.dirname, "..", "..");
     const screen = readFileSync(path.join(root, "client", "app", "AgentTeamsScreen.tsx"), "utf8");
     const dialog = readFileSync(path.join(root, "client", "launch", "LaunchDialog.tsx"), "utf8");
 
-    expect(screen).toContain("const plansSettled = plans.loaded || plans.error !== null");
+    expect(screen).toContain("const plansSettled = planSettledForHost(plans, host.id);");
+    expect(screen).toContain("active: teamPlanActive({");
+    expect(screen).toContain('teamsTab: tab === "teams"');
+    expect(screen).toContain("settingsReady");
     expect(screen).toContain('active: tab === "teams" && plansSettled');
     expect(screen).toContain("disabledReason: plansSettled ? undefined");
     expect(screen).toMatch(/probeSettled=\{plansSettled\}/);
@@ -209,7 +266,8 @@ describe("acceptance additions: probe-settled gating and preview identity", () =
     );
     expect(crew).toContain("useTeamPlans({");
     expect(crew).toContain("teams: [],");
-    expect(crew).toContain("active: launch !== null");
+    expect(crew).toContain("active: teamPlanActive({");
+    expect(crew).toContain("const crewProbeSettled = planSettledForHost(crewPlans, host.id);");
     expect(crew).toContain("modeContract={crewPlans.modeContract}");
     expect(crew).toContain("probeSettled={crewProbeSettled}");
     expect(crew).not.toContain("initialMode");
