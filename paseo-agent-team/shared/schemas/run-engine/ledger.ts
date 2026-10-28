@@ -61,10 +61,17 @@ export const RunTaskStateSchema = z.enum(RUN_TASK_STATES);
 export type RunTaskState = z.infer<typeof RunTaskStateSchema>;
 
 /**
- * Waiting sub-states inside `review`. `review/awaiting-rework` is `state:"review"` +
- * `phase:"awaiting-rework"` (no separate state value); R03/R05/R07 must read it this way.
+ * Review sub-states use state:"review" + phase; `awaiting-rework` is not a separate state.
+ * `frozen` belongs to `state:"blocked"` (cancellation waiting for quiescence) and keeps a claim.
  */
-export const RUN_TASK_PHASES = ["implementation", "review", "smoke", "awaiting-rework"] as const;
+export const RUN_TASK_PHASES = [
+  "implementation",
+  "review",
+  "smoke",
+  "awaiting-rework",
+  /** Cancellation blocked on quiescence: state stays blocked, its claim stays frozen. */
+  "frozen",
+] as const;
 export const RunTaskPhaseSchema = z.enum(RUN_TASK_PHASES);
 export type RunTaskPhase = z.infer<typeof RunTaskPhaseSchema>;
 
@@ -418,6 +425,8 @@ export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
     category: z.enum(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]),
+    /** SHA-256 of the engine-generated control nonce (bare 64hex); never the nonce itself. */
+    controlNonceDigest: RunDigestSchema,
     state: z.enum(["open", "answered", "waiting-human"]),
     dedupeKey: z.string().min(1).max(256),
     subjectId: RunIdRefSchema.nullable(),

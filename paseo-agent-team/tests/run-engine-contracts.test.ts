@@ -13,6 +13,8 @@ import {
   RUN_MAX_TASKS,
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
+  RUN_TASK_PHASES,
+  RunDecisionPointSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
   RunHistoryCheckpointSchema,
@@ -21,6 +23,8 @@ import {
   type RunRecord,
   RunRecordSchema,
   RunReopenGrantSchema,
+  RunTaskPhaseSchema,
+  RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
 import {
   RunDecisionBlockSchema,
@@ -772,6 +776,52 @@ describe("protocol blocks are strict and identity-bound", () => {
         action: { action: "replan", nextDagRevision: 0 },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("R01c decision nonce digest and frozen phase", () => {
+  const decision = {
+    decisionId: "55555555-5555-4555-8555-555555555555",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "open",
+    dedupeKey: "run: D1: decision",
+    subjectId: null,
+    summary: "A decision needs a reply.",
+    createdAt: NOW,
+    answeredAt: null,
+  };
+
+  test("a decision carries a bare 64hex control nonce digest", () => {
+    expect(RunDecisionPointSchema.safeParse(decision).success).toBe(true);
+    const invalid = [
+      { ...decision, controlNonceDigest: "A".repeat(64) },
+      { ...decision, controlNonceDigest: `sha256:${"a".repeat(64)}` },
+      { ...decision, controlNonceDigest: "11111111-1111-4111-8111-111111111111" },
+      { ...decision, controlNonceDigest: "a".repeat(63) },
+      (() => {
+        const { controlNonceDigest: _omit, ...missing } = decision;
+        return missing;
+      })(),
+    ];
+    for (const value of invalid) {
+      const parsed = RunDecisionPointSchema.safeParse(value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
+    }
+  });
+
+  test("frozen is a legal phase and an unknown phase is a single-defect rejection", () => {
+    expect(RUN_TASK_PHASES).toContain("frozen");
+    expect(RunTaskPhaseSchema.safeParse("frozen").success).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    const invalid = RunTaskRecordSchema.safeParse(
+      taskRecord({ state: "review", phase: "holding" }),
+    );
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) expect(invalid.error.issues[0]?.path).toEqual(["phase"]);
   });
 });
 

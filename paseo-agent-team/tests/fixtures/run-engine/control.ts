@@ -80,6 +80,7 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
     {
       decisionId: DECISION_D4,
       category: "D4",
+      controlNonceDigest: "b".repeat(64),
       state: "open",
       dedupeKey: "run-rec0re-ctl|D4|seat-b1|budget-100",
       subjectId: "seat-b1",
