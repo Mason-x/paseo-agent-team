@@ -1,9 +1,11 @@
 /** Default UI copy and catalog display names (Simplified Chinese). */
 
 import { designZh } from "./zh/design";
+import { designGapZh } from "./zh/design-gap";
 import { launchContractZh } from "./zh/launch-contract";
 import { modePlanZh } from "./zh/mode-plan";
 import { modesZh } from "./zh/modes";
+import { teamPlanZh } from "./zh/team-plan";
 
 /**
  * Launch/planner issue copy merged into `zh.modes`. It deliberately excludes the mode display
@@ -29,8 +31,7 @@ export const launchModeZh = {
     `协作需要独立的评审/测试席位（${reason || "judge-required"}）。`,
   onDemandFallbackEager: "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
   onDemandUnavailable: "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。",
-  collaborationRuntimeUnavailable:
-    "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或标准模式。",
+  collaborationRuntimeUnavailable: `协作模式需要后续版本的运行能力；当前版本请使用${modesZh.modeLabels.flagship}或${modesZh.modeLabels.standard}模式。`,
   staleEscalationOnly:
     "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
   duplicateLabelWarning: (label: string) => `实例标签「${label}」重复，已继续启动。`,
@@ -769,8 +770,10 @@ export const zh = {
 
   // 组队模式：规划、预览与启动闸门
   design: designZh,
+  designGap: designGapZh,
   launchContract: launchContractZh,
   modePlan: modePlanZh,
+  teamPlan: teamPlanZh,
   modes: {
     ...launchModeZh,
     ...modesZh,
