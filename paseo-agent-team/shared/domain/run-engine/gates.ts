@@ -23,13 +23,23 @@ function artifactKey(ref: unknown): string {
   return JSON.stringify(ref);
 }
 
-function normalizedPath(value: string): string {
-  return value.replaceAll("\\", "/").replace(/\/+/gu, "/").toLowerCase();
+/** Logical relative paths only: reject absolute paths, drive letters and any `..` segment. */
+export function normalizeContainedPath(value: string): string | null {
+  const raw = value.replaceAll("\\", "/").trim();
+  if (raw === "" || raw.startsWith("/") || /^[A-Za-z]:/u.test(raw)) return null;
+  const segments: string[] = [];
+  for (const segment of raw.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") return null;
+    segments.push(segment);
+  }
+  return segments.length === 0 ? null : segments.join("/").toLowerCase();
 }
 
 function withinRoot(root: string, path: string): boolean {
-  const base = normalizedPath(root).replace(/\/$/u, "");
-  const target = normalizedPath(path);
+  const base = normalizeContainedPath(root);
+  const target = normalizeContainedPath(path);
+  if (base === null || target === null) return false;
   return target === base || target.startsWith(`${base}/`);
 }
 
@@ -50,8 +60,89 @@ function implementationActors(record: RunRecord, taskId: string): Set<string> {
   return actors;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isIndependent(review: RunStoredReview, actors: ReadonlySet<string>): boolean {
   return !actors.has(review.reviewerAgentId) && !actors.has(review.reviewerSeatId);
+}
+
+const LEVEL_REVIEW_TIER: Record<string, "B" | "A" | "S"> = {
+  L1: "B",
+  L2: "A",
+  L3: "A",
+  L4: "S",
+};
+const TIER_RANK: Record<string, number> = { B: 0, A: 1, S: 2 };
+
+/** The stricter of the task's current level and any recorded escalation origin. */
+function requiredReviewTier(task: RunTaskRecord): "B" | "A" | "S" {
+  let required = LEVEL_REVIEW_TIER[task.spec.level] ?? "S";
+  for (const entry of task.escalations) {
+    if (!isRecord(entry)) continue;
+    for (const key of ["from", "fromLevel", "level"] as const) {
+      const value = entry[key];
+      if (typeof value !== "string") continue;
+      const tier = LEVEL_REVIEW_TIER[value];
+      if (tier !== undefined && TIER_RANK[tier] > TIER_RANK[required]) required = tier;
+    }
+  }
+  return required;
+}
+
+function reviewAssignment(
+  record: RunRecord,
+  taskId: string,
+  review: RunStoredReview,
+): RunRecord["assignments"][number] | undefined {
+  const byId =
+    review.assignmentId === undefined
+      ? undefined
+      : record.assignments.find(
+          (entry) =>
+            entry.assignmentId === review.assignmentId &&
+            entry.taskId === taskId &&
+            entry.purpose === "reviewer",
+        );
+  if (byId) return byId;
+  return record.assignments.find(
+    (entry) =>
+      entry.taskId === taskId &&
+      entry.purpose === "reviewer" &&
+      entry.agentId === review.reviewerAgentId &&
+      entry.seatId === review.reviewerSeatId,
+  );
+}
+
+function reviewerQualified(
+  record: RunRecord,
+  task: RunTaskRecord,
+  review: RunStoredReview,
+): boolean {
+  const assignment = reviewAssignment(record, task.spec.id, review);
+  if (!assignment) return false;
+  const required = requiredReviewTier(task);
+  if (assignment.tier !== required) return false;
+  if (required !== "B") return true;
+  const implementerFamilies = new Set(
+    record.assignments
+      .filter(
+        (entry) =>
+          entry.taskId === task.spec.id &&
+          entry.purpose !== "reviewer" &&
+          entry.purpose !== "smoker" &&
+          entry.family !== null &&
+          entry.family !== undefined,
+      )
+      .map((entry) => entry.family as string),
+  );
+  return (
+    implementerFamilies.size > 0 &&
+    assignment.family !== null &&
+    assignment.family !== undefined &&
+    !implementerFamilies.has(assignment.family)
+  );
 }
 
 function inWriteScope(task: RunTaskRecord, file: string): boolean {
@@ -59,7 +150,7 @@ function inWriteScope(task: RunTaskRecord, file: string): boolean {
     (scope) =>
       scope.access === "write" &&
       (scope.kind === "file"
-        ? normalizedPath(scope.path) === normalizedPath(file)
+        ? normalizeContainedPath(scope.path) === normalizeContainedPath(file)
         : withinRoot(scope.path, file)),
   );
 }
@@ -68,8 +159,23 @@ function inWriteScope(task: RunTaskRecord, file: string): boolean {
 export function checkEvidenceGate(record: RunRecord, taskValue: RunTaskRecord): GateResult {
   const task = taskValue as RunTaskWithEvidence;
   const report = task.report;
-  if (report === undefined || report.status !== "done") {
+  if (report === undefined) {
     return fail("evidence", ["tasks", task.spec.id, "report"], "missing-done-report");
+  }
+  if (!isRecord(report)) {
+    return fail("evidence", ["tasks", task.spec.id, "report"], "invalid-report");
+  }
+  if (report.status !== "done") {
+    return fail("evidence", ["tasks", task.spec.id, "report"], "missing-done-report");
+  }
+  if (
+    !Array.isArray(report.changedFiles) ||
+    !report.changedFiles.every((file) => typeof file === "string") ||
+    !Array.isArray(report.evidence) ||
+    !report.evidence.every((entry) => isRecord(entry) && typeof entry.id === "string") ||
+    !isRecord(report.ref)
+  ) {
+    return fail("evidence", ["tasks", task.spec.id, "report"], "invalid-report");
   }
   if (task.ref === null || artifactKey(report.ref) !== artifactKey(task.ref)) {
     return fail("evidence", ["tasks", task.spec.id, "ref"], "ref-mismatch");
@@ -99,6 +205,15 @@ export function checkEvidenceGate(record: RunRecord, taskValue: RunTaskRecord): 
     const evidence = evidenceById.get(requirement.id);
     if (!evidence) {
       return fail("evidence", ["tasks", task.spec.id, "evidence", requirement.id], "missing");
+    }
+    if (
+      (evidence.command !== null && typeof evidence.command !== "string") ||
+      typeof evidence.exitCode !== "number" ||
+      typeof evidence.summary !== "string" ||
+      typeof evidence.artifactPath !== "string" ||
+      !isRecord(evidence.ref)
+    ) {
+      return fail("evidence", ["tasks", task.spec.id, "evidence", requirement.id], "invalid");
     }
     if (requirement.command !== null && evidence.command !== requirement.command) {
       return fail("evidence", ["tasks", task.spec.id, "evidence", requirement.id], "command");
@@ -153,22 +268,29 @@ export function checkEvidenceGate(record: RunRecord, taskValue: RunTaskRecord): 
 export function checkReviewGate(record: RunRecord, taskValue: RunTaskRecord): GateResult {
   const task = taskValue as RunTaskWithEvidence;
   if (task.ref === null) return fail("review", ["tasks", task.spec.id, "ref"], "missing-ref");
+  if (task.reviews !== undefined && !Array.isArray(task.reviews)) {
+    return fail("review", ["tasks", task.spec.id, "reviews"], "invalid-reviews");
+  }
   const actors = implementationActors(record, task.spec.id);
   const reviews = task.reviews ?? [];
-  const valid = reviews.some(
-    (review) =>
-      review.reviewerAgentId.length > 0 &&
-      review.reviewerSeatId.length > 0 &&
-      review.verdict === "可合入" &&
-      review.blockers.length === 0 &&
-      artifactKey(review.reviewedRef) === artifactKey(task.ref) &&
-      isIndependent(review, actors),
-  );
+  const valid = reviews.some((review) => {
+    if (!isRecord(review)) return false;
+    if (typeof review.reviewerAgentId !== "string" || review.reviewerAgentId === "") return false;
+    if (typeof review.reviewerSeatId !== "string" || review.reviewerSeatId === "") return false;
+    if (review.verdict !== "可合入") return false;
+    if (!Array.isArray(review.blockers) || review.blockers.length !== 0) return false;
+    if (artifactKey(review.reviewedRef) !== artifactKey(task.ref)) return false;
+    return isIndependent(review, actors) && reviewerQualified(record, task, review);
+  });
   return valid ? OK : fail("review", ["tasks", task.spec.id, "reviews"], "no-valid-review");
 }
 
+function normalizedAnyPath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/\/+/gu, "/").toLowerCase();
+}
+
 function realHomeLike(value: string): boolean {
-  const path = normalizedPath(value);
+  const path = value.replaceAll("\\", "/").toLowerCase();
   return path.includes("/.paseo") || path.endsWith("/.paseo");
 }
 
@@ -179,8 +301,10 @@ function canonicalDevHost(value: string): string {
   const bracketed = /^\[([^\]]+)\](?::(\d+))?$/u.exec(host);
   const plain = /^([^:]+)(?::(\d+))?$/u.exec(host);
   const name = bracketed?.[1] ?? plain?.[1] ?? host;
-  const port = bracketed?.[2] ?? plain?.[2] ?? "";
-  const loopback = name === "localhost" || name === "127.0.0.1" || name === "::1";
+  const rawPort = bracketed?.[2] ?? plain?.[2] ?? "";
+  const port = rawPort === "" ? "" : String(Number(rawPort));
+  const loopback =
+    name === "localhost" || name === "127.0.0.1" || name === "::1" || name === "0.0.0.0";
   return `${loopback ? "loopback" : name}:${port}`;
 }
 
@@ -193,8 +317,24 @@ export function checkSmokeGate(record: RunRecord, taskValue: RunTaskRecord): Gat
   const task = taskValue as RunTaskWithEvidence;
   if (!task.spec.devSmoke) return OK;
   const report = task.smokeReport;
-  if (report === undefined) {
-    return fail("smoke", ["tasks", task.spec.id, "smokeReport"], "missing");
+  if (!isRecord(report)) {
+    return fail("smoke", ["tasks", task.spec.id, "smokeReport"], "invalid-report");
+  }
+  if (
+    !Array.isArray(report.checks) ||
+    !report.checks.every(
+      (check) =>
+        isRecord(check) &&
+        typeof check.id === "string" &&
+        typeof check.evidencePath === "string" &&
+        (check.result === "pass" || check.result === "fail"),
+    ) ||
+    !isRecord(report.testedRef) ||
+    typeof report.devServerId !== "string" ||
+    typeof report.devHost !== "string" ||
+    typeof report.devHome !== "string"
+  ) {
+    return fail("smoke", ["tasks", task.spec.id, "smokeReport"], "invalid-report");
   }
   if (task.ref !== null && artifactKey(report.testedRef) !== artifactKey(task.ref)) {
     return fail("smoke", ["tasks", task.spec.id, "testedRef"], "ref-mismatch");
@@ -211,7 +351,7 @@ export function checkSmokeGate(record: RunRecord, taskValue: RunTaskRecord): Gat
   if (
     defaultDevHost(report.devHost) ||
     canonicalDevHost(report.devHost) !== canonicalDevHost(target.host) ||
-    normalizedPath(report.devHome) !== normalizedPath(target.home) ||
+    normalizedAnyPath(report.devHome) !== normalizedAnyPath(target.home) ||
     realHomeLike(report.devHome)
   ) {
     return fail("smoke", ["tasks", task.spec.id, "devHost"], "wrong-target");

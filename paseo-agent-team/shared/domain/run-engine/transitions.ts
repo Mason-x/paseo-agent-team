@@ -20,6 +20,8 @@ export type RunStoredTaskReport = RunTaskReportBlock;
 export type RunStoredReview = Pick<RunReviewReportBlock, "reviewedRef" | "verdict" | "blockers"> & {
   reviewerAgentId: string;
   reviewerSeatId: string;
+  /** The reviewer assignment; omitted only for legacy fixtures/records created before R03a. */
+  assignmentId?: string;
   probes?: RunReviewReportBlock["probes"];
 };
 export type RunStoredSmokeReport = RunSmokeReportBlock;
@@ -44,7 +46,7 @@ export type RunDispatchEvent = {
  */
 export type RunReducerEvent =
   | { kind: "dag-accepted"; block: RunTaskDagBlock }
-  | { kind: "dag-revised"; block: RunTaskDagBlock }
+  | { kind: "dag-revised"; block: RunTaskDagBlock; controlNonceDigest: string }
   | RunDispatchEvent
   | { kind: "turn-started"; assignmentId: string; agentId: string; turnId: string }
   | { kind: "turn-ended"; assignmentId: string; endedEventKey: string }
@@ -52,7 +54,13 @@ export type RunReducerEvent =
   | { kind: "review-report"; block: RunReviewReportBlock }
   | { kind: "smoke-report"; block: RunSmokeReportBlock }
   | { kind: "decision"; block: RunDecisionBlock }
-  | { kind: "cancel-requested"; taskIds: readonly string[]; reason: string; cancelIntentId: string }
+  | {
+      kind: "cancel-requested";
+      taskIds: readonly string[];
+      reason: string;
+      cancelIntentId: string;
+      controlNonceDigest: string;
+    }
   | {
       kind: "cancellation-checked";
       taskId: string;
@@ -62,7 +70,7 @@ export type RunReducerEvent =
   | { kind: "run-paused" }
   | { kind: "run-resumed" }
   | { kind: "run-finished" }
-  | { kind: "run-cancelled"; reason: string }
+  | { kind: "run-cancelled"; reason: string; controlNonceDigest: string }
   | { kind: "observation-recorded"; receipt: RunEventReceipt };
 
 export const RUN_REDUCER_EVENT_KINDS = [

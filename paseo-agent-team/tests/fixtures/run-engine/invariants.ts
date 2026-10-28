@@ -77,7 +77,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i3o",
-      tasks: [T1, { ...T2, state: "blocked", waitingReason: "missing-seat" }, T3],
+      tasks: [T1, { ...T2, state: "blocked", phase: "frozen", waitingReason: "missing-seat" }, T3],
       resources: [claim({ frozen: true })],
     }),
     note: "blocked+frozen may keep a claim after the 10-27 revision.",
@@ -146,12 +146,13 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i6x",
-      tasks: [{ ...T2, reworkCount: 0 }],
+      tasks: [T1, { ...T2, reworkCount: 0 }, T3],
       events: [
         ...NORMAL_RUN_LEDGER.events,
         { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
         { seq: 9, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
       ],
+      counters: { ...NORMAL_RUN_LEDGER.counters, eventsThroughSeq: 9 },
     }),
     note: "Two rework events exist while the counter says zero.",
   },

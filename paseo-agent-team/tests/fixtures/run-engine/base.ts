@@ -30,6 +30,8 @@ export const DIGEST_2 = "2".repeat(64);
 export const NONCE_T1 = "6f1c2a44-3b7e-4f0a-9a11-000000000001";
 export const NONCE_T2 = "6f1c2a44-3b7e-4f0a-9a11-000000000002";
 export const NONCE_T3 = "6f1c2a44-3b7e-4f0a-9a11-000000000003";
+export const NONCE_T1_REVIEW = "6f1c2a44-3b7e-4f0a-9a11-000000000004";
+export const NONCE_T2_REVIEW = "6f1c2a44-3b7e-4f0a-9a11-000000000005";
 export const NONCE_PROBE = "6f1c2a44-3b7e-4f0a-9a11-000000000006";
 
 export const MESSAGE_T1 = "11111111-1111-4111-8111-111111111111";
@@ -338,8 +340,29 @@ const T1 = taskRecord(spec("T1", "Core API surface"), {
   ref: { kind: "git-commit", value: "9f3c1a7" },
   changedFiles: ["src/t1.ts"],
   attempts: 1,
+  report: {
+    status: "done",
+    changedFiles: ["src/t1.ts"],
+    ref: { kind: "git-commit", value: "9f3c1a7" },
+    workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+    evidence: [
+      {
+        id: "five-gates",
+        command: "npm run check && npm run typecheck && npm test",
+        exitCode: 0,
+        summary: "all gates passed",
+        artifactPath: "evidence/t1.log",
+        ref: { kind: "git-commit", value: "9f3c1a7" },
+        isolation: {
+          homePath: "C:/Users/runner/AppData/Local/Temp/t1-home",
+          outsideRealHome: true,
+        },
+      },
+    ],
+  },
   reviews: [
     {
+      assignmentId: "assignment-t1-r1",
       reviewerAgentId: "agent-b2",
       reviewerSeatId: "seat-b2",
       verdict: "可合入",
@@ -416,7 +439,20 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   dagRevision: 1,
   tasks: [T1, T2, T3],
   resources: [claim()],
-  assignments: [assignment()],
+  assignments: [
+    assignment(),
+    assignment({
+      assignmentId: "assignment-t1-r1",
+      taskId: "T1",
+      seatId: "seat-b2",
+      agentId: "agent-b2",
+      purpose: "reviewer",
+      tier: "A",
+      family: "codex",
+      nonce: NONCE_T1_REVIEW,
+      messageId: null,
+    }),
+  ],
   reopenGrants: [],
   outbox: [
     dispatchIntent({
@@ -441,6 +477,21 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
       issuedAt: AT_CREATED,
       acceptedAt: AT_CREATED,
       acceptedEventKey: "agent-b1|turn-6|turn_ended",
+      revokedAt: null,
+      revokeReason: null,
+    },
+    {
+      nonce: NONCE_T1_REVIEW,
+      runId: RUN_ID,
+      taskId: "T1",
+      assignmentId: "assignment-t1-r1",
+      attempt: 1,
+      phase: "review",
+      agentId: "agent-b2",
+      seatId: "seat-b2",
+      issuedAt: AT_CREATED,
+      acceptedAt: AT_UPDATED,
+      acceptedEventKey: "agent-b2|turn-8|turn_ended",
       revokedAt: null,
       revokeReason: null,
     },
