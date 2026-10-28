@@ -58,6 +58,15 @@ describe("executionTier and reviewRequirement", () => {
     );
     expect(executionTier(task)).toBe("A");
     expect(reviewRequirement(task)).toEqual({ level: "L4", tier: "S" });
+    const l3Plan = taskRecord(
+      spec("T2", "L3 plan", {
+        level: "L3",
+        tier: "A",
+        implementationPolicy: "a-with-s-plan",
+        architectureTaskId: "T0",
+      }),
+    );
+    expect(reviewRequirement(l3Plan)).toEqual({ level: "L4", tier: "S" });
   });
 });
 

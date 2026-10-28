@@ -177,7 +177,37 @@ export const RunTaskSpecShape = {
   implementationPolicy: z.enum(["default", "a-with-s-plan"]),
   architectureTaskId: z.string().min(1).max(64).nullable(),
 };
-export const RunTaskSpecSchema = z.object(RunTaskSpecShape).passthrough();
+export const RunTaskSpecSchema = z
+  .object(RunTaskSpecShape)
+  .passthrough()
+  .superRefine((spec, ctx) => {
+    const expected =
+      spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
+    if (spec.implementationPolicy === "a-with-s-plan") {
+      if (spec.level !== "L4") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["level"],
+          message: "a-with-s-plan is only valid on L4",
+        });
+      }
+      if (spec.tier !== "A") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tier"],
+          message: "a-with-s-plan must execute at tier A",
+        });
+      }
+      return;
+    }
+    if (spec.tier !== expected) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tier"],
+        message: `tier must be ${expected} for ${spec.level}`,
+      });
+    }
+  });
 export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 
 /** Evidence summary (05 §3): bounded, redacted, path-only; secrets never enter the ledger. */
@@ -633,6 +663,34 @@ export const RunTaskRecordSchema = z
         path: ["phase"],
         message: "awaiting-rework is only valid on a review task",
       });
+    }
+    for (const [index, escalation] of task.escalations.entries()) {
+      const previous = index === 0 ? undefined : task.escalations[index - 1];
+      if (
+        previous !== undefined &&
+        (escalation.qualityFailures < previous.qualityFailures ||
+          escalation.atAttempt < previous.atAttempt)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation counters must not decrease",
+        });
+      }
+      if (escalation.qualityFailures > task.qualityFailures) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures exceeds the task total",
+        });
+      }
+      if (escalation.atAttempt > task.attempts) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "atAttempt"],
+          message: "escalation atAttempt exceeds the task attempts",
+        });
+      }
     }
     let current = task.spec.tier;
     for (const [index, escalation] of task.escalations.entries()) {
