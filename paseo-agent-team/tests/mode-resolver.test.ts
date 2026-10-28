@@ -13,6 +13,7 @@ import {
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import type { Role } from "../shared/schemas/role";
 import type { StoredEconomyEntry, TeamMode } from "../shared/schemas/team-mode";
+import { cheapIssueText } from "../shared/zh/mode-plan";
 import { role } from "./fixtures";
 
 function expectAvailable(
@@ -814,6 +815,43 @@ describe("resolveModeProfile", () => {
         params: { reason: "provider-unavailable" },
       },
     ]);
+  });
+  test("a deleted all-seats Profile is reported as missing, not outside-list", () => {
+    const economy: EconomyPolicy = {
+      pool: [],
+      taskOrder: {},
+      profileBudget: {},
+      allSeats: {
+        status: "ready",
+        version: 1,
+        profiles: [
+          {
+            profileId: deepseek.id,
+            enabled: true,
+            family: "deepseek",
+            boundModel: { provider: deepseek.provider, model: deepseek.model ?? "" },
+          },
+        ],
+        routes: { execution: [deepseek.id] },
+        executionTaskOrder: {},
+        issues: [],
+      },
+    };
+    const result = resolveModeProfile({
+      mode: "economy-all",
+      role: roleOf("eng-fullstack", {
+        executionPolicy: { tier: "execution", taskKind: "coding" },
+      }),
+      kind: "member",
+      host: { status: "ready", profiles: [], availability: [] },
+      economy,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const invalid = result.issues.find((issue) => issue.code === "MODE_CHEAP_PROFILE_INVALID");
+    expect(invalid?.params).toMatchObject({ profileId: deepseek.id, reason: "missing" });
+    if (!invalid) throw new Error("missing cheap profile issue");
+    expect(cheapIssueText(invalid)).toContain("Profile 已删除");
   });
 });
 

@@ -3,6 +3,7 @@ import { hashLaunchPlan } from "../server/launch-hash";
 import type { LaunchPlanHashInput } from "../shared/domain/launch-hash";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
 import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
+import type { PaseoProfile } from "../shared/paseo/adapter";
 import {
   allAvailable,
   architect,
@@ -108,6 +109,96 @@ describe("launch plan hash", () => {
       }),
     ];
     for (const candidate of cases) expect(hashLaunchPlan(candidate)).not.toBe(base);
+  });
+
+  test("economy-all hashes only all-seats route Profiles, not the standard pool", () => {
+    const deepseek: PaseoProfile = {
+      id: "tail-deepseek",
+      name: "Tail DeepSeek",
+      provider: "omp",
+      model: "deepseek-v4.1",
+      modeId: "full",
+    };
+    const grok: PaseoProfile = {
+      id: "tail-grok",
+      name: "Tail Grok",
+      provider: "omp",
+      model: "grok-4.7",
+      modeId: "full",
+    };
+    const unrelated: PaseoProfile = {
+      id: "tail-unrelated",
+      name: "Unrelated standard pool",
+      provider: "omp",
+      model: "grok-4.6",
+      modeId: "full",
+    };
+    const tailHost: HostSnapshot = {
+      status: "ready",
+      profiles: [deepseek, grok, unrelated],
+      availability: [{ provider: "omp", available: true }],
+    };
+    const economy: EconomyPolicy = {
+      pool: [{ profileId: unrelated.id, family: "grok", enabled: true }],
+      taskOrder: {},
+      profileBudget: {},
+      allSeats: {
+        status: "ready",
+        version: 1,
+        profiles: [
+          {
+            profileId: deepseek.id,
+            enabled: true,
+            family: "deepseek",
+            boundModel: { provider: deepseek.provider, model: deepseek.model ?? "" },
+          },
+          {
+            profileId: grok.id,
+            enabled: true,
+            family: "grok",
+            boundModel: { provider: grok.provider, model: grok.model ?? "" },
+          },
+        ],
+        routes: {
+          coordinator: [deepseek.id],
+          decision: [deepseek.id],
+          execution: [deepseek.id],
+          escalation: [deepseek.id],
+          retain: [deepseek.id],
+        },
+        executionTaskOrder: {},
+        issues: [],
+      },
+    };
+    const economyAllTeam = { ...codingTeam, mode: "economy-all" as const };
+    const plan = buildLaunchPlan({
+      team: economyAllTeam,
+      roles,
+      profiles: tailHost.profiles,
+      availability: tailHost.availability,
+      workspaceId: "ws-1",
+      task: "Add Stripe",
+      runId: "preview",
+      maxMembers: 24,
+      host: tailHost,
+      economy,
+      runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
+    });
+    const base = input({ team: economyAllTeam, plan, host: tailHost, economy });
+    const changedUnrelated: HostSnapshot = {
+      ...tailHost,
+      profiles: tailHost.profiles.map((profile) =>
+        profile.id === unrelated.id ? { ...profile, modeId: "manual" } : profile,
+      ),
+    };
+    expect(hashLaunchPlan({ ...base, host: changedUnrelated })).toBe(hashLaunchPlan(base));
+    const changedRoute: HostSnapshot = {
+      ...tailHost,
+      profiles: tailHost.profiles.map((profile) =>
+        profile.id === deepseek.id ? { ...profile, modeId: "manual" } : profile,
+      ),
+    };
+    expect(hashLaunchPlan({ ...base, host: changedRoute })).not.toBe(hashLaunchPlan(base));
   });
 
   test("covers mode and member creation decisions", () => {

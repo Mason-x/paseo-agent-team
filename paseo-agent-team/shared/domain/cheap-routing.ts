@@ -30,6 +30,7 @@ export type CheapInvalidReason =
   | "budget-conflict"
   | "unverified"
   | "unavailable"
+  | "missing"
   | "outside-list"
   | "duplicate";
 

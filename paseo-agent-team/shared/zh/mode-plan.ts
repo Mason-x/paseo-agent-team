@@ -26,8 +26,11 @@ export function cheapIssueText(entry: ModeIssue): string {
       const version = value(entry.params, "version");
       return `全席位经济策略不可用（${route || "all"}：${reason || "absent"}${version ? `，version ${version}` : ""}）。`;
     }
-    case "MODE_CHEAP_PROFILE_INVALID":
-      return `Profile「${profileId || "unknown"}」不符合 ${route || "all"} 路由的廉价条件（${value(entry.params, "reason") || "invalid"}）。`;
+    case "MODE_CHEAP_PROFILE_INVALID": {
+      const reason = value(entry.params, "reason");
+      const reasonText = reason === "missing" ? "Profile 已删除" : reason;
+      return `Profile「${profileId || "unknown"}」不符合 ${route || "all"} 路由的廉价条件（${reasonText || "invalid"}）。`;
+    }
     case "MODE_CHEAP_ROUTE_UNAVAILABLE": {
       const counts = [
         "candidates",

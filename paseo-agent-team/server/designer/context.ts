@@ -115,7 +115,7 @@ export function describeModeRouting(input: {
             profileId,
             family: entry.family,
             eligible: false,
-            reason: "outside-list",
+            reason: "missing",
             reported: true,
           };
         }
