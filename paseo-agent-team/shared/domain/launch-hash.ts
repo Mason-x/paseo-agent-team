@@ -35,7 +35,20 @@ function profileTuple(profile: PaseoProfile): Record<string, unknown> {
 }
 
 function selectedProfileIds(plan: LaunchPlan, economy: EconomyPolicy): Set<string> {
-  const ids = new Set<string>(economy.pool.map((entry) => entry.profileId));
+  const ids = new Set<string>();
+  if (plan.mode === "economy-all") {
+    const allSeats = economy.allSeats;
+    if (allSeats?.status === "ready") {
+      for (const routeIds of Object.values(allSeats.routes)) {
+        for (const id of routeIds ?? []) ids.add(id);
+      }
+      for (const orderIds of Object.values(allSeats.executionTaskOrder)) {
+        for (const id of orderIds ?? []) ids.add(id);
+      }
+    }
+  } else {
+    for (const entry of economy.pool) ids.add(entry.profileId);
+  }
   if (plan.coordinator.profile.id !== "missing") ids.add(plan.coordinator.profile.id);
   for (const seat of plan.seats) {
     if (seat.selected.unavailable) continue;

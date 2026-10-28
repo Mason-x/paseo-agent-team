@@ -909,7 +909,7 @@ function resolveCheapSeat(input: {
       profileIssues.push(
         blocker(
           "MODE_CHEAP_PROFILE_INVALID",
-          { route, profileId, reason: "outside-list" },
+          { route, profileId, reason: "missing" },
           { roleId: input.role.id, profileId },
         ),
       );
