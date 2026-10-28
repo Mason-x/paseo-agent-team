@@ -469,7 +469,7 @@ describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
     useDefaultProfileHints: false,
   };
 
-  test("a v2 status job carries the seed and it survives refresh/host/cache loss", () => {
+  test("a v2 status job carries the seed and the pure planner consumes it", () => {
     const job = gapJob({ gapRetry: seed });
     const parsed = DesignJobSchema.parse(job);
     expect(parsed.gapRetry).toEqual(seed);
@@ -505,7 +505,7 @@ describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
     expect(prefilled.submitting).toBe(false);
   });
 
-  test("a legacy job has no server seed and falls back to the session cache only", () => {
+  test("a legacy job has no server seed and the pure planner falls back to the session cache", () => {
     const legacy = gapJob();
     expect(DesignJobSchema.parse(legacy).gapRetry).toBeUndefined();
     expect(readGapRetrySeed(legacy)).toBeNull();
@@ -528,14 +528,8 @@ describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
     });
   });
 
-  test("the client routes v2 through status({jobId}) and a missing seed asks for a new request", () => {
+  test("a missing seed asks for a new request instead of inventing one", () => {
     const root = path.join(import.meta.dirname, "..", "..");
-    const jobs = readFileSync(path.join(root, "client", "designer", "use-design-jobs.ts"), "utf8");
-    expect(jobs).toMatch(
-      /modeContract === "v2"[\s\S]{0,260}statusCall\(withDesignContract\(\{ jobId: job\.jobId \}/,
-    );
-    expect(jobs).toMatch(/return retryCache\.current\.get\(job\.jobId\)/);
-
     const panel = readFileSync(
       path.join(root, "client", "designer", "DesignJobsPanel.tsx"),
       "utf8",

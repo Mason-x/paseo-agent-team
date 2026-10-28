@@ -21,7 +21,7 @@ import { type EconomyPolicy, normalizeEconomyPolicy } from "../shared/domain/mod
 import { buildSeatPlan } from "../shared/domain/seat-plan";
 import { buildTeamModelPlan } from "../shared/domain/team-model-plan";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
-import { type DesignJob, DesignRoleGapSchema } from "../shared/schemas/design";
+import { type DesignJob, DesignRoleGapSchema, RoleGapReportSchema } from "../shared/schemas/design";
 import type { Preferences } from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
@@ -627,38 +627,67 @@ describe("AC-0b.7 / B03: the saved-Team first paint batches its RPCs", () => {
 
 describe("AC-0c.8 / C04: a gap job offers its exits and a prefilled retry", () => {
   test("the card shows both gap exits and the retry form starts from the original request", () => {
-    const gap = {
+    const profile = {
+      id: "p-sonnet",
+      name: "Sonnet",
+      provider: "claude",
+      model: "claude-sonnet-4-6",
+    };
+    // Start from the proposal shape the model/service actually emits, then project the report
+    // the job stores (the report adds resolved Profiles and drops the proposal discriminator).
+    const proposal = DesignRoleGapSchema.parse({
+      kind: "missing-role",
       responsibility: "数据库迁移评审",
       reason: "现有 Role 不承担迁移评审",
-      use: "member" as const,
-      profiles: [
-        {
-          id: "p-sonnet",
-          name: "Sonnet",
-          provider: "claude",
-          model: "claude-sonnet-4-6",
-        },
-      ],
+      use: "member",
+      profiles: { kind: "existing", profileIds: [profile.id] },
       suggestedRole: {
         id: "qa-migration",
         name: "【质量】迁移评审",
         responsibilities: ["评审迁移脚本"],
-        executionPolicy: { tier: "decision" as const, taskKind: "general" as const },
+        executionPolicy: { tier: "decision", taskKind: "general" },
       },
-    };
+    });
+    if (proposal.kind !== "missing-role") throw new Error("fixture must be a missing-role gap");
+    const suggested = RoleGapReportSchema.parse({
+      responsibility: proposal.responsibility,
+      reason: proposal.reason,
+      use: proposal.use,
+      profiles: [profile],
+      suggestedRole: proposal.suggestedRole,
+    });
+    const unlaunchable = RoleGapReportSchema.parse({
+      responsibility: "数据库迁移执行",
+      reason: "绑定的 Profile 在本 host 不可用",
+      use: "member",
+      profiles: [profile],
+      unlaunchableRole: {
+        roleId: "qa-migration",
+        roleName: "【质量】迁移评审",
+        unavailableProfileIds: [profile.id],
+        profileNames: [profile.name],
+      },
+    });
     const job: DesignJob = designJob({
       state: "failed",
       mode: "sota",
       existingRolesOnly: true,
       outputContractVersion: 2,
-      roleGap: [gap],
+      roleGap: [suggested, unlaunchable],
       resultId: null,
       carrierWorkspaceId: "ws-carrier",
       targetWorkspaceId: "ws-target",
       allowed: { cancel: false, save: false, launch: false, continueAction: null },
     });
-    expect(buildDesignRoleGapViews(job)).toHaveLength(1);
-    expect(buildDesignRoleGapViews(job)[0]?.suggestedRole?.id).toBe("qa-migration");
+    const views = buildDesignRoleGapViews(job);
+    expect(views).toHaveLength(2);
+    expect(views[0]).toMatchObject({
+      suggestedRole: { id: "qa-migration" },
+      primary: { kind: "create-role" },
+    });
+    expect(views[1]).toMatchObject({
+      primary: { kind: "open-role", roleId: "qa-migration", profileId: profile.id },
+    });
 
     const cache = createDesignRetryCache();
     cache.remember(job.jobId, {
@@ -719,6 +748,40 @@ describe("AC-0d.16 / C02: economy-all gap suggestions are route-backed", () => {
       modeCode: "MODE_CHEAP_PROFILE_INVALID",
       route: "execution",
       profileId: sonnet.id,
+    });
+  });
+
+  test("a route candidate that fails budget eligibility is rejected too", () => {
+    const economy = economyOf({
+      pool: [],
+      taskOrder: {},
+      profileBudget: { [deepseek.id]: "sota" },
+      allSeats: allSeatsPolicy(),
+    });
+    const routing = describeModeRouting({ profiles, availability: available, economy });
+    expect(routing.status).toBe("ready");
+    const rejected = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: DesignRoleGapSchema.parse({
+        kind: "missing-role",
+        responsibility: "负责数据库迁移",
+        reason: "目录没有承担迁移的 Role",
+        use: "member",
+        profiles: { kind: "existing", profileIds: [deepseek.id] },
+        suggestedRole: {
+          id: "eng-data",
+          name: "【工程】数据迁移",
+          responsibilities: ["迁移"],
+          executionPolicy: { tier: "execution", taskKind: "coding" },
+        },
+      }),
+      routing,
+    });
+    expect(rejected[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_PROFILE_INVALID",
+      route: "execution",
+      profileId: deepseek.id,
+      reason: "budget-conflict",
     });
   });
 });

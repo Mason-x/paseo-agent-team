@@ -232,10 +232,16 @@ describe("AC-0c.12 / C03: a v1 design ledger and the economy access gate", () =>
     expect(modeVisibleTo("economy-all", 1)).toBe(false);
     expect(modeVisibleTo("economy-all", 2)).toBe(true);
     const legacy = projectJobForContract(
-      DesignJobSchema.parse({ ...record.job, mode: "economy-all" }),
+      DesignJobSchema.parse({
+        ...record.job,
+        mode: "economy-all",
+        existingRolesOnly: true,
+        outputContractVersion: 2,
+      }),
       1,
     );
     expect(legacy).not.toHaveProperty("existingRolesOnly");
+    expect(legacy).not.toHaveProperty("outputContractVersion");
     expect(
       projectJobForContract(
         DesignJobSchema.parse({
