@@ -23,6 +23,32 @@ export type DesignerPrefill = {
   confirmReplace?: boolean;
 };
 
+/** The one-shot prefill the screen hands to the designer card, tied to the host it was made for. */
+export type DesignPrefillSlot = { hostId: string; value: DesignerPrefill } | null;
+
+export function designPrefillSlot(hostId: string, value: DesignerPrefill): DesignPrefillSlot {
+  return { hostId, value };
+}
+
+/** A prefill made for another host (a stale slot after a host switch) is never delivered. */
+export function designPrefillForHost(
+  slot: DesignPrefillSlot,
+  hostId: string,
+): DesignerPrefill | undefined {
+  return slot?.hostId === hostId ? slot.value : undefined;
+}
+
+/**
+ * "Close the switch and retry" from a Role-gap card: show the Teams tab, where the designer card
+ * lives, and give it the planned prefill. The screen applies the result; nothing starts here.
+ */
+export function applyGapRetry(
+  hostId: string,
+  prefill: DesignerPrefill,
+): { tab: "teams"; designPrefill: DesignPrefillSlot } {
+  return { tab: "teams", designPrefill: designPrefillSlot(hostId, prefill) };
+}
+
 export function designerPrefillFromEvent(event: DesignPrefillEvent): DesignerPrefill {
   return {
     nonce: event.token,

@@ -37,8 +37,11 @@ import {
 } from "../catalog/preset-state";
 import { DesignJobsPanel } from "../designer/DesignJobsPanel";
 import {
-  type DesignerPrefill,
+  applyGapRetry,
+  type DesignPrefillSlot,
   designerPrefillFromEvent,
+  designPrefillForHost,
+  designPrefillSlot,
   economyFocusForConfigure,
   planSettledForHost,
   roleEditorTargetForGap,
@@ -183,10 +186,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   });
   const [resetTarget, setResetTarget] = useState<"roles" | "teams" | "preferences" | null>(null);
   const designClientId = useRef(createDesignClientRequestId()).current;
-  const [designPrefill, setDesignPrefill] = useState<{
-    hostId: string;
-    value: DesignerPrefill;
-  } | null>(null);
+  const [designPrefill, setDesignPrefill] = useState<DesignPrefillSlot>(null);
   const attemptedPrefills = useRef(new Set<string>());
   const designHostRef = useRef(host.id);
 
@@ -220,7 +220,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       { scopeId: designJobs.scopeId, token, now: Date.now() },
       (event) => {
         delivered = true;
-        setDesignPrefill({ hostId: host.id, value: designerPrefillFromEvent(event) });
+        setDesignPrefill(designPrefillSlot(host.id, designerPrefillFromEvent(event)));
         return true;
       },
     );
@@ -944,7 +944,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   onRefreshProfiles: hostProfiles.reload,
                   modeContract: plans.modeContract,
                   disabledReason: plansSettled ? undefined : zh.modes.previewLoadingContext,
-                  prefill: designPrefill?.hostId === host.id ? designPrefill.value : undefined,
+                  prefill: designPrefillForHost(designPrefill, host.id),
                   collapsedSummary: latestDesignSummary,
                   collapsedSummaryTone: latestDesignTone,
                   onStart: (input) => designJobs.start(input),
@@ -964,8 +964,9 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                     navigation={navigation}
                     modeContract={plans.modeContract}
                     onGapRetry={(prefill) => {
-                      setTab("teams");
-                      setDesignPrefill({ hostId: host.id, value: prefill });
+                      const next = applyGapRetry(host.id, prefill);
+                      setTab(next.tab);
+                      setDesignPrefill(next.designPrefill);
                     }}
                     onOpenRole={(target) => {
                       const resolved = roleEditorTargetForGap(
