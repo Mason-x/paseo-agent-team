@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   defaultCatalogPreviewRpc,
   designCancelRpc,
@@ -9,13 +10,181 @@ import {
   designSaveFailedRpc,
   designStartRpc,
   designStatusRpc,
+  emptyTeamPlanProbe,
   exampleCatalogRpc,
+  type LaunchJob,
   LaunchPreviewInputSchema,
   LaunchStartInputSchema,
   launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
+  projectLaunchJobForLegacyPeer,
+  teamPlanRpc,
 } from "../shared/rpc";
+import { launchContractZh } from "../shared/zh/launch-contract";
+
+/** Literal copy of 75ec305's `LaunchJobSchema` (three-mode enum, strip object). */
+const baselineTeamMode = z.enum(["sota", "economy", "collaborative"]);
+const baselineLaunchJob = z.object({
+  runId: z.string(),
+  teamId: z.string(),
+  teamName: z.string(),
+  state: z.enum(["running", "succeeded", "failed"]),
+  step: z.enum(["workspace", "coordinator", "member", "kickoff", "done"]),
+  memberIndex: z.number().int().optional(),
+  memberTotal: z.number().int(),
+  workspaceId: z.string().optional(),
+  coordinatorId: z.string().optional(),
+  memberIds: z.array(z.string()),
+  warnings: z.array(z.string()),
+  error: z
+    .object({
+      message: z.string(),
+      detail: z.string().optional(),
+      step: z.enum(["workspace", "coordinator", "member", "kickoff", "done"]),
+      archived: z.boolean(),
+      agentIdsKept: z.array(z.string()),
+      kickoffMessage: z.string().optional(),
+    })
+    .optional(),
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+  mode: baselineTeamMode.optional(),
+  planHash: z.string().optional(),
+});
+
+const legacyJob: LaunchJob = {
+  runId: "run-legacy",
+  teamId: "team-1",
+  teamName: "Legacy",
+  state: "succeeded",
+  step: "done",
+  memberTotal: 1,
+  memberIds: ["m1"],
+  warnings: [],
+  startedAt: "2026-01-01T00:00:00.000Z",
+  mode: "economy",
+};
+
+const newModeJob: LaunchJob = {
+  runId: "run-new",
+  teamId: "team-2",
+  teamName: "New",
+  state: "running",
+  step: "coordinator",
+  memberTotal: 1,
+  memberIds: ["m1"],
+  warnings: ["starting"],
+  startedAt: "2026-01-01T00:00:00.000Z",
+  mode: "economy-all",
+  rawMode: "future",
+  planHash: "abc",
+};
+
+/** Literal copy of 75ec305's strict preview DTOs, enough for one legacy seat. */
+const baselineSeatProfile = z.strictObject({
+  id: z.string().min(1),
+  name: z.string(),
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
+});
+const baselineSeatPreview = z.strictObject({
+  seatId: z.string().min(1),
+  logicalSeatId: z.string().min(1),
+  roleId: z.string().min(1),
+  roleName: z.string(),
+  instanceLabel: z.string().optional(),
+  purpose: z.enum(["member", "candidate", "judge", "escalation"]),
+  activation: z.enum(["eager", "on-demand", "escalation-only"]),
+  cohortId: z.string().optional(),
+  profile: baselineSeatProfile.nullable(),
+  source: z.enum(["role-preferred", "role-fallback", "economy-pool", "unavailable"]),
+  family: z.string().optional(),
+  alternates: z.array(z.string()),
+  budget: z.enum(["economy", "sota", "unknown"]),
+  budgetBasis: z.enum(["host", "pool", "conservative-default"]),
+  standby: z.boolean(),
+  unavailable: z.boolean(),
+  issues: z.array(
+    z.strictObject({
+      code: z.string(),
+      severity: z.enum(["warning", "blocker"]),
+      roleId: z.string().optional(),
+      seatId: z.string().optional(),
+      profileId: z.string().optional(),
+      params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+    }),
+  ),
+});
+const baselineCoordinator = z.strictObject({
+  roleId: z.string().min(1),
+  roleName: z.string(),
+  profile: baselineSeatProfile.nullable(),
+  source: z.enum(["role-preferred", "role-fallback", "unavailable"]),
+  budget: z.enum(["economy", "sota", "unknown"]).optional(),
+  budgetBasis: z.enum(["host", "pool", "conservative-default"]).optional(),
+  issues: z.array(z.object({}).passthrough()),
+});
+const baselineLaunchPreview = z.strictObject({
+  requestedMode: baselineTeamMode,
+  coordinator: baselineCoordinator,
+  seats: z.array(baselineSeatPreview),
+  counts: z.strictObject({
+    logical: z.number().int().min(0),
+    physical: z.number().int().min(0),
+    eager: z.number().int().min(0),
+    deferred: z.number().int().min(0),
+    escalation: z.number().int().min(0),
+    sotaPotential: z.number().int().min(0),
+  }),
+  budget: z.strictObject({
+    economy: z.number().int().min(0),
+    sota: z.number().int().min(0),
+    unknown: z.number().int().min(0),
+    deferredSota: z.number().int().min(0),
+  }),
+  issues: z.array(z.object({}).passthrough()),
+  warnings: z.array(z.string()),
+  planHash: z.string().min(1).max(128),
+});
+
+const legacyPreview = {
+  requestedMode: "economy" as const,
+  coordinator: {
+    roleId: "lead",
+    roleName: "Lead",
+    profile: { id: "p1", name: "P1", provider: "claude" },
+    source: "role-preferred" as const,
+    budget: "sota" as const,
+    budgetBasis: "host" as const,
+    issues: [],
+  },
+  seats: [
+    {
+      seatId: "seat-m1",
+      logicalSeatId: "logical-m1",
+      roleId: "eng",
+      roleName: "Eng",
+      purpose: "member" as const,
+      activation: "eager" as const,
+      profile: { id: "p2", name: "P2", provider: "omp" },
+      source: "role-preferred" as const,
+      alternates: [],
+      budget: "economy" as const,
+      budgetBasis: "pool" as const,
+      standby: false,
+      unavailable: false,
+      issues: [],
+    },
+  ],
+  counts: { logical: 1, physical: 1, eager: 1, deferred: 0, escalation: 0, sotaPotential: 0 },
+  budget: { economy: 1, sota: 0, unknown: 0, deferredSota: 0 },
+  issues: [],
+  warnings: [],
+  planHash: "hash",
+};
 
 describe("plugin RPC contracts", () => {
   test("method names are part of the client/server protocol, so they stay fixed", () => {
@@ -182,5 +351,68 @@ describe("plugin RPC contracts", () => {
       roles: [],
       teams: [],
     });
+  });
+
+  test("team.plan is exported once with the zero-read probe shape", () => {
+    expect(teamPlanRpc.name).toBe("agent-team.team.plan");
+    expect(teamPlanRpc.input.parse(emptyTeamPlanProbe())).toEqual({ items: [] });
+    expect(
+      teamPlanRpc.input.parse({ items: [{ key: "draft", kind: "draft", draft: { members: [] } }] }),
+    ).toMatchObject({ items: [{ key: "draft" }] });
+  });
+
+  test("launch.status takes an optional integer contractVersion only", () => {
+    expect(launchStatusRpc.input.parse({ runId: "run-1" })).toEqual({ runId: "run-1" });
+    expect(launchStatusRpc.input.parse({ runId: "run-1", contractVersion: 2 })).toEqual({
+      runId: "run-1",
+      contractVersion: 2,
+    });
+    expect(launchStatusRpc.input.parse({ runId: "run-1", contractVersion: 3 })).toMatchObject({
+      contractVersion: 3,
+    });
+    expect(() => launchStatusRpc.input.parse({ runId: "run-1", contractVersion: 2.5 })).toThrow();
+  });
+
+  test("a new-mode job is projected to the baseline DTO for a legacy poller", () => {
+    // 75ec305's literal schema: `mode` only knows the three legacy values and `z.object` strips
+    // unknown keys. Without projection the parse fails, which is the counter-proof below.
+    expect(baselineLaunchJob.safeParse(newModeJob).success).toBe(false);
+
+    const projected = projectLaunchJobForLegacyPeer(newModeJob);
+    expect(projected).not.toBeNull();
+    if (projected === null) return;
+    expect(projected).not.toHaveProperty("mode");
+    expect(projected).not.toHaveProperty("rawMode");
+    expect(projected.state).toBe("running");
+    expect(projected.step).toBe("coordinator");
+    expect(projected.planHash).toBe(newModeJob.planHash);
+    expect(projected.warnings).toEqual([...newModeJob.warnings, launchContractZh.refreshHint]);
+    expect(baselineLaunchJob.safeParse(projected).success).toBe(true);
+
+    // The stored job is untouched: projection works on a copy.
+    expect(newModeJob.mode).toBe("economy-all");
+    expect(newModeJob.rawMode).toBe("future");
+    // Re-projecting an already hinted job does not duplicate the hint.
+    const again = projectLaunchJobForLegacyPeer(projected);
+    expect(again?.warnings).toEqual(projected.warnings);
+  });
+
+  test("legacy jobs, v2 callers, and null pass the projection through", () => {
+    expect(projectLaunchJobForLegacyPeer(null)).toBeNull();
+    expect(projectLaunchJobForLegacyPeer(legacyJob)).toBe(legacyJob);
+    expect(projectLaunchJobForLegacyPeer(newModeJob, 2)).toBe(newModeJob);
+    expect(projectLaunchJobForLegacyPeer(newModeJob, 3)).not.toBe(newModeJob);
+    expect(projectLaunchJobForLegacyPeer(newModeJob, 3)).not.toHaveProperty("mode");
+  });
+
+  test("a legacy preview still parses with the baseline strict schema", () => {
+    expect(baselineLaunchPreview.safeParse(legacyPreview).success).toBe(true);
+    // Guard: the baseline schema is strict, so a new field would be caught here.
+    expect(
+      baselineLaunchPreview.safeParse({
+        ...legacyPreview,
+        seats: [{ ...legacyPreview.seats[0], route: "execution" }],
+      }).success,
+    ).toBe(false);
   });
 });

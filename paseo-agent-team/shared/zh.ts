@@ -1,6 +1,103 @@
 /** Default UI copy and catalog display names (Simplified Chinese). */
 
 import { designZh } from "./zh/design";
+import { launchContractZh } from "./zh/launch-contract";
+import { modePlanZh } from "./zh/mode-plan";
+import { modesZh } from "./zh/modes";
+
+/**
+ * Launch/planner issue copy merged into `zh.modes`. It deliberately excludes the mode display
+ * names (single source: `modesZh.modeLabels`) and shares no key with `modesZh`; the merge test in
+ * tests/design-contracts.test.ts pins the disjoint key sets so neither side can shadow the other.
+ */
+export const launchModeZh = {
+  unknown: (value: string) => `不支持的模式或策略${value ? `（${value}）` : ""}。`,
+  rolePolicyUnknown: (label: string) => `Role「${label || "unknown"}」的层级或任务类型不受支持。`,
+  contextUnavailable: "无法读取当前 host 的 Profile 或可用性，请刷新后重试。",
+  availabilityUnverified: "未能核实 provider 可用性，已按原绑定继续启动。",
+  profileUnresolved: (label: string, reason: string) =>
+    `无法解析 ${label} 的 Profile（${reason}）。`,
+  roleDisabled: (label: string) => `Role「${label || "unknown"}」已禁用。`,
+  roleDisabledWarning: (label: string) => `Role「${label}」已禁用，仍按原绑定启动。`,
+  rolePolicyWarning: (label: string) => `Role「${label}」的层级或任务类型无效，已按原绑定启动。`,
+  roleMissing: (id: string) => `成员 Role「${id}」不存在。`,
+  escalationInvalid: (label: string, reason: string) =>
+    `升级角色配置无效（${label || reason || "unknown"}）。`,
+  escalationUnavailable: (label: string, reason: string) =>
+    `升级通道不可用（${label || "unknown"}：${reason || "unavailable"}）。`,
+  judgeRequired: (reason: string) =>
+    `协作需要独立的评审/测试席位（${reason || "judge-required"}）。`,
+  onDemandFallbackEager: "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
+  onDemandUnavailable: "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。",
+  collaborationRuntimeUnavailable:
+    "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。",
+  staleEscalationOnly:
+    "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
+  duplicateLabelWarning: (label: string) => `实例标签「${label}」重复，已继续启动。`,
+  planChanged: "配置或可用性已变化，请重新预览后再启动。",
+  unknownFallback: (code: string) => `无法启动（${code}）。`,
+  poolEmpty: "经济池为空，已按原绑定解析。",
+  poolUnavailable: (provider?: string) =>
+    `经济池没有可用候选${provider ? `（${provider}）` : ""}，已按原绑定解析。`,
+  poolConfigInvalid: (field: string) => `经济池配置需整理${field ? `（${field}）` : ""}。`,
+  poolDuplicate: (profileId: string) => `经济池重复条目「${profileId}」，已保留第一个。`,
+  poolOrderIgnored: (profileId: string) => `任务顺序中的「${profileId}」不在池内，已忽略。`,
+  familyMissing: (profileId: string) => `Profile「${profileId}」的模型家族缺失或未核实。`,
+  familiesReduced: (requested: number, families: number) =>
+    `协作候选只有 ${families} 个模型家族，已把 ${requested} 路降为 ${families} 路。`,
+  collaborationUnavailable: "候选家族不足两路，本组已按原绑定单路启动。",
+  noExecutionCohort: "没有可并行的执行席位，本组保持原绑定。",
+  sourcePreferred: "首选",
+  sourceFallback: "备选",
+  sourceEconomyPool: "经济池",
+  sourceUnavailable: "不可用",
+  budgetEconomy: "经济池预算",
+  budgetSota: "SOTA 预算",
+  budgetUnknown: "预算未核实",
+  activationEager: "启动时创建",
+  activationOnDemand: "首次派活时创建",
+  activationEscalationOnly: "待命，不在启动时创建",
+  purposeMember: "成员",
+  purposeCandidate: "候选",
+  purposeJudge: "裁判",
+  purposeEscalation: "升级",
+  launchTeamMode: (mode: string) => `组队模式：${mode}（在 Team 中设置）`,
+  launchTeamModeUnknown: (value: string) =>
+    `组队模式「${value || "unknown"}」无法识别；请编辑 Team 修改。`,
+  launchTeamModeEditHint: "在侧栏 Agent Teams › Teams 中编辑此 Team。",
+  previewNoTask: "输入任务后生成启动预览。",
+  previewDebouncing: "正在等待输入完成，随后会更新预览。",
+  previewNoTarget: "选择目标工作区后显示启动预览。",
+  previewLoadingContext: "正在加载 host 上下文…",
+  previewPending: "正在生成启动预览…",
+  previewUpdating: "正在更新预览，新结果返回前无法启动。",
+  previewFailed: "无法生成启动预览。",
+  previewBlocked: "存在阻塞项，无法启动。",
+  previewRefreshed: "配置或可用性已变化，预览已刷新，请确认后重新启动。",
+  profileUnavailable: "Profile 不可用",
+  poolEntryMissing: (profileId: string) => `经济池条目「${profileId}」在当前 host 不存在。`,
+  limitClamped: (limit: number) => `席位数超过上限，已按 ${limit} 个规划。`,
+  noSeats: "本次没有成员席位。",
+  showAllSeats: (count: number) => `展开全部 ${count} 个席位`,
+  showFewerSeats: "收起席位",
+  seatFamily: "家族",
+  seatSource: "来源",
+  seatBudget: "预算",
+  seatStatus: "状态",
+  budgetValueEconomy: "经济",
+  budgetValueSota: "SOTA",
+  budgetValueUnknown: "未核实",
+  budgetBasisHost: "宿主标签",
+  budgetBasisPool: "经济池",
+  budgetBasisConservative: "保守默认",
+  standby: "待命",
+  logicalSeats: "逻辑席位",
+  physicalSeats: "物理席位",
+  eagerSeats: "立即创建",
+  deferredSeats: "按需创建",
+  escalationSeats: "待命",
+  sotaPotentialSeats: "可能消耗 SOTA",
+} as const;
 
 export const zh = {
   sidebarAgentTeams: "Agent Team",
@@ -571,11 +668,9 @@ export const zh = {
 
   // 组队模式与经济池
   teamMode: "组队模式",
-  teamModeSota: "旗舰（SOTA）",
-  teamModeEconomy: "经济",
-  teamModeCollaborative: "协作",
+  teamModeSota: modesZh.modeLabels.flagship,
+  teamModeCollaborative: modesZh.modeLabels.collaborative,
   teamModeSotaHint: "沿用 Role 原绑定，决策与执行都优先使用原 Profile。",
-  teamModeEconomyHint: "执行层按经济池选择，决策层保留原绑定。",
   teamModeCollaborativeHint: "执行层多路候选，测试与审查后择优；需要隔离工作区。",
   teamModeUnknown: (value: string) =>
     `未知模式「${value}」；未修改时原样保留，选择模式后保存会替换。`,
@@ -621,7 +716,7 @@ export const zh = {
   searchProfiles: "搜索 Profile",
   economyPoolProfilesUnavailable: "暂无法读取当前 host 的 Profile，仍可编辑已有池成员。",
   economyPoolProfilesRequired:
-    "新增或改过家族的经济池条目需要当前 host 的 Profile 才能写入绑定；请等待 Profile 加载完成后重试。",
+    "标准池与全席位经济都依赖当前 host 的 Profile：请等待 Profile 加载完成后再保存；新增或改过家族的条目需要写入绑定。",
   economyPoolOmpUnavailable: (reason?: string) =>
     `omp Provider 当前不可用${reason ? `：${reason}` : ""}；本机建议的 Profile 可能无法启动。`,
   economyPoolOmpMissing: "当前 host 没有 omp Provider；本机建议不会匹配。",
@@ -674,95 +769,10 @@ export const zh = {
 
   // 组队模式：规划、预览与启动闸门
   design: designZh,
+  launchContract: launchContractZh,
+  modePlan: modePlanZh,
   modes: {
-    sota: "旗舰（SOTA）",
-    economy: "经济",
-    collaborative: "协作",
-    unknown: (value: string) => `不支持的模式或策略${value ? `（${value}）` : ""}。`,
-    rolePolicyUnknown: (label: string) => `Role「${label || "unknown"}」的层级或任务类型不受支持。`,
-    contextUnavailable: "无法读取当前 host 的 Profile 或可用性，请刷新后重试。",
-    availabilityUnverified: "未能核实 provider 可用性，已按原绑定继续启动。",
-    profileUnresolved: (label: string, reason: string) =>
-      `无法解析 ${label} 的 Profile（${reason}）。`,
-    roleDisabled: (label: string) => `Role「${label || "unknown"}」已禁用。`,
-    roleDisabledWarning: (label: string) => `Role「${label}」已禁用，仍按原绑定启动。`,
-    rolePolicyWarning: (label: string) => `Role「${label}」的层级或任务类型无效，已按原绑定启动。`,
-    roleMissing: (id: string) => `成员 Role「${id}」不存在。`,
-    escalationInvalid: (label: string, reason: string) =>
-      `升级角色配置无效（${label || reason || "unknown"}）。`,
-    escalationUnavailable: (label: string, reason: string) =>
-      `升级通道不可用（${label || "unknown"}：${reason || "unavailable"}）。`,
-    judgeRequired: (reason: string) =>
-      `协作需要独立的评审/测试席位（${reason || "judge-required"}）。`,
-    onDemandFallbackEager: "按需创建尚未启用，本次经济模式启动时全部创建成员。",
-    onDemandUnavailable: "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。",
-    collaborationRuntimeUnavailable:
-      "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。",
-    staleEscalationOnly:
-      "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
-    duplicateLabelWarning: (label: string) => `实例标签「${label}」重复，已继续启动。`,
-    planChanged: "配置或可用性已变化，请重新预览后再启动。",
-    unknownFallback: (code: string) => `无法启动（${code}）。`,
-    poolEmpty: "经济池为空，已按原绑定解析。",
-    poolUnavailable: (provider?: string) =>
-      `经济池没有可用候选${provider ? `（${provider}）` : ""}，已按原绑定解析。`,
-    poolConfigInvalid: (field: string) => `经济池配置需整理${field ? `（${field}）` : ""}。`,
-    poolDuplicate: (profileId: string) => `经济池重复条目「${profileId}」，已保留第一个。`,
-    poolOrderIgnored: (profileId: string) => `任务顺序中的「${profileId}」不在池内，已忽略。`,
-    familyMissing: (profileId: string) => `Profile「${profileId}」的模型家族缺失或未核实。`,
-    familiesReduced: (requested: number, families: number) =>
-      `协作候选只有 ${families} 个模型家族，已把 ${requested} 路降为 ${families} 路。`,
-    collaborationUnavailable: "候选家族不足两路，本组已按原绑定单路启动。",
-    noExecutionCohort: "没有可并行的执行席位，本组保持原绑定。",
-    sourcePreferred: "首选",
-    sourceFallback: "备选",
-    sourceEconomyPool: "经济池",
-    sourceUnavailable: "不可用",
-    budgetEconomy: "经济池预算",
-    budgetSota: "SOTA 预算",
-    budgetUnknown: "预算未核实",
-    activationEager: "启动时创建",
-    activationOnDemand: "首次派活时创建",
-    activationEscalationOnly: "待命，不在启动时创建",
-    purposeMember: "成员",
-    purposeCandidate: "候选",
-    purposeJudge: "裁判",
-    purposeEscalation: "升级",
-    launchTeamMode: (mode: string) => `组队模式：${mode}（在 Team 中设置）`,
-    launchTeamModeUnknown: (value: string) =>
-      `组队模式「${value || "unknown"}」无法识别；请编辑 Team 修改。`,
-    launchTeamModeEditHint: "在侧栏 Agent Teams › Teams 中编辑此 Team。",
-    previewNoTask: "输入任务后生成启动预览。",
-    previewDebouncing: "正在等待输入完成，随后会更新预览。",
-    previewNoTarget: "选择目标工作区后显示启动预览。",
-    previewLoadingContext: "正在加载 host 上下文…",
-    previewPending: "正在生成启动预览…",
-    previewUpdating: "正在更新预览，新结果返回前无法启动。",
-    previewFailed: "无法生成启动预览。",
-    previewBlocked: "存在阻塞项，无法启动。",
-    previewRefreshed: "配置或可用性已变化，预览已刷新，请确认后重新启动。",
-    profileUnavailable: "Profile 不可用",
-    poolEntryMissing: (profileId: string) => `经济池条目「${profileId}」在当前 host 不存在。`,
-    limitClamped: (limit: number) => `席位数超过上限，已按 ${limit} 个规划。`,
-    noSeats: "本次没有成员席位。",
-    showAllSeats: (count: number) => `展开全部 ${count} 个席位`,
-    showFewerSeats: "收起席位",
-    seatFamily: "家族",
-    seatSource: "来源",
-    seatBudget: "预算",
-    seatStatus: "状态",
-    budgetValueEconomy: "经济",
-    budgetValueSota: "SOTA",
-    budgetValueUnknown: "未核实",
-    budgetBasisHost: "宿主标签",
-    budgetBasisPool: "经济池",
-    budgetBasisConservative: "保守默认",
-    standby: "待命",
-    logicalSeats: "逻辑席位",
-    physicalSeats: "物理席位",
-    eagerSeats: "立即创建",
-    deferredSeats: "按需创建",
-    escalationSeats: "待命",
-    sotaPotentialSeats: "可能消耗 SOTA",
+    ...launchModeZh,
+    ...modesZh,
   },
 } as const;

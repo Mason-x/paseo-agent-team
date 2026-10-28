@@ -65,7 +65,6 @@ export const modesZh = {
   economyAllTaskOrderReset: "使用路由顺序",
   economyAllSuggest: "采用建议（只改草稿）",
   economyAllSuggestedNone: "没有可用的建议，草稿未改动。",
-  economyAllProfilesRequired: "无法核实廉价身份：需要读取当前 host 的 Profile 后才能保存。",
   economyAllVersionUnknown: (version: string) =>
     `经济名单的存储版本未知（${version}）；未编辑时原样保留，编辑后保存会以 v1 重写该块。`,
   economyAllRemoveFor: (name: string) => `移出经济名单 ${name}`,

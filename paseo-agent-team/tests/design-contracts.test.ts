@@ -1,8 +1,12 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { modeIssueText } from "../client/launch/launch-preview-state";
+import { formatDesignIssue } from "../shared/domain/design-output";
 import { availableProfileIds } from "../shared/domain/design-planning";
+import { TEAM_MODES, teamModeDisplay } from "../shared/domain/mode-contract";
 import type { ProfileSelection } from "../shared/domain/mode-resolver";
+import { MODE_ISSUE_CODES } from "../shared/domain/role-execution";
 import { LABELS } from "../shared/paseo/labels";
 import {
   defaultCatalogPreviewRpc,
@@ -31,8 +35,10 @@ import {
   DesignStatusInputSchema,
 } from "../shared/schemas/design";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
-import { zh } from "../shared/zh";
+import { launchModeZh, zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
+import { cheapIssueText } from "../shared/zh/mode-plan";
+import { modesZh } from "../shared/zh/modes";
 import {
   DESIGN_CLIENT_REQUEST_ID,
   DESIGN_HASH,
@@ -256,5 +262,91 @@ describe("shared boundary", () => {
     const source = readFileSync(join(import.meta.dirname, "..", "index.server.ts"), "utf8");
     expect(source).not.toMatch(/server\.paseo\b/);
     expect(source).not.toMatch(/server\.before\s*\(/);
+  });
+
+  test("zh.modes merges the launch copy and modesZh without shadowing keys", () => {
+    // Two disjoint source maps: a duplicate key would let one side silently replace the other.
+    expect(Object.keys(launchModeZh).filter((key) => Object.hasOwn(modesZh, key))).toEqual([]);
+    const merged = zh.modes as Record<string, unknown>;
+    for (const [key, value] of Object.entries(modesZh)) expect(merged[key]).toBe(value);
+    for (const [key, value] of Object.entries(launchModeZh)) expect(merged[key]).toBe(value);
+    // Dead labels are gone; the stored values only exist in `modeLabels`.
+    for (const dead of ["sota", "economy", "collaborative"]) {
+      expect(merged).not.toHaveProperty(dead);
+    }
+    expect(zh).not.toHaveProperty("teamModeEconomy");
+    expect(zh).not.toHaveProperty("teamModeEconomyHint");
+  });
+
+  test("mode labels come from the one display table", () => {
+    expect(zh.teamModeSota).toBe(modesZh.modeLabels.flagship);
+    expect(zh.teamModeCollaborative).toBe(modesZh.modeLabels.collaborative);
+    for (const mode of TEAM_MODES) {
+      expect(designZh.modes[mode]).toBe(modesZh.modeLabels[teamModeDisplay(mode)]);
+    }
+    expect(designZh.modes.economy).toBe("标准");
+    expect(designZh.modes["economy-all"]).toBe("经济");
+  });
+
+  test("the new-Role limit copy reads 0, 3, and a legacy missing limit", () => {
+    const message = (params: Record<string, string | number>) =>
+      formatDesignIssue({
+        code: "DESIGN_NEW_ROLE_LIMIT",
+        severity: "error",
+        path: [],
+        params,
+        action: "repair",
+      });
+    expect(message({ limit: 0 })).toContain("上限0");
+    expect(message({ limit: 0 })).not.toContain("3");
+    expect(message({ limit: 3 })).toContain("上限3");
+    const legacy = message({});
+    expect(legacy).not.toContain("{limit}");
+    expect(legacy).toContain("上限");
+    expect(legacy).not.toContain("3");
+  });
+
+  test("every MODE_ISSUE_CODES entry renders real copy, not the fallback", () => {
+    const params = {
+      route: "execution",
+      reason: "no-eligible",
+      profileId: "p",
+      provider: "omp",
+      field: "mode",
+      value: "turbo",
+      count: 2,
+      limit: 1,
+      members: 2,
+      families: 1,
+      requested: 2,
+      kind: "coding",
+      instanceLabel: "A",
+      roleId: "r",
+      seatId: "s",
+    };
+    for (const code of MODE_ISSUE_CODES) {
+      const issue = { code, severity: "blocker" as const, params };
+      if (code === "MODE_PLAN_CHANGED") {
+        // Declared but never emitted yet; the copy exists, while the renderer case lives in
+        // client/launch/launch-preview-state.ts (I02). Tracked as a stage-2/I02 handoff.
+        expect(zh.modes.planChanged.length).toBeGreaterThan(0);
+        continue;
+      }
+      const text = code.startsWith("MODE_CHEAP_")
+        ? cheapIssueText(issue)
+        : modeIssueText(issue as Parameters<typeof modeIssueText>[0]);
+      expect(text.length).toBeGreaterThan(0);
+      expect(text).not.toBe(zh.modes.unknownFallback(code));
+    }
+  });
+
+  test("design.start takes an optional integer contractVersion", () => {
+    // Stage 2 extends this to the other seven RPCs once C03's optional fields are integrated.
+    const input = { clientRequestId: DESIGN_CLIENT_REQUEST_ID, request: "设计一个团队" };
+    expect(designStartRpc.input.parse(input)).toMatchObject({ request: "设计一个团队" });
+    expect(designStartRpc.input.parse({ ...input, contractVersion: 2 })).toMatchObject({
+      contractVersion: 2,
+    });
+    expect(() => designStartRpc.input.parse({ ...input, contractVersion: 2.5 })).toThrow();
   });
 });

@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { isLegacyTeamMode, requestContractVersion } from "./domain/mode-contract";
 import {
   DefaultCatalogPreviewInputSchema,
   DefaultCatalogPreviewResultSchema,
@@ -8,6 +9,7 @@ import { LaunchPreviewResultSchema } from "./schemas/launch-preview";
 import { RoleSchema } from "./schemas/role";
 import { TeamSchema } from "./schemas/team";
 import { TeamModeSchema } from "./schemas/team-mode";
+import { launchContractZh } from "./zh/launch-contract";
 
 export const LaunchTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: z.string().min(1) }),
@@ -38,7 +40,13 @@ export const LaunchStartInputSchema = z.object({
    * semantic request field and never enters the plan hash.
    */
   contractVersion: z.number().int().optional(),
-  /** Token from launch.preview. Omitted by legacy callers; new clients always send it. */
+  /**
+   * Token from launch.preview. Omitted by legacy callers; new clients always send it.
+   *
+   * Known behavior (F06/73): the launch fingerprint includes each selected Profile's live display
+   * name, so renaming a Profile invalidates an open preview and asks for a fresh one. This is
+   * documented, not changed here.
+   */
   expectedPlanHash: z.string().min(1).max(128).optional(),
 });
 
@@ -86,6 +94,28 @@ export type LaunchTarget = z.infer<typeof LaunchTargetSchema>;
 export type LaunchStartInput = z.infer<typeof LaunchStartInputSchema>;
 export type LaunchPreviewInput = z.infer<typeof LaunchPreviewInputSchema>;
 export type LaunchJob = z.infer<typeof LaunchJobSchema>;
+
+/**
+ * AC-0d.20: a stale page polls `launch.status` with the baseline DTO, whose `mode` enum only
+ * knows the three legacy values. A job started in a new mode is projected to the keys that page
+ * can parse: drop `mode`/`rawMode`, keep the real run state, and append the refresh hint once.
+ * The stored job is never mutated; v2 callers, legacy-mode jobs, and `null` pass through.
+ */
+export function projectLaunchJobForLegacyPeer(
+  job: LaunchJob | null,
+  contractVersion?: number,
+): LaunchJob | null {
+  if (job === null) return null;
+  if (requestContractVersion({ contractVersion }) === 2) return job;
+  if (job.mode === undefined || isLegacyTeamMode(job.mode)) return job;
+  const warnings = job.warnings.includes(launchContractZh.refreshHint)
+    ? job.warnings
+    : [...job.warnings, launchContractZh.refreshHint];
+  const projected: LaunchJob = { ...job, warnings };
+  delete projected.mode;
+  delete projected.rawMode;
+  return projected;
+}
 export {
   designCancelRpc,
   designContinueRpc,
@@ -96,6 +126,26 @@ export {
   designStartRpc,
   designStatusRpc,
 } from "./rpc/design";
+export type {
+  TeamPlanCapabilities,
+  TeamPlanContext,
+  TeamPlanDraft,
+  TeamPlanDraftMember,
+  TeamPlanInput,
+  TeamPlanOutput,
+  TeamPlanResult,
+  TeamPlanRow,
+} from "./rpc/team-plan";
+export {
+  emptyTeamPlanProbe,
+  TEAM_PLAN_DESIGN_ROLE_POLICY,
+  TEAM_PLAN_MAX_DRAFT_ROWS,
+  TEAM_PLAN_MAX_INPUT_BYTES,
+  TEAM_PLAN_MAX_ITEMS,
+  TEAM_PLAN_MAX_ROWS,
+  TEAM_PLAN_SCHEMA_VERSION,
+  teamPlanRpc,
+} from "./rpc/team-plan";
 
 export type {
   CoordinatorPreview,
@@ -134,7 +184,11 @@ export const launchPreviewRpc = defineRpc({
 /** `job` is null once the run is forgotten (finished long ago, or the plugin restarted). */
 export const launchStatusRpc = defineRpc({
   name: "agent-team.launch.status",
-  input: z.object({ runId: z.string().min(1) }),
+  input: z.object({
+    runId: z.string().min(1),
+    /** See `LaunchStartInputSchema.contractVersion`; absent is a legacy caller. */
+    contractVersion: z.number().int().optional(),
+  }),
   output: z.object({ job: LaunchJobSchema.nullable() }),
 });
 
