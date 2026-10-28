@@ -1,6 +1,6 @@
 # Paseo Agent Team：分层编排与确定性治理路线图
 
-2026-10-27 起草，供下一轮 Agent Team 迭代使用。已与 `docs/next-iteration-role-tiering.md`（难度与层级）、`docs/backlog.md`（待修与未完成项）合并考虑；三者冲突时以本文件为准。
+2026-10-27 起草，2026-10-28 随 P1 发布更新。已与 `docs/next-iteration-role-tiering.md`（难度与层级）、`docs/backlog.md`（待修与未完成项）合并考虑；三者冲突时以本文件为准。
 
 ## 1. 目标与原则
 
@@ -117,8 +117,13 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 
 ## 6. 分阶段路线图
 
+- **P1 产品阶段（已完成，2026-10-28）**：Team 视图解析模型、四档模式与“经济：全席位”路由、新模式访问门、设计师“只用现有 Role”开关与缺口卡、旧客户端兼容投影，以及 CLI 的高级 `--mode` 覆盖。Run Engine 在此期间完成 A 批底座，尚未接入日常启动。
 - **阶段 0（已完成，2026-10-27）**：按本设计建好 Team「Agent Team 研发 · 分层编排」（`agent-team-orchestration`），未运行。在 Run Engine 落地之前，用"运行调度成员 + 规则"的过渡形态执行。
-- **阶段 1（下一轮目标）：Run Engine 最小闭环**
+- **阶段 1（Run Engine 最小闭环；A 批完成，B 批下一步）**
+  - **A 批已完成**：任务合同与 strict schema、原子 JSON 台账底座、进程锁、真实文件系统夹具与崩溃/并发矩阵；当前仅测试引用，尚未改变 P1 运行时行为。
+  - **B 批待实施**：合同补齐、确定性 reducer/门禁/调度/锁/预算、运行台账、观察与 hooks、Runs 只读接线、派发/取消、渠道/唤醒/批准，以及真实 DEV 验收。计划在 P1 打 tag 后合入，按 `R01b/R03a → R05 → R06 → W01 → VB` 的关键路径推进。
+  - **R04b 转入 backlog**：设计师账本切换到通用底座；P1 账本 v2 刚上线，暂不承担改造风险。
+  - 阶段 1 的完整闭环仍包括：
   1. 任务台账的 schema 与存储：复用设计师账本模式（原子写、锁、恢复），旧数据兼容。
   2. 结构化协议：`task-dag` / `task-report` 的 strict schema 与身份校验，在 `turn_ended` 时解析；解析失败时要求重发，不得静默接受。
   3. 确定性状态机与质量门：证据、独立审查、DEV 冒烟三道门由程序强制执行。
@@ -136,7 +141,7 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
   - 协作模式（多家族并行 + 仲裁）建立在 Run Engine 之上；
   - 额度感知（用量接口）；
   - 可观测与调优：记录任务级的模型、返工、耗时与 token，按历史数据调整层级。
-- **并入 backlog P1**：
+- **已并入 backlog P1（已完成）**：
   - 启动对话框去掉"本次运行模式"，改为只读显示 Team 的模式。这是本轮第一个任务，难度 L2，详见 backlog P1 第 0 条。
   - Team 列表与 Team 编辑页显示每个成员按模式解析出的模型，复用启动预览的同一套规划。难度 L3，详见 backlog P1 第 0b 条。
   - 设计师增加"只用现有 Role"开关，默认开启。详见 backlog P1 第 0c 条。
@@ -183,3 +188,12 @@ Anthropic，2026-08《Patterns and problems in emerging multiagent systems》：
 - 并行导致的合并冲突与重名为 0：由锁、DAG 和唯一命名保证。
 - 质量门被绕过的次数为 0：由程序强制。
 - 从启动到合入的总时长低于 round-ape。
+
+## 9. 协作与测试环境规则建议
+
+由 Paseo daemon 启动的 agent 会继承指向真实 home 的 `PASEO_HOME`，而工具调用之间的 shell 环境不会保留。建议写入 `AGENTS.md`：
+
+- 每条会运行代码的命令，都在**同一命令行内**把 `PASEO_HOME` 设为系统 TEMP 下的新目录，并断言它不在 `%USERPROFILE%\.paseo` 下。
+- 不得把临时文件、日志、探针数据或测试夹具写进 `PASEO_HOME`；临时数据另建 TEMP 目录。
+- 禁止对默认 host 执行插件安装/重载等生命周期命令；真实 daemon 的只读接口与端口也不作为测试目标。
+- 测试与质量门必须使用隔离的目录；同一 worktree 内不要并行执行 `npm ci` 或覆盖率。
