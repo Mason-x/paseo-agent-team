@@ -37,6 +37,7 @@ import {
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
 import { launchModeZh, zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
+import { launchContractZh } from "../shared/zh/launch-contract";
 import { cheapIssueText } from "../shared/zh/mode-plan";
 import { modesZh } from "../shared/zh/modes";
 import {
@@ -295,6 +296,28 @@ describe("shared boundary", () => {
     expect(zh.economyPoolEmpty).not.toContain("才可使用");
     expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.standard);
     expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("经济模式");
+  });
+
+  test("renamed-mode copy avoids raw stored values and the old economy-only wording", () => {
+    expect(zh.memberCreationHint).toContain(
+      `${modesZh.modeLabels.standard}/${modesZh.modeLabels.economy}/${modesZh.modeLabels.collaborative}`,
+    );
+    expect(zh.memberCreationHint).not.toContain("；经济/协作");
+
+    const teamGate = launchContractZh.modeRequired("team", "economy-all");
+    expect(teamGate).toContain(modesZh.modeLabels.economy);
+    expect(teamGate).not.toContain("economy-all");
+    const requestGate = launchContractZh.modeRequired("request", "economy-all");
+    expect(requestGate).toContain("本次运行模式");
+    expect(requestGate).not.toContain("economy-all");
+
+    // A damaged Team is not a stale page: say so instead of claiming an update is required.
+    const unknownGate = launchContractZh.modeRequired("team", "turbo");
+    expect(unknownGate).toContain("无法识别");
+    expect(unknownGate).toContain("Team 编辑器");
+    expect(unknownGate).not.toContain("更新插件");
+    expect(launchContractZh.refreshHint).not.toContain("插件已更新");
+    expect(launchContractZh.refreshHint).toContain("刷新页面");
   });
 
   test("the new-Role limit copy reads 0, 3, and a legacy missing limit", () => {

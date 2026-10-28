@@ -683,7 +683,7 @@ export const zh = {
   memberCreationDefault: "默认（按模式）",
   memberCreationEager: "启动时全部创建",
   memberCreationOnDemand: "首次派活时创建",
-  memberCreationHint: "默认：旗舰启动时全部创建；经济/协作首次派活时才创建成员。",
+  memberCreationHint: "默认：旗舰启动时全部创建；标准/经济/协作首次派活时才创建成员。",
   collaborationReplicas: "协作路数",
   collaborationTwo: "两路",
   collaborationThree: "三路",

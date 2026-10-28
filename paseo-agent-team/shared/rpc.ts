@@ -29,8 +29,8 @@ const LaunchRequestShape = {
 export const LaunchStartInputSchema = z.object({
   ...LaunchRequestShape,
   /**
-   * Advanced override for scripts and tests only; the App never sends it. Normal launches plan
-   * from the saved Team.mode and never persist an override.
+   * Advanced override: the App never sends it; scripts and tests may. Normal launches plan from
+   * the saved Team.mode and never persist an override.
    */
   mode: TeamModeSchema.optional(),
   /**
