@@ -243,6 +243,9 @@ describe("acceptance additions: probe-settled gating and preview identity", () =
     const dialog = readFileSync(path.join(root, "client", "launch", "LaunchDialog.tsx"), "utf8");
 
     expect(screen).toContain("const plansSettled = planSettledForHost(plans, host.id);");
+    const hook = readFileSync(path.join(root, "client", "teams", "use-team-plans.ts"), "utf8");
+    // Activation after a host change must sync the new scope before it may refresh.
+    expect(hook.indexOf("client.setScope({")).toBeLessThan(hook.indexOf("client.setActive(true)"));
     expect(screen).toContain("active: teamPlanActive({");
     expect(screen).toContain('teamsTab: tab === "teams"');
     expect(screen).toContain("settingsReady");
@@ -252,6 +255,7 @@ describe("acceptance additions: probe-settled gating and preview identity", () =
     expect(screen).toMatch(/modeContract: plans\.modeContract/);
     expect(screen).toMatch(/modeContract=\{plans\.modeContract\}/);
 
+    expect(dialog).toContain("probeSettled = false");
     expect(dialog).toMatch(/enabled:\s*[\s\S]{0,140}probeSettled/);
     expect(dialog).toContain("const blocked = gate.disabled || !probeSettled");
     expect(dialog).toMatch(/launchStatusRequest\(job\.runId, modeContract\)/);

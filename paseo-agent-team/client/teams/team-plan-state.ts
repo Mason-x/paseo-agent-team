@@ -607,6 +607,14 @@ export function isMethodNotFound(error: unknown): boolean {
  * Host shims may report null/undefined/"unknown" before the app state is known; only background
  * and inactive mean "not visible". Everything else starts (and resumes) the visible refresh loop.
  */
+/** A view from another host never exposes its contract; the consumer sees unknown until aligned. */
+export function modeContractForHost(
+  view: Pick<TeamPlanBatchView, "scopeHostId" | "modeContract">,
+  hostId: string,
+): ModeContractSupport {
+  return view.scopeHostId === hostId ? view.modeContract : "unknown";
+}
+
 export function isAppStateActive(state: string | null | undefined): boolean {
   return state !== "background" && state !== "inactive";
 }
