@@ -177,7 +177,37 @@ export const RunTaskSpecShape = {
   implementationPolicy: z.enum(["default", "a-with-s-plan"]),
   architectureTaskId: z.string().min(1).max(64).nullable(),
 };
-export const RunTaskSpecSchema = z.object(RunTaskSpecShape).passthrough();
+export const RunTaskSpecSchema = z
+  .object(RunTaskSpecShape)
+  .passthrough()
+  .superRefine((spec, ctx) => {
+    const expected =
+      spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
+    if (spec.implementationPolicy === "a-with-s-plan") {
+      if (spec.level !== "L4") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["level"],
+          message: "a-with-s-plan is only valid on L4",
+        });
+      }
+      if (spec.tier !== "A") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tier"],
+          message: "a-with-s-plan must execute at tier A",
+        });
+      }
+      return;
+    }
+    if (spec.tier !== expected) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tier"],
+        message: `tier must be ${expected} for ${spec.level}`,
+      });
+    }
+  });
 export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 
 /** Evidence summary (05 §3): bounded, redacted, path-only; secrets never enter the ledger. */
@@ -219,6 +249,15 @@ export const RunCancellationEvidenceSchema = z
     assignmentId: RunIdRefSchema,
     lastTurnId: z.string().min(1).max(128).nullable(),
     endedEventKey: z.string().min(1).max(256).nullable(),
+    /** The actual refresh observation backing quiescence; a timestamp alone is not evidence. */
+    refresh: z
+      .object({
+        agentId: RunIdRefSchema,
+        status: z.enum(["idle", "closed", "missing"]),
+        activeTurn: z.literal(false),
+        observedAt: RunTimeSchema,
+      })
+      .passthrough(),
     refreshObservedAt: RunTimeSchema,
     /** Must be ≥ the observationSeq at the refresh that produced this evidence. */
     observationSeq: RunSeqSchema,
@@ -436,6 +475,18 @@ export const RunBudgetEntrySchema = z
   })
   .passthrough();
 
+export const RUN_DECISION_ANSWER_ACTIONS = [
+  "replan",
+  "assign-seat",
+  "increase-budget",
+  "retry",
+  "cancel",
+  "defer-channel",
+  "resume-seat",
+  "reject",
+] as const;
+export const RunDecisionAnswerActionSchema = z.enum(RUN_DECISION_ANSWER_ACTIONS);
+
 export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
@@ -446,10 +497,28 @@ export const RunDecisionPointSchema = z
     dedupeKey: z.string().min(1).max(256),
     subjectId: RunIdRefSchema.nullable(),
     summary: z.string().min(1).max(4096),
+    /** The answer survives checkpoint compression; required exactly when state=answered. */
+    answer: z
+      .object({
+        action: RunDecisionAnswerActionSchema,
+        taskIds: z.array(z.string().min(1).max(64)).max(64),
+        answeredAt: RunTimeSchema,
+      })
+      .passthrough()
+      .nullable(),
     createdAt: RunTimeSchema,
     answeredAt: RunTimeSchema.nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((decision, ctx) => {
+    if (decision.state === "answered" && decision.answer === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["answer"],
+        message: "an answered decision must record its answer",
+      });
+    }
+  });
 
 export const RunApprovalSchema = z
   .object({
@@ -587,6 +656,18 @@ export const RunModelPlanBasisSchema = z
   .passthrough();
 export type RunModelPlanBasis = z.infer<typeof RunModelPlanBasisSchema>;
 
+/** One B→A/A→S escalation. The chain is validated against the frozen spec tier. */
+export const RunTaskEscalationSchema = z
+  .object({
+    fromTier: RunTierSchema,
+    toTier: RunTierSchema,
+    atAttempt: z.number().int().min(1),
+    qualityFailures: z.number().int().nonnegative(),
+    at: RunTimeSchema,
+  })
+  .passthrough();
+export type RunTaskEscalation = z.infer<typeof RunTaskEscalationSchema>;
+
 export const RunTaskRecordSchema = z
   .object({
     spec: RunTaskSpecSchema,
@@ -601,7 +682,7 @@ export const RunTaskRecordSchema = z
     evidenceReturns: z.number().int().nonnegative(),
     reworkCount: z.number().int().nonnegative(),
     qualityFailures: z.number().int().nonnegative(),
-    escalations: z.array(z.record(z.string(), z.unknown())).max(16),
+    escalations: z.array(RunTaskEscalationSchema).max(2),
     frozenClaimId: RunIdRefSchema.nullable(),
     /** Explicit decision that released a frozen/blocked task (05 §4 B1); never implicit. */
     releaseDecisionId: z.string().uuid().nullable(),
@@ -621,6 +702,54 @@ export const RunTaskRecordSchema = z
         path: ["phase"],
         message: "awaiting-rework is only valid on a review task",
       });
+    }
+    for (const [index, escalation] of task.escalations.entries()) {
+      const previous = index === 0 ? undefined : task.escalations[index - 1];
+      if (
+        previous !== undefined &&
+        (escalation.qualityFailures < previous.qualityFailures ||
+          escalation.atAttempt < previous.atAttempt)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation counters must not decrease",
+        });
+      }
+      if (escalation.qualityFailures > task.qualityFailures) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures exceeds the task total",
+        });
+      }
+      if (escalation.atAttempt > task.attempts) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "atAttempt"],
+          message: "escalation atAttempt exceeds the task attempts",
+        });
+      }
+    }
+    let current = task.spec.tier;
+    for (const [index, escalation] of task.escalations.entries()) {
+      if (escalation.fromTier !== current) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "fromTier"],
+          message: `escalation must start from ${current}`,
+        });
+      }
+      const next = current === "B" ? "A" : current === "A" ? "S" : null;
+      if (next === null || escalation.toTier !== next) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "toTier"],
+          message: next === null ? "S cannot escalate" : `escalation must go to ${next}`,
+        });
+        break;
+      }
+      current = escalation.toTier;
     }
   });
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;

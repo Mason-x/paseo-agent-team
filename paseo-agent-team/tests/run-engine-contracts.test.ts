@@ -14,6 +14,7 @@ import {
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
   RUN_TASK_PHASES,
+  RunCancellationEvidenceSchema,
   RunDecisionPointSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
@@ -786,6 +787,7 @@ describe("R01c decision nonce digest and frozen phase", () => {
     category: "D1",
     controlNonceDigest: "a".repeat(64),
     state: "open",
+    answer: null,
     dedupeKey: "run: D1: decision",
     subjectId: null,
     summary: "A decision needs a reply.",
@@ -878,6 +880,286 @@ describe("R01c decision nonce digest and frozen phase", () => {
     if (!unknown.success) {
       expect(unknown.error.issues).toHaveLength(1);
       expect(unknown.error.issues[0]?.path).toEqual(["phase"]);
+    }
+  });
+});
+
+describe("R01f cancellation refresh and decision answer", () => {
+  const evidence = {
+    assignmentId: "assignment-1",
+    lastTurnId: "turn-1",
+    endedEventKey: "agent|turn-1|turn_ended",
+    refresh: {
+      agentId: "agent-1",
+      status: "idle",
+      activeTurn: false,
+      observedAt: NOW,
+    },
+    refreshObservedAt: NOW,
+    observationSeq: 1,
+    cancelIntentId: "intent-cancel",
+    receipt: { kind: "archive", confirmedAt: NOW, externalId: "archive-1" },
+  };
+  const answered = {
+    decisionId: "99999999-9999-4999-8999-999999999999",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "answered",
+    answer: { action: "cancel", taskIds: ["t1"], answeredAt: NOW },
+    dedupeKey: "run: D1",
+    subjectId: "t1",
+    summary: "cancel approved",
+    createdAt: NOW,
+    answeredAt: NOW,
+  };
+
+  test("refresh is a required typed observation; decision answers are required only when answered", () => {
+    expect(RunCancellationEvidenceSchema.safeParse(evidence).success).toBe(true);
+    expect(RunDecisionPointSchema.safeParse(answered).success).toBe(true);
+    expect(
+      RunDecisionPointSchema.safeParse({ ...answered, state: "open", answer: null }).success,
+    ).toBe(true);
+
+    const badEvidence = [
+      {
+        value: (() => {
+          const { refresh: _omit, ...rest } = evidence;
+          return rest;
+        })(),
+        path: ["refresh"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, status: "busy" } },
+        path: ["refresh", "status"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, activeTurn: true } },
+        path: ["refresh", "activeTurn"],
+      },
+    ];
+    for (const entry of badEvidence) {
+      const parsed = RunCancellationEvidenceSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("answered without answer and invalid answer actions are single defects", () => {
+    const missing = { ...answered, answer: null };
+    const parsedMissing = RunDecisionPointSchema.safeParse(missing);
+    expect(parsedMissing.success).toBe(false);
+    if (!parsedMissing.success) {
+      expect(parsedMissing.error.issues).toHaveLength(1);
+      expect(parsedMissing.error.issues[0]?.path).toEqual(["answer"]);
+    }
+    const badAction = {
+      ...answered,
+      answer: { ...answered.answer, action: "force-done" },
+    };
+    const parsedAction = RunDecisionPointSchema.safeParse(badAction);
+    expect(parsedAction.success).toBe(false);
+    if (!parsedAction.success) {
+      expect(parsedAction.error.issues).toHaveLength(1);
+      expect(parsedAction.error.issues[0]?.path).toEqual(["answer", "action"]);
+    }
+  });
+});
+
+describe("R01d escalation chain", () => {
+  const a = {
+    fromTier: "B",
+    toTier: "A",
+    atAttempt: 3,
+    qualityFailures: 3,
+    at: NOW,
+  };
+  const sTier = { ...a, fromTier: "A", toTier: "S", atAttempt: 6, qualityFailures: 6 };
+  const r01dTask = (overrides: Record<string, unknown>) =>
+    taskRecord({ attempts: 10, qualityFailures: 10, ...overrides });
+
+  test("B→A and B→A→S chains parse; two entries are the maximum", () => {
+    expect(RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a] })).success).toBe(true);
+    expect(RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a, sTier] })).success).toBe(true);
+    const tooMany = RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a, sTier, a] }));
+    expect(tooMany.success).toBe(false);
+    if (!tooMany.success) {
+      expect(tooMany.error.issues.some((issue) => issue.path[0] === "escalations")).toBe(true);
+    }
+  });
+
+  test("A start can escalate only to S; S start cannot escalate at all", () => {
+    const aStart = r01dTask({
+      spec: taskSpec({ level: "L3", tier: "A" }),
+      escalations: [sTier],
+    });
+    expect(RunTaskRecordSchema.safeParse(aStart).success).toBe(true);
+
+    const sStart = r01dTask({
+      spec: taskSpec({ level: "L4", tier: "S" }),
+      escalations: [{ ...a, fromTier: "S", toTier: "S" }],
+    });
+    const rejected = RunTaskRecordSchema.safeParse(sStart);
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(rejected.error.issues).toHaveLength(1);
+      expect(rejected.error.issues[0]?.path).toEqual(["escalations", 0, "toTier"]);
+    }
+  });
+
+  test("wrong fromTier, skipped toTier, missing field and bad attempt are single defects", () => {
+    const cases: Array<{ value: unknown; path: (string | number)[] }> = [
+      {
+        value: r01dTask({ escalations: [{ ...a, fromTier: "A" }] }),
+        path: ["escalations", 0, "fromTier"],
+      },
+      {
+        value: r01dTask({ escalations: [{ ...a, toTier: "S" }] }),
+        path: ["escalations", 0, "toTier"],
+      },
+      {
+        value: r01dTask({ escalations: [a, { ...sTier, fromTier: "B" }] }),
+        path: ["escalations", 1, "fromTier"],
+      },
+      {
+        value: r01dTask({ escalations: [{ ...a, atAttempt: 0 }] }),
+        path: ["escalations", 0, "atAttempt"],
+      },
+      {
+        value: r01dTask({
+          escalations: [{ fromTier: "B", toTier: "A", atAttempt: 1, at: NOW }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+});
+
+describe("R01e spec tier consistency and escalation counters", () => {
+  test("default tiers follow level, except a-with-s-plan L4/A", () => {
+    for (const [level, tier] of [
+      ["L1", "B"],
+      ["L2", "B"],
+      ["L3", "A"],
+      ["L4", "S"],
+    ] as const) {
+      expect(
+        RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec({ level, tier }) })).success,
+      ).toBe(true);
+    }
+    expect(
+      RunTaskRecordSchema.safeParse(
+        taskRecord({
+          spec: taskSpec({
+            level: "L4",
+            tier: "A",
+            implementationPolicy: "a-with-s-plan",
+            architectureTaskId: "T0",
+          }),
+        }),
+      ).success,
+    ).toBe(true);
+
+    const mismatches: Array<{ spec: Record<string, unknown>; path: (string | number)[] }> = [
+      { spec: { level: "L4", tier: "B" }, path: ["spec", "tier"] },
+      { spec: { level: "L1", tier: "S" }, path: ["spec", "tier"] },
+      {
+        spec: {
+          level: "L3",
+          tier: "A",
+          implementationPolicy: "a-with-s-plan",
+          architectureTaskId: "T0",
+        },
+        path: ["spec", "level"],
+      },
+      {
+        spec: {
+          level: "L4",
+          tier: "B",
+          implementationPolicy: "a-with-s-plan",
+          architectureTaskId: "T0",
+        },
+        path: ["spec", "tier"],
+      },
+    ];
+    for (const entry of mismatches) {
+      const parsed = RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec(entry.spec) }));
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("escalation counters are monotonic and bounded by the task totals", () => {
+    const base = { fromTier: "B", toTier: "A", atAttempt: 3, qualityFailures: 3, at: NOW };
+    const cases: Array<{ task: ReturnType<typeof taskRecord>; path: (string | number)[] }> = [
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [
+            base,
+            { ...base, fromTier: "A", toTier: "S", atAttempt: 4, qualityFailures: 1 },
+          ],
+        }),
+        path: ["escalations", 1, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 10,
+          qualityFailures: 10,
+          escalations: [{ ...base, qualityFailures: 99 }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 2,
+          qualityFailures: 3,
+          escalations: [{ ...base, atAttempt: 3 }],
+        }),
+        path: ["escalations", 0, "atAttempt"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(entry.task);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("a third escalation is rejected by the array cap, not only by the S rule", () => {
+    const a = { fromTier: "B", toTier: "A", atAttempt: 3, qualityFailures: 3, at: NOW };
+    const s = { ...a, fromTier: "A", toTier: "S", atAttempt: 6, qualityFailures: 6 };
+    const parsed = RunTaskRecordSchema.safeParse(
+      taskRecord({
+        attempts: 6,
+        qualityFailures: 6,
+        escalations: [a, s, { ...s, fromTier: "S", toTier: "S" }],
+      }),
+    );
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(
+        parsed.error.issues.some(
+          (issue) => issue.path[0] === "escalations" && issue.path.length === 1,
+        ),
+      ).toBe(true);
     }
   });
 });
