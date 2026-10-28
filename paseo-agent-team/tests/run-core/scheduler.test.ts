@@ -131,6 +131,15 @@ describe("scheduler eligibility and ordering", () => {
       })),
     );
     expect(ranked.map((candidate) => candidate.seatId)).toEqual(["seat-a2", "seat-a1", "seat-b1"]);
+    const codeUnits = ["a", "B"].map((seatId) => ({
+      seatId,
+      profileId: "p",
+      load: 0,
+      qualityRework: 0,
+      order: 0,
+      qualification: "q",
+    }));
+    expect(rankCandidates(codeUnits).map((candidate) => candidate.seatId)).toEqual(["B", "a"]);
   });
 
   test("planDispatch returns proposals only and does not mutate its input", () => {
@@ -154,8 +163,17 @@ describe("scheduler eligibility and ordering", () => {
         qualification: "tier=B,load=0,rework=0",
       },
     ]);
-    expect(single.blocked).toMatchObject([{ taskId: "T2", decision: "D1" }]);
+    expect(single.blocked).toMatchObject([{ taskId: "T2", decision: "wait" }]);
     expect(planDispatch(input, ctx({ seats: [seat({ order: 1 })] }))).toHaveLength(1);
+    const three = record({
+      tasks: ["T1", "T2", "T3"].map((id) => taskRecord(spec(id, id), { state: "ready" })),
+    });
+    const plan = planDispatchWithReasons(three, ctx({ seats: [seat({ order: 1 })] }));
+    expect(plan.proposals.map((entry) => entry.taskId)).toEqual(["T1"]);
+    expect(plan.blocked).toMatchObject([
+      { taskId: "T2", decision: "wait" },
+      { taskId: "T3", decision: "wait" },
+    ]);
     expect(JSON.stringify(input)).toBe(before);
   });
 
@@ -173,6 +191,9 @@ describe("scheduler eligibility and ordering", () => {
     expect(new Set(labels.map((entry) => entry.branchName)).size).toBe(3);
     expect(labels[0]?.branchName).toContain("-t1-");
     expect(dispatchLabels("run-abcdef123456", "登录", 1, 1).branchName).toContain("task-");
+    expect(dispatchLabels("run-abcdef123456", "T1", 1, 1).branchName).not.toBe(
+      dispatchLabels("run-abcdef123456", "t1", 1, 1).branchName,
+    );
   });
 
   test("quality failure is the single rework/escalate/D3/D4 rule", () => {

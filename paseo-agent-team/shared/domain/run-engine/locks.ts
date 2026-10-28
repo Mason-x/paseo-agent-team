@@ -23,7 +23,10 @@ export type PathRejection =
   | "ads"
   | "trailing-dot-space"
   | "empty-segment"
-  | "escape";
+  | "escape"
+  | "glob"
+  | "illegal-char"
+  | "reserved";
 
 export type NormalizedPath =
   | { ok: true; path: string; caseFolded: string }
@@ -68,6 +71,13 @@ export function normalizeLogicalPath(raw: string): NormalizedPath {
   if (raw.startsWith("/") || raw.startsWith("\\")) return { ok: false, reason: "absolute" };
   if (/^[A-Za-z]:/u.test(raw)) return { ok: false, reason: "drive" };
   if (raw.includes(":")) return { ok: false, reason: "ads" };
+  if (raw.includes("*") || raw.includes("?")) return { ok: false, reason: "glob" };
+  for (const char of raw) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f || '<>"|'.includes(char)) {
+      return { ok: false, reason: "illegal-char" };
+    }
+  }
   const segments: string[] = [];
   for (const part of raw.split(/[\\/]+/u)) {
     if (part === "") continue;
@@ -79,6 +89,10 @@ export function normalizeLogicalPath(raw: string): NormalizedPath {
     }
     if (part.endsWith(".") || part.endsWith(" ")) {
       return { ok: false, reason: "trailing-dot-space" };
+    }
+    const base = part.split(".")[0]?.toUpperCase() ?? "";
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(base)) {
+      return { ok: false, reason: "reserved" };
     }
     segments.push(part);
   }

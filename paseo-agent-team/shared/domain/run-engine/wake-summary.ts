@@ -102,7 +102,7 @@ export function classifyWake(
   }
 
   return [...requests.values()].sort((left, right) =>
-    left.dedupeKey.localeCompare(right.dedupeKey),
+    left.dedupeKey < right.dedupeKey ? -1 : left.dedupeKey > right.dedupeKey ? 1 : 0,
   );
 }
 
@@ -125,7 +125,9 @@ function cleanText(value: string): string {
   let folded = "";
   for (const char of value) {
     const code = char.codePointAt(0) ?? 0;
-    folded += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : char;
+    const control = code < 0x20 || (code >= 0x7f && code <= 0x9f);
+    const bidi = (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+    folded += control || bidi ? " " : char;
   }
   return folded.replace(/\s+/gu, " ").trim();
 }

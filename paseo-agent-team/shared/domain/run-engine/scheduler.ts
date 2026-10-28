@@ -190,7 +190,8 @@ export function rankCandidates(candidates: readonly SeatChoice[]): readonly Seat
  */
 export type DispatchBlock = {
   taskId: string;
-  decision: "D1";
+  /** D1 only when no structurally capable same-tier seat exists; temporary shortage waits. */
+  decision: "D1" | "wait";
   reasons: readonly SeatDenial[];
 };
 
@@ -199,9 +200,17 @@ export type DispatchPlan = {
   blocked: readonly DispatchBlock[];
 };
 
+const TEMPORARY_DENIALS: ReadonlySet<SeatDenial["reason"]> = new Set([
+  "busy",
+  "permission",
+  "channel",
+  "profile-unavailable",
+]);
+
 /**
  * Advisory plan: one proposal per ready task, simulating one-slot occupancy so the same seat is
- * never proposed twice. A task with no exact-tier/free seat yields a D1 block, not an event.
+ * never proposed twice. A task blocked only by temporary occupancy/permission/channel waits; D1
+ * is reserved for "no structurally capable same-tier seat", not ordinary scheduling pressure.
  */
 export function planDispatchWithReasons(
   record: Pick<RunRecord, "tasks" | "roster" | "policy">,
@@ -215,7 +224,12 @@ export function planDispatchWithReasons(
     const eligibility = eligibleSeats(record, task.spec.id, { ...ctx, seats });
     const choice = eligibility.candidates[0];
     if (!choice) {
-      blocked.push({ taskId: task.spec.id, decision: "D1", reasons: eligibility.denials });
+      const temporary = eligibility.denials.some((denial) => TEMPORARY_DENIALS.has(denial.reason));
+      blocked.push({
+        taskId: task.spec.id,
+        decision: temporary ? "wait" : "D1",
+        reasons: eligibility.denials,
+      });
       continue;
     }
     proposals.push({
@@ -264,7 +278,11 @@ export function dispatchLabels(
       .slice(0, 10) || "run";
   const lowerTask = taskId.toLowerCase();
   const slug = lowerTask.replace(/[^a-z0-9-]/gu, "-").replace(/^-+|-+$/gu, "");
-  const task = slug === lowerTask && slug !== "" ? slug : `${slug || "task"}-${shortHash(taskId)}`;
+  const caseChanged = taskId !== lowerTask;
+  const task =
+    slug === lowerTask && !caseChanged && slug !== ""
+      ? slug
+      : `${slug || "task"}-${shortHash(taskId)}`;
   let suffix = Math.max(1, Math.trunc(sequence));
   let name = `re-${token}-${task}-a${Math.max(1, Math.trunc(attempt))}-${suffix}`;
   while (taken.has(name)) {

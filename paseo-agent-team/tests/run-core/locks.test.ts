@@ -59,6 +59,14 @@ describe("logical path and scope rules", () => {
       ["src/a. ", "trailing-dot-space"],
       ["../a.ts", "escape"],
       [".", "empty"],
+      ["src/*.ts", "glob"],
+      ["src/**/a.ts", "glob"],
+      ["a|b", "illegal-char"],
+      ["a<b", "illegal-char"],
+      ["a\u0000b", "illegal-char"],
+      ["CON", "reserved"],
+      ["aux.txt", "reserved"],
+      ["COM1/x", "reserved"],
     ];
     for (const [value, reason] of rejects) {
       expect(normalizeLogicalPath(value)).toEqual({ ok: false, reason });
@@ -161,6 +169,21 @@ describe("findLockConflicts", () => {
         scopes: [scope()],
       }),
     ).toEqual({ ok: true, conflicts: [] });
+  });
+
+  test("default case-fold and claim-side normalization are applied", () => {
+    expect(
+      findLockConflicts(record([claim({ path: "SRC\\A.ts" })]), {
+        taskId: "T2",
+        scopes: [scope({ path: "src/a.ts" })],
+      }),
+    ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
+    expect(
+      findLockConflicts(record([claim({ path: "src\\a.ts" })]), {
+        taskId: "T2",
+        scopes: [scope({ path: "src/a.ts" })],
+      }),
+    ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
   });
 
   test("does not mutate the record and uses case-fold when asked", () => {

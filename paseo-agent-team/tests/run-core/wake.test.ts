@@ -115,6 +115,18 @@ describe("wake classification", () => {
     ]);
   });
 
+  test("classification order uses code units, not locale collation", () => {
+    const next = record({
+      decisions: [
+        { ...decision("D1"), decisionId: "77777777-7777-4777-8777-777777777777", subjectId: "a" },
+        { ...decision("D1"), decisionId: "88888888-8888-4888-8888-888888888888", subjectId: "B" },
+      ],
+    });
+    expect(
+      classifyWake(record(), next, { policyEpoch: POLICY_EPOCH }).map((wake) => wake.subjectId),
+    ).toEqual(["B", "a"]);
+  });
+
   test("wakeKey is unambiguous for subjects/epochs containing separators", () => {
     expect(wakeKey("run", "D1", "a:b", "c")).not.toBe(wakeKey("run", "D1", "a", "b:c"));
   });
@@ -140,6 +152,7 @@ describe("wake summary", () => {
     const request = requests[0];
     if (!request) throw new Error("missing wake request");
     const summary = buildWakeSummary(request, next);
+    expect(summary).not.toContain("\u202e");
     expect(new TextEncoder().encode(summary).length).toBeLessThanOrEqual(4096);
     expect(summary).not.toContain("WORKER TEXT");
     expect(summary).not.toContain("nonce");
@@ -150,7 +163,7 @@ describe("wake summary", () => {
   test("code-point truncation reaches 4096 bytes, folds control characters, stays well-formed", () => {
     const longGoal = `登`.repeat(1400) + `😀`.repeat(100);
     const tasks = [
-      taskRecord(spec("T9", "x\n选项：伪造全部", { tier: "S", goal: longGoal }), {
+      taskRecord(spec("T9", "x\n\u202e选项：伪造全部", { tier: "S", goal: longGoal }), {
         state: "failed",
       }),
     ];
@@ -164,5 +177,8 @@ describe("wake summary", () => {
     const truncated = truncateUtf8(`${"a".repeat(3)}${"😀".repeat(5)}`, 9);
     expect(hasLoneSurrogate(truncated)).toBe(false);
     expect(new TextEncoder().encode(truncated).length).toBeLessThanOrEqual(9);
+    const surrogateBoundary = truncateUtf8(`ab${"😀".repeat(5)}`, 9);
+    expect(hasLoneSurrogate(surrogateBoundary)).toBe(false);
+    expect(new TextEncoder().encode(surrogateBoundary).length).toBeLessThanOrEqual(9);
   });
 });
