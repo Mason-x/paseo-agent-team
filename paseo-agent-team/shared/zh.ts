@@ -30,7 +30,7 @@ export const launchModeZh = {
   onDemandFallbackEager: "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
   onDemandUnavailable: "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。",
   collaborationRuntimeUnavailable:
-    "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。",
+    "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或标准模式。",
   staleEscalationOnly:
     "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
   duplicateLabelWarning: (label: string) => `实例标签「${label}」重复，已继续启动。`,
@@ -710,7 +710,7 @@ export const zh = {
   economyPool: "经济池",
   economyPoolTitle: "经济池设置",
   economyPoolIntro: "只保存到本 host 的插件偏好；不会修改 Profile 本身。",
-  economyPoolEmpty: "经济池为空。添加当前 host 的 Profile 后才可使用经济模式。",
+  economyPoolEmpty: "标准执行池为空；标准模式将沿用 Role 原绑定解析。",
   economyPoolAddProfile: "添加 Profile",
   economyPoolNoProfiles: "当前 host 没有可用 Profile。",
   searchProfiles: "搜索 Profile",

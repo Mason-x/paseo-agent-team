@@ -1949,7 +1949,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
       },
     ],
     warnings: ["Provider claude 不可用。", "首选 Profile 缺失或不可用，改用备选 Codex xhigh。"],
-    blockers: ["协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。"],
+    blockers: ["协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或标准模式。"],
     preview: {
       requestedMode: "collaborative",
       coordinator: {
@@ -2020,7 +2020,7 @@ export const D02_BASELINE_COORD: readonly Record<string, unknown>[] = [
     ],
     warnings: [],
     blockers: [
-      "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或经济模式。",
+      "协作模式需要后续版本的运行能力；当前版本请使用 SOTA 或标准模式。",
       "无法解析协调者 Profile（provider-unavailable）。",
     ],
     preview: {

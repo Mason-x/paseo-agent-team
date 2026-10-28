@@ -288,6 +288,15 @@ describe("shared boundary", () => {
     expect(designZh.modes["economy-all"]).toBe("经济");
   });
 
+  test("the standard-pool empty state names the standard mode, never economy-all", () => {
+    expect(zh.economyPoolEmpty).toContain(modesZh.modeLabels.standard);
+    expect(zh.economyPoolEmpty).not.toContain("经济模式");
+    // The old copy claimed the standard pool gated the mode; the standard mode can fall back.
+    expect(zh.economyPoolEmpty).not.toContain("才可使用");
+    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.standard);
+    expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("经济模式");
+  });
+
   test("the new-Role limit copy reads 0, 3, and a legacy missing limit", () => {
     const message = (params: Record<string, string | number>) =>
       formatDesignIssue({
