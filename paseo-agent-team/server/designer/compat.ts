@@ -49,13 +49,27 @@ export function legacyModeIssue(
 }
 
 /** Strip unknown keys through the DTO schema; a legacy reader also loses the contract-2 fields. */
-export function projectJobForContract(job: DesignJob, contract: DesignContract): DesignJob {
-  const parsed = DesignJobSchema.safeParse(job);
-  const stripped: DesignJob = parsed.success ? parsed.data : job;
+export function projectJobForContract(
+  job: DesignJob,
+  contract: DesignContract,
+  options: { keepGapRetry?: boolean } = {},
+): DesignJob {
+  // A stored Job may carry an extension with the transient seed's name. Only a caller that has
+  // re-derived a seed from the root record may keep it; every other projection drops it first.
+  const source = options.keepGapRetry === true ? job : withoutGapRetry(job);
+  const parsed = DesignJobSchema.safeParse(source);
+  const stripped: DesignJob = parsed.success ? parsed.data : source;
   if (contract === MODE_CONTRACT_VERSION) return stripped;
   const copy: DesignJob = { ...stripped };
   for (const key of CONTRACT_2_JOB_FIELDS) delete copy[key];
   return copy;
+}
+
+/** The transient gap seed is never part of a stored or generally projected Job. */
+export function withoutGapRetry(job: DesignJob): DesignJob {
+  if (!("gapRetry" in job)) return job;
+  const { gapRetry: _stored, ...rest } = job;
+  return rest as DesignJob;
 }
 
 export function projectResultForContract(result: DesignResult | null): DesignResult | null {
@@ -77,10 +91,11 @@ export type StatusProjection = {
 export function projectStatusForContract(
   input: StatusProjection,
   contract: DesignContract,
+  options: { keepGapRetry?: boolean } = {},
 ): StatusProjection {
   const visible = input.jobs.filter((job) => modeVisibleTo(job.mode, contract));
   const hidden = input.jobs.length - visible.length;
-  const jobs = visible.map((job) => projectJobForContract(job, contract));
+  const jobs = visible.map((job) => projectJobForContract(job, contract, options));
   if (hidden === 0) return { ...input, jobs };
   const firstHidden = input.jobs.find((job) => !modeVisibleTo(job.mode, contract));
   return {

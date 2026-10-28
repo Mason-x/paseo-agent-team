@@ -4187,6 +4187,10 @@ describe("design service ledger v2, second segment (C02 wiring)", () => {
       const { store, service, jobId } = await gapJobRecord();
       const record = store.records.get(jobId);
       if (!record) throw new Error("missing");
+      const validIntent = JSON.stringify({
+        profileId: DESIGNER.id,
+        useDefaultProfileHints: false,
+      });
       for (const mutate of [
         (value: StoredDesignJob) => {
           value.selectionIntent = "{not json";
@@ -4194,14 +4198,85 @@ describe("design service ledger v2, second segment (C02 wiring)", () => {
         (value: StoredDesignJob) => {
           value.request = "界".repeat(4001);
         },
+        // Valid JSON is not enough: the original field types must already fit the seed.
+        (value: StoredDesignJob) => {
+          value.selectionIntent = JSON.stringify({
+            profileId: 17,
+            useDefaultProfileHints: "true",
+          });
+        },
+        (value: StoredDesignJob) => {
+          value.selectionIntent = "[]";
+        },
+        (value: StoredDesignJob) => {
+          value.selectionIntent = JSON.stringify({ profileId: {}, useDefaultProfileHints: 0 });
+        },
+        (value: StoredDesignJob) => {
+          value.selectionIntent = JSON.stringify({
+            profileId: "p-1",
+            useDefaultProfileHints: "false",
+          });
+        },
       ]) {
         const broken = structuredClone(record);
+        broken.selectionIntent = validIntent;
         mutate(broken);
         store.records.set(jobId, broken);
         const read = await service.status({ jobId, contractVersion: 2 });
         expect(JSON.stringify(read)).not.toContain("gapRetry");
         expect(read).toMatchObject({ ok: true });
       }
+      await service.dispose();
+    });
+
+    test("a seed stored on the Job copy is stripped and never trusted", async () => {
+      const { store, service, jobId } = await gapJobRecord();
+      const record = store.records.get(jobId);
+      if (!record) throw new Error("missing");
+      const storedSeed = {
+        request: "存储扩展中的私有需求",
+        profileId: "secret-profile",
+        useDefaultProfileHints: true,
+      };
+      store.records.set(jobId, {
+        ...record,
+        job: { ...record.job, gapRetry: storedSeed },
+      });
+      const listed = await service.status({ contractVersion: 2 });
+      const result = await service.result({ jobId, contractVersion: 2 });
+      const cancel = await service.cancel({ jobId, contractVersion: 2 });
+      for (const reply of [listed, result, cancel]) {
+        expect(JSON.stringify(reply)).not.toContain("gapRetry");
+      }
+      // By id still serves only the seed re-derived from the record root.
+      const byId = await service.status({ jobId, contractVersion: 2 });
+      expect(byId.ok && byId.jobs[0]?.gapRetry).toEqual({
+        request: "给后台做一次改版",
+        profileId: DESIGNER.id,
+        useDefaultProfileHints: false,
+      });
+      await service.dispose();
+    });
+
+    test("a stored seed on a job without a gap is stripped too", async () => {
+      const { service, store } = await gapJobRecord();
+      const record = [...store.records.values()][0];
+      if (!record) throw new Error("missing");
+      store.records.set(record.job.jobId, {
+        ...record,
+        roleGap: null,
+        job: {
+          ...record.job,
+          roleGap: null,
+          gapRetry: {
+            request: "存储扩展中的私有需求",
+            profileId: "secret-profile",
+            useDefaultProfileHints: true,
+          },
+        },
+      });
+      const byId = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(JSON.stringify(byId)).not.toContain("gapRetry");
       await service.dispose();
     });
 

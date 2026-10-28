@@ -1325,6 +1325,73 @@ describe("gapRetry: only status({jobId}) on a gap job, contract 2, bounded text"
     await service.dispose();
   });
 
+  test("bad JSON field types and arrays omit the whole seed", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const intents = [
+      JSON.stringify({ profileId: 17, useDefaultProfileHints: "true" }),
+      "[]",
+      JSON.stringify({ profileId: {}, useDefaultProfileHints: 0 }),
+      JSON.stringify({ profileId: "p-1", useDefaultProfileHints: "false" }),
+    ];
+    const records = intents.map((selectionIntent, index) =>
+      gapRecord({ selectionIntent, id: uuid(), request: `需求 ${index}` }),
+    );
+    for (const record of records) await store.create(record);
+    const service = serviceFor(store);
+    for (const record of records) {
+      const reply = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(reply.ok && reply.jobs[0]).not.toHaveProperty("gapRetry");
+    }
+    await service.dispose();
+  });
+
+  test("a seed stored on the Job copy never leaks and is never trusted", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const storedSeed = {
+      request: "存储扩展中的私有需求",
+      profileId: "secret-profile",
+      useDefaultProfileHints: true,
+    };
+    const gap = gapRecord({ id: uuid() });
+    gap.job = { ...gap.job, gapRetry: storedSeed };
+    const noGap = v2Record(DESIGN_V1_RECORD_READY, {
+      job: { jobId: uuid(), clientRequestId: uuid(), agentId: uuid(), gapRetry: storedSeed },
+    });
+    const broken = gapRecord({ id: uuid(), selectionIntent: "{not json" });
+    broken.job = { ...broken.job, gapRetry: storedSeed };
+    for (const record of [gap, noGap, broken]) await store.create(record);
+    // The setup is real: the extension really is on disk.
+    expect(await readFile(fileOf(root, gap), "utf8")).toContain("存储扩展中的私有需求");
+
+    const service = serviceFor(store);
+    // By id: a valid gap gets only the root-derived seed; no-gap and broken intent get none.
+    const gapRead = await service.status({ jobId: gap.job.jobId, contractVersion: 2 });
+    expect(gapRead.ok && gapRead.jobs[0]?.gapRetry).toEqual({
+      request: "原始需求全文",
+      profileId: "p-sonnet",
+      useDefaultProfileHints: false,
+    });
+    for (const record of [noGap, broken]) {
+      const read = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(JSON.stringify(read)).not.toContain("gapRetry");
+    }
+    // List, result and a mutation strip the stored copy for all three.
+    for (const record of [gap, noGap, broken]) {
+      const listed = await service.status({ contractVersion: 2 });
+      const listedJob = listed.ok
+        ? listed.jobs.find((job) => job.jobId === record.job.jobId)
+        : undefined;
+      expect(listedJob).not.toHaveProperty("gapRetry");
+      const result = await service.result({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(result.ok && "job" in result ? result.job : null).not.toHaveProperty("gapRetry");
+      const canceled = await service.cancel({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(JSON.stringify(canceled)).not.toContain("gapRetry");
+    }
+    await service.dispose();
+  });
+
   test("over 4000 code points or an unusable selectionIntent omits the whole seed", async () => {
     const { home } = await newHome();
     const store = await openStore(home);

@@ -56,6 +56,7 @@ import {
   projectJobForContract,
   projectResultForContract,
   projectStatusForContract,
+  withoutGapRetry,
 } from "./compat";
 import {
   type DesignContextCapabilities,
@@ -453,13 +454,20 @@ function gapRetryOf(record: StoredDesignJob): DesignGapRetry | undefined {
   } catch {
     return undefined;
   }
-  if (!intent || typeof intent !== "object") return undefined;
-  const profileId = "profileId" in intent ? intent.profileId : null;
-  const hints = "useDefaultProfileHints" in intent ? intent.useDefaultProfileHints : false;
+  if (!intent || typeof intent !== "object" || Array.isArray(intent)) return undefined;
+  const source = intent as Record<string, unknown>;
+  // A present field must already have the contract's type. Explicitly bad data omits the whole
+  // seed; only a field the historical shape may omit falls back to its default.
+  if ("profileId" in source && source.profileId !== null && typeof source.profileId !== "string") {
+    return undefined;
+  }
+  if ("useDefaultProfileHints" in source && typeof source.useDefaultProfileHints !== "boolean") {
+    return undefined;
+  }
   const parsed = DesignGapRetrySchema.safeParse({
     request: record.request,
-    profileId: typeof profileId === "string" ? profileId : null,
-    useDefaultProfileHints: hints === true,
+    profileId: source.profileId ?? null,
+    useDefaultProfileHints: source.useDefaultProfileHints ?? false,
   });
   return parsed.success ? parsed.data : undefined;
 }
@@ -1724,7 +1732,11 @@ export function createDesignService(deps: DesignServiceDeps) {
   }
 
   /** Every reply leaves through here: DTO strip, then the caller's contract projection. */
-  function finishReply<T>(reply: T, contract: DesignContract): T {
+  function finishReply<T>(
+    reply: T,
+    contract: DesignContract,
+    options: { keepGapRetry?: boolean } = {},
+  ): T {
     if (!reply || typeof reply !== "object") return reply;
     const out: Record<string, unknown> = { ...(reply as Record<string, unknown>) };
     const job = out.job as DesignJob | null | undefined;
@@ -1742,6 +1754,7 @@ export function createDesignService(deps: DesignServiceDeps) {
             discoveryIssues: (out.discoveryIssues ?? []) as DesignIssue[],
           },
           contract,
+          options,
         ),
       );
     }
@@ -1762,11 +1775,13 @@ export function createDesignService(deps: DesignServiceDeps) {
 
   function wrapReply<I extends { contractVersion?: number }, R>(
     method: (input: I) => Promise<R>,
+    options: { keepGapRetry?: boolean } = {},
   ): (input: I) => Promise<R> {
     return async (input) =>
       finishReply(
         await method(input),
         requestContractVersion({ contractVersion: input.contractVersion }),
+        options,
       );
   }
 
@@ -1904,11 +1919,12 @@ export function createDesignService(deps: DesignServiceDeps) {
             );
           }
           // The retry seed rides on this by-id read only; a list never carries request text.
+          const job = withoutGapRetry(record.job);
           const gapRetry = gapRetryOf(record);
           return {
             ok: true as const,
             scopeId,
-            jobs: [gapRetry === undefined ? record.job : { ...record.job, gapRetry }],
+            jobs: [gapRetry === undefined ? job : { ...job, gapRetry }],
             truncated: false,
             discoveryIssues: [],
           };
@@ -1935,7 +1951,7 @@ export function createDesignService(deps: DesignServiceDeps) {
         return {
           ok: true as const,
           scopeId,
-          jobs: sorted.slice(0, 50).map((record) => record.job),
+          jobs: sorted.slice(0, 50).map((record) => withoutGapRetry(record.job)),
           truncated: sorted.length > 50,
           discoveryIssues,
         };
@@ -1955,7 +1971,7 @@ export function createDesignService(deps: DesignServiceDeps) {
           ]);
         return {
           ok: true as const,
-          job: record.job,
+          job: withoutGapRetry(record.job),
           request: record.request,
           result: record.result,
         };
@@ -2643,7 +2659,7 @@ export function createDesignService(deps: DesignServiceDeps) {
   return {
     ...api,
     start: wrapReply(api.start),
-    status: wrapReply(api.status),
+    status: wrapReply(api.status, { keepGapRetry: true }),
     result: wrapReply(api.result),
     prepareSave: wrapReply(api.prepareSave),
     markSaved: wrapReply(api.markSaved),

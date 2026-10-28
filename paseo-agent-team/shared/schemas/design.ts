@@ -399,8 +399,9 @@ export const DesignJobSchema = z.object({
   roleGap: z.array(RoleGapReportSchema).max(8).nullable().optional(),
   /**
    * Retry seed of a Role-gap job. Present only on `design.status({ jobId })` for a job that
-   * ended with a gap, never in a list, a result, or a mutation reply, and never stored in the
-   * ledger's Job copy. Absent from an older daemon: the client then falls back to its session.
+   * ended with a gap, never in a list, a result, or a mutation reply. A stored Job extension with
+   * this name (a newer/tolerant writer) is stripped and never trusted: only the seed re-derived
+   * from the record root can be served. Absent from an older daemon: the client falls back.
    */
   gapRetry: DesignGapRetrySchema.optional(),
   createdAt: DesignTimeSchema,
