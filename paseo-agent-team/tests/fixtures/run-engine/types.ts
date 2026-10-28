@@ -20,6 +20,7 @@ import type {
   RunReopenGrantSchema,
   RunResourceClaimSchema,
   RunSeatSnapshotSchema,
+  RunTaskEscalationSchema,
   RunTaskRecordSchema,
   RunTaskSpecSchema,
 } from "../../../shared/schemas/run-engine/ledger";
@@ -40,6 +41,7 @@ export type RunRecord = z.infer<typeof RunRecordSchema>;
 export type RunReopenGrant = z.infer<typeof RunReopenGrantSchema>;
 export type RunResourceClaim = z.infer<typeof RunResourceClaimSchema>;
 export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
+export type RunTaskEscalation = z.infer<typeof RunTaskEscalationSchema>;
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;
 export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 export type RunArtifactRef = z.infer<typeof RunArtifactRefSchema>;
