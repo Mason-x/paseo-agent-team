@@ -55,6 +55,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
     {
       decisionId: DECISION_D1,
       category: "D1",
+      controlNonceDigest: "c".repeat(64),
       state: "open",
       dedupeKey: "run-rec0re-unk|D1|outcome-unknown|intent-t2-a1",
       subjectId: "T2",
@@ -164,7 +165,17 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-blk",
   revision: 8,
   lifecycle: "paused",
-  tasks: [T1, { ...T2, state: "blocked", waitingReason: "missing-seat" } as RunTaskRecord, T3],
+  tasks: [
+    T1,
+    {
+      ...T2,
+      state: "blocked",
+      phase: "frozen",
+      waitingReason: "missing-seat",
+      frozenClaimId: "claim-t2",
+    } as RunTaskRecord,
+    T3,
+  ],
   resources: [claim({ frozen: true, taskId: "T2" })],
   assignments: [
     assignment({
@@ -179,6 +190,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
     {
       decisionId: DECISION_D1,
       category: "D1",
+      controlNonceDigest: "f".repeat(64),
       state: "open",
       dedupeKey: "run-rec0re-blk|D1|missing-seat|T2",
       subjectId: "T2",

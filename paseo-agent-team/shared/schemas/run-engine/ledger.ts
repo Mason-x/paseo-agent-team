@@ -32,6 +32,12 @@ export const RunIdSchema = z
   .max(96)
   .regex(/^run-[a-z0-9]+-[a-z0-9]+$/);
 export const RunDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+/** The ledger header digest as written by AtomicJsonCodec: "" on revision 1, then sha256:<64>. */
+export const RunHeaderDigestSchema = z.union([
+  z.literal(""),
+  z.string().regex(/^sha256:[a-f0-9]{64}$/),
+]);
 export const RunNonceSchema = z.string().uuid();
 export const RunTimeSchema = z.string().datetime();
 export const RunIdRefSchema = z.string().min(1).max(128);
@@ -55,14 +61,15 @@ export const RunTaskStateSchema = z.enum(RUN_TASK_STATES);
 export type RunTaskState = z.infer<typeof RunTaskStateSchema>;
 
 /**
- * Waiting sub-states. `review/awaiting-rework` is `state:"review"` + `phase:"awaiting-rework"`;
- * `blocked/frozen` is `state:"blocked"` + `phase:"frozen"` with a frozen claim and D1.
+ * Review sub-states use state:"review" + phase; `awaiting-rework` is not a separate state.
+ * `frozen` belongs to `state:"blocked"` (cancellation waiting for quiescence) and keeps a claim.
  */
 export const RUN_TASK_PHASES = [
   "implementation",
   "review",
   "smoke",
   "awaiting-rework",
+  /** Cancellation blocked on quiescence: state stays blocked, its claim stays frozen. */
   "frozen",
 ] as const;
 export const RunTaskPhaseSchema = z.enum(RUN_TASK_PHASES);
@@ -390,18 +397,33 @@ export const RunSeatSnapshotSchema = z
   .passthrough();
 export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
 
+/**
+ * `hot`/`tool` are repo-level named resources persisted as claims. They conflict only by exact
+ * (case-sensitive) name equality: no directory coverage and no path normalization/filesystem
+ * validation. For these kinds `path` carries the name (non-empty, <=512) and `access` must be
+ * write. R03b implements the conflict behavior; the schema only carries the value.
+ */
 export const RunResourceClaimSchema = z
   .object({
     claimId: RunIdRefSchema,
     taskId: z.string().min(1).max(64),
     repoId: z.string().min(1).max(256),
-    kind: z.enum(["file", "directory"]),
+    kind: z.enum(["file", "directory", "hot", "tool"]),
     path: RunPathSchema,
     access: z.enum(["read", "write"]),
     frozen: z.boolean(),
     createdAt: RunTimeSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((claim, ctx) => {
+    if ((claim.kind === "hot" || claim.kind === "tool") && claim.access !== "write") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access"],
+        message: "hot/tool claims must be write claims",
+      });
+    }
+  });
 
 export const RunBudgetEntrySchema = z
   .object({
@@ -418,6 +440,8 @@ export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
     category: z.enum(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]),
+    /** SHA-256 of the engine-generated control nonce (bare 64hex); never the nonce itself. */
+    controlNonceDigest: RunDigestSchema,
     state: z.enum(["open", "answered", "waiting-human"]),
     dedupeKey: z.string().min(1).max(256),
     subjectId: RunIdRefSchema.nullable(),
@@ -485,7 +509,7 @@ export const RunMetricsBookSchema = z
  */
 export const RunModelPlanBasisSchema = z
   .object({
-    launchPlanFingerprint: RunDigestSchema,
+    p1PlanHash: RunDigestSchema,
     mode: z.string().min(1).max(64),
     targetWorkspaceId: z.string().min(1).max(128).nullable(),
     task: z.string().min(1).max(4000),
@@ -582,7 +606,23 @@ export const RunTaskRecordSchema = z
     /** Explicit decision that released a frozen/blocked task (05 §4 B1); never implicit. */
     releaseDecisionId: z.string().uuid().nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((task, ctx) => {
+    if (task.phase === "frozen" && task.state !== "blocked") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "frozen is only valid while the task is blocked",
+      });
+    }
+    if (task.phase === "awaiting-rework" && task.state !== "review") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "awaiting-rework is only valid on a review task",
+      });
+    }
+  });
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;
 
 /**
@@ -771,12 +811,18 @@ export const RunPolicySnapshotSchema = z
   .passthrough();
 export type RunPolicySnapshot = z.infer<typeof RunPolicySnapshotSchema>;
 
+/**
+ * Schema v1 is frozen once R05 persists it. A later shape change must bump the version or add an
+ * explicit tolerant read path; old shapes are corrupt, never unknown-version.
+ */
 export const RunRecordSchema = z
   .object({
     schemaVersion: z.literal(RUN_SCHEMA_VERSION),
     runId: RunIdSchema,
-    revision: RunRevisionSchema,
-    previousDigest: RunDigestSchema,
+    // The persisted root is the codec header: validateHeader (atomic-json.ts) requires revision >= 1.
+    // Only this field is tightened; RunRevisionSchema stays non-negative for the other structures.
+    revision: RunRevisionSchema.min(1),
+    previousDigest: RunHeaderDigestSchema,
     createdAt: RunTimeSchema,
     updatedAt: RunTimeSchema,
     hostBinding: z.object({ serverId: z.string().min(1).max(128) }).passthrough(),
@@ -832,5 +878,28 @@ export const RunRecordSchema = z
     alerts: z.array(RunAlertSchema).max(1024),
     metrics: RunMetricsBookSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((record, ctx) => {
+    if (record.revision === 1 && record.previousDigest !== "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "first revision must not have a previous digest",
+      });
+    }
+    if (record.revision !== 1 && record.previousDigest === "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "only the first revision may omit the previous digest",
+      });
+    }
+    if (record.launch.modelPlan.p1PlanHash !== record.team.modelPlanHash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["team", "modelPlanHash"],
+        message: "modelPlanHash must equal launch.modelPlan.p1PlanHash",
+      });
+    }
+  });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
