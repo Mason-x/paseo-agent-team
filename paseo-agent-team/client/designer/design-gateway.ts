@@ -36,12 +36,30 @@ export function designContractFields(support: DesignModeContract): { contractVer
   return support === "v2" ? { contractVersion: MODE_CONTRACT_VERSION } : {};
 }
 
-/** One place that adds the contract to any of the eight design RPC inputs. */
+/**
+ * One place that puts the contract on any of the eight design RPC inputs. A confirmed v2 host
+ * gets `contractVersion: 2` (replacing whatever the caller put there). Anything else gets the
+ * baseline shape: a `contractVersion` or `existingRolesOnly` already on the input is removed, so a
+ * caller that built a v2-shaped input can never reach a baseline daemon's strict schema with it.
+ */
 export function withDesignContract<T extends object>(
   input: T,
   support: DesignModeContract,
-): T & { contractVersion?: 2 } {
-  return { ...input, ...designContractFields(support) };
+): Omit<T, "contractVersion" | "existingRolesOnly"> & { contractVersion?: 2 } {
+  const {
+    contractVersion: _contract,
+    existingRolesOnly: _rule,
+    ...rest
+  } = input as T & {
+    contractVersion?: unknown;
+    existingRolesOnly?: unknown;
+  };
+  if (support === "v2") {
+    // v2 keeps an explicit rule when the caller supplied one (start); other inputs have none.
+    const keepRule = "existingRolesOnly" in input ? { existingRolesOnly: _rule } : {};
+    return { ...rest, ...keepRule, ...designContractFields(support) } as never;
+  }
+  return rest as never;
 }
 
 /**

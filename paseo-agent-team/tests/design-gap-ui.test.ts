@@ -506,6 +506,26 @@ describe("contract negotiation (K1)", () => {
     expect(withDesignContract({}, "unknown")).toEqual({});
   });
 
+  test("a baseline or unconfirmed host never receives a contract field the caller already set", () => {
+    const polluted = { jobId: ID, contractVersion: 2, existingRolesOnly: false };
+    for (const support of ["legacy", "unknown"] as const) {
+      const sent = withDesignContract(polluted, support);
+      expect(sent).toEqual({ jobId: ID });
+      expect(sent).not.toHaveProperty("contractVersion");
+      expect(sent).not.toHaveProperty("existingRolesOnly");
+    }
+    // A confirmed v2 host gets exactly version 2, even over a stale 1, and keeps a supplied rule.
+    expect(withDesignContract({ jobId: ID, contractVersion: 1 }, "v2")).toEqual({
+      jobId: ID,
+      contractVersion: 2,
+    });
+    expect(withDesignContract(polluted, "v2")).toEqual({
+      jobId: ID,
+      existingRolesOnly: false,
+      contractVersion: 2,
+    });
+  });
+
   test("the three save RPCs carry it too, and only for v2", async () => {
     const seen: Record<string, unknown> = {};
     const rpcs = {
