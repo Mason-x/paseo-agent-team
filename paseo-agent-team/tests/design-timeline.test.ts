@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { DESIGN_RECORD_VERSION, type StoredDesignJob } from "../server/designer/store";
+import {
+  DESIGN_RECORD_VERSION,
+  LEGACY_RECORD_RULES,
+  type StoredDesignJob,
+} from "../server/designer/store";
 import {
   type DesignTimelineItem,
   type DesignTimelinePage,
@@ -13,6 +17,7 @@ const MESSAGE = "55555555-5555-4555-8555-555555555555";
 function stored(): StoredDesignJob {
   return {
     schemaVersion: DESIGN_RECORD_VERSION,
+    ...LEGACY_RECORD_RULES,
     job: designJob({ attempt: 1, agentCreated: true }),
     request: "给后台做一次改版",
     requestHash: DESIGN_HASH,

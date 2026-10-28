@@ -1,15 +1,23 @@
 import { canonicalDesignContent } from "../../shared/domain/design-content";
 import { planDesignCompensation, verifySavedDesign } from "../../shared/domain/design-merge";
-import { extractDesignProposal } from "../../shared/domain/design-output";
-import type { DesignPlanningPort } from "../../shared/domain/design-planning";
+import { extractDesignOutput } from "../../shared/domain/design-output";
+import {
+  type DesignPlanningPort,
+  designContractVersionForNewJob,
+  designModeAccess,
+  normalizeExistingRolesOnly,
+} from "../../shared/domain/design-planning";
 import {
   allocateDesignTeamId,
   type DesignValidationContext,
   finalizeDesignIssues,
   materializeDesign,
+  roleGapFinalIssue,
   validateDesign,
   validateMaterializedDesign,
+  validateRoleGap,
 } from "../../shared/domain/design-validation";
+import { isTeamMode, requestContractVersion } from "../../shared/domain/mode-contract";
 import { type EconomyPolicy, normalizeEconomyPolicy } from "../../shared/domain/mode-resolver";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import {
@@ -25,20 +33,30 @@ import {
 import type {
   DesignCancelInput,
   DesignContinueInput,
+  DesignGapRetry,
   DesignIssue,
   DesignJob,
   DesignMarkSavedInput,
   DesignPrepareSaveInput,
-  DesignProposal,
   DesignResult,
   DesignResultInput,
   DesignSaveFailedInput,
   DesignStartInput,
   DesignStatusInput,
+  DesignTeamProposal,
+  RoleGapReport,
 } from "../../shared/schemas/design";
-import { DesignResultSchema } from "../../shared/schemas/design";
+import { DesignGapRetrySchema, DesignResultSchema } from "../../shared/schemas/design";
 import type { Preferences } from "../../shared/schemas/preferences";
 import { ProfileRefSchema } from "../../shared/schemas/profile-ref";
+import {
+  type DesignContract,
+  legacyModeIssue,
+  modeVisibleTo,
+  projectJobForContract,
+  projectResultForContract,
+  projectStatusForContract,
+} from "./compat";
 import {
   type DesignContextCapabilities,
   type DesignContextSnapshot,
@@ -46,6 +64,7 @@ import {
   readDesignContext,
 } from "./context";
 import { bindDesignerProfile, DESIGNER_SYSTEM_PROMPT } from "./definition";
+import { checkGapEconomyEligibility } from "./planning";
 import {
   buildDesignCorrection,
   buildDesignKickoff,
@@ -54,7 +73,12 @@ import {
   summarizeProfiles,
 } from "./prompt";
 import { permissionSummary, reconcileDesignJob } from "./recovery";
-import type { DesignAttemptRecord, DesignJobStore, StoredDesignJob } from "./store";
+import {
+  DESIGN_RECORD_VERSION,
+  type DesignAttemptRecord,
+  type DesignJobStore,
+  type StoredDesignJob,
+} from "./store";
 
 const DESIGN_ACTIVE = new Set([
   "starting",
@@ -318,9 +342,18 @@ function promptContext(
 ): DesignPromptContext {
   const economy = economyOf(context);
   const roles = context.roles.map((role) => {
-    const launch = context.roleLaunch[role.id] ?? {
+    // Two separate planner verdicts: a Role can launch as a member and fail as coordinator, so
+    // neither is ever derived from the other. A Role the tables do not know is "cannot launch,
+    // unverified", never "launchable".
+    const launch = context.roleLaunchTables.member[role.id] ?? {
       launchable: false,
       unavailableProfileIds: [],
+      verified: false,
+    };
+    const coordinatorLaunch = context.roleLaunchTables.coordinator[role.id] ?? {
+      launchable: false,
+      unavailableProfileIds: [],
+      verified: false,
     };
     return {
       id: role.id,
@@ -332,6 +365,9 @@ function promptContext(
       fallbackProfileIds: role.fallbackProfiles.map((ref) => ref.profileId),
       launchable: launch.launchable,
       unavailableProfileIds: launch.unavailableProfileIds,
+      coordinatorLaunchable: coordinatorLaunch.launchable,
+      launchVerified: launch.verified,
+      coordinatorLaunchVerified: coordinatorLaunch.verified,
       ...(typeof role.executionPolicy?.tier === "string" &&
       typeof role.executionPolicy.taskKind === "string"
         ? { tier: role.executionPolicy.tier, taskKind: role.executionPolicy.taskKind }
@@ -358,6 +394,12 @@ function promptContext(
     occupiedRoleNames: context.roles.map((role) => role.name),
     occupiedTeams: context.teams.map((team) => ({ id: team.id, name: team.name })),
     expectedChoices,
+    // The record's own contract and rule, passed as stored: a version 1 record is (1, false) and
+    // must never go through the default for new requests (that would flip it to "on").
+    outputContractVersion: record.outputContractVersion,
+    existingRolesOnly: record.existingRolesOnly,
+    // economy-all route evidence, copied from the snapshot and never recomputed here.
+    ...(context.modeRouting === undefined ? {} : { modeRouting: context.modeRouting }),
   };
 }
 
@@ -383,12 +425,48 @@ function validationContext(
     targetWorkspaceId: context.targetWorkspaceId,
     capabilities: context.capabilities,
     hasher,
+    // Per-use verdicts from the same planner; `unlaunchable-role` is judged by the use it names.
+    roleLaunch: context.roleLaunchTables,
   };
+}
+
+/**
+ * The rules a record validates under, derived from the record and nothing else. Every shared
+ * validator that takes `rules` gets this object (validateMaterializedDesign would otherwise fall
+ * back to the legacy limit of 3), so initial validation, re-materialization, save re-validation,
+ * recheck, and gap validation cannot disagree.
+ */
+function validationRules(record: StoredDesignJob): { existingRolesOnly: boolean } {
+  return { existingRolesOnly: record.existingRolesOnly };
+}
+
+/**
+ * The retry seed of a Role-gap job, read from the record: its request text and the Profile intent
+ * of its selection. Anything that does not parse or fit the bounds yields no seed (the client then
+ * asks the user to re-enter the request); it is never guessed or truncated.
+ */
+function gapRetryOf(record: StoredDesignJob): DesignGapRetry | undefined {
+  if (record.roleGap === null) return undefined;
+  let intent: unknown;
+  try {
+    intent = JSON.parse(record.selectionIntent ?? "");
+  } catch {
+    return undefined;
+  }
+  if (!intent || typeof intent !== "object") return undefined;
+  const profileId = "profileId" in intent ? intent.profileId : null;
+  const hints = "useDefaultProfileHints" in intent ? intent.useDefaultProfileHints : false;
+  const parsed = DesignGapRetrySchema.safeParse({
+    request: record.request,
+    profileId: typeof profileId === "string" ? profileId : null,
+    useDefaultProfileHints: hints === true,
+  });
+  return parsed.success ? parsed.data : undefined;
 }
 
 function identityFor(
   record: StoredDesignJob,
-  proposal: DesignProposal,
+  proposal: DesignTeamProposal,
   context: DesignContextSnapshot,
 ) {
   const allocated = allocateDesignTeamId(
@@ -407,7 +485,7 @@ function identityFor(
 }
 
 function expectedChoicesFromMismatches(
-  proposal: DesignProposal | null,
+  proposal: DesignTeamProposal | null,
   mismatches: readonly { target: string; expectedProfileIds: string[]; reason: string }[],
 ): ExpectedDesignChoice[] {
   if (!proposal) return [];
@@ -444,7 +522,43 @@ function startInputFromRecord(record: StoredDesignJob): DesignStartInput | null 
     ...(typeof workspaceId === "string" ? { workspaceId } : {}),
     ...(typeof profileId === "string" ? { profileId } : {}),
     ...(typeof useDefaultProfileHints === "boolean" ? { useDefaultProfileHints } : {}),
+    // The record's own rule, never the default for new requests: a legacy record stays false.
+    existingRolesOnly: record.existingRolesOnly,
   };
+}
+
+/**
+ * The one answer to "this clientRequestId already has a job", shared by the normal path and the
+ * create-raced path (so the two cannot drift). A version-2 record is compared by its v2 hash only.
+ * A version-1 record (created before the rule existed) is compared by its original payload hash
+ * and only when the caller omits the rule or sends false — what it meant when it was created; an
+ * explicit true is a different request. The new default (true) never reinterprets an old record.
+ */
+function resolveExistingRequest(
+  existing: StoredDesignJob,
+  input: DesignStartInput,
+  v2Hash: string,
+  base: Record<string, unknown>,
+  hasher: (content: string) => string,
+) {
+  const conflict = failure(
+    [
+      error(
+        "DESIGN_REQUEST_CONFLICT",
+        ["clientRequestId"],
+        { clientRequestId: input.clientRequestId },
+        "inspect",
+      ),
+    ],
+    existing.job,
+  );
+  if (existing.requestHashVersion === 2) {
+    return existing.requestHash === v2Hash ? { ok: true as const, job: existing.job } : conflict;
+  }
+  if (input.existingRolesOnly === true) return conflict;
+  return existing.requestHash === hashPayload(hasher, base)
+    ? { ok: true as const, job: existing.job }
+    : conflict;
 }
 
 export function createDesignService(deps: DesignServiceDeps) {
@@ -532,6 +646,35 @@ export function createDesignService(deps: DesignServiceDeps) {
     throw new Error("design job revision conflict");
   }
 
+  /**
+   * CAS update that re-checks the freshly read record first: when `proceed` says no (the job was
+   * canceled or reached a terminal state meanwhile) nothing is written and null is returned.
+   */
+  async function updateRecordIf(
+    jobId: string,
+    proceed: (record: StoredDesignJob) => boolean,
+    mutate: (record: StoredDesignJob) => StoredDesignJob,
+  ): Promise<StoredDesignJob | null> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await deps.store.get(jobId);
+      if (!current || !proceed(current)) return null;
+      const next = mutate(structuredClone(current));
+      if (next.creation?.request && (next.job.agentCreated || TERMINAL.has(next.job.state))) {
+        next.creation = { ...next.creation, request: null };
+      }
+      next.job.stateRevision = deps.ids.next();
+      next.job.updatedAt = deps.clock.now();
+      try {
+        await deps.store.update(jobId, current.job.stateRevision, next);
+        return next;
+      } catch (cause) {
+        if (!(cause && typeof cause === "object" && "issue" in cause && cause.issue === "conflict"))
+          throw cause;
+      }
+    }
+    throw new Error("design job revision conflict");
+  }
+
   async function failJob(
     jobId: string,
     issues: readonly DesignIssue[],
@@ -551,6 +694,50 @@ export function createDesignService(deps: DesignServiceDeps) {
     }));
   }
 
+  /**
+   * Terminal state of a design that reported a gap in the existing Roles: failed, with the
+   * server-verified gaps and no result (nothing to save, compensate, or launch). One CAS; it is
+   * re-checked against cancellation and terminal states at write time, and a repeated hook or
+   * status replay cannot write it twice (a terminal job is never touched again).
+   */
+  async function finishWithRoleGap(
+    jobId: string,
+    attempt: 1 | 2 | 3,
+    reported: readonly RoleGapReport[],
+  ) {
+    const gaps = [...reported];
+    const issue = roleGapFinalIssue(gaps);
+    const finalized = finalizeDesignIssues([issue]);
+    await updateRecordIf(
+      jobId,
+      (current) =>
+        RECONCILE_STATES.has(current.job.state) &&
+        !current.job.cancelRequested &&
+        current.existingRolesOnly &&
+        current.outputContractVersion === 2 &&
+        current.roleGap === null,
+      (current) => ({
+        ...current,
+        proposal: null,
+        result: null,
+        roleGap: gaps,
+        job: {
+          ...current.job,
+          state: "failed",
+          attempt,
+          finishedAt: deps.clock.now(),
+          resultId: null,
+          saveState: "none",
+          saveLeaseExpiresAt: null,
+          issues: finalized.issues,
+          issuesTruncated: finalized.issuesTruncated,
+          roleGap: gaps,
+          allowed: allowedFor("failed"),
+        },
+      }),
+    );
+  }
+
   async function processCandidate(
     record: StoredDesignJob,
     attemptText: string,
@@ -563,20 +750,65 @@ export function createDesignService(deps: DesignServiceDeps) {
       return;
     }
     const context = contextResult.context;
-    const extracted = extractDesignProposal({
+    const extracted = extractDesignOutput({
       text: attemptText,
       jobId: record.job.jobId,
       attempt,
       nonce: record.attempts.find((item) => item.attempt === attempt)?.nonce ?? "",
+      // The record picks the decoder; a legacy job keeps reading the v1 shape on a new build.
+      outputContractVersion: record.outputContractVersion,
     });
     if (!extracted.ok) {
       await handleFailure(record, context, extracted.issues, null, null, allowCorrection);
       return;
     }
+    if (extracted.kind === "role-gap") {
+      const gapValidation = validateRoleGap(
+        extracted.gap,
+        validationContext(record, context, attempt, deps.hasher),
+        validationRules(record),
+      );
+      if (!gapValidation.ok) {
+        await handleFailure(
+          record,
+          context,
+          gapValidation.issues,
+          null,
+          null,
+          allowCorrection,
+          "role-gap",
+        );
+        return;
+      }
+      // economy-all: a suggested Profile must be a cheap candidate of the route its own use and
+      // tier pick. An issue is a correction round (same budget of 3), not a terminal state.
+      const eligibility = extracted.gap.gaps.flatMap((gap, index) =>
+        checkGapEconomyEligibility({
+          mode: record.mode,
+          gap,
+          routing: context.modeRouting,
+          path: ["gaps", index],
+        }),
+      );
+      if (eligibility.length > 0) {
+        await handleFailure(record, context, eligibility, null, null, allowCorrection, "role-gap");
+        return;
+      }
+      await finishWithRoleGap(record.job.jobId, attempt, gapValidation.value.gaps);
+      return;
+    }
     const proposal = extracted.proposal;
     const identityResult = identityFor(record, proposal, context);
     if (!identityResult.ok) {
-      await handleFailure(record, context, identityResult.issues, proposal, null, allowCorrection);
+      await handleFailure(
+        record,
+        context,
+        identityResult.issues,
+        proposal,
+        null,
+        allowCorrection,
+        "team",
+      );
       return;
     }
     const validation = validateDesign(
@@ -584,6 +816,7 @@ export function createDesignService(deps: DesignServiceDeps) {
       validationContext(record, context, attempt, deps.hasher),
       deps.planner,
       identityResult.identity,
+      validationRules(record),
     );
     if (!validation.ok) {
       await handleFailure(
@@ -593,6 +826,7 @@ export function createDesignService(deps: DesignServiceDeps) {
         proposal,
         validation.choiceMismatches ?? null,
         allowCorrection,
+        "team",
       );
       return;
     }
@@ -614,9 +848,22 @@ export function createDesignService(deps: DesignServiceDeps) {
       await failJob(record.job.jobId, [error("DESIGN_OUTPUT_SCHEMA", ["result"], {}, "inspect")]);
       return;
     }
-    const rematerialized = validateMaterializedDesign(result, validationCtx, deps.planner);
+    const rematerialized = validateMaterializedDesign(
+      result,
+      validationCtx,
+      deps.planner,
+      validationRules(record),
+    );
     if (!rematerialized.ok) {
-      await handleFailure(record, context, rematerialized.issues, proposal, null, allowCorrection);
+      await handleFailure(
+        record,
+        context,
+        rematerialized.issues,
+        proposal,
+        null,
+        allowCorrection,
+        "team",
+      );
       return;
     }
     await updateRecord(record.job.jobId, (current) => ({
@@ -645,7 +892,7 @@ export function createDesignService(deps: DesignServiceDeps) {
     if (profileIssues.length === 0) return null;
     const roles = new Set<string>();
     for (const role of context.roles) {
-      if (context.roleLaunch[role.id]?.launchable === false) {
+      if (context.roleLaunchTables.member[role.id]?.launchable === false) {
         roles.add(`${role.name} (${role.id})`);
       }
     }
@@ -669,7 +916,7 @@ export function createDesignService(deps: DesignServiceDeps) {
     record: StoredDesignJob,
     context: DesignContextSnapshot,
     inputIssues: readonly DesignIssue[],
-    proposal: DesignProposal | null,
+    proposal: DesignTeamProposal | null,
     mismatches:
       | readonly {
           target: string;
@@ -679,6 +926,12 @@ export function createDesignService(deps: DesignServiceDeps) {
         }[]
       | null,
     allowCorrection: boolean,
+    /**
+     * What the decoded output was (team or role-gap), so the correction round keeps its template.
+     * Undefined when decoding itself failed (fence, JSON, schema, identity): the correction then
+     * uses the same default template set as the kickoff.
+     */
+    previousOutputKind?: "team" | "role-gap",
   ) {
     const profileFailure = profileResolutionFailure(inputIssues, context);
     let issues = inputIssues;
@@ -757,6 +1010,7 @@ export function createDesignService(deps: DesignServiceDeps) {
       issues: finalized.issues,
       context: promptContext(record, context, expectedChoices),
       expectedChoices,
+      ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
     });
     if (!correction.ok) {
       await failJob(
@@ -1450,7 +1704,73 @@ export function createDesignService(deps: DesignServiceDeps) {
     await reconcile(jobId);
   }
 
-  return {
+  /**
+   * Refuses, before anything is read or written, a by-job call from a caller whose contract cannot
+   * represent the job's mode (a baseline page asking about an economy-all job). A store problem
+   * is not this function's to report; the call's own path surfaces it.
+   */
+  async function contractBlock(jobId: string, raw: number | undefined) {
+    const contract = requestContractVersion({ contractVersion: raw });
+    if (contract === 2) return null;
+    try {
+      const record = await deps.store.get(jobId);
+      if (record && !modeVisibleTo(record.mode, contract)) {
+        return failure([legacyModeIssue(record.mode)]);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /** Every reply leaves through here: DTO strip, then the caller's contract projection. */
+  function finishReply<T>(reply: T, contract: DesignContract): T {
+    if (!reply || typeof reply !== "object") return reply;
+    const out: Record<string, unknown> = { ...(reply as Record<string, unknown>) };
+    const job = out.job as DesignJob | null | undefined;
+    if (job) out.job = projectJobForContract(job, contract);
+    if ("result" in out && out.result) {
+      out.result = projectResultForContract(out.result as DesignResult);
+    }
+    if (Array.isArray(out.jobs)) {
+      Object.assign(
+        out,
+        projectStatusForContract(
+          {
+            jobs: out.jobs as DesignJob[],
+            truncated: Boolean(out.truncated),
+            discoveryIssues: (out.discoveryIssues ?? []) as DesignIssue[],
+          },
+          contract,
+        ),
+      );
+    }
+    const prepared = out.prepared as Record<string, unknown> | undefined;
+    if (prepared) {
+      out.prepared = {
+        ...prepared,
+        ...(prepared.job
+          ? { job: projectJobForContract(prepared.job as DesignJob, contract) }
+          : {}),
+        ...(prepared.result
+          ? { result: projectResultForContract(prepared.result as DesignResult) }
+          : {}),
+      };
+    }
+    return out as T;
+  }
+
+  function wrapReply<I extends { contractVersion?: number }, R>(
+    method: (input: I) => Promise<R>,
+  ): (input: I) => Promise<R> {
+    return async (input) =>
+      finishReply(
+        await method(input),
+        requestContractVersion({ contractVersion: input.contractVersion }),
+      );
+  }
+
+  const api = {
     async start(input: DesignStartInput) {
       return withAdmission(async () => {
         if (disposed)
@@ -1463,31 +1783,31 @@ export function createDesignService(deps: DesignServiceDeps) {
           ]);
         }
         const mode = input.mode ?? "sota";
+        // The access gate comes before any store read, hash, or agent: a caller that did not say
+        // contract 2 (or a mode this build does not know) is refused with nothing touched.
+        if (
+          !isTeamMode(mode) ||
+          !designModeAccess({ mode, contractVersion: input.contractVersion }).ok
+        ) {
+          return failure([legacyModeIssue(mode)]);
+        }
         const request = input.request.trim();
-        const payload = {
+        const rules = normalizeExistingRolesOnly(input.existingRolesOnly);
+        const base = {
           request,
           mode,
           workspaceId: input.workspaceId ?? null,
           profileId: input.profileId ?? null,
           useDefaultProfileHints: input.useDefaultProfileHints ?? false,
         };
+        // payloadVersion 2 adds the rule; contractVersion, clientRequestId, time, and nonce are
+        // never part of it. An omitted rule and an explicit true hash alike; false differs.
+        const payload = { payloadVersion: 2, ...base, existingRolesOnly: rules };
         const requestHash = hashPayload(deps.hasher, payload);
         try {
           const existing = await deps.store.findRequest(input.clientRequestId);
           if (existing) {
-            return existing.requestHash === requestHash
-              ? { ok: true as const, job: existing.job }
-              : failure(
-                  [
-                    error(
-                      "DESIGN_REQUEST_CONFLICT",
-                      ["clientRequestId"],
-                      { clientRequestId: input.clientRequestId },
-                      "inspect",
-                    ),
-                  ],
-                  existing.job,
-                );
+            return resolveExistingRequest(existing, input, requestHash, base, deps.hasher);
           }
           const records = await deps.store.list();
           if (records.filter((record) => active(record.job)).length >= 3) {
@@ -1526,12 +1846,20 @@ export function createDesignService(deps: DesignServiceDeps) {
             recovered: false,
             saveLeaseExpiresAt: null,
             allowed: allowedFor("starting"),
+            // The Job DTO's copy of the record rules (the root below is the authority).
+            existingRolesOnly: rules,
+            outputContractVersion: designContractVersionForNewJob(),
+            roleGap: null,
           };
           const record: StoredDesignJob = {
-            schemaVersion: 1,
+            schemaVersion: DESIGN_RECORD_VERSION,
             job,
             request,
             requestHash,
+            requestHashVersion: 2,
+            outputContractVersion: designContractVersionForNewJob(),
+            existingRolesOnly: rules,
+            roleGap: null,
             mode,
             selectionIntent: JSON.stringify(payload),
             creation: null,
@@ -1547,21 +1875,7 @@ export function createDesignService(deps: DesignServiceDeps) {
             await deps.store.create(record);
           } catch (cause) {
             const raced = await deps.store.findRequest(input.clientRequestId);
-            if (raced) {
-              return raced.requestHash === requestHash
-                ? { ok: true as const, job: raced.job }
-                : failure(
-                    [
-                      error(
-                        "DESIGN_REQUEST_CONFLICT",
-                        ["clientRequestId"],
-                        { clientRequestId: input.clientRequestId },
-                        "inspect",
-                      ),
-                    ],
-                    raced.job,
-                  );
-            }
+            if (raced) return resolveExistingRequest(raced, input, requestHash, base, deps.hasher);
             return failure([issueFromStore(cause)]);
           }
           void enqueue(jobId, () => runStart(jobId, input)).catch((cause) =>
@@ -1577,6 +1891,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     async status(input: DesignStatusInput) {
       try {
         if (input.jobId) {
+          const blocked = await contractBlock(input.jobId, input.contractVersion);
+          if (blocked) return blocked;
           const record = await deps.store.get(input.jobId);
           if (!record)
             return failure([
@@ -1587,10 +1903,12 @@ export function createDesignService(deps: DesignServiceDeps) {
               log("design reconcile failed", cause),
             );
           }
+          // The retry seed rides on this by-id read only; a list never carries request text.
+          const gapRetry = gapRetryOf(record);
           return {
             ok: true as const,
             scopeId,
-            jobs: [record.job],
+            jobs: [gapRetry === undefined ? record.job : { ...record.job, gapRetry }],
             truncated: false,
             discoveryIssues: [],
           };
@@ -1627,6 +1945,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async result(input: DesignResultInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
@@ -1645,6 +1965,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async prepareSave(input: DesignPrepareSaveInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
@@ -1656,6 +1978,13 @@ export function createDesignService(deps: DesignServiceDeps) {
             ok: true as const,
             prepared: { outcome: "already-saved" as const, job: record.job },
           };
+        if (record.roleGap !== null) {
+          // A gap has no result to save, so the stale-result answer below would be misleading.
+          return failure(
+            [error("DESIGN_STATE_CHANGED", ["state"], { reason: "role-gap" }, "refresh")],
+            record.job,
+          );
+        }
         if (
           !record.result ||
           record.job.resultId !== input.resultId ||
@@ -1728,6 +2057,7 @@ export function createDesignService(deps: DesignServiceDeps) {
           record.result,
           validationContext(record, context, designAttempt(record.result.attempt), deps.hasher),
           deps.planner,
+          validationRules(record),
         );
         if (!validated.ok) {
           if (canceledCompensation) {
@@ -1858,6 +2188,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async markSaved(input: DesignMarkSavedInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
@@ -1940,6 +2272,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async saveFailed(input: DesignSaveFailedInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
@@ -2024,6 +2358,8 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async cancel(input: DesignCancelInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
@@ -2049,12 +2385,21 @@ export function createDesignService(deps: DesignServiceDeps) {
     },
 
     async continue(input: DesignContinueInput) {
+      const blocked = await contractBlock(input.jobId, input.contractVersion);
+      if (blocked) return blocked;
       try {
         const record = await deps.store.get(input.jobId);
         if (!record)
           return failure([
             error("DESIGN_JOB_NOT_FOUND", ["jobId"], { jobId: input.jobId }, "refresh"),
           ]);
+        if (record.roleGap !== null) {
+          // A gap is final: retrying is a new request, never an in-place continue.
+          return failure(
+            [error("DESIGN_STATE_CHANGED", ["state"], { reason: "role-gap" }, "refresh")],
+            record.job,
+          );
+        }
         if (record.job.stateRevision !== input.expectedRevision) {
           return failure(
             [error("DESIGN_STATE_CHANGED", ["stateRevision"], {}, "refresh")],
@@ -2102,6 +2447,7 @@ export function createDesignService(deps: DesignServiceDeps) {
               deps.hasher,
             ),
             deps.planner,
+            validationRules(record),
           );
           if (!checked.ok) return failure(checked.issues, record.job);
           const updated = await updateRecord(record.job.jobId, (current) => ({
@@ -2293,6 +2639,17 @@ export function createDesignService(deps: DesignServiceDeps) {
       disposed = true;
       await deps.store.dispose();
     },
+  };
+  return {
+    ...api,
+    start: wrapReply(api.start),
+    status: wrapReply(api.status),
+    result: wrapReply(api.result),
+    prepareSave: wrapReply(api.prepareSave),
+    markSaved: wrapReply(api.markSaved),
+    saveFailed: wrapReply(api.saveFailed),
+    cancel: wrapReply(api.cancel),
+    continue: wrapReply(api.continue),
   };
 }
 
