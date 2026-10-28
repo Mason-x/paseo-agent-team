@@ -1,0 +1,55 @@
+{
+  "ok": true,
+  "scopeId": "07802fea-5299-4ae1-a14c-5c4a6d008d8e",
+  "jobs": [
+    {
+      "jobId": "0f631bb1-169e-4af4-862f-5a97515569a6",
+      "clientRequestId": "eadca3f3-3769-4447-870e-c951188113dd",
+      "stateRevision": "d662ceec-4434-4194-bbf2-1d6a95377f77",
+      "state": "ready",
+      "attempt": 2,
+      "mode": "sota",
+      "existingRolesOnly": false,
+      "outputContractVersion": 2,
+      "roleGap": null,
+      "createdAt": "2026-10-28T08:18:15.240Z",
+      "updatedAt": "2026-10-28T08:19:00.104Z",
+      "finishedAt": null,
+      "requestExcerpt": "DEV D5 off: 需要新增安全加固与迁移审计 Role 的后台改版团队。",
+      "agentId": "0f631bb1-169e-4af4-862f-5a97515569a6",
+      "agentCreated": true,
+      "carrierWorkspaceId": "wks_bf367d481eb5f62f",
+      "targetWorkspaceId": null,
+      "designerProfile": {
+        "id": "dev-haiku-55",
+        "name": "DEV Haiku 5.5",
+        "provider": "claude",
+        "model": "claude-haiku-5-5",
+        "modeId": "auto",
+        "thinkingOptionId": "off"
+      },
+      "agentStatus": "running",
+      "requiresAttention": false,
+      "attentionReason": "finished",
+      "pendingPermissions": [],
+      "permissionsTruncated": false,
+      "resultId": "1bd2bcb1bc1386a9c44af8c3587280e310642b85823b0bf46437df02eaf99a8d",
+      "savedTeamId": null,
+      "saveState": "none",
+      "cancelRequested": false,
+      "needsCleanup": false,
+      "issues": [],
+      "issuesTruncated": 0,
+      "recovered": false,
+      "saveLeaseExpiresAt": null,
+      "allowed": {
+        "cancel": true,
+        "save": true,
+        "launch": false,
+        "continueAction": null
+      }
+    }
+  ],
+  "truncated": false,
+  "discoveryIssues": []
+}

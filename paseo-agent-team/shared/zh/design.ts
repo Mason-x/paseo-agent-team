@@ -1,6 +1,16 @@
+import { TEAM_MODES, teamModeDisplay } from "../domain/mode-contract";
 import type { DesignIssueAction, DesignIssueCode, DesignJob, DesignState } from "../schemas/design";
 import type { SeatPreview } from "../schemas/launch-preview";
 import type { TeamMode } from "../schemas/team-mode";
+import { modesZh } from "./modes";
+
+/**
+ * Stored mode -> the one display table. Derived so the designer cannot drift from the picker;
+ * `modesZh.modeLabels` stays the only literal label list (AC-0d.17).
+ */
+const DESIGN_MODE_LABELS = Object.fromEntries(
+  TEAM_MODES.map((mode) => [mode, modesZh.modeLabels[teamModeDisplay(mode)]]),
+) as Record<TeamMode, string>;
 
 /**
  * Chinese copy for the Team designer. `zh.design` is this object; error keys deliberately sit at
@@ -23,7 +33,8 @@ export const designZh = {
   noWorkspace: "没有可承载设计的已有工作区，请先在Paseo创建工作区",
   workspaceUnavailable: "所选或承载工作区已不可用",
   profileUnavailable: "设计师Profile缺失或不可用，请重新选择",
-  inputTooLarge: "设计上下文过大，精简目录说明或需求后重试",
+  inputTooLarge:
+    "请停用无关 Role 或分批设计（当前 Role {roles} 个、Team {teams} 个，共 {bytes}B，上限 {limit}B）；也可精简说明后重试",
   outputMissing: "本轮没有完整的设计JSON块",
   outputMultiple: "本轮包含多个设计块，请只输出一个完整方案",
   outputTooLarge: "方案超过大小限制，请精简角色内容",
@@ -37,7 +48,9 @@ export const designZh = {
   roleNameConflict: "新Role名称与现有Role重复：{name}",
   roleNaming: "新Role须使用【分类】名称和对应id前缀",
   roleUnused: "新Role没有被Team使用：{roleId}",
-  newRoleLimit: "每次设计最多新增3个Role",
+  // Legacy issues carry no params.limit; the placeholder then renders empty and the sentence
+  // still reads correctly ("超过本次设计的上限"). New records always pass 0 or 3.
+  newRoleLimit: "新增 Role 数量超过本次设计的上限{limit}",
   teamInvalid: "Team成员、协调者或实例标签不符合规则",
   memberLimit: "模式展开后为{count}个成员，当前最多{limit}个",
   profileMissing: "新Role引用了不存在的Profile：{profileId}",
@@ -88,11 +101,7 @@ export const designZh = {
     inspect: "查看详情",
   } satisfies Record<DesignIssueAction, string>,
 
-  modes: {
-    sota: "SOTA",
-    economy: "经济",
-    collaborative: "协作",
-  } satisfies Record<TeamMode, string>,
+  modes: DESIGN_MODE_LABELS,
 
   sources: {
     "role-preferred": "Role 首选",
@@ -137,6 +146,7 @@ export const designZh = {
   resultMode: "模式",
   resultTeamLine: (name: string, id: string) => `${name} · ${id}`,
   resultNewRoleLine: (name: string, id: string) => `${name} · ${id}`,
+  resultNoveltyReason: "新增原因",
   resultTargetLabel: "目标工作区",
   resultNoTarget: "未指定目标工作区（不会自动使用承载工作区）",
   resultReuse: "复用 Role",

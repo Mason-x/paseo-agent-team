@@ -2,12 +2,27 @@ import { z } from "zod";
 import type { PaseoProfile, ProviderAvailability } from "../paseo/adapter";
 import type { Role } from "../schemas/role";
 import {
+  ALL_SEATS_POLICY_VERSION,
+  ALL_SEATS_WRITER_LIMIT,
+  type BudgetBasis,
+  type RoleTier,
+  StoredAllSeatsEntrySchema,
+  StoredAllSeatsPolicySchema,
   type StoredEconomyPolicy,
   StoredEconomyPolicySchema,
   type TaskKind,
   type TeamMode,
   TeamModeSchema,
 } from "../schemas/team-mode";
+import {
+  type AllSeatsEntry,
+  type AllSeatsRoute,
+  entryFamily,
+  evaluateCheapCandidate,
+  orderedRouteIds,
+  type RouteOrder,
+  routeOf,
+} from "./cheap-routing";
 import { type ProfileResolution, resolveProfile } from "./profile-resolver";
 import {
   issueValue,
@@ -39,12 +54,33 @@ export type EconomyPolicy = {
   pool: readonly EconomyPoolEntry[];
   taskOrder: Partial<Record<TaskKind, readonly string[]>>;
   profileBudget: Readonly<Record<string, EconomyBudget>>;
+  /** Read-only all-seats policy. Absent means economy-all has no configured source. */
+  allSeats?: AllSeatsPolicy;
 };
+
+export type AllSeatsPolicy =
+  | {
+      status: "ready";
+      version: typeof ALL_SEATS_POLICY_VERSION;
+      profiles: readonly AllSeatsEntry[];
+      routes: Partial<Record<AllSeatsRoute, readonly string[]>>;
+      executionTaskOrder: Partial<Record<TaskKind, readonly string[]>>;
+      issues: readonly ModeIssue[];
+    }
+  | { status: "absent" }
+  | {
+      status: "invalid";
+      reason: "unknown-version" | "shape";
+      version?: unknown;
+      issues: readonly ModeIssue[];
+    };
 
 type ProfileSelectionBase = {
   budget: EconomyBudget;
-  budgetBasis: "host" | "pool" | "conservative-default";
+  budgetBasis: BudgetBasis;
   family?: string;
+  /** Cheap-route identity for economy-all; omitted for legacy modes. */
+  route?: AllSeatsRoute;
   /** Same-family later candidates (profileIds), in pool order, for measured failure replacement. */
   alternates?: readonly string[];
   /** True for an escalation channel planned in economy/collaborative mode; never create it early. */
@@ -139,6 +175,226 @@ function normalizeFamily(raw: string | undefined): string | undefined {
   const family = raw?.trim().toLowerCase();
   if (!family || !FAMILY_PATTERN.test(family)) return undefined;
   return family;
+}
+
+const ALL_SEATS_ROUTES = [
+  "coordinator",
+  "decision",
+  "execution",
+  "escalation",
+  "retain",
+] as const satisfies readonly AllSeatsRoute[];
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function allSeatsIssue(
+  code: ModeIssueCode,
+  params: Record<string, string | number | boolean>,
+  extra: { roleId?: string; profileId?: string } = {},
+): ModeIssue {
+  return { code, severity: "warning", params, ...extra };
+}
+
+/**
+ * Static all-seats policy: entries, family/tuple against the live Profiles, allowlist references,
+ * and writer limits. Dynamic facts (live family cost, availability, exclusions) stay in
+ * resolveCheapSeat. Configuration problems live in `allSeats.issues`, never in Result.issues, so
+ * legacy previews gain no noise.
+ */
+function normalizeAllSeats(raw: unknown, profiles: readonly PaseoProfile[]): AllSeatsPolicy {
+  if (raw === undefined || raw === null) return { status: "absent" };
+  const parsed = StoredAllSeatsPolicySchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      status: "invalid",
+      reason: "shape",
+      issues: [allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", { reason: "shape" })],
+    };
+  }
+  const version = parsed.data.version;
+  if (version !== ALL_SEATS_POLICY_VERSION) {
+    return {
+      status: "invalid",
+      reason: version === undefined ? "shape" : "unknown-version",
+      ...(version === undefined ? {} : { version }),
+      issues: [
+        allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", {
+          reason: version === undefined ? "shape" : "unknown-version",
+          ...(typeof version === "string" || typeof version === "number" ? { version } : {}),
+        }),
+      ],
+    };
+  }
+  if (!Array.isArray(parsed.data.profiles) || !isPlainRecord(parsed.data.routes)) {
+    return {
+      status: "invalid",
+      reason: "shape",
+      issues: [allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", { reason: "shape" })],
+    };
+  }
+
+  const liveProfiles = new Map(profiles.map((profile) => [profile.id, profile]));
+  const issues: ModeIssue[] = [];
+  const entries: AllSeatsEntry[] = [];
+  const seen = new Set<string>();
+  for (const rawEntry of parsed.data.profiles) {
+    const entry = StoredAllSeatsEntrySchema.safeParse(rawEntry);
+    if (!entry.success) {
+      issues.push(allSeatsIssue("MODE_CHEAP_PROFILE_INVALID", { reason: "shape" }));
+      continue;
+    }
+    if (seen.has(entry.data.profileId)) {
+      issues.push(
+        allSeatsIssue("MODE_CHEAP_PROFILE_INVALID", {
+          profileId: entry.data.profileId,
+          reason: "duplicate",
+        }),
+      );
+      continue;
+    }
+    seen.add(entry.data.profileId);
+    const family = entryFamily(entry.data.family);
+    if (family === undefined) {
+      issues.push(
+        allSeatsIssue(
+          "MODE_CHEAP_PROFILE_INVALID",
+          { reason: "family-unknown" },
+          { profileId: entry.data.profileId },
+        ),
+      );
+      continue;
+    }
+    const live = liveProfiles.get(entry.data.profileId);
+    if (live) {
+      const tuple = {
+        provider: entry.data.boundModel.provider,
+        model: entry.data.boundModel.model,
+      };
+      if (tuple.provider !== live.provider || tuple.model !== (live.model ?? "")) {
+        issues.push(
+          allSeatsIssue(
+            "MODE_CHEAP_PROFILE_INVALID",
+            { reason: "tuple-changed" },
+            { profileId: entry.data.profileId },
+          ),
+        );
+      }
+    }
+    entries.push({
+      profileId: entry.data.profileId,
+      enabled: entry.data.enabled,
+      family,
+      boundModel: { provider: entry.data.boundModel.provider, model: entry.data.boundModel.model },
+      ...(entry.data.nameSnapshot === undefined ? {} : { nameSnapshot: entry.data.nameSnapshot }),
+    });
+  }
+  if (entries.length > ALL_SEATS_WRITER_LIMIT) {
+    issues.push(
+      allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", {
+        reason: "limit",
+        count: entries.length,
+        limit: ALL_SEATS_WRITER_LIMIT,
+      }),
+    );
+  }
+
+  const entryIds = new Set(entries.map((entry) => entry.profileId));
+  const routes: Partial<Record<AllSeatsRoute, readonly string[]>> = {};
+  for (const route of ALL_SEATS_ROUTES) {
+    const rawIds = parsed.data.routes[route];
+    if (rawIds === undefined) continue;
+    if (!Array.isArray(rawIds)) {
+      issues.push(allSeatsIssue("MODE_CHEAP_ROUTE_UNAVAILABLE", { route, reason: "shape" }));
+      continue;
+    }
+    const kept: string[] = [];
+    for (const rawId of rawIds) {
+      if (typeof rawId !== "string") {
+        issues.push(allSeatsIssue("MODE_CHEAP_ROUTE_UNAVAILABLE", { route, reason: "shape" }));
+        continue;
+      }
+      if (!entryIds.has(rawId)) {
+        issues.push(
+          allSeatsIssue("MODE_CHEAP_PROFILE_INVALID", {
+            route,
+            profileId: rawId,
+            reason: "outside-list",
+          }),
+        );
+        continue;
+      }
+      if (kept.includes(rawId)) {
+        issues.push(
+          allSeatsIssue(
+            "MODE_CHEAP_PROFILE_INVALID",
+            { route, profileId: rawId, reason: "duplicate" },
+            { profileId: rawId },
+          ),
+        );
+        continue;
+      }
+      kept.push(rawId);
+    }
+    if (rawIds.length > ALL_SEATS_WRITER_LIMIT) {
+      issues.push(
+        allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", {
+          route,
+          reason: "limit",
+          count: rawIds.length,
+          limit: ALL_SEATS_WRITER_LIMIT,
+        }),
+      );
+    }
+    routes[route] = kept;
+  }
+
+  const executionIds = new Set(routes.execution ?? []);
+  const executionTaskOrder: Partial<Record<TaskKind, readonly string[]>> = {};
+  if (isPlainRecord(parsed.data.executionTaskOrder)) {
+    for (const [kind, rawIds] of Object.entries(parsed.data.executionTaskOrder)) {
+      if (!isTaskKind(kind) || !Array.isArray(rawIds)) {
+        issues.push(
+          allSeatsIssue("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason: "order" }),
+        );
+        continue;
+      }
+      const kept: string[] = [];
+      for (const rawId of rawIds) {
+        if (typeof rawId !== "string" || !executionIds.has(rawId)) {
+          issues.push(
+            allSeatsIssue("MODE_CHEAP_ROUTE_UNAVAILABLE", {
+              route: "execution",
+              reason: "order",
+            }),
+          );
+          continue;
+        }
+        if (!kept.includes(rawId)) kept.push(rawId);
+      }
+      if (rawIds.length > ALL_SEATS_WRITER_LIMIT) {
+        issues.push(
+          allSeatsIssue("MODE_CHEAP_POLICY_REQUIRED", {
+            route: "execution",
+            reason: "limit",
+            count: rawIds.length,
+            limit: ALL_SEATS_WRITER_LIMIT,
+          }),
+        );
+      }
+      executionTaskOrder[kind] = kept;
+    }
+  }
+
+  return {
+    status: "ready",
+    version: ALL_SEATS_POLICY_VERSION,
+    profiles: entries,
+    routes,
+    executionTaskOrder,
+    issues,
+  };
 }
 
 // One raw economy entry / boundModel. Parsing them individually keeps a bad row local: the pool
@@ -341,7 +597,16 @@ export function normalizeEconomyPolicy(
     profileBudget[profileId] = budget;
   }
 
-  return { ok: true, value: { pool, taskOrder, profileBudget }, issues };
+  return {
+    ok: true,
+    value: {
+      pool,
+      taskOrder,
+      profileBudget,
+      allSeats: normalizeAllSeats(stored.allSeats, profiles),
+    },
+    issues,
+  };
 }
 
 function availabilityOf(
@@ -356,7 +621,7 @@ function availabilityOf(
 export function budgetOf(
   profileId: string,
   economy: EconomyPolicy,
-): { budget: EconomyBudget; basis: "host" | "pool" | "conservative-default" } {
+): { budget: EconomyBudget; basis: BudgetBasis } {
   // A Profile that sits in the economy pool consumes pool budget even when reached through the
   // Role's original binding (fallback must not relabel it as host/SOTA).
   if (economy.pool.some((entry) => entry.profileId === profileId)) {
@@ -536,6 +801,197 @@ function originalSelection(
   };
 }
 
+type RouteFailureCounts = {
+  candidates: number;
+  disabled: number;
+  missing: number;
+  unavailable: number;
+  unverified: number;
+  invalid: number;
+  outsideList: number;
+  excluded: number;
+};
+
+/**
+ * One stable reason for a route that produced no seat: nothing configured (list or route empty),
+ * or every candidate failed for the same cause. Mixed causes are `no-eligible`; the per-candidate
+ * issues and the counts keep the detail.
+ */
+export function routeFailureReason(counts: RouteFailureCounts, listSize: number): string {
+  if (listSize === 0) return "list-empty";
+  if (counts.candidates === 0) return "route-empty";
+  const causes: [number, string][] = [
+    [counts.disabled, "all-disabled"],
+    [counts.missing, "profile-missing"],
+    [counts.unavailable, "provider-unavailable"],
+    [counts.unverified, "availability-unverified"],
+    [counts.invalid, "model-unverified"],
+  ];
+  const only = causes.filter(([count]) => count > 0);
+  if (only.length === 1 && only[0]?.[0] === counts.candidates) return only[0][1];
+  return "no-eligible";
+}
+
+function resolveCheapSeat(input: {
+  role: Role;
+  kind: "coordinator" | "member";
+  tier: RoleTier;
+  taskKind: TaskKind;
+  host: Extract<HostSnapshot, { status: "ready" }>;
+  economy: EconomyPolicy;
+  excludedProfileIds?: ReadonlySet<string>;
+  /** Role-policy warnings (e.g. an unreadable stored tier); legacy selections report them too. */
+  policyIssues?: readonly ModeIssue[];
+}): Result<ProfileSelection, ModeIssue[]> {
+  const route = routeOf(input.kind, input.tier);
+  const policyIssues = [...(input.policyIssues ?? [])];
+  const policy = input.economy.allSeats;
+  if (!policy || policy.status === "absent") {
+    return {
+      ok: false,
+      issues: [
+        blocker(
+          "MODE_CHEAP_POLICY_REQUIRED",
+          { route, reason: "absent" },
+          { roleId: input.role.id },
+        ),
+      ],
+    };
+  }
+  if (policy.status === "invalid") {
+    return {
+      ok: false,
+      issues: [
+        blocker(
+          "MODE_CHEAP_POLICY_REQUIRED",
+          {
+            route,
+            reason: policy.reason,
+            ...(policy.version === undefined ? {} : { version: String(policy.version) }),
+          },
+          { roleId: input.role.id },
+        ),
+      ],
+    };
+  }
+  const order: RouteOrder = {
+    routes: policy.routes,
+    executionTaskOrder: policy.executionTaskOrder,
+  };
+  const ids = orderedRouteIds(order, route, input.taskKind);
+  const liveProfiles = new Map(input.host.profiles.map((profile) => [profile.id, profile]));
+  const entries = new Map(policy.profiles.map((entry) => [entry.profileId, entry]));
+  const counts = {
+    candidates: ids.length,
+    disabled: 0,
+    missing: 0,
+    unavailable: 0,
+    unverified: 0,
+    invalid: 0,
+    outsideList: 0,
+    excluded: 0,
+  };
+  const profileIssues: ModeIssue[] = [];
+
+  for (const profileId of ids) {
+    if (input.excludedProfileIds?.has(profileId)) {
+      counts.excluded += 1;
+      continue;
+    }
+    const entry = entries.get(profileId);
+    const live = liveProfiles.get(profileId);
+    if (!entry) {
+      counts.outsideList += 1;
+      continue;
+    }
+    if (!live) {
+      counts.missing += 1;
+      profileIssues.push(
+        blocker(
+          "MODE_CHEAP_PROFILE_INVALID",
+          { route, profileId, reason: "missing" },
+          { roleId: input.role.id, profileId },
+        ),
+      );
+      continue;
+    }
+    const budgetLabel = input.economy.profileBudget[profileId];
+    const check = evaluateCheapCandidate({
+      entry,
+      live,
+      route,
+      ...(budgetLabel === undefined ? {} : { profileBudget: budgetLabel }),
+      availability: input.host.availability,
+      excludedProfileIds: input.excludedProfileIds,
+    });
+    if (check.ok) {
+      return {
+        ok: true,
+        value: {
+          profile: live,
+          source: "economy-pool",
+          budget: "economy",
+          budgetBasis: "route",
+          family: check.family,
+          route,
+          standby: input.tier === "escalation",
+          unavailable: false,
+          issues: policyIssues,
+        },
+        issues: policyIssues,
+      };
+    }
+    if (check.reason === "disabled") counts.disabled += 1;
+    else if (check.reason === "unavailable") counts.unavailable += 1;
+    else if (check.reason === "unverified") counts.unverified += 1;
+    else counts.invalid += 1;
+    profileIssues.push(
+      blocker(
+        "MODE_CHEAP_PROFILE_INVALID",
+        { route, profileId, reason: check.reason },
+        { roleId: input.role.id, profileId },
+      ),
+    );
+  }
+
+  const failureIssues = [
+    ...profileIssues,
+    blocker(
+      "MODE_CHEAP_ROUTE_UNAVAILABLE",
+      {
+        route,
+        reason: routeFailureReason(counts, policy.profiles.length),
+        candidates: counts.candidates,
+        disabled: counts.disabled,
+        missing: counts.missing,
+        unavailable: counts.unavailable,
+        unverified: counts.unverified,
+        invalid: counts.invalid,
+        outsideList: counts.outsideList,
+        excluded: counts.excluded,
+      },
+      { roleId: input.role.id },
+    ),
+  ];
+  if (input.tier === "escalation") {
+    // The standby seat stays visible (and blocked) instead of disappearing from the plan.
+    return {
+      ok: true,
+      value: {
+        profile: null,
+        source: "unavailable",
+        budget: "unknown",
+        budgetBasis: "conservative-default",
+        standby: true,
+        unavailable: true,
+        issues: [...policyIssues, ...failureIssues],
+      },
+      issues: [...policyIssues, ...failureIssues],
+    };
+  }
+  return { ok: false, issues: failureIssues };
+}
+
 /**
  * Per-seat mode selection. Coordinator, decision, retain, and escalation seats keep the Role's
  * original binding; only execution seats use the economy pool. A pool miss falls back to the same
@@ -590,6 +1046,21 @@ export function resolveModeProfile(
     excludedProfileIds: input.excludedProfileIds,
   };
 
+  if (input.mode === "economy-all") {
+    return resolveCheapSeat({
+      role: input.role,
+      kind: input.kind,
+      tier: policy.tier,
+      taskKind: policy.taskKind,
+      host: input.host,
+      economy: input.economy,
+      policyIssues,
+      ...(input.excludedProfileIds === undefined
+        ? {}
+        : { excludedProfileIds: input.excludedProfileIds }),
+    });
+  }
+
   if (input.kind === "coordinator" || policy.tier !== "execution" || input.mode === "sota") {
     return originalSelection(
       original,
@@ -622,6 +1093,65 @@ export function resolveModeProfile(
     };
   }
   return originalSelection(original, [...policyIssues, ...attempt.issues], false);
+}
+
+export type CoordinatorResolution =
+  | {
+      ok: true;
+      selection: AvailableProfileSelection;
+      warnings: string[];
+      /** Role-policy warnings of the cheap route; legacy selections report none here. */
+      issues: ModeIssue[];
+    }
+  | { ok: false; legacyReason?: string; issues: ModeIssue[] };
+
+/**
+ * Coordinator selection. Legacy modes keep resolveProfile's exact source/warnings/budget; the new
+ * economy-all mode uses the coordinator cheap route and never falls back to the original binding.
+ */
+export function resolveCoordinatorProfile(input: {
+  mode: TeamMode;
+  role: Role;
+  host: HostSnapshot;
+  economy: EconomyPolicy;
+  excludedProfileIds?: ReadonlySet<string>;
+}): CoordinatorResolution {
+  if (input.mode === "economy-all") {
+    const resolved = resolveModeProfile({
+      mode: input.mode,
+      role: input.role,
+      kind: "coordinator",
+      host: input.host,
+      economy: input.economy,
+      ...(input.excludedProfileIds === undefined
+        ? {}
+        : { excludedProfileIds: input.excludedProfileIds }),
+    });
+    if (!resolved.ok) return { ok: false, issues: resolved.issues ?? [] };
+    if (resolved.value.unavailable) {
+      return { ok: false, issues: resolved.issues ?? [] };
+    }
+    return { ok: true, selection: resolved.value, warnings: [], issues: resolved.issues ?? [] };
+  }
+  const profiles = input.host.status === "ready" ? input.host.profiles : [];
+  const availability = input.host.status === "ready" ? input.host.availability : [];
+  const resolved = resolveProfile(input.role, profiles, availability);
+  if (!resolved.ok) return { ok: false, legacyReason: resolved.reason, issues: [] };
+  const budget = budgetOf(resolved.profile.id, input.economy);
+  return {
+    ok: true,
+    selection: {
+      profile: resolved.profile,
+      source: resolved.source,
+      budget: budget.budget,
+      budgetBasis: budget.basis,
+      standby: false,
+      unavailable: false,
+      issues: [],
+    },
+    warnings: resolved.warnings,
+    issues: [],
+  };
 }
 
 /**

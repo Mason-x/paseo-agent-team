@@ -1,9 +1,14 @@
 import { describe, expect, test } from "vitest";
 import {
+  applyGapRetry,
   designerPrefillFromEvent,
   designLaunchSeed,
+  designPrefillForHost,
+  designPrefillSlot,
   designSaveAttemptKey,
   designStartFailureMessage,
+  economyFocusForConfigure,
+  roleEditorTargetForGap,
   shouldAutoSaveDesignJob,
   shouldCleanupDesignJob,
   shouldWarnOnlyWorkspace,
@@ -12,6 +17,31 @@ import type { DesignLaunchPrefill } from "../client/designer/submission-state";
 import type { DesignIssue } from "../shared/schemas/design";
 import { designZh } from "../shared/zh/design";
 import { designJob } from "./design-fixtures";
+import { architect } from "./fixtures";
+
+describe("gap exits", () => {
+  test("opens a known Role with the Profile the row names", () => {
+    expect(
+      roleEditorTargetForGap([architect], { roleId: architect.id, profileId: "profile-1" }),
+    ).toEqual({ role: architect, focusProfileId: "profile-1" });
+    expect(roleEditorTargetForGap([architect], { roleId: architect.id })).toEqual({
+      role: architect,
+      focusProfileId: null,
+    });
+    // A missing Role must not open the editor on a different record.
+    expect(roleEditorTargetForGap([architect], { roleId: "ghost" })).toBeNull();
+  });
+
+  test("maps gap policy exits onto the editor focus", () => {
+    expect(economyFocusForConfigure({ layer: "allSeats", route: "execution" })).toEqual({
+      layer: "allSeats",
+      route: "execution",
+    });
+    expect(economyFocusForConfigure({ layer: "allSeats" })).toEqual({ layer: "allSeats" });
+    expect(economyFocusForConfigure({ layer: "standard" })).toEqual({ layer: "standard" });
+    expect(economyFocusForConfigure({ layer: "allSeats", route: "turbo" })).toBeNull();
+  });
+});
 
 const issue: DesignIssue = {
   code: "DESIGN_NO_WORKSPACE",
@@ -51,24 +81,49 @@ describe("screen prefill", () => {
   });
 });
 
+describe("gap retry slot", () => {
+  const prefill = {
+    nonce: "n-1",
+    text: "原需求",
+    workspaceId: "ws-target",
+    mode: "sota" as const,
+    existingRolesOnly: false,
+    confirmReplace: true,
+  };
+
+  test("shows the Teams tab and hands the card exactly the planned prefill", () => {
+    expect(applyGapRetry("host-a", prefill)).toEqual({
+      tab: "teams",
+      designPrefill: { hostId: "host-a", value: prefill },
+    });
+  });
+
+  test("a prefill made for another host is never delivered", () => {
+    const slot = designPrefillSlot("host-a", prefill);
+    expect(designPrefillForHost(slot, "host-a")).toBe(prefill);
+    expect(designPrefillForHost(slot, "host-b")).toBeUndefined();
+    expect(designPrefillForHost(null, "host-a")).toBeUndefined();
+  });
+});
+
 describe("launch seed", () => {
   const prefill: DesignLaunchPrefill = {
     initialTeamId: "saved-team",
     lockTeam: true,
     initialTask: "改版",
     initialWorkspaceId: "ws-target",
-    initialMode: "economy",
   };
 
-  test("passes the saved Team, mode, and editable target preselect", () => {
-    expect(designLaunchSeed(prefill, "result-1")).toEqual({
+  test("passes the saved Team and editable target preselect, never a mode", () => {
+    const seed = designLaunchSeed(prefill, "result-1");
+    expect(seed).toEqual({
       key: "result-1",
       teamId: "saved-team",
       lockTeam: true,
       initialTask: "改版",
-      initialMode: "economy",
       initialWorkspaceId: "ws-target",
     });
+    expect(seed).not.toHaveProperty("initialMode");
   });
 
   test("omits a missing target instead of falling back to a carrier", () => {

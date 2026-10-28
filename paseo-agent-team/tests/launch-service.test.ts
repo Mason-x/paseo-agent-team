@@ -8,6 +8,7 @@ import { LaunchJobSchema, type LaunchStartInput } from "../shared/rpc";
 import { LaunchPreviewResultSchema } from "../shared/schemas/launch-preview";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
+import { launchContractZh } from "../shared/zh/launch-contract";
 import { fakePort, healthyConfig, invalid, preferences, ready } from "./fakes";
 import { architect, claudeOpus, codingTeam, developer, role, techLead } from "./fixtures";
 
@@ -567,5 +568,130 @@ describe("job retention", () => {
     expect(service.status("run-2")).toBeNull();
     expect(service.status("run-3")).not.toBeNull();
     expect(service.status("run-52")).not.toBeNull();
+  });
+});
+
+describe("mode access gate", () => {
+  const economyAllTeam = { ...codingTeam, id: "economy-team", mode: "economy-all" };
+  const unknownModeTeam = { ...codingTeam, id: "unknown-team", mode: "turbo" };
+  const withTeams = () =>
+    setup({ teams: ready({ teams: [codingTeam, economyAllTeam, unknownModeTeam] }) });
+  const denied = (subject: "team" | "request", value: string) => [
+    launchContractZh.modeRequired(subject, value),
+    launchContractZh.refreshHint,
+  ];
+
+  test("a legacy caller cannot launch an economy-all Team even with a SOTA override", async () => {
+    const { service, port, created } = withTeams();
+    for (const override of [undefined, "sota" as const]) {
+      const preview = await service.preview(
+        { ...onWorkspace, teamId: economyAllTeam.id, ...(override ? { mode: override } : {}) },
+        port,
+      );
+      expect(preview.ok).toBe(false);
+      if (preview.ok) continue;
+      expect(preview.blockers).toEqual(denied("team", "economy-all"));
+      expect(preview.issues).toEqual([
+        expect.objectContaining({
+          code: "MODE_UNKNOWN",
+          severity: "blocker",
+          params: expect.objectContaining({ reason: "contract-required" }),
+        }),
+      ]);
+
+      for (const input of [
+        { ...onWorkspace, teamId: economyAllTeam.id, ...(override ? { mode: override } : {}) },
+        {
+          ...onWorkspace,
+          teamId: economyAllTeam.id,
+          ...(override ? { mode: override } : {}),
+          expectedPlanHash: "stale",
+        },
+      ]) {
+        const started = await service.start(input, port);
+        expect(started.ok).toBe(false);
+        if (!started.ok) expect(started.blockers).toEqual(denied("team", "economy-all"));
+      }
+    }
+    expect(created).toHaveLength(0);
+    // The gate short-circuits before host and target reads.
+    expect(port.config.get).not.toHaveBeenCalled();
+    expect(port.providers.listAvailable).not.toHaveBeenCalled();
+  });
+
+  test("an unknown stored mode is denied for every legacy caller", async () => {
+    for (const contractVersion of [undefined, 1, 3] as const) {
+      const { service, port, created } = withTeams();
+      const preview = await service.preview(
+        {
+          ...onWorkspace,
+          teamId: unknownModeTeam.id,
+          mode: "sota",
+          ...(contractVersion === undefined ? {} : { contractVersion }),
+        },
+        port,
+      );
+      expect(preview.ok, String(contractVersion)).toBe(false);
+      if (!preview.ok) expect(preview.blockers).toEqual(denied("team", "turbo"));
+      expect(created).toHaveLength(0);
+    }
+  });
+
+  test("a v2 caller may override an economy-all Team; the override stays this run only", async () => {
+    const { service, port, created } = withTeams();
+    const preview = await service.preview(
+      { ...onWorkspace, teamId: economyAllTeam.id, mode: "sota", contractVersion: 2 },
+      port,
+    );
+    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+    expect(preview.preview.requestedMode).toBe("sota");
+    const started = await service.start(
+      {
+        ...onWorkspace,
+        teamId: economyAllTeam.id,
+        mode: "sota",
+        contractVersion: 2,
+        expectedPlanHash: preview.preview.planHash,
+      },
+      port,
+    );
+    expect(started.ok).toBe(true);
+    await settled(service, "run-test");
+    expect(created.length).toBeGreaterThan(0);
+  });
+
+  test("legacy Teams keep working for v1 callers, and contractVersion is not hashed", async () => {
+    const { service, port } = withTeams();
+    const legacy = await service.preview({ ...onWorkspace, mode: "economy" }, port);
+    expect(legacy.ok).toBe(true);
+
+    const plain = await service.preview(onWorkspace, port);
+    const v2 = await service.preview({ ...onWorkspace, contractVersion: 2 }, port);
+    const v3 = await service.preview({ ...onWorkspace, contractVersion: 3 }, port);
+    if (!plain.ok || !v2.ok || !v3.ok) throw new Error("unexpected preview failure");
+    expect(v2.preview.planHash).toBe(plain.preview.planHash);
+    expect(v3.preview.planHash).toBe(plain.preview.planHash);
+  });
+
+  test("a job never reports a placeholder mode for an unreadable Team", async () => {
+    const { service, port } = withTeams();
+    const started = await service.start(
+      { ...onWorkspace, teamId: unknownModeTeam.id, mode: "sota", contractVersion: 2 },
+      port,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    expect(started.job.mode).toBe("sota");
+    expect(started.job.rawMode).toBeUndefined();
+    // FIX1's job shape: the raw stored value replaces `mode` when planning cannot read it.
+    const raw = LaunchJobSchema.parse({ ...started.job, mode: undefined, rawMode: "turbo" });
+    expect(raw.rawMode).toBe("turbo");
+  });
+
+  test("a request mode the caller cannot carry is refused by itself", async () => {
+    const { service, port } = withTeams();
+    const preview = await service.preview({ ...onWorkspace, mode: "economy-all" }, port);
+    expect(preview.ok).toBe(false);
+    if (!preview.ok) expect(preview.blockers).toEqual(denied("request", "economy-all"));
   });
 });

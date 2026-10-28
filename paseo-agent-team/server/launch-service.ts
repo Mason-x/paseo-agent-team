@@ -1,19 +1,14 @@
 import { buildLaunchPlan, type LaunchPlan } from "../shared/domain/launch-plan";
 import { launchPreviewWarnings, toModeLaunchPreview } from "../shared/domain/launch-preview";
 import { isLaunchError, launchTeam } from "../shared/domain/launch-team";
-import {
-  type EconomyPolicy,
-  type HostSnapshot,
-  normalizeEconomyPolicy,
-} from "../shared/domain/mode-resolver";
+import { checkModeAccess, requestContractVersion } from "../shared/domain/mode-contract";
+import type { EconomyPolicy } from "../shared/domain/mode-resolver";
 import type { ModeIssue } from "../shared/domain/role-execution";
 import { createRunId } from "../shared/ids";
 import {
   createPaseoAdapter,
   type PaseoAdapter,
-  type PaseoProfile,
   type ProjectSummary,
-  profilesFromConfig,
 } from "../shared/paseo/adapter";
 import type { PaseoPort } from "../shared/paseo/port";
 import type { LaunchJob, LaunchPreviewInput, LaunchStartInput } from "../shared/rpc";
@@ -21,13 +16,16 @@ import type { LaunchPreviewResult } from "../shared/schemas/launch-preview";
 import type { Preferences } from "../shared/schemas/preferences";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
+import { launchContractZh } from "../shared/zh/launch-contract";
 import { hashLaunchPlan } from "./launch-hash";
+import {
+  planningEconomy,
+  readPlanningHost,
+  readPlanningSettings,
+  type SettingsReader,
+} from "./planning-context";
 
-type SettingsState<Values> =
-  | { status: "ready"; values: Values }
-  | { status: "invalid"; error: string };
-
-export type SettingsReader<Values> = { read(): Promise<SettingsState<Values>> };
+export type { SettingsReader } from "./planning-context";
 
 export type LaunchStartResult =
   | { ok: true; job: LaunchJob }
@@ -36,8 +34,6 @@ export type LaunchStartResult =
 import { LAUNCH_RUNTIME_CAPABILITIES } from "../shared/domain/launch-runtime";
 
 export { LAUNCH_RUNTIME_CAPABILITIES };
-
-const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 
 const MAX_JOBS = 50;
 const FINISHED_JOB_TTL_MS = 60 * 60 * 1000;
@@ -56,21 +52,13 @@ type PreparedLaunch = {
   preferences: Preferences;
   economy: EconomyPolicy;
   economyIssues: ModeIssue[];
+  /** The stored value planning could not read; a job then carries it instead of a placeholder. */
+  rawMode?: string;
 };
 
 type PrepareResult =
   | { ok: true; prepared: PreparedLaunch }
   | { ok: false; blockers: string[]; warnings: string[]; issues: ModeIssue[] };
-
-function economyOf(preferences: Preferences, profiles: readonly PaseoProfile[]): EconomyPolicy {
-  const normalized = normalizeEconomyPolicy(preferences.economy, profiles);
-  return normalized.ok ? normalized.value : EMPTY_ECONOMY;
-}
-
-function economyIssuesOf(preferences: Preferences, profiles: readonly PaseoProfile[]): ModeIssue[] {
-  const normalized = normalizeEconomyPolicy(preferences.economy, profiles);
-  return normalized.issues ?? [];
-}
 
 /**
  * Launches Teams on the daemon host. Each launch is a job that keeps running after the RPC
@@ -107,22 +95,43 @@ export function createLaunchService(deps: {
     adapter: PaseoAdapter,
     runId: string,
   ): Promise<PrepareResult> {
-    const [roles, teams, preferences] = await Promise.all([
-      deps.roles.read(),
-      deps.teams.read(),
-      deps.preferences.read(),
-    ]);
-    const invalid = [
-      roles.status === "invalid" ? zh.settingsInvalid(zh.catalogRoles) : null,
-      teams.status === "invalid" ? zh.settingsInvalid(zh.catalogTeams) : null,
-      preferences.status === "invalid" ? zh.settingsInvalid(zh.catalogPreferences) : null,
-    ].filter((message): message is string => message !== null);
-    if (roles.status !== "ready" || teams.status !== "ready" || preferences.status !== "ready") {
-      return { ok: false, blockers: invalid, warnings: [], issues: [] };
+    const settings = await readPlanningSettings({
+      roles: deps.roles,
+      teams: deps.teams,
+      preferences: deps.preferences,
+    });
+    if (settings.status === "unavailable") {
+      return {
+        ok: false,
+        blockers: settings.blockers,
+        warnings: [],
+        issues: settings.issues,
+      };
+    }
+
+    // Access gate: after reading the stored Team, before any override, host read, or target read.
+    // A stale caller may not launch a Team whose saved mode it cannot represent, even by sending
+    // a legacy override; the refusal is the only blocker, so the reason is unambiguous.
+    const team = settings.teams.teams.find((entry) => entry.id === input.teamId);
+    const access = checkModeAccess({
+      storedMode: team?.mode,
+      requestedMode: input.mode,
+      contractVersion: requestContractVersion(input),
+    });
+    if (!access.ok) {
+      return {
+        ok: false,
+        blockers: [
+          launchContractZh.modeRequired(access.denial.subject, access.denial.value),
+          launchContractZh.refreshHint,
+        ],
+        warnings: [],
+        issues: [access.issue],
+      };
     }
 
     const target = input.target;
-    const [workspace, project, hostResult] = await Promise.all([
+    const [workspace, project, hostFacts] = await Promise.all([
       target.kind === "workspace" ? adapter.getWorkspace(target.workspaceId) : null,
       target.kind === "new-workspace"
         ? adapter
@@ -130,59 +139,24 @@ export function createLaunchService(deps: {
             .then((projects) => projects.find((entry) => entry.id === target.projectId))
             .catch(() => undefined)
         : undefined,
-      (async (): Promise<{ host: HostSnapshot; daemonConfig: unknown }> => {
-        let daemonConfig: unknown;
-        try {
-          daemonConfig = await adapter.readConfig();
-        } catch (cause) {
-          // Raw host errors may contain paths or tokens: log them, return a stable code only.
-          log("launch config read failed", cause);
-          return {
-            host: { status: "unavailable", reason: "config-read-failed" },
-            daemonConfig: undefined,
-          };
-        }
-        const profiles = profilesFromConfig(daemonConfig);
-        try {
-          const availability = await adapter.listProviderAvailability();
-          return {
-            host: { status: "ready", profiles, availability },
-            daemonConfig,
-          };
-        } catch (cause) {
-          log("launch availability read failed", cause);
-          // Profiles are still usable; SOTA keeps launching with an explicit warning, while the
-          // new modes refuse to treat an unverified pool as healthy.
-          return {
-            host: {
-              status: "ready",
-              profiles,
-              availability: [],
-              availabilityUnverified: true,
-            },
-            daemonConfig,
-          };
-        }
-      })(),
+      readPlanningHost(adapter, log),
     ]);
-    const { host, daemonConfig } = hostResult;
+    const { host, daemonConfig } = hostFacts;
     const readyHost = host.status === "ready" ? host : undefined;
     const targetBlockers: string[] = [];
     if (target.kind === "workspace" && !workspace) targetBlockers.push(zh.workspaceMissing);
     if (target.kind === "new-workspace" && !project) targetBlockers.push(zh.projectMissing);
 
-    const team = teams.values.teams.find((entry) => entry.id === input.teamId);
-    const economy = economyOf(preferences.values, readyHost?.profiles ?? []);
-    const economyIssues = economyIssuesOf(preferences.values, readyHost?.profiles ?? []);
+    const { economy, issues: economyIssues } = planningEconomy(settings.preferences, host);
     const plan = buildLaunchPlan({
       team,
-      roles: roles.values.roles,
+      roles: settings.roles.roles,
       profiles: readyHost?.profiles ?? [],
       availability: readyHost?.availability ?? [],
       workspaceId: workspace?.id ?? "",
       task: input.task,
       runId,
-      maxMembers: preferences.values.maxMembers,
+      maxMembers: settings.preferences.maxMembers,
       mode: input.mode,
       host,
       economy,
@@ -195,20 +169,21 @@ export function createLaunchService(deps: {
       plan,
       planHash: hashLaunchPlan({
         team: plan.team,
-        roles: roles.values.roles,
+        roles: settings.roles.roles,
         plan,
         host,
         economy,
         target,
         task: input.task,
-        maxMembers: preferences.values.maxMembers,
+        maxMembers: settings.preferences.maxMembers,
         runtimeCapabilities: LAUNCH_RUNTIME_CAPABILITIES,
       }),
       workspace,
       project,
-      preferences: preferences.values,
+      preferences: settings.preferences,
       economy,
       economyIssues,
+      ...(plan.rawMode === undefined ? {} : { rawMode: plan.rawMode }),
     };
     if (blockers.length > 0) {
       return { ok: false, blockers, warnings: plan.warnings, issues };
@@ -329,7 +304,9 @@ export function createLaunchService(deps: {
         memberIds: [],
         warnings: launchPreviewWarnings(plan, prepared.prepared.economyIssues),
         startedAt: now().toISOString(),
-        mode: plan.mode,
+        ...(prepared.prepared.rawMode === undefined
+          ? { mode: plan.mode }
+          : { rawMode: prepared.prepared.rawMode }),
         planHash: prepared.prepared.planHash,
       };
       jobs.set(runId, job);

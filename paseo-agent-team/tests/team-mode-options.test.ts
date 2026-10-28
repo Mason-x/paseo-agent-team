@@ -7,12 +7,46 @@ import {
   TASK_KIND_OPTIONS,
   TEAM_MODE_OPTIONS,
 } from "../client/shared/team-mode-options";
+import {
+  TEAM_MODE_DISPLAY,
+  TEAM_MODES,
+  type TeamModeDisplay,
+} from "../shared/domain/mode-contract";
 import { RoleTierSchema, TaskKindSchema, TeamModeSchema } from "../shared/schemas/team-mode";
+import { modesZh } from "../shared/zh/modes";
 
 describe("mode and policy options", () => {
   test("team mode options match the strict command enum", () => {
     expect(TEAM_MODE_OPTIONS.map((option) => option.value)).toEqual(TeamModeSchema.options);
     expect(TEAM_MODE_OPTIONS.every((option) => option.label && option.hint)).toBe(true);
+  });
+
+  test("the picker table is the contract table: four modes, one display identity each", () => {
+    expect(TEAM_MODE_OPTIONS.map((option) => option.value)).toEqual([...TEAM_MODES]);
+    expect(TEAM_MODE_OPTIONS.map((option) => option.display)).toEqual(
+      TEAM_MODES.map((mode) => TEAM_MODE_DISPLAY[mode]),
+    );
+    expect(new Set(TEAM_MODE_OPTIONS.map((option) => option.display)).size).toBe(TEAM_MODES.length);
+    expect(TEAM_MODE_OPTIONS.map((option) => option.label)).toEqual(
+      TEAM_MODES.map((mode) => modesZh.modeLabels[TEAM_MODE_DISPLAY[mode]]),
+    );
+  });
+
+  test("labels and hints are unique, and standard never shares the economy name", () => {
+    const labels = TEAM_MODE_OPTIONS.map((option) => option.label);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels).toEqual(["旗舰（SOTA）", "标准", "经济", "协作"]);
+
+    const displayOf = new Map(TEAM_MODE_OPTIONS.map((option) => [option.display, option] as const));
+    const standard = displayOf.get("standard" satisfies TeamModeDisplay);
+    const economy = displayOf.get("economy" satisfies TeamModeDisplay);
+    expect(standard?.hint).toContain("决策层保留原绑定");
+    expect(economy?.hint).toContain("所有席位");
+    expect(standard?.value).toBe("economy");
+    expect(economy?.value).toBe("economy-all");
+
+    const hints = TEAM_MODE_OPTIONS.map((option) => option.hint);
+    expect(new Set(hints).size).toBe(hints.length);
   });
 
   test("Role tier and task kind options match their strict enums", () => {

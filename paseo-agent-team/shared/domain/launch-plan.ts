@@ -4,7 +4,9 @@ import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
 import type { TeamMode } from "../schemas/team-mode";
 import { zh } from "../zh";
-import type { EconomyPolicy, HostSnapshot } from "./mode-resolver";
+import { cheapIssueText } from "../zh/mode-plan";
+import type { EconomyPolicy, HostSnapshot, ProfileSelection } from "./mode-resolver";
+import { resolveCoordinatorProfile } from "./mode-resolver";
 import { resolveProfile } from "./profile-resolver";
 import {
   type CoordinatorRosterEntry,
@@ -13,13 +15,8 @@ import {
   compileMemberSystemPrompt,
 } from "./prompt-compiler";
 import type { ModeIssue } from "./role-execution";
-import {
-  buildSeatPlan,
-  type PlannedSeat,
-  type RuntimeCapabilities,
-  type SeatBudgetCounts,
-  type SeatCounts,
-} from "./seat-plan";
+import type { PlannedSeat, RuntimeCapabilities, SeatBudgetCounts, SeatCounts } from "./seat-plan";
+import { buildTeamModelPlan } from "./team-model-plan";
 import { coordinatorToolsBlocker } from "./tools-readiness";
 
 export type { RuntimeCapabilities } from "./seat-plan";
@@ -54,6 +51,13 @@ export type LaunchPlan = {
   seatCounts: SeatCounts;
   seatBudget: SeatBudgetCounts;
   seatIssues: ModeIssue[];
+  /** The same selection the coordinator was built from; preview uses it for the new mode. */
+  coordinatorSelected?: ProfileSelection;
+  /**
+   * The stored Team.mode this version cannot read. `mode` above is then only an internal
+   * placeholder (planning is blocked by MODE_UNKNOWN); consumers must not present it as resolved.
+   */
+  rawMode?: string;
   kickoffMessage: string;
   warnings: string[];
   blockers: string[];
@@ -95,6 +99,10 @@ function seatBlockerText(
   const value = entry.params.value === undefined ? "" : String(entry.params.value);
 
   switch (entry.code) {
+    case "MODE_CHEAP_POLICY_REQUIRED":
+    case "MODE_CHEAP_PROFILE_INVALID":
+    case "MODE_CHEAP_ROUTE_UNAVAILABLE":
+      return cheapIssueText(entry);
     case "MODE_MEMBER_LIMIT":
       return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
     case "MODE_SEAT_DUPLICATE":
@@ -153,6 +161,10 @@ export function warningIssueText(entry: ModeIssue, seats: readonly PlannedSeat[]
   const provider = typeof entry.params.provider === "string" ? entry.params.provider : undefined;
 
   switch (entry.code) {
+    case "MODE_CHEAP_POLICY_REQUIRED":
+    case "MODE_CHEAP_PROFILE_INVALID":
+    case "MODE_CHEAP_ROUTE_UNAVAILABLE":
+      return cheapIssueText(entry);
     case "MODE_MEMBER_LIMIT":
       return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
     case "MODE_SEAT_DUPLICATE":
@@ -308,15 +320,16 @@ export function buildLaunchPlan(input: {
   };
   const hostProfiles = host.status === "ready" ? host.profiles : input.profiles;
   const hostAvailability = host.status === "ready" ? host.availability : input.availability;
-  const seatPlan = buildSeatPlan({
+  const modelPlan = buildTeamModelPlan({
     team,
     roles: input.roles,
     host,
     economy: input.economy ?? EMPTY_ECONOMY_POLICY,
     maxMembers: input.maxMembers,
-    mode: input.mode,
+    ...(input.mode === undefined ? {} : { mode: input.mode }),
     runtimeCapabilities: capabilities,
   });
+  const seatPlan = modelPlan.seatPlan;
   for (const entry of seatPlan.blockers) {
     if (
       entry.code === "MODE_ONDEMAND_UNAVAILABLE" &&
@@ -329,6 +342,11 @@ export function buildLaunchPlan(input: {
     blockers.push(seatBlockerText(entry, input.roles, seatPlan.seats));
   }
   for (const entry of seatPlan.issues) {
+    if (entry.severity !== "warning") continue;
+    warnings.push(warningIssueText(entry, seatPlan.seats));
+  }
+  // Coordinator policy warnings and (economy-all) all-seats configuration problems.
+  for (const entry of modelPlan.extraIssues) {
     if (entry.severity !== "warning") continue;
     warnings.push(warningIssueText(entry, seatPlan.seats));
   }
@@ -353,18 +371,32 @@ export function buildLaunchPlan(input: {
   }
 
   let coordinator: PlannedAgent = emptyCoordinator;
+  let coordinatorSelected: ProfileSelection | undefined;
   if (coordinatorRole) {
-    const resolved = resolveProfile(coordinatorRole, hostProfiles, hostAvailability);
-    if (!resolved.ok) {
-      blockers.push(zh.coordinatorProfileFail(resolved.reason));
-    } else {
-      warnings.push(...resolved.warnings);
+    // An unreadable stored mode is blocked by MODE_UNKNOWN, but the coordinator is still shown as
+    // the baseline did: the Role's own binding through the legacy resolver. Nothing starts.
+    const selection =
+      modelPlan.coordinator.selection ??
+      (modelPlan.effectiveMode === null
+        ? (() => {
+            const legacy = resolveCoordinatorProfile({
+              mode: "sota",
+              role: coordinatorRole,
+              host,
+              economy: input.economy ?? EMPTY_ECONOMY_POLICY,
+            });
+            return legacy.ok ? legacy.selection : null;
+          })()
+        : null);
+    if (selection) {
+      warnings.push(...modelPlan.coordinator.warnings);
+      coordinatorSelected = selection;
       const title = coordinatorTitle(team, task);
       coordinator = {
         kind: "coordinator",
         role: coordinatorRole,
-        profile: resolved.profile,
-        source: resolved.source,
+        profile: selection.profile,
+        source: selection.source,
         title,
         labels: teamLabels({
           runId: input.runId,
@@ -404,8 +436,14 @@ export function buildLaunchPlan(input: {
               }),
         }),
       };
-      const toolsBlocker = coordinatorToolsBlocker(input.daemonConfig, resolved.profile.provider);
+      const toolsBlocker = coordinatorToolsBlocker(input.daemonConfig, selection.profile.provider);
       if (toolsBlocker) blockers.push(toolsBlocker);
+    } else if (modelPlan.coordinator.legacyFailureReason !== null) {
+      blockers.push(zh.coordinatorProfileFail(modelPlan.coordinator.legacyFailureReason));
+    } else {
+      for (const entry of modelPlan.coordinator.issues) {
+        blockers.push(seatBlockerText(entry, input.roles, seatPlan.seats));
+      }
     }
   }
 
@@ -490,7 +528,9 @@ export function buildLaunchPlan(input: {
     seats: seatPlan.seats,
     seatCounts: seatPlan.counts,
     seatBudget: seatPlan.budget,
-    seatIssues: seatPlan.issues,
+    seatIssues: [...modelPlan.issues],
+    ...(coordinatorSelected === undefined ? {} : { coordinatorSelected }),
+    ...(modelPlan.rawMode === undefined ? {} : { rawMode: modelPlan.rawMode }),
     kickoffMessage,
     warnings: [...new Set(warnings)],
     blockers: [...new Set(blockers)],

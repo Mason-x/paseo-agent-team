@@ -8,7 +8,8 @@ import { resolveCollapseDefault } from "../designer/card-state";
 import { TeamDesignerCard, type TeamDesignerCardProps } from "../designer/TeamDesignerCard";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
-import { TeamList } from "./TeamList";
+import { TeamList, type TeamListPlans } from "./TeamList";
+import type { TeamBindingTarget } from "./team-plan-state";
 
 /**
  * The Team page: the designer on top, then the Team search and list. It renders inside the
@@ -26,6 +27,8 @@ export function TeamsTab({
   onEdit,
   onCopy,
   onDelete,
+  plans,
+  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -41,6 +44,9 @@ export function TeamsTab({
   onEdit: (team: Team) => void;
   onCopy: (team: Team) => void;
   onDelete: (team: Team) => void;
+  /** Model-plan summaries supplied by the screen (I02); absent keeps the list as before. */
+  plans?: TeamListPlans;
+  onConfigureEconomy?: (target: Extract<TeamBindingTarget, { kind: "economy" }>) => void;
 }) {
   const [query, setQuery] = useState("");
   const styles = useMemo(
@@ -94,6 +100,8 @@ export function TeamsTab({
         teams={teams}
         roles={roles}
         query={query}
+        plans={plans}
+        onConfigureEconomy={onConfigureEconomy}
         onLaunch={onLaunch}
         onEdit={onEdit}
         onCopy={onCopy}

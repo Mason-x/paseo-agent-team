@@ -85,6 +85,7 @@ export function toModeLaunchPreview(
     ...(seat.cohortId === undefined ? {} : { cohortId: seat.cohortId }),
     profile: profileOf(seat.selected),
     source: seat.selected.source,
+    ...(seat.selected.route === undefined ? {} : { route: seat.selected.route }),
     ...(seat.selected.family === undefined ? {} : { family: seat.selected.family }),
     alternates: [...(seat.selected.alternates ?? [])],
     budget: seat.selected.budget,
@@ -94,25 +95,43 @@ export function toModeLaunchPreview(
     issues: issuesOf(seat.selected),
   }));
 
-  const coordinatorProfile =
-    plan.coordinator.profile.id === "missing" ? null : profileTuple(plan.coordinator.profile);
-  const coordinatorBudget =
-    plan.coordinator.profile.id === "missing"
+  const selectedCoordinator = plan.mode === "economy-all" ? plan.coordinatorSelected : undefined;
+  const coordinatorProfile = selectedCoordinator
+    ? selectedCoordinator.unavailable
+      ? null
+      : profileTuple(selectedCoordinator.profile)
+    : plan.coordinator.profile.id === "missing"
+      ? null
+      : profileTuple(plan.coordinator.profile);
+  const coordinatorBudget = selectedCoordinator
+    ? { budget: selectedCoordinator.budget, budgetBasis: selectedCoordinator.budgetBasis }
+    : plan.coordinator.profile.id === "missing"
       ? undefined
-      : budgetOf(plan.coordinator.profile.id, economy);
+      : (() => {
+          const legacy = budgetOf(plan.coordinator.profile.id, economy);
+          return { budget: legacy.budget, budgetBasis: legacy.basis };
+        })();
   const coordinator: CoordinatorPreview = {
     roleId: plan.coordinator.role.id,
     roleName: plan.coordinator.role.name,
     profile: coordinatorProfile,
-    source: plan.coordinator.source === "role-fallback" ? "role-fallback" : "role-preferred",
+    source: selectedCoordinator
+      ? selectedCoordinator.source
+      : plan.coordinator.source === "role-fallback"
+        ? "role-fallback"
+        : "role-preferred",
+    ...(selectedCoordinator?.route === undefined ? {} : { route: selectedCoordinator.route }),
     ...(coordinatorBudget === undefined
       ? {}
-      : { budget: coordinatorBudget.budget, budgetBasis: coordinatorBudget.basis }),
+      : {
+          budget: coordinatorBudget.budget,
+          budgetBasis: coordinatorBudget.budgetBasis,
+        }),
     issues: [],
   };
 
   return {
-    requestedMode: plan.mode,
+    ...(plan.rawMode === undefined ? { requestedMode: plan.mode } : { rawMode: plan.rawMode }),
     coordinator,
     seats,
     counts: plan.seatCounts,

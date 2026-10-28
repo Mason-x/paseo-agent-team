@@ -1,0 +1,1409 @@
+// C03 real-ledger specification (L4): mkdtemp + the real createDesignJobStore, no mocking of the
+// filesystem. Fixtures are the frozen baseline (schemaVersion 1) records from p1-compat; the
+// expectations come from .notes/01-spec-p1.md (AC-0c.5, 0c.9–0c.14, 0c.16, 0d.15, 0d.20, X7–X11)
+// and .notes/83-c03-rereview.md (D1–D12), not from the implementation's current shape.
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
+import { projectJobForContract, projectResultForContract } from "../../server/designer/compat";
+import type { DesignSettingsReaders } from "../../server/designer/context";
+import { type DesignDataRoot, resolveDesignDataRoot } from "../../server/designer/data-root";
+import { type DesignDiscoveryPort, reconcileDesignJob } from "../../server/designer/recovery";
+import {
+  createDesignService,
+  type DesignService,
+  type DesignServiceDeps,
+} from "../../server/designer/service";
+import {
+  createDesignJobStore,
+  DESIGN_RECORD_VERSION,
+  type DesignJobStore,
+  type DesignStoreFs,
+  LEGACY_RECORD_RULES,
+  type StoredDesignJob,
+} from "../../server/designer/store";
+import type { DesignTimelinePort } from "../../server/designer/timeline";
+import { canonicalDesignContent } from "../../shared/domain/design-content";
+import type { DesignPlanningPort } from "../../shared/domain/design-planning";
+import type { PaseoProfile } from "../../shared/paseo/adapter";
+import type {
+  DesignAdapter,
+  DesignAgentSummary,
+  DesignTimelinePage,
+  DesignWorkspaceSummary,
+} from "../../shared/paseo/design-port";
+import type { DesignJob, DesignResult, RoleGapReport } from "../../shared/schemas/design";
+import { PreferencesSchema } from "../../shared/schemas/preferences";
+import type { TeamMode } from "../../shared/schemas/team-mode";
+import { DESIGN_HASH, designProposal, newDesignRole } from "../design-fixtures";
+import { architect, claudeOpus, codexXhigh, codingTeam, developer, techLead } from "../fixtures";
+import {
+  DESIGN_V1_RECORD_DESIGNING,
+  DESIGN_V1_RECORD_FAILED,
+  DESIGN_V1_RECORD_READY,
+  DESIGN_V1_RECORDS,
+} from "../fixtures/p1-compat/design-ledger-v1";
+
+const NOW = "2026-10-27T00:00:00.000Z";
+const C02_IDS = {
+  clientId: "00000000-0000-4000-8000-000000000101",
+  leaseId: "00000000-0000-4000-8000-000000000102",
+  resultId: "a".repeat(64),
+};
+
+const homes: string[] = [];
+let sequence = 0;
+
+afterEach(async () => {
+  await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
+});
+
+function uuid(): string {
+  sequence += 1;
+  return `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
+}
+
+function hash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function hashFile(file: string): Promise<string> {
+  return readFile(file, "utf8").then(hash);
+}
+
+async function newHome(): Promise<{ home: string; root: DesignDataRoot }> {
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-c03-spec-"));
+  homes.push(home);
+  const root = await resolveDesignDataRoot(home);
+  await mkdir(root.jobs, { recursive: true });
+  return { home, root };
+}
+
+async function openStore(home: string, fs?: DesignStoreFs): Promise<DesignJobStore> {
+  const store = createDesignJobStore({
+    home,
+    ...(fs === undefined ? {} : { fs }),
+    clock: { now: () => NOW },
+    ids: { next: uuid },
+  });
+  await store.initialize();
+  return store;
+}
+
+type RecordLike = { job: { jobId: string } };
+
+function fileOf(root: DesignDataRoot, record: RecordLike): string {
+  return path.join(root.jobs, `${record.job.jobId}.json`);
+}
+
+async function writeRecordFile(
+  root: DesignDataRoot,
+  record: RecordLike,
+  name?: string,
+): Promise<string> {
+  const target = path.join(root.jobs, name ?? `${record.job.jobId}.json`);
+  await writeFile(target, `${JSON.stringify(record)}\n`, "utf8");
+  return target;
+}
+
+async function seed(root: DesignDataRoot, ...records: readonly RecordLike[]): Promise<void> {
+  for (const record of records) await writeRecordFile(root, record);
+}
+
+async function snapshot(files: readonly string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const file of files) out[file] = await hashFile(file);
+  return out;
+}
+
+type StoredOverrides = Partial<Omit<StoredDesignJob, "job">> & {
+  job?: Partial<StoredDesignJob["job"]>;
+};
+
+function v2Record(fixture: unknown, overrides: StoredOverrides = {}): StoredDesignJob {
+  // Fixtures are complete v1 records; this cast is the test boundary, and the v2 fields below are
+  // what the reader must synthesize or what the writer must store.
+  const base = structuredClone(fixture) as StoredDesignJob;
+  return {
+    ...base,
+    schemaVersion: DESIGN_RECORD_VERSION,
+    requestHashVersion: 2,
+    outputContractVersion: 2,
+    existingRolesOnly: true,
+    roleGap: null,
+    ...overrides,
+    job: { ...base.job, ...(overrides.job ?? {}) },
+  };
+}
+
+const gapReport: RoleGapReport = {
+  responsibility: "数据库迁移评审",
+  reason: "现有 Role 不承担迁移评审。",
+  use: "member",
+  profiles: [],
+  profileGapReason: "host 没有合适 Profile。",
+  suggestedRole: {
+    id: "qa-migration",
+    name: "【质量】迁移评审",
+    responsibilities: ["评审迁移脚本"],
+    executionPolicy: { tier: "decision", taskKind: "general" },
+  },
+};
+
+type ServiceOverrides = Partial<DesignServiceDeps>;
+
+function serviceFor(store: DesignJobStore, overrides: ServiceOverrides = {}): DesignService {
+  return createDesignService({
+    store,
+    readers: {} as DesignSettingsReaders,
+    getAdapter: () => null,
+    planner: {} as DesignPlanningPort,
+    clock: { now: () => NOW },
+    ids: { next: uuid },
+    hasher: hash,
+    capabilities: { onDemand: false, expansion: false, collaboration: false },
+    log: () => {},
+    ...overrides,
+  });
+}
+
+function v1RequestBase(record: { request: string; mode: string }) {
+  return {
+    request: record.request,
+    mode: record.mode,
+    workspaceId: null,
+    profileId: null,
+    useDefaultProfileHints: false,
+  };
+}
+
+function issueCodes(result: { ok: boolean; issues?: readonly { code: string }[] }): string[] {
+  return "issues" in result && result.issues ? result.issues.map((issue) => issue.code) : [];
+}
+
+describe("AC-0c.12 / AC-0c.16① / AC-0d.15: v1 records read in memory, files untouched", () => {
+  test("all five baseline records load with legacy rules and byte-identical files", async () => {
+    const { home, root } = await newHome();
+    await seed(root, ...DESIGN_V1_RECORDS);
+    const files = DESIGN_V1_RECORDS.map((record) => fileOf(root, record));
+    const beforeSha = await snapshot(files);
+    const beforeStat = await Promise.all(files.map((file) => stat(file)));
+
+    const store = await openStore(home);
+    const listed = await store.list();
+    expect(listed).toHaveLength(DESIGN_V1_RECORDS.length);
+    for (const fixture of DESIGN_V1_RECORDS) {
+      const record = await store.get(fixture.job.jobId);
+      expect(record).not.toBeNull();
+      expect(record).toMatchObject({
+        schemaVersion: 1,
+        ...LEGACY_RECORD_RULES,
+        requestHash: fixture.requestHash,
+        selectionIntent: fixture.selectionIntent,
+      });
+      // The old ≤3 rule is "absent", never an explicit false on the Job DTO.
+      expect(record?.job.existingRolesOnly).toBeUndefined();
+      expect(record?.job.outputContractVersion).toBeUndefined();
+      expect(record?.job.roleGap).toBeUndefined();
+      expect(await store.findRequest(fixture.job.clientRequestId)).toMatchObject({
+        requestHashVersion: 1,
+        existingRolesOnly: false,
+      });
+      expect(JSON.parse(await readFile(fileOf(root, fixture), "utf8"))).toEqual(fixture);
+    }
+    expect(await store.problems()).toEqual([]);
+
+    // A restart is a pure read as well.
+    await store.dispose();
+    const reopened = await openStore(home);
+    await reopened.list();
+    await reopened.dispose();
+
+    expect(await snapshot(files)).toEqual(beforeSha);
+    const afterStat = await Promise.all(files.map((file) => stat(file)));
+    expect(afterStat.map((entry) => entry.mtimeMs)).toEqual(
+      beforeStat.map((entry) => entry.mtimeMs),
+    );
+  });
+
+  test("D10: read-only recovery of terminal and matching in-flight v1 records writes nothing", async () => {
+    const { home, root } = await newHome();
+    await seed(root, DESIGN_V1_RECORD_FAILED, DESIGN_V1_RECORD_DESIGNING);
+    const failedFile = fileOf(root, DESIGN_V1_RECORD_FAILED);
+    const designingFile = fileOf(root, DESIGN_V1_RECORD_DESIGNING);
+    const before = await snapshot([failedFile, designingFile]);
+
+    const store = await openStore(home);
+    const terminal = await reconcileDesignJob(
+      { discovery: impossibleDiscovery(), timeline: impossibleTimeline() },
+      store,
+      DESIGN_V1_RECORD_FAILED.job.jobId,
+    );
+    expect(terminal.observation).toBe("terminal");
+
+    const labels = DESIGN_V1_RECORD_DESIGNING.creation.request.labels;
+    const discovery: DesignDiscoveryPort = {
+      list: async () => ({ agents: [], nextCursor: null }),
+      refresh: async (agentId) => ({
+        agentId,
+        labels,
+        archived: false,
+        status: "running",
+        pendingPermissions: [],
+        attentionReason: null,
+      }),
+    };
+    const inFlight = await reconcileDesignJob(
+      { discovery, timeline: runningTimeline() },
+      store,
+      DESIGN_V1_RECORD_DESIGNING.job.jobId,
+    );
+    // Matched agent + pending receipt: a fact, not a state transition.
+    expect(inFlight.observation).toBe("receipt-pending");
+    await store.dispose();
+
+    expect(await snapshot([failedFile, designingFile])).toEqual(before);
+  });
+});
+
+describe("AC-0c.12 / AC-0c.16② / D1–D3: one legal CAS writes v2", () => {
+  test("v1 → v2 keeps identity and unknown extension keys at every record-owned layer", async () => {
+    const { home, root } = await newHome();
+    const readyBase = structuredClone(DESIGN_V1_RECORD_READY);
+    const ready = {
+      ...readyBase,
+      futureRoot: { keep: "root" },
+      job: { ...readyBase.job, futureJob: { keep: "job" } },
+      result: { ...readyBase.result, futureResult: { keep: "result" } },
+      attempts: [{ ...readyBase.attempts[0], futureAttempt: { keep: "attempt" } }],
+    };
+    const designingBase = structuredClone(DESIGN_V1_RECORD_DESIGNING);
+    const designing = {
+      ...designingBase,
+      creation: { ...designingBase.creation, futureCreation: { keep: "creation" } },
+    };
+    await seed(root, ready, designing);
+
+    const store = await openStore(home);
+    for (const [fixture, mutation] of [
+      [ready, { agentStatus: "idle" }],
+      [designing, { agentStatus: "running" }],
+    ] as const) {
+      const current = await store.get(fixture.job.jobId);
+      if (!current) throw new Error("fixture missing");
+      await store.update(current.job.jobId, current.job.stateRevision, {
+        ...current,
+        job: { ...current.job, ...mutation, stateRevision: uuid() },
+      });
+    }
+
+    const readyOnDisk = JSON.parse(await readFile(fileOf(root, ready), "utf8"));
+    expect(readyOnDisk).toMatchObject({
+      schemaVersion: 2,
+      requestHashVersion: 1,
+      outputContractVersion: 1,
+      existingRolesOnly: false,
+      roleGap: null,
+      requestHash: ready.requestHash,
+      selectionIntent: ready.selectionIntent,
+    });
+    expect(readyOnDisk.job).not.toHaveProperty("existingRolesOnly");
+    expect(readyOnDisk.job).not.toHaveProperty("outputContractVersion");
+    expect(readyOnDisk.job).not.toHaveProperty("roleGap");
+    expect(readyOnDisk.futureRoot).toEqual({ keep: "root" });
+    expect(readyOnDisk.job.futureJob).toEqual({ keep: "job" });
+    expect(readyOnDisk.result.futureResult).toEqual({ keep: "result" });
+    expect(readyOnDisk.attempts[0]).toMatchObject({
+      ...ready.attempts[0],
+      futureAttempt: { keep: "attempt" },
+    });
+    expect(readyOnDisk.result.resultId).toBe(ready.result.resultId);
+    expect(readyOnDisk.attempts[0].nonce).toBe(ready.attempts[0].nonce);
+
+    const designingOnDisk = JSON.parse(await readFile(fileOf(root, designing), "utf8"));
+    expect(designingOnDisk.creation.futureCreation).toEqual({ keep: "creation" });
+    expect(designingOnDisk.creation.request.labels).toEqual(designing.creation.request.labels);
+
+    await store.dispose();
+    const reopened = await openStore(home);
+    expect(await reopened.get(ready.job.jobId)).toMatchObject({
+      schemaVersion: 2,
+      ...LEGACY_RECORD_RULES,
+    });
+    await reopened.dispose();
+  });
+
+  test("oversized unknown extensions are rejected by the record cap, old bytes kept", async () => {
+    const { home, root } = await newHome();
+    const record = {
+      ...structuredClone(DESIGN_V1_RECORD_READY),
+      futureHuge: "x".repeat(600 * 1024),
+    };
+    const file = await writeRecordFile(root, record);
+    const before = await hashFile(file);
+
+    const store = await openStore(home);
+    const current = await store.get(record.job.jobId);
+    if (!current) throw new Error("fixture missing");
+    await expect(
+      store.update(current.job.jobId, current.job.stateRevision, {
+        ...current,
+        job: { ...current.job, stateRevision: uuid() },
+      }),
+    ).rejects.toMatchObject({ issue: "too-large" });
+    await store.dispose();
+
+    expect(await hashFile(file)).toBe(before);
+  });
+
+  test("D3: a v2 job copy that disagrees with the root is corrupt, not silently fixed", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const record = v2Record(DESIGN_V1_RECORD_READY, {
+      job: { state: "ready" },
+    });
+    await store.create(record);
+    const file = fileOf(root, record);
+    const written = JSON.parse(await readFile(file, "utf8"));
+
+    written.job.existingRolesOnly = false;
+    await writeFile(file, `${JSON.stringify(written)}\n`, "utf8");
+    expect(await store.problems()).toEqual([{ name: path.basename(file), reason: "corrupt" }]);
+    await expect(store.get(record.job.jobId)).rejects.toMatchObject({ issue: "corrupt" });
+    await store.dispose();
+  });
+});
+
+describe("AC-0c.16③/⑤: unknown versions and the baseline reader", () => {
+  test("schemaVersion 3 is isolated, blocks only its request id, and never changes bytes", async () => {
+    const { home, root } = await newHome();
+    const good = await writeRecordFile(root, DESIGN_V1_RECORD_READY);
+    const goodBefore = await hashFile(good);
+    const future = { ...structuredClone(DESIGN_V1_RECORD_FAILED), schemaVersion: 3 };
+    const futureFile = await writeRecordFile(root, future);
+    const before = await hashFile(futureFile);
+
+    const store = await openStore(home);
+    expect((await store.list()).map((record) => record.job.jobId)).toEqual([
+      DESIGN_V1_RECORD_READY.job.jobId,
+    ]);
+    expect(await store.problems()).toEqual([
+      { name: `${DESIGN_V1_RECORD_FAILED.job.jobId}.json`, reason: "unknown-version" },
+    ]);
+    await expect(store.get(future.job.jobId)).rejects.toMatchObject({ issue: "unknown-version" });
+    await expect(
+      store.findRequest(DESIGN_V1_RECORD_FAILED.job.clientRequestId),
+    ).rejects.toMatchObject({ issue: "unknown-version" });
+    expect(await store.findRequest(uuid())).toBeNull();
+    await store.dispose();
+
+    expect(await hashFile(futureFile)).toBe(before);
+    expect(await hashFile(good)).toBe(goodBefore);
+  });
+
+  test("AC-0c.16⑤ / D9: a baseline reader reports unknown-version and leaves v2 bytes alone", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const record = v2Record(DESIGN_V1_RECORD_READY);
+    await store.create(record);
+    await store.dispose();
+    const file = fileOf(root, record);
+    const raw = await readFile(file, "utf8");
+    const before = hash(raw);
+    // Literal baseline decisions: only schemaVersion 1, name = jobId, identity at job.*.
+    const parsed = JSON.parse(raw) as {
+      schemaVersion: number;
+      job: { jobId: string; clientRequestId: string };
+    };
+    expect(parsed.schemaVersion).not.toBe(1);
+    expect(path.basename(file, ".json")).toBe(parsed.job.jobId);
+    expect(parsed.job.clientRequestId).toBe(record.job.clientRequestId);
+    expect(hash(await readFile(file, "utf8"))).toBe(before);
+  });
+});
+
+describe("AC-0c.16④: crash points leave the old or the new valid record", () => {
+  test.each(["after-tmp", "before-rename", "after-rename"] as const)(
+    "%s",
+    async (point) => {
+      const { home, root } = await newHome();
+      await seed(root, DESIGN_V1_RECORD_DESIGNING);
+      const armed = { value: false };
+      const store = await openStore(home, crashFs(point, armed));
+      const current = await store.get(DESIGN_V1_RECORD_DESIGNING.job.jobId);
+      if (!current) throw new Error("fixture missing");
+      armed.value = true;
+      await expect(
+        store.update(current.job.jobId, current.job.stateRevision, {
+          ...current,
+          job: { ...current.job, stateRevision: uuid() },
+        }),
+      ).rejects.toBeTruthy();
+      await store.dispose();
+      armed.value = false;
+
+      const reopened = await openStore(home);
+      const records = await reopened.list();
+      expect(records).toHaveLength(1);
+      const record = records[0];
+      if (!record) throw new Error("record missing");
+      expect([1, 2]).toContain(record.schemaVersion);
+      expect(record.job.jobId).toBe(DESIGN_V1_RECORD_DESIGNING.job.jobId);
+      expect(record.requestHash).toBe(DESIGN_V1_RECORD_DESIGNING.requestHash);
+      if (record.schemaVersion === 2) {
+        expect(record).toMatchObject(LEGACY_RECORD_RULES);
+      }
+      await reopened.dispose();
+    },
+    20_000,
+  );
+});
+
+describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
+  test("economy-all with contract 2 lands as schemaVersion 2", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const service = serviceFor(store);
+    const started = await service.start({
+      clientRequestId: uuid(),
+      request: "经济任务",
+      mode: "economy-all",
+      contractVersion: 2,
+    });
+    expect(started.ok).toBe(true);
+    const jobId = started.ok ? started.job.jobId : "";
+    const onDisk = JSON.parse(await readFile(path.join(root.jobs, `${jobId}.json`), "utf8"));
+    expect(onDisk).toMatchObject({
+      schemaVersion: 2,
+      requestHashVersion: 2,
+      outputContractVersion: 2,
+      existingRolesOnly: true,
+      roleGap: null,
+      mode: "economy-all",
+    });
+    expect(onDisk.job).toMatchObject({
+      existingRolesOnly: true,
+      outputContractVersion: 2,
+      roleGap: null,
+    });
+    await service.dispose();
+  });
+
+  test("legacy contract 2 gate rejects economy-all and an unknown mode with zero writes", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    let adapterCalls = 0;
+    const service = serviceFor(store, {
+      getAdapter: () => {
+        adapterCalls += 1;
+        return null;
+      },
+    });
+    for (const mode of ["economy-all", "future-mode"]) {
+      const rejected = await service.start({
+        clientRequestId: uuid(),
+        request: "经济任务",
+        mode: mode as TeamMode,
+      });
+      expect(rejected.ok).toBe(false);
+      expect(issueCodes(rejected)).toEqual(["DESIGN_MODE_UNAVAILABLE"]);
+      if (!rejected.ok) expect(rejected.issues[0]?.action).toBe("refresh");
+    }
+    expect(adapterCalls).toBe(0);
+    expect((await readdir(root.jobs)).filter((name) => name.endsWith(".json"))).toEqual([]);
+    await service.dispose();
+  });
+
+  test("AC-0c.10 / X8: a v1 request id uses the narrow v1 hash, explicit true conflicts", async () => {
+    const { home, root } = await newHome();
+    const fixture = structuredClone(DESIGN_V1_RECORD_DESIGNING);
+    const record = {
+      ...fixture,
+      requestHash: hash(canonicalDesignContent(v1RequestBase(fixture))),
+    };
+    const file = await writeRecordFile(root, record);
+    const before = await hashFile(file);
+    const store = await openStore(home);
+    const service = serviceFor(store);
+    // The fixture stores the known legacy value; narrow once at this boundary.
+    const mode = record.mode as TeamMode;
+    const input = {
+      clientRequestId: record.job.clientRequestId,
+      request: record.request,
+      mode,
+    };
+
+    const omitted = await service.start(input);
+    expect(omitted.ok && omitted.job.jobId).toBe(record.job.jobId);
+    const explicitFalse = await service.start({ ...input, existingRolesOnly: false });
+    expect(explicitFalse.ok && explicitFalse.job.jobId).toBe(record.job.jobId);
+    const explicitTrue = await service.start({ ...input, existingRolesOnly: true });
+    expect(explicitTrue.ok).toBe(false);
+    expect(issueCodes(explicitTrue)).toEqual(["DESIGN_REQUEST_CONFLICT"]);
+
+    await service.dispose();
+    expect(await hashFile(file)).toBe(before);
+    expect((await readdir(root.jobs)).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+  });
+});
+
+describe("AC-0c.5 / 0c.9 / 0c.16 / 0c.17 / D8: gap terminal records", () => {
+  test("a v2 gap record reads back and prepareSave/compensate/continue refuse it", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const base = v2Record(DESIGN_V1_RECORD_READY, {
+      result: null,
+      proposal: null,
+      roleGap: [gapReport],
+      job: {
+        state: "failed",
+        resultId: null,
+        roleGap: [gapReport],
+        finishedAt: NOW,
+      },
+    });
+    await store.create(base);
+    const file = fileOf(root, base);
+    const before = await hashFile(file);
+    const read = await store.get(base.job.jobId);
+    expect(read).toMatchObject({
+      roleGap: [gapReport],
+      result: null,
+      job: { state: "failed", roleGap: [gapReport] },
+    });
+
+    const service = serviceFor(store);
+    for (const intent of ["save", "compensate"] as const) {
+      const reply = await service.prepareSave({
+        contractVersion: 2,
+        jobId: base.job.jobId,
+        resultId: C02_IDS.resultId,
+        clientId: C02_IDS.clientId,
+        intent,
+      });
+      expect(reply.ok).toBe(false);
+      if (reply.ok) throw new Error("gap record must not be savable");
+      expect(reply.issues[0]).toMatchObject({
+        code: "DESIGN_STATE_CHANGED",
+        action: "refresh",
+        params: { reason: "role-gap" },
+      });
+    }
+    const continued = await service.continue({
+      contractVersion: 2,
+      jobId: base.job.jobId,
+      expectedRevision: base.job.stateRevision,
+      action: "repair",
+    });
+    expect(continued.ok).toBe(false);
+    if (continued.ok) throw new Error("gap record must not continue");
+    expect(continued.issues[0]).toMatchObject({
+      code: "DESIGN_STATE_CHANGED",
+      params: { reason: "role-gap" },
+    });
+    await service.dispose();
+    expect(await hashFile(file)).toBe(before);
+  });
+
+  test("D8: a plain failed v2 job still gets the old stale-result answer", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const record = v2Record(DESIGN_V1_RECORD_FAILED, {
+      result: null,
+      roleGap: null,
+      job: { state: "failed", resultId: null, roleGap: null },
+    });
+    await store.create(record);
+    const service = serviceFor(store);
+    const reply = await service.prepareSave({
+      contractVersion: 2,
+      jobId: record.job.jobId,
+      resultId: C02_IDS.resultId,
+      clientId: C02_IDS.clientId,
+      intent: "save",
+    });
+    expect(reply.ok).toBe(false);
+    expect(issueCodes(reply)).toEqual(["DESIGN_RESULT_STALE"]);
+    await service.dispose();
+  });
+});
+
+describe("AC-0c.9 / AC-0d.15: record rule read back across v1, v2 and gap", () => {
+  test("the root rule survives a reopen; the v1 default is never written into the job", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const record = v2Record(DESIGN_V1_RECORD_READY, {
+      existingRolesOnly: false,
+      job: { state: "ready" },
+    });
+    await store.create(record);
+    const read = await store.get(record.job.jobId);
+    expect(read).toMatchObject({
+      existingRolesOnly: false,
+      requestHashVersion: 2,
+      outputContractVersion: 2,
+      job: { existingRolesOnly: false, outputContractVersion: 2 },
+    });
+    await store.dispose();
+    const reopened = await openStore(home);
+    expect((await reopened.get(record.job.jobId))?.existingRolesOnly).toBe(false);
+    await reopened.dispose();
+  });
+});
+
+describe("AC-0c.13 / AC-0d.20: legacy projection hides a new-mode job", () => {
+  test("contract 1 hides economy-all from the list but contract 2 shows it", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const record = v2Record(DESIGN_V1_RECORD_FAILED, {
+      mode: "economy-all",
+      job: { state: "failed", mode: "economy-all", roleGap: null },
+    });
+    await store.create(record);
+    const service = serviceFor(store);
+
+    const legacy = await service.status({});
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) {
+      expect(legacy.jobs).toEqual([]);
+      expect(legacy.truncated).toBe(true);
+      expect(legacy.discoveryIssues[0]).toMatchObject({
+        code: "DESIGN_MODE_UNAVAILABLE",
+        action: "refresh",
+        params: { reason: "hidden-by-contract" },
+      });
+    }
+    const current = await service.status({ contractVersion: 2 });
+    expect(current.ok && current.jobs.map((job) => job.jobId)).toEqual([record.job.jobId]);
+    const byId = await service.status({ contractVersion: 1, jobId: record.job.jobId });
+    expect(byId.ok).toBe(false);
+    expect(issueCodes(byId)).toEqual(["DESIGN_MODE_UNAVAILABLE"]);
+    if (!byId.ok) expect(byId.job).toBeNull();
+    await service.dispose();
+  });
+
+  test("D2: projection strips record-owned unknown keys from the DTO", async () => {
+    const job = structuredClone(DESIGN_V1_RECORD_READY.job) as DesignJob & {
+      futureJob?: unknown;
+    };
+    job.futureJob = { keep: true };
+    const projected = projectJobForContract(job, 2) as DesignJob & { futureJob?: unknown };
+    expect(projected.futureJob).toBeUndefined();
+
+    const fixtureResult = structuredClone(DESIGN_V1_RECORD_READY.result) as DesignResult;
+    const result = { ...fixtureResult, futureResult: { keep: true } };
+    // Named cast at the compat boundary: the projector returns the DTO type, which has no room
+    // for a newer writer's key; the assertion proves the strip.
+    const projectedResult = projectResultForContract(result) as unknown as Record<string, unknown>;
+    expect(projectedResult.futureResult).toBeUndefined();
+  });
+});
+
+test.todo(
+  "AC-0c.13 / AC-0d.20: baseline DTO snapshot matrix and a real stale-page reload — still depends on I01 aggregation and DEV, not on C03",
+);
+
+function impossibleDiscovery(): DesignDiscoveryPort {
+  return {
+    list: async () => {
+      throw new Error("terminal recovery must not discover");
+    },
+    refresh: async () => {
+      throw new Error("terminal recovery must not refresh");
+    },
+  };
+}
+
+function impossibleTimeline(): DesignTimelinePort {
+  return {
+    refresh: async () => {
+      throw new Error("this recovery path must not read the timeline");
+    },
+    refetch: async () => {
+      throw new Error("this recovery path must not read the timeline");
+    },
+  };
+}
+
+/** The agent is still running, so attempt-text extraction stops before any page refetch. */
+function runningTimeline(): DesignTimelinePort {
+  return {
+    refresh: async () => ({
+      status: "running",
+      activeTurn: true,
+      pendingPermissionCount: 0,
+      lastError: null,
+    }),
+    refetch: async () => {
+      throw new Error("a running turn must not be paginated");
+    },
+  };
+}
+
+type CrashPoint = "after-tmp" | "before-rename" | "after-rename";
+
+/** Real fs operations plus one injected crash point; the directory and bytes stay real. */
+function crashFs(point: CrashPoint, armed: { value: boolean }): DesignStoreFs {
+  const write = async (target: string, content: string): Promise<void> => {
+    const handle = await open(target, "w");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  };
+  const exclusive = async (target: string, content: string): Promise<void> => {
+    const handle = await open(target, "wx");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  };
+  const real: DesignStoreFs = {
+    mkdir: async (target) => {
+      await mkdir(target, { recursive: true });
+    },
+    readFile: async (target) => readFile(target, "utf8"),
+    writeFile: write,
+    rename: async (from, to) => {
+      await rename(from, to);
+    },
+    rm: async (target) => {
+      await rm(target, { force: true });
+    },
+    readdir: async (target) => readdir(target),
+    openExclusive: exclusive,
+  };
+  return {
+    ...real,
+    writeFile: async (target, content) => {
+      await real.writeFile(target, content);
+      if (armed.value && point === "after-tmp") throw new Error("crash after tmp write");
+    },
+    rename: async (from, to) => {
+      if (armed.value && point === "before-rename") throw new Error("crash before rename");
+      await real.rename(from, to);
+      if (armed.value && point === "after-rename") throw new Error("crash after rename");
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// C03 second segment: gap eligibility/correction, record rule across restart, and gapRetry.
+// Same real mkdtemp + createDesignJobStore; only the Paseo adapter/settings ports are fakes.
+// ---------------------------------------------------------------------------------------------
+
+const SPEC_NOW = "2026-10-27T00:00:00.000Z";
+const DESIGNER: PaseoProfile = {
+  id: "designer-opus",
+  name: "Claude-Opus-5.5-Max",
+  provider: "claude",
+  model: "claude-opus-5-5",
+  modeId: "auto",
+  thinkingOptionId: "max",
+};
+const CHEAP: PaseoProfile = {
+  id: "cheap-sonnet",
+  name: "Cheap Sonnet",
+  provider: "claude",
+  model: "claude-sonnet-4-6",
+};
+const baseProfiles = [DESIGNER, claudeOpus, codexXhigh];
+const baseAvailability = [
+  { provider: "claude", available: true },
+  { provider: "codex", available: true },
+];
+const carrier: DesignWorkspaceSummary = {
+  id: "ws-carrier",
+  name: "Carrier",
+  title: "Carrier",
+  projectId: "project-1",
+  projectName: "Project",
+  directory: "C:/project",
+  internal: false,
+  archivingAt: null,
+  background: false,
+  status: "ready",
+  activityAt: SPEC_NOW,
+};
+
+class SpecAdapter implements DesignAdapter {
+  agents = new Map<string, DesignAgentSummary>();
+  sent: string[] = [];
+  entries: DesignTimelinePage["entries"] = [];
+  profilesValue = baseProfiles;
+  availabilityValue = baseAvailability;
+
+  async readConfig() {
+    return { agentProfiles: this.profilesValue };
+  }
+  async listProviderAvailability() {
+    return this.availabilityValue;
+  }
+  async listRecentWorkspaces() {
+    return { workspaces: [carrier], nextCursor: null, hasMore: false };
+  }
+  async getDesignWorkspace(workspaceId: string) {
+    return workspaceId === carrier.id ? carrier : null;
+  }
+  async createDesignAgent(input: Parameters<DesignAdapter["createDesignAgent"]>[0]) {
+    this.agents.set(input.agentId, {
+      id: input.agentId,
+      labels: input.labels,
+      status: "idle",
+      activeTurn: false,
+      archivedAt: null,
+      requiresAttention: false,
+      attentionReason: null,
+      pendingPermissions: [],
+      lastError: null,
+      providerUnavailable: false,
+    });
+    return { agentId: input.agentId };
+  }
+  async getDesignAgent(agentId: string) {
+    return this.agents.get(agentId) ?? null;
+  }
+  async listDesignAgents() {
+    return { agents: [...this.agents.values()], nextCursor: null, hasMore: false };
+  }
+  async readDesignTimeline(): Promise<DesignTimelinePage> {
+    return {
+      epoch: "epoch-1",
+      direction: "before",
+      projection: "projected",
+      entries: structuredClone(this.entries),
+      startCursor: null,
+      endCursor: null,
+      hasOlder: false,
+      hasNewer: false,
+      reset: false,
+      gap: false,
+      staleCursor: false,
+    };
+  }
+  async sendDesignMessage(input: { text: string }) {
+    this.sent.push(input.text);
+  }
+  async archiveDesignAgent() {}
+}
+
+function specReaders(values: { roles?: unknown[]; teams?: unknown[]; preferences?: unknown } = {}) {
+  return {
+    roles: {
+      read: async () => ({
+        status: "ready" as const,
+        revision: "roles-r1",
+        values: { roles: values.roles ?? [techLead, architect, developer] },
+      }),
+    },
+    teams: {
+      read: async () => ({
+        status: "ready" as const,
+        revision: "teams-r1",
+        values: { teams: values.teams ?? [codingTeam] },
+      }),
+    },
+    preferences: {
+      read: async () => ({
+        status: "ready" as const,
+        revision: "prefs-r1",
+        values: PreferencesSchema.parse(values.preferences ?? { maxMembers: 24 }),
+      }),
+    },
+  };
+}
+
+const specPlanner: DesignPlanningPort = {
+  plan(input) {
+    const ids = {
+      coordinator: claudeOpus.id,
+      m1: codexXhigh.id,
+      m2: claudeOpus.id,
+    };
+    const profileOf = (id: string) => {
+      const profile = [...baseProfiles, CHEAP].find((entry) => entry.id === id);
+      if (!profile) throw new Error(`missing profile ${id}`);
+      return {
+        id: profile.id,
+        name: profile.name,
+        provider: profile.provider,
+        ...(profile.model === undefined ? {} : { model: profile.model }),
+      };
+    };
+    const seats = input.team.members.map((member, index) => ({
+      seatId: `${member.seatId}-p1`,
+      logicalSeatId: member.seatId ?? "",
+      roleId: member.roleId,
+      roleName: "Member",
+      purpose: "member" as const,
+      activation: "eager" as const,
+      profile: profileOf(ids[`m${index + 1}` as keyof typeof ids]),
+      source: "role-preferred" as const,
+      alternates: [],
+      budget: "sota" as const,
+      budgetBasis: "host" as const,
+      standby: false,
+      unavailable: false,
+      issues: [],
+    }));
+    return {
+      ok: true as const,
+      preview: {
+        requestedMode: input.mode,
+        coordinator: {
+          roleId: input.team.coordinatorRoleId,
+          roleName: "Coordinator",
+          profile: profileOf(ids.coordinator),
+          source: "role-preferred" as const,
+          issues: [],
+        },
+        seats,
+        counts: {
+          logical: seats.length,
+          physical: seats.length,
+          eager: seats.length,
+          deferred: 0,
+          escalation: 0,
+          sotaPotential: seats.length,
+        },
+        budget: { economy: 0, sota: seats.length, unknown: 0, deferredSota: 0 },
+        issues: [],
+        warnings: [],
+        planHash: DESIGN_HASH,
+      },
+      issues: [],
+      launchWarnings: [],
+    };
+  },
+};
+
+let specSequence = 0;
+
+function specService(store: DesignJobStore, adapter: SpecAdapter | null = null): DesignService {
+  return createDesignService({
+    store,
+    readers: specReaders() as DesignSettingsReaders,
+    getAdapter: () => adapter,
+    planner: specPlanner,
+    clock: { now: () => SPEC_NOW },
+    ids: { next: () => `00000000-0000-4000-8000-${String(++specSequence).padStart(12, "0")}` },
+    hasher: (content) => createHash("sha256").update(content).digest("hex"),
+    capabilities: { onDemand: true, expansion: true, collaboration: false },
+    log: () => {},
+  });
+}
+
+function answerFor(record: StoredDesignJob, proposal: unknown, attempt = 1) {
+  const attemptRecord = record.attempts.find((item) => item.attempt === attempt);
+  return [
+    { seqStart: 1, seqEnd: 1, type: "user_message" as const, messageId: attemptRecord?.messageId },
+    {
+      seqStart: 2,
+      seqEnd: 2,
+      type: "assistant_message" as const,
+      text: `\`\`\`agent-team-design\n${JSON.stringify(proposal)}\n\`\`\``,
+      turnId: "turn-1",
+    },
+  ];
+}
+
+function proposalFor(record: StoredDesignJob, attempt = 1) {
+  const attemptRecord = record.attempts.find((item) => item.attempt === attempt);
+  const proposal = designProposal({
+    jobId: record.job.jobId,
+    attempt: attempt as 1 | 2 | 3,
+    nonce: attemptRecord?.nonce,
+  });
+  return record.outputContractVersion === 2 ? { ...proposal, version: 2, kind: "team" } : proposal;
+}
+
+function gapOutput(record: StoredDesignJob, attempt = 1) {
+  const attemptRecord = record.attempts.find((item) => item.attempt === attempt);
+  return {
+    version: 2,
+    kind: "role-gap",
+    jobId: record.job.jobId,
+    attempt,
+    nonce: attemptRecord?.nonce,
+    summary: "现有 Role 覆盖不了迁移评审。",
+    gaps: [
+      {
+        kind: "missing-role",
+        responsibility: "数据库迁移评审",
+        reason: "现有 Role 不承担迁移评审。",
+        use: "member",
+        profiles: { kind: "none", reason: "host 没有合适的 Profile。" },
+        suggestedRole: {
+          id: "qa-migration",
+          name: "【质量】迁移评审",
+          responsibilities: ["评审迁移脚本"],
+          executionPolicy: { tier: "decision", taskKind: "general" },
+        },
+      },
+    ],
+  };
+}
+
+function existingProfileGap(record: StoredDesignJob, profileId: string) {
+  const base = gapOutput(record);
+  return {
+    ...base,
+    gaps: [
+      {
+        ...base.gaps[0],
+        profiles: { kind: "existing", profileIds: [profileId] },
+      },
+    ],
+  };
+}
+
+async function startAndDesign(
+  service: DesignService,
+  store: DesignJobStore,
+  input: Parameters<DesignService["start"]>[0],
+) {
+  const started = await service.start(input);
+  if (!started.ok) throw new Error(`start failed: ${JSON.stringify(started.issues)}`);
+  await untilOffline(store, started.job.jobId, (record) => record.job.agentCreated);
+  const record = await store.get(started.job.jobId);
+  if (!record) throw new Error("record missing");
+  return record;
+}
+
+async function untilOffline(
+  store: DesignJobStore,
+  jobId: string,
+  check: (record: StoredDesignJob) => boolean,
+) {
+  for (let index = 0; index < 200; index += 1) {
+    const record = await store.get(jobId);
+    if (record && check(record)) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("condition not met");
+}
+
+async function finishTurn(service: DesignService, adapter: SpecAdapter, jobId: string) {
+  await service.onTurnEnded({
+    agent: { id: jobId, labels: adapter.agents.get(jobId)?.labels },
+    outcome: { kind: "completed" },
+  });
+}
+
+function withNewRole(record: StoredDesignJob, attempt = 1) {
+  const role = newDesignRole({ id: "eng-observability", name: "【工程】可观测" });
+  const base = proposalFor(record, attempt);
+  return {
+    ...base,
+    team: {
+      ...base.team,
+      members: base.team.members.map((member) =>
+        member.key === "m2" ? { ...member, roleId: role.id } : member,
+      ),
+    },
+    newRoles: [role],
+    reuse: base.reuse.filter((entry) => entry.roleId !== "developer"),
+  };
+}
+
+describe("AC-0c.5 / AC-0c.17: gap eligibility and correction on the real ledger", () => {
+  test("an economy-all suggested Profile outside the route is a correction round, not a terminal gap", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const adapter = new SpecAdapter();
+    adapter.profilesValue = [...baseProfiles, CHEAP];
+    const service = specService(store, adapter);
+    const record = await startAndDesign(service, store, {
+      clientRequestId: uuid(),
+      request: "给后台做一次改版",
+      mode: "economy-all",
+      profileId: DESIGNER.id,
+      contractVersion: 2,
+    });
+    adapter.entries = answerFor(record, existingProfileGap(record, CHEAP.id));
+    await finishTurn(service, adapter, record.job.jobId);
+    await untilOffline(store, record.job.jobId, (entry) => entry.job.attempt === 2);
+
+    const after = await store.get(record.job.jobId);
+    expect(after?.roleGap).toBeNull();
+    expect(after?.job.state).not.toBe("failed");
+    expect(after?.job.issues).toEqual([
+      expect.objectContaining({
+        code: "DESIGN_MODE_PLAN_INVALID",
+        params: expect.objectContaining({ modeCode: "MODE_CHEAP_POLICY_REQUIRED" }),
+      }),
+    ]);
+    await service.dispose();
+  });
+
+  test("a no-suitable-Profile gap ends failed with root/job roleGap and no result", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const adapter = new SpecAdapter();
+    const service = specService(store, adapter);
+    const record = await startAndDesign(service, store, {
+      clientRequestId: uuid(),
+      request: "给后台做一次改版",
+      mode: "sota",
+      profileId: DESIGNER.id,
+      contractVersion: 2,
+    });
+    adapter.entries = answerFor(record, gapOutput(record));
+    await finishTurn(service, adapter, record.job.jobId);
+    await untilOffline(store, record.job.jobId, (entry) => entry.job.state === "failed");
+
+    const terminal = await store.get(record.job.jobId);
+    expect(terminal?.roleGap).toHaveLength(1);
+    expect(terminal?.job.roleGap).toHaveLength(1);
+    expect(terminal?.result).toBeNull();
+    expect(terminal?.job.resultId).toBeNull();
+    const raw = await readFile(fileOf(root, record), "utf8");
+    expect(JSON.parse(raw).roleGap).toHaveLength(1);
+    expect(JSON.parse(raw).result).toBeNull();
+    await service.dispose();
+  });
+});
+
+describe("AC-0c.11 / AC-0c.14: the stored rule survives restart and save revalidation", () => {
+  test("a restarted service keeps false during prepareSave and true during recheck/save", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const adapter = new SpecAdapter();
+    const first = specService(store, adapter);
+    const record = await startAndDesign(first, store, {
+      clientRequestId: uuid(),
+      request: "给后台做一次改版",
+      mode: "sota",
+      profileId: DESIGNER.id,
+      existingRolesOnly: false,
+      contractVersion: 2,
+    });
+    adapter.entries = answerFor(record, withNewRole(record));
+    await finishTurn(first, adapter, record.job.jobId);
+    await untilOffline(store, record.job.jobId, (entry) => entry.job.state === "ready");
+    const ready = await store.get(record.job.jobId);
+    if (!ready?.result) throw new Error("result missing");
+    await first.dispose();
+
+    // A restarted service opens the same home again; the stored false still permits the result.
+    const restarted = await openStore(home);
+    const second = specService(restarted, adapter);
+    const loose = await second.prepareSave({
+      jobId: ready.job.jobId,
+      resultId: ready.result.resultId,
+      clientId: uuid(),
+      contractVersion: 2,
+    });
+    expect(loose).toMatchObject({ ok: true, prepared: { outcome: "write" } });
+
+    // Seed the opposite rule on the same record (the store forbids this through update, as it
+    // must); a fresh reader then derives every validation from the stored true.
+    const current = await restarted.get(ready.job.jobId);
+    if (!current?.result) throw new Error("record missing after restart");
+    const rawFile = fileOf(root, current);
+    const raw = JSON.parse(await readFile(rawFile, "utf8"));
+    raw.existingRolesOnly = true;
+    raw.job.existingRolesOnly = true;
+    // The preceding prepareSave took a write lease; a recheck must not be blocked by it.
+    raw.leaseOwner = null;
+    raw.job.saveLeaseExpiresAt = null;
+    raw.job.state = "ready";
+    raw.job.saveState = "none";
+    await writeFile(rawFile, `${JSON.stringify(raw)}\n`, "utf8");
+    const revision = raw.job.stateRevision;
+    const recheck = await second.continue({
+      jobId: current.job.jobId,
+      expectedRevision: revision,
+      action: "recheck",
+      contractVersion: 2,
+    });
+    expect(recheck).toMatchObject({
+      ok: false,
+      issues: [{ code: "DESIGN_NEW_ROLE_LIMIT", params: { limit: 0 } }],
+    });
+    const prepared = await second.prepareSave({
+      jobId: current.job.jobId,
+      resultId: current.result.resultId,
+      clientId: uuid(),
+      contractVersion: 2,
+    });
+    expect(prepared).toMatchObject({
+      ok: false,
+      issues: [{ code: "DESIGN_NEW_ROLE_LIMIT", params: { limit: 0 } }],
+    });
+    await second.dispose();
+  });
+});
+
+describe("gapRetry: only status({jobId}) on a gap job, contract 2, bounded text", () => {
+  function gapRecord(
+    overrides: { request?: string; selectionIntent?: string | null; id?: string } = {},
+  ) {
+    const id = overrides.id ?? uuid();
+    const record = v2Record(DESIGN_V1_RECORD_READY, {
+      request: overrides.request ?? "原始需求全文",
+      selectionIntent:
+        overrides.selectionIntent === undefined
+          ? JSON.stringify({
+              request: "原始需求全文",
+              mode: "sota",
+              workspaceId: "ws-target",
+              profileId: "p-sonnet",
+              useDefaultProfileHints: false,
+            })
+          : overrides.selectionIntent,
+      roleGap: [gapReport],
+      result: null,
+      proposal: null,
+      job: {
+        jobId: id,
+        clientRequestId: id,
+        stateRevision: uuid(),
+        agentId: id,
+        state: "failed",
+        resultId: null,
+        roleGap: [gapReport],
+        finishedAt: NOW,
+      },
+    });
+    return record;
+  }
+
+  test("status by id returns the seed; list, result and the ledger never contain it", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const record = gapRecord();
+    await store.create(record);
+    const file = fileOf(root, record);
+    const ledgerText = await readFile(file, "utf8");
+    expect(ledgerText).not.toContain("gapRetry");
+
+    const service = serviceFor(store);
+    const byId = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+    expect(byId.ok && byId.jobs[0]?.gapRetry).toEqual({
+      request: "原始需求全文",
+      profileId: "p-sonnet",
+      useDefaultProfileHints: false,
+    });
+
+    const listed = await service.status({ contractVersion: 2 });
+    expect(listed.ok && listed.jobs[0]).not.toHaveProperty("gapRetry");
+    const result = await service.result({ jobId: record.job.jobId, contractVersion: 2 });
+    expect(result.ok && "job" in result ? result.job : null).not.toHaveProperty("gapRetry");
+    await service.dispose();
+    expect(await readFile(file, "utf8")).toBe(ledgerText);
+  });
+
+  test("a contract-1 caller never sees gapRetry or the other contract-2 job fields", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const record = gapRecord();
+    await store.create(record);
+    const service = serviceFor(store);
+    const legacy = await service.status({ jobId: record.job.jobId });
+    expect(legacy.ok && legacy.jobs[0]).not.toHaveProperty("gapRetry");
+    if (legacy.ok) {
+      expect(legacy.jobs[0]).not.toHaveProperty("roleGap");
+      expect(legacy.jobs[0]).not.toHaveProperty("existingRolesOnly");
+    }
+    await service.dispose();
+  });
+
+  test("bad JSON field types and arrays omit the whole seed", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const intents = [
+      JSON.stringify({ profileId: 17, useDefaultProfileHints: "true" }),
+      "[]",
+      JSON.stringify({ profileId: {}, useDefaultProfileHints: 0 }),
+      JSON.stringify({ profileId: "p-1", useDefaultProfileHints: "false" }),
+    ];
+    const records = intents.map((selectionIntent, index) =>
+      gapRecord({ selectionIntent, id: uuid(), request: `需求 ${index}` }),
+    );
+    for (const record of records) await store.create(record);
+    const service = serviceFor(store);
+    for (const record of records) {
+      const reply = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(reply.ok && reply.jobs[0]).not.toHaveProperty("gapRetry");
+    }
+    await service.dispose();
+  });
+
+  test("a seed stored on the Job copy never leaks and is never trusted", async () => {
+    const { home, root } = await newHome();
+    const store = await openStore(home);
+    const storedSeed = {
+      request: "存储扩展中的私有需求",
+      profileId: "secret-profile",
+      useDefaultProfileHints: true,
+    };
+    const gap = gapRecord({ id: uuid() });
+    gap.job = { ...gap.job, gapRetry: storedSeed };
+    const noGap = v2Record(DESIGN_V1_RECORD_READY, {
+      job: { jobId: uuid(), clientRequestId: uuid(), agentId: uuid(), gapRetry: storedSeed },
+    });
+    const broken = gapRecord({ id: uuid(), selectionIntent: "{not json" });
+    broken.job = { ...broken.job, gapRetry: storedSeed };
+    for (const record of [gap, noGap, broken]) await store.create(record);
+    // The setup is real: the extension really is on disk.
+    expect(await readFile(fileOf(root, gap), "utf8")).toContain("存储扩展中的私有需求");
+
+    const service = serviceFor(store);
+    // By id: a valid gap gets only the root-derived seed; no-gap and broken intent get none.
+    const gapRead = await service.status({ jobId: gap.job.jobId, contractVersion: 2 });
+    expect(gapRead.ok && gapRead.jobs[0]?.gapRetry).toEqual({
+      request: "原始需求全文",
+      profileId: "p-sonnet",
+      useDefaultProfileHints: false,
+    });
+    for (const record of [noGap, broken]) {
+      const read = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(JSON.stringify(read)).not.toContain("gapRetry");
+    }
+    // List, result and a mutation strip the stored copy for all three.
+    for (const record of [gap, noGap, broken]) {
+      const listed = await service.status({ contractVersion: 2 });
+      const listedJob = listed.ok
+        ? listed.jobs.find((job) => job.jobId === record.job.jobId)
+        : undefined;
+      expect(listedJob).not.toHaveProperty("gapRetry");
+      const result = await service.result({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(result.ok && "job" in result ? result.job : null).not.toHaveProperty("gapRetry");
+      const canceled = await service.cancel({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(JSON.stringify(canceled)).not.toContain("gapRetry");
+    }
+    await service.dispose();
+  });
+
+  test("over 4000 code points or an unusable selectionIntent omits the whole seed", async () => {
+    const { home } = await newHome();
+    const store = await openStore(home);
+    const long = gapRecord({ request: "请".repeat(4001), id: uuid() });
+    const brokenIntent = gapRecord({ selectionIntent: "{not json", id: uuid() });
+    await store.create(long);
+    await store.create(brokenIntent);
+    const service = serviceFor(store);
+    for (const record of [long, brokenIntent]) {
+      const reply = await service.status({ jobId: record.job.jobId, contractVersion: 2 });
+      expect(reply.ok && reply.jobs[0]).not.toHaveProperty("gapRetry");
+    }
+    await service.dispose();
+  });
+});

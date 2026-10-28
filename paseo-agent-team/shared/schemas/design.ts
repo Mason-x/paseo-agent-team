@@ -95,19 +95,123 @@ export const DesignProfileChoiceSchema = z.strictObject({
 
 export type DesignProfileChoice = z.infer<typeof DesignProfileChoiceSchema>;
 
-export const DesignProposalSchema = z.strictObject({
-  version: z.literal(1),
+/**
+ * Output contract version. It is chosen per record (a new job writes 2, a legacy record keeps 1);
+ * the two shapes are never compared by literal equality, and a v2 job never accepts a block that
+ * lacks `kind`.
+ */
+export const DESIGN_OUTPUT_CONTRACT_VERSION = 2;
+export const DesignOutputContractVersionSchema = z.union([z.literal(1), z.literal(2)]);
+export type DesignOutputContractVersion = z.infer<typeof DesignOutputContractVersionSchema>;
+
+const DesignIdentityFields = {
   jobId: DesignUuidSchema,
   attempt: DesignAttemptSchema,
   nonce: DesignNonceSchema,
-  summary: z.string().trim().min(1).max(1000),
+};
+
+const DesignSummarySchema = z.string().trim().min(1).max(1000);
+
+const DesignTeamBodyFields = {
+  summary: DesignSummarySchema,
   team: DesignTeamDraftSchema,
   reuse: z.array(z.strictObject({ roleId: SlugSchema, reason: DesignReasonSchema })).max(65),
   newRoles: z.array(NewDesignRoleSchema).max(3),
   profileChoices: z.array(DesignProfileChoiceSchema).min(2).max(65),
+};
+
+/** Contract v1 model output (no `kind`); decoded only for records that stored version 1. */
+export const DesignProposalSchema = z.strictObject({
+  version: z.literal(1),
+  ...DesignIdentityFields,
+  ...DesignTeamBodyFields,
 });
 
 export type DesignProposal = z.infer<typeof DesignProposalSchema>;
+
+/** Contract v2 team output. The 0/3 new-Role limit lives in validation, not in the shape. */
+export const DesignTeamProposalV2Schema = z.strictObject({
+  version: z.literal(2),
+  kind: z.literal("team"),
+  ...DesignIdentityFields,
+  ...DesignTeamBodyFields,
+});
+
+export type DesignTeamProposalV2 = z.infer<typeof DesignTeamProposalV2Schema>;
+
+/** Every team-shaped output this build understands, for validation and materialization. */
+export type DesignTeamProposal = DesignProposal | DesignTeamProposalV2;
+
+export const DesignRoleGapUseSchema = z.enum(["coordinator", "member"]);
+export type DesignRoleGapUse = z.infer<typeof DesignRoleGapUseSchema>;
+
+const RoleGapProfileIdsSchema = z
+  .array(DesignIdSchema)
+  .min(1)
+  .max(3)
+  .refine((ids) => new Set(ids).size === ids.length, { message: "design.gapProfileDuplicate" });
+
+export const DesignRoleGapProfilesSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("existing"),
+    profileIds: RoleGapProfileIdsSchema,
+  }),
+  // An explicit "this host has no suitable Profile" answer, never a fabricated id.
+  z.strictObject({
+    kind: z.literal("none"),
+    reason: DesignReasonSchema,
+  }),
+]);
+
+export type DesignRoleGapProfiles = z.infer<typeof DesignRoleGapProfilesSchema>;
+
+const roleGapCommonFields = {
+  responsibility: z.string().trim().min(1).max(600),
+  reason: DesignReasonSchema,
+  use: DesignRoleGapUseSchema,
+  profiles: DesignRoleGapProfilesSchema,
+};
+
+export const DesignRoleGapSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("missing-role"),
+    ...roleGapCommonFields,
+    suggestedRole: z.strictObject({
+      id: SlugSchema,
+      name: ShortTextSchema,
+      responsibilities: StringListSchema.min(1).max(8),
+      executionPolicy: z.strictObject({
+        tier: RoleTierSchema,
+        taskKind: TaskKindSchema,
+      }),
+    }),
+  }),
+  z.strictObject({
+    kind: z.literal("unlaunchable-role"),
+    ...roleGapCommonFields,
+    roleId: SlugSchema,
+  }),
+]);
+
+export type DesignRoleGap = z.infer<typeof DesignRoleGapSchema>;
+
+/** A gap report replaces the Team: it may never also carry team/newRoles/profileChoices. */
+export const DesignRoleGapProposalSchema = z.strictObject({
+  version: z.literal(2),
+  kind: z.literal("role-gap"),
+  ...DesignIdentityFields,
+  summary: DesignSummarySchema,
+  gaps: z.array(DesignRoleGapSchema).min(1).max(8),
+});
+
+export type DesignRoleGapProposal = z.infer<typeof DesignRoleGapProposalSchema>;
+
+export const DesignOutputV2Schema = z.discriminatedUnion("kind", [
+  DesignTeamProposalV2Schema,
+  DesignRoleGapProposalSchema,
+]);
+
+export type DesignOutputV2 = z.infer<typeof DesignOutputV2Schema>;
 
 /** The fixed error vocabulary. Rendered text lives in shared/zh/design.ts. */
 export const DESIGN_ISSUE_CODES = [
@@ -220,8 +324,63 @@ export const ProfileSummarySchema = z.object({
 
 export type ProfileSummary = z.infer<typeof ProfileSummarySchema>;
 
+/**
+ * Server-side gap report: the model's claim plus what the server verified. Names come from the
+ * live Profile/Role catalog, never from the model's spelling; the two branch blocks are filled by
+ * `validateRoleGap`. The object stays tolerant so the Job DTO survives a newer writer.
+ */
+export const RoleGapSuggestedRoleSchema = z.object({
+  id: SlugSchema,
+  name: ShortTextSchema,
+  responsibilities: StringListSchema,
+  executionPolicy: z.object({ tier: RoleTierSchema, taskKind: TaskKindSchema }),
+});
+
+export const RoleGapUnlaunchableRoleSchema = z.object({
+  roleId: SlugSchema,
+  roleName: z.string(),
+  /** Bindings the planner reported unavailable for this use, in its order. */
+  unavailableProfileIds: z.array(DesignIdSchema).max(5),
+  /** Those ids resolved to live Profile names; a name is never taken from the model. */
+  profileNames: z.array(z.string()).max(5),
+});
+
+export const RoleGapReportSchema = z.object({
+  responsibility: z.string().trim().min(1).max(600),
+  reason: DesignReasonSchema,
+  use: DesignRoleGapUseSchema,
+  /** Resolved live Profiles; empty when the model answered kind:"none". */
+  profiles: z.array(ProfileSummarySchema).max(3),
+  profileGapReason: DesignReasonSchema.optional(),
+  suggestedRole: RoleGapSuggestedRoleSchema.optional(),
+  unlaunchableRole: RoleGapUnlaunchableRoleSchema.optional(),
+});
+
+export type RoleGapReport = z.infer<typeof RoleGapReportSchema>;
+
 export type { ModeLaunchPreview };
 export { ModeLaunchPreviewSchema };
+
+/**
+ * The seed the UI needs to retry a Role-gap job without the switch (H3=B). It is the user's own
+ * request text, already stored in the same host's ledger, so it adds no trust boundary; it is
+ * bounded like the original request (4000 code points, 16KiB of UTF-8) and never trimmed or
+ * rewritten here. Strip object: a newer writer's extra keys do not reach a reader.
+ */
+export const DESIGN_GAP_RETRY_MAX_BYTES = 16 * 1024;
+export const DesignGapRetrySchema = z.object({
+  request: z
+    .string()
+    .refine(
+      (value) =>
+        checkDesignRequest(value).ok &&
+        new TextEncoder().encode(value).length <= DESIGN_GAP_RETRY_MAX_BYTES,
+      { message: "design.inputInvalid" },
+    ),
+  profileId: DesignIdSchema.nullable(),
+  useDefaultProfileHints: z.boolean(),
+});
+export type DesignGapRetry = z.infer<typeof DesignGapRetrySchema>;
 
 export const DesignJobSchema = z.object({
   jobId: DesignUuidSchema,
@@ -230,6 +389,21 @@ export const DesignJobSchema = z.object({
   state: DesignStateSchema,
   attempt: z.number().int().min(0).max(3),
   mode: TeamModeSchema,
+  /**
+   * Record rule projected onto the Job DTO. Absent on legacy jobs: they were created with the old
+   * ≤3 rule, which is not the same as an explicit `false`. `roleGap` is null when the record has
+   * no gap and null for a legacy record.
+   */
+  existingRolesOnly: z.boolean().optional(),
+  outputContractVersion: DesignOutputContractVersionSchema.optional(),
+  roleGap: z.array(RoleGapReportSchema).max(8).nullable().optional(),
+  /**
+   * Retry seed of a Role-gap job. Present only on `design.status({ jobId })` for a job that
+   * ended with a gap, never in a list, a result, or a mutation reply. A stored Job extension with
+   * this name (a newer/tolerant writer) is stripped and never trusted: only the seed re-derived
+   * from the record root can be served. Absent from an older daemon: the client falls back.
+   */
+  gapRetry: DesignGapRetrySchema.optional(),
   createdAt: DesignTimeSchema,
   updatedAt: DesignTimeSchema,
   finishedAt: DesignTimeSchema.nullable(),
@@ -346,6 +520,17 @@ export const DesignStartInputSchema = z
     workspaceId: DesignIdSchema.optional(),
     profileId: DesignIdSchema.optional(),
     useDefaultProfileHints: z.boolean().optional(),
+    /**
+     * Optional so a legacy caller and an explicit `true` remain distinguishable: the record keeps
+     * "field omitted" for the old-request idempotency comparison. New requests normalize to true.
+     */
+    existingRolesOnly: z.boolean().optional(),
+    /**
+     * Mode-contract negotiation. Any integer is accepted here and normalized by
+     * `requestContractVersion` (only 2 is v2; absent, 1, 3, … are legacy), so an explicit `1` from
+     * a copy of the old client stays a legacy request instead of becoming a schema error.
+     */
+    contractVersion: z.number().int().optional(),
   })
   .refine((value) => !(value.profileId && value.useDefaultProfileHints), {
     message: "design.inputInvalid",
@@ -354,6 +539,8 @@ export const DesignStartInputSchema = z
 export const DesignStartOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignStatusInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema.optional(),
 });
 
@@ -365,6 +552,8 @@ export const DesignStatusOutputSchema = reply({
 });
 
 export const DesignResultInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
@@ -399,6 +588,8 @@ export const DesignPreparedSchema = z.discriminatedUnion("outcome", [
 export type DesignPrepared = z.infer<typeof DesignPreparedSchema>;
 
 export const DesignPrepareSaveInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   clientId: DesignUuidSchema,
@@ -409,6 +600,8 @@ export const DesignPrepareSaveInputSchema = z.strictObject({
 export const DesignPrepareSaveOutputSchema = reply({ prepared: DesignPreparedSchema });
 
 export const DesignMarkSavedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema.optional(),
@@ -417,6 +610,8 @@ export const DesignMarkSavedInputSchema = z.strictObject({
 export const DesignMarkSavedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignSaveFailedInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   resultId: DesignHashSchema,
   leaseId: DesignUuidSchema,
@@ -434,12 +629,16 @@ export const DesignSaveFailedInputSchema = z.strictObject({
 export const DesignSaveFailedOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignCancelInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
 });
 
 export const DesignCancelOutputSchema = reply({ job: DesignJobSchema });
 
 export const DesignContinueInputSchema = z.strictObject({
+  /** Mode-contract negotiation (see DesignStartInput); absent or any integer but 2 is legacy. */
+  contractVersion: z.number().int().optional(),
   jobId: DesignUuidSchema,
   expectedRevision: DesignUuidSchema,
   action: z.enum(["recheck", "repair"]),

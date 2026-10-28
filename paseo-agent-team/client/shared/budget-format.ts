@@ -1,5 +1,6 @@
 import type { SeatPreview } from "../../shared/schemas/launch-preview";
 import { zh } from "../../shared/zh";
+import { modesZh } from "../../shared/zh/modes";
 
 const BUDGET_LABELS: Record<SeatPreview["budget"], string> = {
   economy: zh.modes.budgetValueEconomy,
@@ -10,6 +11,7 @@ const BUDGET_LABELS: Record<SeatPreview["budget"], string> = {
 const BASIS_LABELS: Record<SeatPreview["budgetBasis"], string> = {
   host: zh.modes.budgetBasisHost,
   pool: zh.modes.budgetBasisPool,
+  route: modesZh.budgetBasisRoute,
   "conservative-default": zh.modes.budgetBasisConservative,
 };
 

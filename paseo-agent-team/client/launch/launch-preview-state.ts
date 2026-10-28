@@ -1,10 +1,10 @@
+import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import type { LaunchTarget } from "../../shared/rpc";
 import type {
   LaunchPreviewResult,
   ModeIssueDto,
   SeatPreview,
 } from "../../shared/schemas/launch-preview";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 
 export const PREVIEW_TASK_DEBOUNCE_MS = 400;
@@ -14,7 +14,8 @@ export type LaunchPreviewKeyInput = {
   teamId: string;
   task: string;
   target: LaunchTarget | null;
-  mode: TeamMode;
+  /** The saved Team.mode string: it invalidates the preview after a Team edit, but is never sent. */
+  savedMode: string;
 };
 
 /** The debounced task is the preview identity; a non-empty difference keeps start disabled. */
@@ -27,6 +28,14 @@ export function previewTaskState(
   return { task, pending: composing || liveTask.trim() !== task };
 }
 
+/** A settled probe changes the cache key once; the old preview is no longer the same identity. */
+export function launchPreviewCacheKey(
+  input: LaunchPreviewKeyInput,
+  modeContract: ModeContractSupport,
+): readonly unknown[] {
+  return [...launchPreviewQueryKey(input), modeContract] as const;
+}
+
 /** A task change invalidates the previous preview immediately; trim is part of the contract. */
 export function launchPreviewQueryKey(input: LaunchPreviewKeyInput): readonly unknown[] {
   return [
@@ -36,7 +45,7 @@ export function launchPreviewQueryKey(input: LaunchPreviewKeyInput): readonly un
     input.teamId,
     input.task.trim(),
     input.target,
-    input.mode,
+    input.savedMode,
   ] as const;
 }
 
@@ -140,6 +149,8 @@ export function modeIssueText(issue: ModeIssueDto): string {
       return zh.modes.noExecutionCohort;
     case "MODE_LIMIT_CLAMPED":
       return zh.modes.limitClamped(Number(issue.params.limit));
+    case "MODE_PLAN_CHANGED":
+      return zh.modes.planChanged;
     default:
       return zh.modes.unknownFallback(issue.code);
   }

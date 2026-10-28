@@ -10,7 +10,6 @@ import { createPaseoAdapter } from "../../shared/paseo/adapter";
 import { defaultCatalogPreviewRpc } from "../../shared/rpc";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import {
   preferencesSettings,
   RolesDocumentSchema,
@@ -37,7 +36,17 @@ import {
   resolveEmptyCatalogMode,
 } from "../catalog/preset-state";
 import { DesignJobsPanel } from "../designer/DesignJobsPanel";
-import { type DesignerPrefill, designerPrefillFromEvent } from "../designer/design-screen-state";
+import {
+  applyGapRetry,
+  type DesignPrefillSlot,
+  designerPrefillFromEvent,
+  designPrefillForHost,
+  designPrefillSlot,
+  economyFocusForConfigure,
+  planSettledForHost,
+  roleEditorTargetForGap,
+  teamPlanActive,
+} from "../designer/design-screen-state";
 import { subscribeDesignPrefills } from "../designer/events";
 import { createDesignClientRequestId, DESIGN_JOB_MAX_ATTEMPTS } from "../designer/submission-state";
 import { useDesignJobs } from "../designer/use-design-jobs";
@@ -46,13 +55,15 @@ import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
 import { RoleList } from "../roles/RoleList";
 import { RunsTab } from "../runs/RunsTab";
-import { EconomyPoolEditor } from "../settings/EconomyPoolEditor";
+import { type EconomyEditorFocus, EconomyPoolEditor } from "../settings/EconomyPoolEditor";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
 import { TeamsTab } from "../teams/TeamsTab";
+import { familyHintsFromEconomy } from "../teams/team-plan-state";
+import { useTeamPlans } from "../teams/use-team-plans";
 import { VersionEntry } from "../version/VersionEntry";
 import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from "./tabs";
 
@@ -92,7 +103,6 @@ type LaunchSeed = {
   teamId?: string;
   lockTeam?: boolean;
   initialTask?: string;
-  initialMode?: TeamMode;
   initialWorkspaceId?: string;
 };
 
@@ -111,6 +121,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
   const hostProfiles = useHostProfiles(adapter);
+  const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
   const ready =
     roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const requestedTab = parseTab(params.tab);
@@ -121,22 +132,61 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const [presetForceOpen, setPresetForceOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [economyOpen, setEconomyOpen] = useState(false);
+  const [economyFocus, setEconomyFocus] = useState<EconomyEditorFocus | null>(null);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
     role: Role | null;
+    focusProfileId?: string | null;
   } | null>(null);
   const [teamEditor, setTeamEditor] = useState<{
     mode: "create" | "edit";
     team: Team | null;
   } | null>(null);
   const [launch, setLaunch] = useState<LaunchSeed | null>(null);
+  const planningRolesKey = roles.status === "ready" ? roles.revision : roles.status;
+  const planningTeamsKey = teams.status === "ready" ? teams.revision : teams.status;
+  const planningPrefsKey =
+    preferences.status === "ready" ? preferences.revision : preferences.status;
+  const planningRevisions = useMemo(
+    () => ({
+      roles: planningRolesKey,
+      teams: planningTeamsKey,
+      preferences: planningPrefsKey,
+    }),
+    [planningRolesKey, planningTeamsKey, planningPrefsKey],
+  );
+  const preferenceValues = preferences.status === "ready" ? preferences.values : null;
+  const familyHints = useMemo(
+    () => (preferenceValues ? familyHintsFromEconomy(preferenceValues.economy, profileList) : []),
+    [preferenceValues, profileList],
+  );
+  const settingsReady =
+    roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
+  const plans = useTeamPlans({
+    hostId: host.id,
+    profiles: profileList,
+    revisions: planningRevisions,
+    teams: teams.status === "ready" ? teams.values.teams : [],
+    active: teamPlanActive({
+      teamsTab: tab === "teams",
+      launchOpen: launch !== null,
+      settingsReady,
+      profilesLoading: hostProfiles.status === "loading",
+    }),
+    familyHints,
+  });
+  // Success and failure both settle the probe; before that neither design polling nor a launch
+  // preview may go out with a guessed contract (W-I2-1). The host identity makes the settled
+  // flag fail closed for the first render after switching hosts.
+  const plansSettled = planSettledForHost(plans, host.id);
+  const designJobs = useDesignJobs({
+    hostId: host.id,
+    active: tab === "teams" && plansSettled,
+    modeContract: plans.modeContract,
+  });
   const [resetTarget, setResetTarget] = useState<"roles" | "teams" | "preferences" | null>(null);
-  const designJobs = useDesignJobs({ hostId: host.id, active: tab === "teams" });
   const designClientId = useRef(createDesignClientRequestId()).current;
-  const [designPrefill, setDesignPrefill] = useState<{
-    hostId: string;
-    value: DesignerPrefill;
-  } | null>(null);
+  const [designPrefill, setDesignPrefill] = useState<DesignPrefillSlot>(null);
   const attemptedPrefills = useRef(new Set<string>());
   const designHostRef = useRef(host.id);
 
@@ -170,7 +220,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       { scopeId: designJobs.scopeId, token, now: Date.now() },
       (event) => {
         delivered = true;
-        setDesignPrefill({ hostId: host.id, value: designerPrefillFromEvent(event) });
+        setDesignPrefill(designPrefillSlot(host.id, designerPrefillFromEvent(event)));
         return true;
       },
     );
@@ -690,7 +740,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     renderSettingsState(roles, "roles") ??
     renderSettingsState(teams, "teams") ??
     renderSettingsState(preferences, "preferences");
-  const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
   const latestDesignJob = designJobs.jobs[0];
   const latestDesignSummary = latestDesignJob
     ? [
@@ -783,7 +832,8 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             accessibilityRole="button"
             accessibilityLabel={newLabel}
             onPress={() => {
-              if (tab === "roles") setRoleEditor({ mode: "create", role: null });
+              if (tab === "roles")
+                setRoleEditor({ mode: "create", role: null, focusProfileId: undefined });
               else if (tab === "teams") setTeamEditor({ mode: "create", team: null });
               else setLaunch({ key: "new" });
             }}
@@ -892,7 +942,9 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   profilesLoading: hostProfiles.status === "loading",
                   profilesError: hostProfiles.status === "error" ? hostProfiles.error : undefined,
                   onRefreshProfiles: hostProfiles.reload,
-                  prefill: designPrefill?.hostId === host.id ? designPrefill.value : undefined,
+                  modeContract: plans.modeContract,
+                  disabledReason: plansSettled ? undefined : zh.modes.previewLoadingContext,
+                  prefill: designPrefillForHost(designPrefill, host.id),
                   collapsedSummary: latestDesignSummary,
                   collapsedSummaryTone: latestDesignTone,
                   onStart: (input) => designJobs.start(input),
@@ -910,6 +962,36 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                     active={tab === "teams"}
                     clientId={designClientId}
                     navigation={navigation}
+                    modeContract={plans.modeContract}
+                    onGapRetry={(prefill) => {
+                      const next = applyGapRetry(host.id, prefill);
+                      setTab(next.tab);
+                      setDesignPrefill(next.designPrefill);
+                    }}
+                    onOpenRole={(target) => {
+                      const resolved = roleEditorTargetForGap(
+                        roles.status === "ready" ? roles.values.roles : [],
+                        target,
+                      );
+                      if (!resolved) {
+                        toast.error(zh.missingRoles(target.roleId));
+                        return;
+                      }
+                      setRoleEditor({
+                        mode: "edit",
+                        role: resolved.role,
+                        focusProfileId: resolved.focusProfileId,
+                      });
+                    }}
+                    onConfigureEconomy={(target) => {
+                      const focus = economyFocusForConfigure(target);
+                      if (!focus) return;
+                      setEconomyFocus(focus);
+                      setEconomyOpen(true);
+                    }}
+                    onCreateRole={() =>
+                      setRoleEditor({ mode: "create", role: null, focusProfileId: undefined })
+                    }
                     onPreviewLaunch={(seed) => {
                       if (!teams.values.teams.some((team) => team.id === seed.teamId)) {
                         toast.error(designZh.savedTeamDeleted);
@@ -924,6 +1006,20 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                 onEdit={(team) => setTeamEditor({ mode: "edit", team })}
                 onCopy={copyTeam}
                 onDelete={deleteTeam}
+                plans={{
+                  summaries: plans.summaries,
+                  modeContract: plans.modeContract,
+                  pending: plans.pending,
+                  error: plans.error,
+                  onRetry: plans.retry,
+                  onRefreshTeams: () => void teams.reload(),
+                }}
+                onConfigureEconomy={(target) => {
+                  const focus = economyFocusForConfigure(target);
+                  if (!focus) return;
+                  setEconomyFocus(focus);
+                  setEconomyOpen(true);
+                }}
               />
             </View>
             {tab === "roles" ? importView : null}
@@ -934,7 +1030,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                 teams={teams.values.teams}
                 profiles={profileList}
                 query={roleQuery}
-                onEdit={(role) => setRoleEditor({ mode: "edit", role })}
+                onEdit={(role) => setRoleEditor({ mode: "edit", role, focusProfileId: undefined })}
                 onCopy={(role) => void copyRole(role)}
                 onDelete={(role) => void deleteRole(role)}
               />
@@ -959,11 +1055,17 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         profiles={profileList}
         profilesLoading={hostProfiles.status === "loading"}
         profilesError={hostProfiles.status === "error" ? hostProfiles.error : undefined}
+        focus={economyFocus ?? undefined}
         onSaved={() => {
+          plans.invalidate();
           void preferences.reload();
           toast.show(zh.economyPoolSaved, { variant: "success" });
         }}
-        onClose={() => setEconomyOpen(false)}
+        onClose={() => {
+          plans.invalidate();
+          setEconomyFocus(null);
+          setEconomyOpen(false);
+        }}
       />
       <PresetSyncDialog
         theme={theme}
@@ -998,7 +1100,12 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         profilesError={hostProfiles.status === "error" ? hostProfiles.error : undefined}
         saving={roles.status === "ready" && roles.saving}
         onRefreshProfiles={hostProfiles.reload}
-        onClose={() => setRoleEditor(null)}
+        focusProfileId={roleEditor?.focusProfileId}
+        onClose={() => {
+          setRoleEditor(null);
+          plans.invalidate();
+          void hostProfiles.reload();
+        }}
       />
       <TeamEditor
         theme={theme}
@@ -1010,6 +1117,28 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         existingIds={new Set(ready ? teams.values.teams.map((team) => team.id) : [])}
         saving={teams.status === "ready" && teams.saving}
         onClose={() => setTeamEditor(null)}
+        planClient={plans.planClient}
+        onOpenRole={(roleId, profileId) => {
+          const resolved = roleEditorTargetForGap(
+            roles.status === "ready" ? roles.values.roles : [],
+            { roleId, ...(profileId === undefined ? {} : { profileId }) },
+          );
+          if (!resolved) {
+            toast.error(zh.missingRoles(roleId));
+            return;
+          }
+          setRoleEditor({
+            mode: "edit",
+            role: resolved.role,
+            focusProfileId: resolved.focusProfileId,
+          });
+        }}
+        onConfigureEconomy={(target) => {
+          const focus = economyFocusForConfigure(target);
+          if (!focus) return;
+          setEconomyFocus(focus);
+          setEconomyOpen(true);
+        }}
       />
       {ready && launch ? (
         <LaunchDialog
@@ -1024,9 +1153,15 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           initialTeamId={launch.teamId}
           lockTeam={launch.lockTeam ?? launch.teamId !== undefined}
           initialTask={launch.initialTask}
-          initialMode={launch.initialMode}
           initialWorkspaceId={launch.initialWorkspaceId}
+          modeContract={plans.modeContract}
+          probeSettled={plansSettled}
           onClose={() => setLaunch(null)}
+          onEditTeam={(team) => {
+            setLaunch(null);
+            setTab("teams");
+            setTeamEditor({ mode: "edit", team });
+          }}
           onLaunched={() => {
             setLaunch(null);
             setTab("runs");

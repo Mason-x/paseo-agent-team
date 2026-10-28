@@ -6,13 +6,20 @@ import type {
   DesignIssue,
   DesignIssueAction,
   DesignMemberKey,
-  DesignProposal,
   DesignResult,
+  DesignRoleGapProposal,
+  DesignTeamProposal,
   MemberReason,
   NewDesignRole,
+  ProfileSummary,
   ProposalProfileRef,
+  RoleGapReport,
 } from "../schemas/design";
-import { DesignResultSchema, DesignTimeSchema } from "../schemas/design";
+import {
+  DesignResultSchema,
+  DesignRoleGapProposalSchema,
+  DesignTimeSchema,
+} from "../schemas/design";
 import type { Preferences } from "../schemas/preferences";
 import type { Role } from "../schemas/role";
 import { RoleSchema } from "../schemas/role";
@@ -23,7 +30,9 @@ import type { DesignResultCore } from "./design-content";
 import { canonicalDesignContent, roleBehaviorContent } from "./design-content";
 import { utf8ByteLength } from "./design-output";
 import type { DesignPlanCheck, DesignPlanningPort } from "./design-planning";
+import { designNewRoleLimit } from "./design-planning";
 import type { HostSnapshot } from "./mode-resolver";
+import { identifyModelFamily, namesHighCostFamily } from "./model-family";
 import type { ModeIssue, ModeIssueCode } from "./role-execution";
 import { isRoleTier, isTaskKind } from "./role-execution";
 
@@ -49,6 +58,29 @@ export type DesignValidationContext = {
   capabilities: { onDemand: boolean; expansion: boolean; collaboration: boolean };
   /** Injected by the server; only materializeDesign needs it to fill reuse[].behaviorHash. */
   hasher?: (canonicalContent: string) => string;
+  /**
+   * The same planner's per-purpose verdicts for existing Roles (C02/C03 inject them). A claim of
+   * `unlaunchable-role` is judged by the use it names; without a verified verdict it is rejected.
+   */
+  roleLaunch?: DesignRoleLaunchTables;
+};
+
+export type DesignRoleLaunchVerdict = {
+  launchable: boolean;
+  /** Bindings the planner found unavailable for this use, in its order. */
+  unavailableProfileIds: readonly string[];
+  /** False when availability could not be verified: such a verdict proves nothing. */
+  verified: boolean;
+};
+
+/**
+ * The same planner's verdicts, keyed by Role and split by use: a Role can be launchable as a
+ * member and not as coordinator (or the reverse), so one flat answer would misreport a gap.
+ * C02/C03 build these tables from `computeRoleLaunchability`; shared never imports server code.
+ */
+export type DesignRoleLaunchTables = {
+  readonly member: Readonly<Record<string, DesignRoleLaunchVerdict>>;
+  readonly coordinator: Readonly<Record<string, DesignRoleLaunchVerdict>>;
 };
 
 export type MaterializationIdentity = {
@@ -68,7 +100,8 @@ export type ValidationResult<T> =
 
 /** The read-only output of a successful validateDesign call. */
 export type ValidatedDesign = {
-  proposal: DesignProposal;
+  /** v1 or v2 team shape, exactly as decoded for the record's contract. */
+  proposal: DesignTeamProposal;
   team: Team;
   newRoles: readonly Role[];
   reusedRoles: readonly Role[];
@@ -76,6 +109,21 @@ export type ValidatedDesign = {
   plan: DesignPlanSuccess;
   memberReasons: readonly MemberReason[];
   warnings: readonly DesignIssue[];
+};
+
+/**
+ * The record's own rule (04 §6.1). Omitted means the legacy contract — 3 new Roles — so a caller
+ * that has not been taught about the record keeps the old behaviour instead of silently tightening
+ * or loosening it. C03 must pass the record value explicitly.
+ */
+export type DesignValidationRules = {
+  existingRolesOnly?: boolean;
+};
+
+/** A validated gap: the model's claim plus the server-resolved names and reasons. */
+export type ValidatedRoleGap = {
+  proposal: DesignRoleGapProposal;
+  gaps: readonly RoleGapReport[];
 };
 
 const ROLE_PREFIXES = [
@@ -261,6 +309,7 @@ function buildNewRole(
     ...(role.color !== undefined ? { color: role.color } : {}),
     ...(role.icon !== undefined ? { icon: role.icon } : {}),
     executionPolicy: role.executionPolicy,
+    noveltyReason: role.noveltyReason,
     enabled: true,
     createdAt: identity.createdAt,
     updatedAt: identity.createdAt,
@@ -274,7 +323,7 @@ function buildNewRole(
 }
 
 function buildTeam(
-  proposal: DesignProposal,
+  proposal: DesignTeamProposal,
   context: DesignValidationContext,
   identity: MaterializationIdentity,
 ): Team {
@@ -470,7 +519,7 @@ export type ProfileChoiceDiagnostic = {
  * G6 can pass this to the correction prompt; it does not need to copy preview matching logic.
  */
 export function describeProfileChoiceMismatches(
-  proposal: DesignProposal,
+  proposal: DesignTeamProposal,
   plan: DesignPlanSuccess,
   team: Team,
   logicalSeatIds: Readonly<Record<string, string>>,
@@ -549,6 +598,11 @@ export type DesignContentCheckInput = {
   logicalSeatIds: Readonly<Record<string, string>>;
   hasher?: (canonicalContent: string) => string;
   allowExistingOwnRows?: boolean;
+  /**
+   * The record's rule. Omitted keeps the legacy 3 so an unaware caller cannot tighten a record;
+   * C03 passes the record value on every revalidation, and the limit is derived only here.
+   */
+  existingRolesOnly?: boolean;
 };
 
 /**
@@ -560,6 +614,7 @@ export type DesignContentCheckInput = {
 export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[] {
   const issues: DesignIssue[] = [];
   const roleById = new Map(input.roles.map((role) => [role.id, role]));
+  const newRoleLimit = designNewRoleLimit(input);
   const profileIds = new Set(input.profiles.map((profile) => profile.id));
   const newRoleIds = new Set(input.newRoles.map((role) => role.id));
   const usedRoleIds = new Set<string>([
@@ -576,11 +631,11 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
     }
   }
 
-  if (input.newRoles.length > 3) {
+  if (input.newRoles.length > newRoleLimit) {
     issues.push(
       error("DESIGN_NEW_ROLE_LIMIT", ["newRoles"], {
         count: input.newRoles.length,
-        limit: 3,
+        limit: newRoleLimit,
       }),
     );
   }
@@ -963,11 +1018,24 @@ export function allocateDesignTeamId(
 }
 
 export function validateDesign(
-  proposal: DesignProposal,
+  proposal: DesignTeamProposal,
   context: DesignValidationContext,
   planner: DesignPlanningPort,
   identity: MaterializationIdentity,
+  rules?: DesignValidationRules,
 ): ValidationResult<ValidatedDesign> {
+  // A v2 output carries the existing-roles-only contract; without the record's rule the limit
+  // would silently fall back to 3 and let a save-time revalidation pass what the initial one
+  // rejected. An empty rules object counts as missing. Legacy v1 output keeps the old rule.
+  if (proposal.version === 2 && rules?.existingRolesOnly === undefined) {
+    return {
+      ok: false,
+      issues: [
+        error("DESIGN_INPUT_INVALID", ["existingRolesOnly"], { reason: "record-rule-required" }),
+      ],
+      issuesTruncated: 0,
+    };
+  }
   if (context.host.status === "unavailable") {
     return {
       ok: false,
@@ -995,12 +1063,13 @@ export function validateDesign(
     ...proposal.team.members.map((member) => member.roleId),
   ]);
 
-  // Step 2: new Role set.
-  if (proposal.newRoles.length > 3) {
+  // Step 2: new Role set. The limit comes from the record rule, never from a literal here.
+  const newRoleLimit = designNewRoleLimit(rules);
+  if (proposal.newRoles.length > newRoleLimit) {
     issues.push(
       error("DESIGN_NEW_ROLE_LIMIT", ["newRoles"], {
         count: proposal.newRoles.length,
-        limit: 3,
+        limit: newRoleLimit,
       }),
     );
   }
@@ -1318,6 +1387,7 @@ export function validateDesign(
     jobId: context.jobId,
     mode: context.mode,
     logicalSeatIds: identity.logicalSeatIds,
+    existingRolesOnly: rules?.existingRolesOnly,
   });
   if (contentIssues.some((entry) => entry.severity === "error")) {
     const finalized = finalizeDesignIssues([...issues, ...warnings, ...contentIssues]);
@@ -1473,6 +1543,7 @@ export function validateMaterializedDesign(
   result: DesignResult,
   context: DesignValidationContext,
   planner: DesignPlanningPort,
+  rules: DesignValidationRules = {},
 ): ValidationResult<DesignPlanSuccess> {
   const parsed = DesignResultSchema.safeParse(result);
   if (!parsed.success) {
@@ -1511,6 +1582,7 @@ export function validateMaterializedDesign(
     logicalSeatIds,
     hasher: context.hasher,
     allowExistingOwnRows: true,
+    existingRolesOnly: rules?.existingRolesOnly,
   });
   issues.push(...contentIssues);
   if (value.jobId !== context.jobId) {
@@ -1620,3 +1692,228 @@ export function validateMaterializedDesign(
 }
 
 export type { DesignResultCore } from "./design-content";
+
+export type RoleGapValidationRules = {
+  /** The record's rule. A gap is only legal while the job is existing-roles-only. */
+  existingRolesOnly: boolean;
+};
+
+/** The live Profile as the gap card shows it; names come from the host, never from the model. */
+function gapProfileSummary(profile: PaseoProfile): ProfileSummary {
+  return {
+    id: profile.id,
+    name: profile.name,
+    provider: profile.provider,
+    ...(profile.model === undefined ? {} : { model: profile.model }),
+    ...(profile.modeId === undefined ? {} : { modeId: profile.modeId }),
+    ...(profile.thinkingOptionId === undefined
+      ? {}
+      : { thinkingOptionId: profile.thinkingOptionId }),
+  };
+}
+
+/**
+ * Validates a `kind:"role-gap"` output and resolves everything the UI must not trust the model
+ * for: Profile names, the existing Role's name, and the planner's per-use verdict. A gap never
+ * carries a Team, and the branch is only legal for an existing-roles-only record.
+ *
+ * `unlaunchable-role` requires the injected `context.roleLaunch`: without a verdict, or when the
+ * planner says the Role is launchable in that use, the gap is rejected rather than accepted on
+ * the model's word.
+ */
+export function validateRoleGap(
+  proposal: DesignRoleGapProposal,
+  context: DesignValidationContext,
+  rules: RoleGapValidationRules,
+): ValidationResult<ValidatedRoleGap> {
+  if (context.host.status === "unavailable") {
+    return {
+      ok: false,
+      issues: [
+        error(
+          "DESIGN_CONFIG_UNAVAILABLE",
+          [],
+          { reason: context.host.reason ?? "unavailable" },
+          "refresh",
+        ),
+      ],
+      issuesTruncated: 0,
+    };
+  }
+  if (!rules.existingRolesOnly) {
+    return {
+      ok: false,
+      issues: [
+        error("DESIGN_OUTPUT_SCHEMA", ["kind"], {
+          path: "kind",
+          reason: "role-gap-not-requested",
+        }),
+      ],
+      issuesTruncated: 0,
+    };
+  }
+  const parsed = DesignRoleGapProposalSchema.safeParse(proposal);
+  if (!parsed.success) {
+    return { ok: false, ...finalizeDesignIssues(schemaIssues(parsed.error.issues, [])) };
+  }
+
+  const profiles = new Map(context.host.profiles.map((profile) => [profile.id, profile]));
+  const roleById = new Map(context.roles.map((role) => [role.id, role]));
+  const existingNames = new Set(context.roles.map((role) => normalizeRoleName(role.name)));
+  const suggestedIds = new Set<string>();
+  const suggestedNames = new Set<string>();
+  const issues: DesignIssue[] = [];
+  const reports: RoleGapReport[] = [];
+
+  parsed.data.gaps.forEach((gap, index) => {
+    const path = ["gaps", index];
+    const report: RoleGapReport = {
+      responsibility: gap.responsibility,
+      reason: gap.reason,
+      use: gap.use,
+      profiles: [],
+    };
+
+    if (gap.profiles.kind === "existing") {
+      gap.profiles.profileIds.forEach((profileId, profileIndex) => {
+        const profile = profiles.get(profileId);
+        const at = [...path, "profiles", "profileIds", profileIndex];
+        if (!profile) {
+          issues.push(error("DESIGN_PROFILE_MISSING", at, { profileId }));
+          return;
+        }
+        // Only the all-seats cheap mode restricts suggestions to low-cost families this build can
+        // verify (full eligibility and route membership stay with C02). Flagship, standard, and
+        // collaborative keep their original semantics: a Profile that exists on the host is fine.
+        if (context.mode === "economy-all") {
+          const family = identifyModelFamily({ model: profile.model });
+          const familyReason = namesHighCostFamily(family)
+            ? "high-cost-family"
+            : family.status === "identified" && family.cost === "low"
+              ? null
+              : "family-unverified";
+          if (familyReason) {
+            issues.push(
+              error("DESIGN_OUTPUT_SCHEMA", at, {
+                path: at.join("."),
+                reason: familyReason,
+                profileId,
+              }),
+            );
+            return;
+          }
+        }
+        report.profiles.push(gapProfileSummary(profile));
+      });
+    } else {
+      report.profileGapReason = gap.profiles.reason;
+    }
+
+    if (gap.kind === "missing-role") {
+      const suggested = gap.suggestedRole;
+      if (roleById.has(suggested.id) || suggestedIds.has(suggested.id)) {
+        issues.push(
+          error("DESIGN_ROLE_ID_CONFLICT", [...path, "suggestedRole", "id"], {
+            roleId: suggested.id,
+          }),
+        );
+      }
+      suggestedIds.add(suggested.id);
+      const normalizedName = normalizeRoleName(suggested.name);
+      if (existingNames.has(normalizedName) || suggestedNames.has(normalizedName)) {
+        issues.push(
+          error("DESIGN_ROLE_NAME_CONFLICT", [...path, "suggestedRole", "name"], {
+            name: suggested.name,
+          }),
+        );
+      }
+      suggestedNames.add(normalizedName);
+      const prefix = expectedRolePrefix(suggested.id);
+      if (!prefix || !suggested.name.trim().startsWith(prefix)) {
+        issues.push(
+          error("DESIGN_ROLE_NAMING", [...path, "suggestedRole", "name"], {
+            roleId: suggested.id,
+            prefix: prefix ?? "",
+          }),
+        );
+      }
+      report.suggestedRole = {
+        id: suggested.id,
+        name: suggested.name,
+        responsibilities: [...suggested.responsibilities],
+        executionPolicy: { ...suggested.executionPolicy },
+      };
+    } else {
+      const role = roleById.get(gap.roleId);
+      // Look the claim up in the table for the use it names: member and coordinator differ.
+      const verdict = role ? context.roleLaunch?.[gap.use]?.[gap.roleId] : undefined;
+      if (!role) {
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "unknown-role",
+            roleId: gap.roleId,
+          }),
+        );
+      } else if (!role.enabled) {
+        // A disabled Role is not a launchability gap: the remedy is enabling/reusing another
+        // Role, not repairing its bindings. Keep the schema error so the model corrects it.
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "role-disabled",
+            roleId: gap.roleId,
+          }),
+        );
+      } else if (!verdict?.verified) {
+        // No verdict, or an availability query that failed: this proves nothing about the Role.
+        // Reporting it as a gap would turn a config failure into a responsibility claim.
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "role-launch-unverified",
+            roleId: gap.roleId,
+          }),
+        );
+      } else if (verdict.launchable) {
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "role-launchable",
+            roleId: gap.roleId,
+          }),
+        );
+      } else {
+        const unavailable = [...verdict.unavailableProfileIds].slice(0, 5);
+        report.unlaunchableRole = {
+          roleId: gap.roleId,
+          roleName: role.name,
+          unavailableProfileIds: unavailable,
+          profileNames: unavailable.map((id) => profiles.get(id)?.name ?? id),
+        };
+      }
+    }
+
+    reports.push(report);
+  });
+
+  if (issues.some((issue) => issue.severity === "error")) {
+    return { ok: false, ...finalizeDesignIssues(issues) };
+  }
+  return {
+    ok: true,
+    value: { proposal: parsed.data, gaps: reports },
+    issues: [],
+    issuesTruncated: 0,
+  };
+}
+
+/**
+ * The terminal issue for a design that ended with a role-gap: it reuses DESIGN_REUSE_INVALID so a
+ * legacy client renders a readable failure, carries `reason: "roles-gap"`, and falls back to an
+ * empty roleId when the first gap has no existing Role (a missing-role suggestion).
+ */
+export function roleGapFinalIssue(gaps: readonly RoleGapReport[]): DesignIssue {
+  const roleId = gaps[0]?.unlaunchableRole?.roleId ?? "";
+  return error("DESIGN_REUSE_INVALID", [], { reason: "roles-gap", roleId }, "choose-profile");
+}

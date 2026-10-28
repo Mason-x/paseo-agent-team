@@ -216,9 +216,16 @@ export function DesignResultCard({
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>{designZh.resultNewRoles}</Text>
           {view.newRoles.map((role) => (
-            <Text key={role.id} selectable style={styles.value}>
-              {designZh.resultNewRoleLine(role.name, role.id)}
-            </Text>
+            <View key={role.id} style={{ gap: 1 }}>
+              <Text selectable style={styles.value}>
+                {designZh.resultNewRoleLine(role.name, role.id)}
+              </Text>
+              {role.noveltyReason ? (
+                <Text style={styles.muted}>
+                  {designZh.resultNoveltyReason}：{role.noveltyReason}
+                </Text>
+              ) : null}
+            </View>
           ))}
         </View>
       ) : null}

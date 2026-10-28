@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import type { DesignModeRouting } from "../server/designer/context";
 import {
   bindDesignerProfile,
   DESIGNER_PROFILE_HINTS,
@@ -188,6 +190,198 @@ function textOf(result: ReturnType<typeof buildDesignKickoff>): string {
   return result.text;
 }
 
+/** Byte-exact baseline for the legacy contract (record outputContractVersion = 1). */
+function goldenSha(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function realScaleRoles(): DesignPromptRoleSummary[] {
+  const catalog = [
+    ...expectedRoleContent,
+    ...expectedRoleContent.slice(0, 8).map((item) => ({ ...item, id: `${item.id}-custom` })),
+  ];
+  return catalog.map((item, index) =>
+    role(index, {
+      id: item.id,
+      name: item.name,
+      mission: item.mission,
+      responsibilities: item.responsibilities,
+      launchable: index !== 0,
+      unavailableProfileIds: index === 0 ? ["profile-missing"] : [],
+    }),
+  );
+}
+
+function devCatalog(): {
+  roles: DesignPromptRoleSummary[];
+  teams: Array<{ id: string; name: string }>;
+} {
+  type Backup = {
+    roles: {
+      roles: Array<{
+        id: string;
+        name: string;
+        enabled?: boolean;
+        mission: string;
+        responsibilities: string[];
+        preferredProfiles?: Array<{ profileId: string }>;
+        fallbackProfiles?: Array<{ profileId: string }>;
+        executionPolicy?: { tier?: string; taskKind?: string };
+      }>;
+    };
+    teams: { teams: Array<{ id: string; name: string }> };
+  };
+  // Fixture captured from the DEV host; only the prompt-facing fields are read.
+  const backup = JSON.parse(
+    readFileSync(join(import.meta.dirname, "fixtures", "v01b-dev-settings-backup.json"), "utf8"),
+  ) as Backup;
+  return {
+    roles: backup.roles.roles.map((entry, index) =>
+      role(index, {
+        id: entry.id,
+        name: entry.name,
+        enabled: entry.enabled !== false,
+        mission: entry.mission,
+        responsibilities: entry.responsibilities,
+        preferredProfileIds: entry.preferredProfiles?.map((ref) => ref.profileId) ?? ["profile-1"],
+        fallbackProfileIds: entry.fallbackProfiles?.map((ref) => ref.profileId) ?? [],
+        launchable: true,
+        tier: entry.executionPolicy?.tier ?? "execution",
+        taskKind: entry.executionPolicy?.taskKind ?? "general",
+      }),
+    ),
+    teams: backup.teams.teams.map((entry) => ({ id: entry.id, name: entry.name })),
+  };
+}
+
+function roleEntries(text: string): Array<Record<string, unknown>> {
+  const marker = "## Role 索引\n";
+  const at = text.indexOf(marker);
+  if (at < 0) throw new Error("missing Role 索引");
+  const rest = text.slice(at + marker.length);
+  const end = rest.indexOf("\n");
+  return JSON.parse(end < 0 ? rest : rest.slice(0, end)) as Array<Record<string, unknown>>;
+}
+
+describe("v1 prompt golden snapshot", () => {
+  test("freezes the small kickoff byte for byte", () => {
+    const result = kickoff();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(9140);
+    expect(goldenSha(result.text)).toBe(
+      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+    );
+  });
+
+  test("freezes the real-sized compressed kickoff byte for byte", () => {
+    const roles = realScaleRoles();
+    const result = kickoff({
+      request: "设计一个功能开发团队",
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(29384);
+    expect(goldenSha(result.text)).toBe(
+      "f05f00a4c499a780dd55411da07fe2268628d52dfd53bcb1857f353839dc1cf6",
+    );
+  });
+
+  test("freezes the realistic correction byte for byte", () => {
+    const result = realisticCorrection(realisticCorrectionContext());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.utf8Bytes).toBe(4202);
+    expect(goldenSha(result.text)).toBe(
+      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+    );
+  });
+
+  test("v1 correction ignores previousOutputKind and every v2 field", () => {
+    const result = realisticCorrection(
+      realisticCorrectionContext({
+        outputContractVersion: 1,
+        existingRolesOnly: true,
+        modeRouting: {
+          status: "ready",
+          routes: [
+            {
+              route: "execution",
+              taskKind: "coding",
+              candidates: [
+                { profileId: "profile-1", family: "claude", eligible: true, reported: false },
+              ],
+            },
+          ],
+        },
+        roles: [
+          role(0, {
+            launchVerified: false,
+            coordinatorLaunchable: false,
+            coordinatorLaunchVerified: true,
+          }),
+        ],
+      }),
+      "role-gap",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).not.toContain("上一轮是角色缺口");
+    expect(result.utf8Bytes).toBe(4202);
+    expect(goldenSha(result.text)).toBe(
+      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+    );
+  });
+});
+
+function realisticCorrectionContext(
+  overrides: Partial<DesignPromptContext> = {},
+): DesignPromptContext {
+  const roles = expectedRoleContent.map((item, index) =>
+    role(index, {
+      id: item.id,
+      name: item.name,
+      mission: item.mission,
+      responsibilities: item.responsibilities,
+    }),
+  );
+  return context({
+    roles,
+    profiles: [profile(1)],
+    occupiedRoleIds: roles.map((item) => item.id),
+    occupiedRoleNames: roles.map((item) => item.name),
+    expectedChoices: [],
+    ...overrides,
+  });
+}
+
+function realisticCorrection(
+  promptContext: DesignPromptContext,
+  previousOutputKind?: "team" | "role-gap",
+) {
+  return buildDesignCorrection({
+    jobId: JOB_ID,
+    attempt: 2,
+    nonce: NONCE,
+    issues: [
+      {
+        code: "DESIGN_OUTPUT_IDENTITY",
+        severity: "error",
+        path: ["nonce"],
+        params: { field: "nonce" },
+        action: "repair",
+      },
+    ],
+    context: promptContext,
+    expectedChoices: [],
+    ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
+  });
+}
+
 describe("team design recipes", () => {
   test("copies all nine source lineups without inventing counts", () => {
     expect(TEAM_DESIGN_RECIPES).toHaveLength(9);
@@ -212,6 +406,836 @@ describe("team design recipes", () => {
     }
     expect(TEAM_DESIGN_RECIPES[2]?.notes).toBe("批量开发 ×2–3，用实例标签区分，如 A / B");
     expect(TEAM_DESIGN_RECIPES[8]?.notes).toBe("调研→开发→发布文案");
+  });
+});
+
+describe("design output contract", () => {
+  function correction(
+    overrides: Partial<DesignPromptContext> = {},
+    previousOutputKind?: "team" | "role-gap",
+  ) {
+    return buildDesignCorrection({
+      jobId: JOB_ID,
+      attempt: 2,
+      nonce: NONCE,
+      issues: [],
+      context: context(overrides),
+      expectedChoices: [],
+      ...(previousOutputKind === undefined ? {} : { previousOutputKind }),
+    });
+  }
+
+  function jsonBlockAt(text: string, title: string): unknown {
+    const marker = `## ${title}\n`;
+    const at = text.indexOf(marker);
+    if (at < 0) throw new Error(`missing ${title}`);
+    const rest = text.slice(at + marker.length);
+    const end = rest.indexOf("\n");
+    return JSON.parse(end < 0 ? rest : rest.slice(0, end));
+  }
+
+  const ROUTING: DesignModeRouting = {
+    status: "ready",
+    routes: [
+      {
+        route: "coordinator",
+        taskKind: null,
+        candidates: [{ profileId: "profile-1", family: "claude", eligible: true, reported: false }],
+      },
+      {
+        route: "execution",
+        taskKind: "coding",
+        candidates: [
+          { profileId: "profile-1", family: "claude", eligible: true, reported: false },
+          {
+            profileId: "profile-2",
+            family: "deepseek",
+            eligible: false,
+            reason: "unverified",
+            reported: true,
+          },
+          {
+            profileId: "profile-3",
+            family: "grok",
+            eligible: false,
+            reason: "high-cost-family",
+            reported: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  test("v1 text ignores every v2 field and stays byte-identical", () => {
+    const enriched = kickoff({
+      outputContractVersion: 1,
+      existingRolesOnly: true,
+      modeRouting: ROUTING,
+      roles: [
+        role(1, {
+          coordinatorLaunchable: false,
+          launchVerified: false,
+          coordinatorLaunchVerified: true,
+        }),
+      ],
+    });
+    const text = textOf(enriched);
+    expect(goldenSha(text)).toBe(
+      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+    );
+  });
+
+  test("v2 with the switch off keeps the team contract and the 3-Role limit", () => {
+    const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false }));
+    expect(text).toContain('"固定 2"');
+    expect(text).toContain('"kind":"team"');
+    expect(text).toContain('"newRole":{');
+    expect(text).toContain('"newRoles":3');
+    expect(text).toContain('"newRoleLimit":3');
+    expect(text).not.toContain("role-gap");
+  });
+
+  test("v2 with the switch on leads with a gap sample and never teaches new Roles", () => {
+    const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: true }));
+    expect(text).toContain('"kind":"role-gap"');
+    expect(text).toContain('"newRoles":[]');
+    expect(text).toContain("复用-only 团队示例");
+    expect(text).toContain('"newRoles":0');
+    expect(text).toContain('"newRoleLimit":0');
+    expect(text).toContain("覆盖不了就报 role-gap");
+    expect(text).toContain("reason 必须说明该 Role 承担的职责");
+    expect(text).not.toContain('"newRole":{');
+  });
+
+  test("correction follows the record contract", () => {
+    const v1 = textOf(correction());
+    expect(v1).toContain('"固定 1"');
+    expect(v1).not.toContain('"kind":"team"');
+    const off = textOf(correction({ outputContractVersion: 2, existingRolesOnly: false }));
+    expect(off).toContain('"kind":"team"');
+    expect(off).not.toContain("role-gap");
+    const on = textOf(correction({ outputContractVersion: 2, existingRolesOnly: true }));
+    expect(on).toContain('"kind":"role-gap"');
+    expect(on).toContain("复用-only 团队示例");
+  });
+
+  test("a failed gap correction carries only the gap template", () => {
+    const gapOnly = textOf(
+      correction({ outputContractVersion: 2, existingRolesOnly: true }, "role-gap"),
+    );
+    expect(gapOnly).toContain("上一轮是角色缺口");
+    expect(gapOnly).toContain('"kind":"role-gap"');
+    expect(gapOnly).not.toContain("复用-only 团队示例");
+    const afterTeam = textOf(
+      correction({ outputContractVersion: 2, existingRolesOnly: true }, "team"),
+    );
+    expect(afterTeam).toContain("复用-only 团队示例");
+    expect(afterTeam).not.toContain("上一轮是角色缺口");
+  });
+
+  test("switching the flag never leaves the other template behind", () => {
+    const shared = context({ outputContractVersion: 2, existingRolesOnly: true });
+    const on = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: shared,
+    });
+    const off = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: { ...shared, existingRolesOnly: false },
+    });
+    const onText = textOf(on);
+    const offText = textOf(off);
+    expect(onText).toContain('"kind":"role-gap"');
+    expect(onText).not.toContain('"newRole":{');
+    expect(offText).toContain('"newRole":{');
+    expect(offText).not.toContain("role-gap");
+  });
+
+  test("v2 carries both launch uses separately and v1 hides them", () => {
+    const roles = [
+      role(1, {
+        launchable: true,
+        coordinatorLaunchable: false,
+        launchVerified: true,
+        coordinatorLaunchVerified: true,
+      }),
+      role(2, {
+        launchable: false,
+        coordinatorLaunchable: true,
+        launchVerified: true,
+        coordinatorLaunchVerified: false,
+      }),
+    ];
+    const v2 = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false, roles }));
+    const index = jsonBlockAt(v2, "Role 索引") as Array<Record<string, unknown>>;
+    // A role usable as member but provably blocked as coordinator, and the reverse: one
+    // tri-state per use, never inferred across uses.
+    expect(index[0]).toMatchObject({
+      launchable: true,
+      memberLaunch: "ok",
+      coordinatorLaunch: "blocked",
+    });
+    expect(index[1]).toMatchObject({
+      launchable: false,
+      memberLaunch: "blocked",
+      coordinatorLaunch: "ok",
+    });
+    const v1Index = jsonBlockAt(
+      textOf(kickoff({ outputContractVersion: 1, roles })),
+      "Role 索引",
+    ) as Array<Record<string, unknown>>;
+    expect(v1Index[0]).not.toHaveProperty("memberLaunch");
+    expect(v1Index[0]).not.toHaveProperty("coordinatorLaunch");
+  });
+
+  test("an unknown launch verdict keeps the Role instead of reclassifying the gap", () => {
+    // AC-0c.6: missing-role means no Role carries the responsibility; unverified availability
+    // is neither that nor a proven unlaunchable Role (AC-0c.14), so the prompt must reuse it.
+    const rendered = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        roles: [
+          role(1, {
+            launchable: false,
+            launchVerified: false,
+            coordinatorLaunchable: false,
+            coordinatorLaunchVerified: false,
+          }),
+        ],
+      }),
+    );
+    const index = jsonBlockAt(rendered, "Role 索引") as Array<Record<string, unknown>>;
+    expect(index[0]).toMatchObject({
+      memberLaunch: "unknown",
+      coordinatorLaunch: "unknown",
+    });
+    expect(rendered).toContain("照常使用该 Role");
+    expect(rendered).toContain("只有确实无 Role 承担时才报 missing-role");
+    expect(rendered).not.toContain("改报 missing-role");
+  });
+
+  test("economy-all v2 renders the route summary and explains the remedy", () => {
+    const text = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        requestedMode: "economy-all",
+        modeRouting: ROUTING,
+      }),
+    );
+    expect(text).toContain("## 经济：全席位路由");
+    expect(text).toContain("非 Role 绑定");
+    expect(text).toContain('"route":"execution"');
+    expect(text).toContain('"failedReasons":["unverified","high-cost-family"]');
+    expect(text).toContain('"failedIds":["profile-2","profile-3"]');
+    const v1 = textOf(kickoff({ outputContractVersion: 1, modeRouting: ROUTING }));
+    expect(v1).not.toContain("## 经济：全席位路由");
+  });
+
+  test("a missing or invalid cheap policy tells the model not to suggest Profiles", () => {
+    for (const modeRouting of [
+      { status: "absent" as const },
+      { status: "invalid" as const, reason: "unknown-version" },
+    ]) {
+      const text = textOf(
+        kickoff({
+          outputContractVersion: 2,
+          existingRolesOnly: true,
+          requestedMode: "economy-all",
+          modeRouting,
+        }),
+      );
+      expect(text).toContain("策略缺失或非法");
+      expect(text).toContain("只能 kind:none");
+      expect(text).toContain(`"status":"${modeRouting.status}"`);
+    }
+  });
+
+  test("route summary caps eligible and failed ids", () => {
+    const many: DesignModeRouting = {
+      status: "ready",
+      routes: [
+        {
+          route: "retain",
+          taskKind: null,
+          candidates: [
+            ...Array.from({ length: 10 }, (_, index) => ({
+              profileId: `ok-${index}`,
+              family: "deepseek",
+              eligible: true,
+              reported: false,
+            })),
+            ...Array.from({ length: 6 }, (_, index) => ({
+              profileId: `bad-${index}`,
+              family: "grok",
+              eligible: false,
+              reason: "unverified" as const,
+              reported: true,
+            })),
+          ],
+        },
+      ],
+    };
+    const text = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        requestedMode: "economy-all",
+        modeRouting: many,
+      }),
+    );
+    const payload = jsonBlockAt(text, "route 摘要") as {
+      routes: Array<Record<string, unknown>>;
+    };
+    expect(payload.routes[0]).toMatchObject({ failedCount: 6, omittedEligible: 2 });
+    expect(payload.routes[0]?.eligible).toHaveLength(8);
+    expect(payload.routes[0]?.failedIds).toHaveLength(5);
+  });
+
+  function realScaleContext(overrides: Partial<DesignPromptContext> = {}): DesignPromptContext {
+    const roles = expectedRoleContent.map((item, index) =>
+      role(index, {
+        id: item.id,
+        name: item.name,
+        mission: item.mission,
+        responsibilities: item.responsibilities,
+      }),
+    );
+    return context({
+      request: "设计一个功能开发团队",
+      roles,
+      profiles: sourceProfiles.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        provider: entry.provider,
+        model: entry.model,
+        available: true,
+        notes: entry.notes,
+      })),
+      occupiedRoleIds: roles.map((item) => item.id),
+      occupiedRoleNames: roles.map((item) => item.name),
+      ...overrides,
+    });
+  }
+
+  test("both switches stay within the 30KiB target, including the 21-Role stress", () => {
+    // catalog / economy-all / 21-Role + 6000-char-notes stress; measured 24471/24667,
+    // 24941/25137 and 30575/30663 bytes (off/on, all <= 30720; stress-on compressed recipe notes).
+    const cases = [
+      {},
+      { requestedMode: "economy-all" as const, modeRouting: ROUTING },
+      { roles: realScaleRoles(), profiles: [profile(1, "说明".repeat(3000))] },
+    ] as const;
+    for (const overrides of cases) {
+      for (const on of [false, true]) {
+        const ctx: DesignPromptContext = {
+          ...realScaleContext(overrides),
+          outputContractVersion: 2,
+          existingRolesOnly: on,
+        };
+        const result = buildDesignKickoff({
+          jobId: JOB_ID,
+          attempt: 1,
+          nonce: NONCE,
+          context: ctx,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) continue;
+        expect(result.utf8Bytes).toBe(utf8ByteLength(result.text));
+        expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+        expect(result.text).toContain(NONCE);
+        expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
+        expect(result.text).toContain("## 字段合同");
+        const repaired = buildDesignCorrection({
+          jobId: JOB_ID,
+          attempt: 2,
+          nonce: NONCE,
+          issues: [],
+          context: ctx,
+          expectedChoices: [],
+        });
+        expect(repaired.ok).toBe(true);
+        if (!repaired.ok) continue;
+        expect(repaired.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
+      }
+    }
+  });
+
+  test("the 40-Role / 30-Team / 12-Profile economy-all stress fits both switches", () => {
+    const roles = [
+      ...realScaleRoles(),
+      ...Array.from({ length: 19 }, (_, index) =>
+        role(100 + index, {
+          id: `stress-${index}`,
+          name: `【质量】压测审查 ${index}`,
+          mission: `负责第 ${index} 类后台模块的迁移评审、风险核对与回归确认，覆盖多实例并行时的共享依赖。`,
+          responsibilities: [
+            "核对迁移脚本的可回滚性与数据一致性",
+            "覆盖并发写入、失败补偿与重试路径",
+            "验证多实例席位之间的职责边界",
+            "输出可复现的回归证据与残余风险",
+            "对高风险改动提出阻断或降级建议",
+            "维护本领域的验收清单",
+          ],
+        }),
+      ),
+    ];
+    expect(roles).toHaveLength(40);
+    const teams = Array.from({ length: 30 }, (_, index) => ({
+      id: `team-${index}`,
+      name: `已有 Team ${index}`,
+    }));
+    const profiles = Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80)));
+    for (const on of [false, true]) {
+      const ctx: DesignPromptContext = {
+        ...realScaleContext({
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          profiles,
+          occupiedTeams: teams,
+          occupiedRoleIds: roles.map((item) => item.id),
+          occupiedRoleNames: roles.map((item) => item.name),
+        }),
+        outputContractVersion: 2,
+        existingRolesOnly: on,
+      };
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: ctx,
+      });
+      expect(result.ok, `on=${on}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, `on=${on} bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+        DESIGN_KICKOFF_TARGET_BYTES,
+      );
+      expect(result.text).toContain(NONCE);
+      expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
+      expect(result.text).toContain("## 字段合同");
+      if (!on) expect(result.text).toContain("noveltyReason 1–600");
+      expect(result.text).toContain('"profileChoices"');
+      expect(result.text).toContain(`"id":"stress-18"`);
+      const index = jsonBlockAt(result.text, "Role 索引") as unknown[];
+      expect(index).toHaveLength(40);
+      expect(result.text).not.toContain("## Role 摘要");
+    }
+  });
+
+  test("the DEV catalog snapshot (27 Roles / 22 Teams) fits both switches", () => {
+    const { roles, teams } = devCatalog();
+    expect(roles).toHaveLength(27);
+    expect(teams).toHaveLength(22);
+    for (const on of [false, true]) {
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: on,
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          occupiedTeams: teams,
+          occupiedRoleIds: roles.map((item) => item.id),
+          occupiedRoleNames: roles.map((item) => item.name),
+          profiles: [profile(1, "DEV Haiku"), profile(2, "DEV Luna"), profile(3)],
+        }),
+      });
+      expect(result.ok, `on=${on}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, `on=${on} bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+        DESIGN_KICKOFF_TARGET_BYTES,
+      );
+      expect(result.text).toContain(NONCE);
+      expect(jsonBlockAt(result.text, "Role 索引")).toHaveLength(27);
+    }
+  });
+
+  test("the DEV catalog with five disabled Roles still fits at full detail", () => {
+    const { roles, teams } = devCatalog();
+    const disabled = new Set([
+      "eng-frontend",
+      "eng-batch",
+      "content-technical",
+      "research-web",
+      "qa-acceptance",
+    ]);
+    const mutated = roles.map((entry) =>
+      disabled.has(entry.id) ? { ...entry, enabled: false } : entry,
+    );
+    const result = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: context({
+        outputContractVersion: 2,
+        existingRolesOnly: false,
+        requestedMode: "economy-all",
+        modeRouting: ROUTING,
+        roles: mutated,
+        occupiedTeams: teams,
+        occupiedRoleIds: mutated.map((entry) => entry.id),
+        occupiedRoleNames: mutated.map((entry) => entry.name),
+        profiles: [profile(1, "DEV Haiku"), profile(2, "DEV Luna"), profile(3)],
+      }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.compression).toBe("full");
+    expect(result.utf8Bytes, `bytes=${result.utf8Bytes}`).toBeLessThanOrEqual(
+      DESIGN_KICKOFF_TARGET_BYTES,
+    );
+    const index = roleEntries(result.text);
+    for (const id of disabled) {
+      const entry = index.find((item) => item.id === id);
+      expect(entry).toEqual({ id, name: entry?.name, enabled: false });
+    }
+  });
+
+  test("v2 entries keep taskKind and expose disabled/blocked states", () => {
+    const roles = [
+      role(0, { id: "ops-role", taskKind: "ops" }),
+      role(1, { id: "off-role", enabled: false }),
+      role(2, {
+        id: "blocked-role",
+        launchable: false,
+        launchVerified: true,
+        coordinatorLaunchable: false,
+        coordinatorLaunchVerified: true,
+        unavailableProfileIds: ["missing-profile"],
+      }),
+    ];
+    const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false, roles }));
+    const index = roleEntries(text);
+    expect(index[0]).toMatchObject({ taskKind: "ops" });
+    expect(index[0]).toHaveProperty("mission");
+    expect(index[1]).toMatchObject({ id: "off-role", enabled: false });
+    expect(index[1]).not.toHaveProperty("memberLaunch");
+    expect(index[1]).not.toHaveProperty("coordinatorLaunch");
+    expect(index[1]).not.toHaveProperty("mission");
+    expect(index[2]).toMatchObject({
+      id: "blocked-role",
+      memberLaunch: "blocked",
+      coordinatorLaunch: "blocked",
+      unavailableProfileIds: ["missing-profile"],
+    });
+    expect(index[2]).not.toHaveProperty("mission");
+    expect(text).toContain("条目形态");
+    expect(text).toContain("enabled:false 表示停用");
+    expect(text).toContain("unlaunchable-role");
+  });
+
+  test("a request-matched custom Role wins a summary slot over recipes", () => {
+    const custom = [
+      ["custom-front", "前端组件", "实现前端界面与交互"],
+      ["custom-test", "测试自动化", "编写并执行测试用例"],
+      ["custom-data", "数据迁移", "设计迁移脚本"],
+      ["custom-security", "安全审计", "检查安全风险"],
+      ["custom-docs", "技术写作", "撰写技术文档"],
+      ["custom-ops", "发布运维", "执行发布与回滚"],
+      ["custom-research", "技术调研", "调研技术选型"],
+      ["custom-content", "内容策划", "策划内容素材"],
+      ["custom-design", "视觉设计", "制作视觉稿"],
+      ["custom-api", "API 设计", "维护接口合同"],
+      ["custom-perf", "性能优化", "分析性能瓶颈"],
+      ["custom-infra", "基础设施", "维护部署环境"],
+      ["custom-review", "代码审查", "审查代码改动"],
+      ["custom-qa", "验收", "组织验收"],
+      ["custom-i18n", "国际化", "维护多语言"],
+    ] as const;
+    const roles = [
+      ...custom.map(([id, name, mission], index) => role(index, { id, name, mission })),
+      ...Array.from({ length: 30 }, (_, index) =>
+        role(100 + index, {
+          id: `filler-${index}`,
+          name: `填充角色 ${index}`,
+          mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。".repeat(8),
+          responsibilities: Array.from({ length: 6 }, () =>
+            "实现功能开发内容，完成团队任务并输出相关材料。".repeat(3),
+          ),
+        }),
+      ),
+    ];
+    const text = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: false,
+        request: "设计一个功能开发团队，需要前端和测试",
+        roles,
+        profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+          id: `team-${index}`,
+          name: `Team ${index}`,
+        })),
+      }),
+    );
+    const index = roleEntries(text);
+    const byId = new Map(index.map((entry) => [String(entry.id), entry]));
+    expect(byId.get("custom-front")).toHaveProperty("mission");
+    expect(byId.get("custom-test")).toHaveProperty("mission");
+    expect(byId.get("filler-0")).not.toHaveProperty("mission");
+    expect(utf8ByteLength(text)).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+  });
+
+  test("four requests against the DEV catalog select different Role summaries", () => {
+    const { roles, teams } = devCatalog();
+    const requests = [
+      ["安全加固与迁移审计", "qa-security"],
+      ["前端界面改版", "eng-frontend"],
+      ["测试用例与回归", "qa-test"],
+      ["技术白皮书写作", "content-technical"],
+    ] as const;
+    const selected = new Set<string>();
+    for (const [request, expected] of requests) {
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request,
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          occupiedTeams: teams,
+          profiles: [profile(1), profile(2), profile(3)],
+        }),
+      });
+      expect(result.ok, request).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, request).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+      const index = roleEntries(result.text);
+      const target = index.find((entry) => entry.id === expected);
+      expect(target, request).toHaveProperty("mission");
+      expect(target, request).toHaveProperty("responsibilities");
+      selected.add(
+        index
+          .filter((entry) => "mission" in entry)
+          .map((entry) => String(entry.id))
+          .join(","),
+      );
+    }
+    expect(selected.size).toBeGreaterThan(1);
+  });
+
+  test("ASCII template words do not steal summary slots from qa-security", () => {
+    const { roles, teams } = devCatalog();
+    const result = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: context({
+        outputContractVersion: 2,
+        existingRolesOnly: false,
+        request: "新增一个 Role 负责安全审计",
+        roles,
+        occupiedTeams: teams,
+        profiles: [profile(1), profile(2), profile(3)],
+      }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const index = roleEntries(result.text);
+    expect(index.find((entry) => entry.id === "qa-security")).toHaveProperty("mission");
+    for (const id of ["t02-coord", "v01b-unbound", "v01b-provider-down"]) {
+      expect(
+        index.find((entry) => entry.id === id),
+        id,
+      ).not.toHaveProperty("mission");
+    }
+  });
+
+  test("the index-only 6 and minimal tiers are reachable and used", () => {
+    const base = Array.from({ length: 15 }, (_, index) =>
+      role(index, {
+        id: `custom-${index}`,
+        name: `自定义领域 Role ${index}`,
+        mission: `负责第 ${index} 类领域工作，覆盖安全、迁移、前端、测试与文档。`,
+        responsibilities: ["输出领域方案", "完成实现与验证"],
+      }),
+    );
+    const seen = new Set<string>();
+    for (const fillers of [100, 110, 120, 130, 140, 150, 160]) {
+      const roles = [
+        ...base,
+        ...Array.from({ length: fillers }, (_, index) =>
+          role(1000 + index, {
+            id: `filler-${index}`,
+            name: `填充 Role ${index}`,
+            mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。".repeat(8),
+            responsibilities: Array.from({ length: 6 }, () =>
+              "实现功能开发内容，完成团队任务并输出相关材料。".repeat(3),
+            ),
+          }),
+        ),
+      ];
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request: "设计一个功能开发团队，需要安全审计与迁移",
+          roles,
+          occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+            id: `team-${index}`,
+            name: `Team ${index}`,
+          })),
+          profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        }),
+      });
+      if (!result.ok) continue;
+      expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+      if (
+        result.compression === "recipes-compact" ||
+        result.compression === "index-only-6" ||
+        result.compression === "index-only-minimal"
+      ) {
+        expect(result.text).toContain('"minInstances":2,"maxInstances":3');
+      }
+      seen.add(result.compression);
+    }
+    expect(seen).toContain("index-only-6");
+    expect(seen).toContain("index-only-minimal");
+  });
+
+  test("prototype keys in a request are not treated as stop words", () => {
+    for (const term of ["constructor", "toString", "__proto__"]) {
+      const roles = [
+        role(0, {
+          id: "proto-target",
+          name: `领域 ${term}`,
+          mission: `负责 ${term} 相关的领域工作。`,
+          responsibilities: [`实现 ${term}`],
+        }),
+        ...Array.from({ length: 40 }, (_, index) =>
+          role(100 + index, {
+            id: `filler-${index}`,
+            name: `填充 Role ${index}`,
+            mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。".repeat(8),
+            responsibilities: Array.from({ length: 6 }, () =>
+              "实现功能开发内容，完成团队任务并输出相关材料。".repeat(3),
+            ),
+          }),
+        ),
+      ];
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request: term,
+          roles,
+          occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+            id: `team-${index}`,
+            name: `Team ${index}`,
+          })),
+          profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        }),
+      });
+      expect(result.ok, term).toBe(true);
+      if (!result.ok) continue;
+      const index = roleEntries(result.text);
+      expect(
+        index.find((entry) => entry.id === "proto-target"),
+        term,
+      ).toHaveProperty("mission");
+    }
+  });
+
+  test("the 45-Role synthetic directory stays under budget for four requests", () => {
+    const roles = [
+      ...Array.from({ length: 15 }, (_, index) =>
+        role(index, {
+          id: `custom-${index}`,
+          name: `自定义领域 Role ${index}`,
+          mission: `负责第 ${index} 类领域工作，覆盖前端、测试、迁移、安全或文档等职责。`,
+          responsibilities: ["输出领域方案", "完成实现与验证"],
+        }),
+      ),
+      ...Array.from({ length: 30 }, (_, index) =>
+        role(100 + index, {
+          id: `filler-${index}`,
+          name: `填充 Role ${index}`,
+          mission: "负责功能开发团队需要的实现工作与内容输出，覆盖相关任务。",
+          responsibilities: ["实现功能开发内容", "完成团队任务"],
+        }),
+      ),
+    ];
+    const requests = ["前端", "只做前端改版", "需要测试", "设计一个功能开发团队，需要前端和测试"];
+    for (const request of requests) {
+      const result = buildDesignKickoff({
+        jobId: JOB_ID,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({
+          outputContractVersion: 2,
+          existingRolesOnly: false,
+          request,
+          requestedMode: "economy-all",
+          modeRouting: ROUTING,
+          roles,
+          occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
+            id: `team-${index}`,
+            name: `Team ${index}`,
+          })),
+          profiles: Array.from({ length: 12 }, (_, index) => profile(index, "说明".repeat(80))),
+        }),
+      });
+      expect(result.ok, request).toBe(true);
+      if (!result.ok) continue;
+      expect(result.utf8Bytes, request).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
+    }
+  });
+
+  test("a v2 kickoff that cannot reach 30KiB fails instead of being sent", () => {
+    const roles = Array.from({ length: 700 }, (_, index) =>
+      role(index, {
+        id: `role-${index}`,
+        name: `角色${index}`,
+        mission: "任".repeat(2000),
+        responsibilities: ["责".repeat(300)],
+      }),
+    );
+    const base = context({
+      outputContractVersion: 2,
+      existingRolesOnly: false,
+      roles,
+      profiles: [profile(1, "说明".repeat(3000))],
+    });
+    const result = buildDesignKickoff({ jobId: JOB_ID, attempt: 1, nonce: NONCE, context: base });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.issues[0]).toMatchObject({
+      code: "DESIGN_INPUT_TOO_LARGE",
+      params: { limit: DESIGN_KICKOFF_TARGET_BYTES },
+    });
+    // The same input under the legacy contract keeps its historical 60KiB escape.
+    const legacy = buildDesignKickoff({
+      jobId: JOB_ID,
+      attempt: 1,
+      nonce: NONCE,
+      context: {
+        ...base,
+        outputContractVersion: 1,
+        roles: roles.slice(0, 40),
+      },
+    });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+    expect(legacy.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_MAX_BYTES);
   });
 });
 
@@ -430,7 +1454,12 @@ describe("designer prompt budgets", () => {
         code: "DESIGN_INPUT_TOO_LARGE",
         severity: "error",
         path: [],
-        params: { bytes: expect.any(Number), limit: DESIGN_KICKOFF_MAX_BYTES },
+        params: {
+          bytes: expect.any(Number),
+          limit: DESIGN_KICKOFF_MAX_BYTES,
+          roles: 700,
+          teams: 1,
+        },
         action: "none",
       },
     ]);
