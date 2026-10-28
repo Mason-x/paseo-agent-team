@@ -4,7 +4,7 @@
 import { describe, expect, test } from "vitest";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
-import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { RunCancellationEvidence, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type {
   RunReviewReportBlock,
   RunSmokeReportBlock,
@@ -15,6 +15,7 @@ import {
   AT_UPDATED,
   assignment,
   claim,
+  DECISION_D1,
   dispatchIntent,
   INTENT_CANCEL,
   MESSAGE_CANCEL,
@@ -981,4 +982,145 @@ describe("R03a gate details and invariant boundaries", () => {
     );
     expect(result).toMatchObject({ ok: false, params: { reason: "capacity" } });
   });
+});
+
+describe("R01f cancellation authorization and refresh evidence", () => {
+  type R01fEvidence = RunCancellationEvidence & {
+    refresh?: { agentId: string; status: string; activeTurn: boolean; observedAt: string };
+  };
+  type R01fDecision = (typeof NORMAL_RUN_LEDGER.decisions)[number] & {
+    answer?: { action: string; taskIds: string[]; answeredAt: string } | null;
+  };
+
+  const refresh = {
+    agentId: "agent-b1",
+    status: "idle",
+    activeTurn: false,
+    observedAt: AT_UPDATED,
+  };
+
+  function cancellationRecord(
+    decisionOverrides: Partial<R01fDecision> = {},
+    evidenceOverrides: Partial<R01fEvidence> = {},
+    recipient = "agent-b1",
+  ) {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    const task = taskOf(record, "T2");
+    task.state = "blocked";
+    task.phase = "frozen";
+    task.frozenClaimId = "claim-t2";
+    const current = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
+    if (!current) throw new Error("assignment");
+    current.turnId = "turn-7";
+    current.state = "in_progress";
+    record.resources = [claim({ frozen: true })];
+    record.outbox.push(
+      dispatchIntent({
+        id: INTENT_CANCEL,
+        kind: "archive",
+        assignmentId: ASSIGNMENT_T2,
+        taskId: "T2",
+        recipient,
+        messageId: MESSAGE_CANCEL,
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+    );
+    record.eventReceipts.push({
+      eventKey: "agent-b1|turn-7|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b1",
+      turnId: "turn-7",
+      seq: 7,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "r01f-ended-7",
+      disposition: "accepted",
+    });
+    record.counters.observationSeq = 8;
+    record.decisions = [
+      {
+        decisionId: DECISION_D1,
+        category: "D1",
+        controlNonceDigest: CONTROL_DIGEST,
+        state: "answered",
+        dedupeKey: "cancel:T2",
+        subjectId: "T2",
+        summary: "cancel T2",
+        createdAt: AT_UPDATED,
+        answeredAt: AT_UPDATED,
+        answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+        cancelIntentId: INTENT_CANCEL,
+        ...decisionOverrides,
+      } as R01fDecision,
+    ];
+    const evidence = {
+      ...QUIESCENT_CANCELLATION,
+      refresh,
+      ...evidenceOverrides,
+    } as R01fEvidence;
+    return { record, evidence };
+  }
+
+  test("an answered cancel decision plus idle refresh releases the frozen claim", () => {
+    const { record, evidence } = cancellationRecord();
+    const result = reduceRun(
+      record,
+      { kind: "cancellation-checked", taskId: "T2", decisionId: DECISION_D1, evidence },
+      facts,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(taskOf(result.next, "T2").state).toBe("cancelled");
+    expect(result.next.resources).toEqual([]);
+  });
+
+  const freezeCases: Array<[string, () => { record: RunRecord; evidence: R01fEvidence }]> = [
+    [
+      "missing refresh",
+      () => {
+        const base = cancellationRecord();
+        delete (base.evidence as Record<string, unknown>).refresh;
+        return base;
+      },
+    ],
+    ["agent busy", () => cancellationRecord({}, { refresh: { ...refresh, status: "busy" } })],
+    ["active turn", () => cancellationRecord({}, { refresh: { ...refresh, activeTurn: true } })],
+    ["wrong intent recipient", () => cancellationRecord({}, {}, "agent-other")],
+    ["D1 still open", () => cancellationRecord({ state: "open", answeredAt: null, answer: null })],
+    [
+      "resume-seat decision",
+      () =>
+        cancellationRecord({
+          answer: { action: "resume-seat", taskIds: ["T2"], answeredAt: AT_UPDATED },
+        }),
+    ],
+    [
+      "null turnId",
+      () => {
+        const base = cancellationRecord({}, { lastTurnId: null, endedEventKey: null });
+        const current = base.record.assignments.find(
+          (entry) => entry.assignmentId === ASSIGNMENT_T2,
+        );
+        if (current) current.turnId = null;
+        return base;
+      },
+    ],
+  ];
+
+  for (const [label, make] of freezeCases) {
+    test(`${label} keeps the task frozen`, () => {
+      const { record, evidence } = make();
+      const result = reduceRun(
+        record,
+        { kind: "cancellation-checked", taskId: "T2", decisionId: DECISION_D1, evidence },
+        facts,
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const task = taskOf(result.next, "T2");
+      expect(task.state).toBe("blocked");
+      expect(task.phase).toBe("frozen");
+      expect(result.next.resources[0]?.frozen).toBe(true);
+    });
+  }
 });
