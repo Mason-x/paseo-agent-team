@@ -16,6 +16,7 @@ import {
 } from "../../shared/schemas/role";
 import { RolesDocumentSchema, rolesSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
+import { teamPlanZh } from "../../shared/zh/team-plan";
 import {
   type EditorDocumentSnapshot,
   type EditorParsed,
@@ -144,6 +145,7 @@ export function RoleEditor({
   saving,
   onRefreshProfiles,
   onClose,
+  focusProfileId,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -157,6 +159,8 @@ export function RoleEditor({
   saving: boolean;
   onRefreshProfiles: () => void;
   onClose: () => void;
+  /** From a plan row's "去绑定": `null` means focus the unbound Role, undefined means no banner. */
+  focusProfileId?: string | null;
 }) {
   const readRolesDoc = useRpc(rolesRead);
   const writeRolesDoc = useRpc(rolesWrite);
@@ -345,6 +349,26 @@ export function RoleEditor({
       >
         <Modal.Content>
           <View style={{ gap: layout.compact ? 12 : 16 }}>
+            {focusProfileId !== undefined ? (
+              <View
+                style={{
+                  padding: 8,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: theme.colors.accent,
+                  backgroundColor: theme.colors.surface2,
+                }}
+              >
+                <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
+                  {focusProfileId
+                    ? teamPlanZh.roleFocusProfile(
+                        profiles.find((profile) => profile.id === focusProfileId)?.name ??
+                          focusProfileId,
+                      )
+                    : teamPlanZh.roleFocusUnbound}
+                </Text>
+              </View>
+            ) : null}
             <AppearanceField
               theme={theme}
               label={zh.icon}
