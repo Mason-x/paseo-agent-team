@@ -2,7 +2,15 @@
 // one settings/host snapshot. Expectations come from 04 §8 and 01 AC-0b/0c/0d (plus X1–X12), not
 // from the current implementation shape. No fake planner here: only Paseo/settings ports are fakes.
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import {
+  buildDesignRoleGapViews,
+  createDesignRetryCache,
+  planDesignGapRetry,
+} from "../client/designer/submission-state";
+import { createTeamPlanClient } from "../client/teams/team-plan-state";
+import { describeModeRouting } from "../server/designer/context";
+import { checkGapEconomyEligibility } from "../server/designer/planning";
 import { createLaunchService } from "../server/launch-service";
 import type { SettingsReader } from "../server/planning-context";
 import { createTeamPlanService } from "../server/team-plan-service";
@@ -13,6 +21,7 @@ import { type EconomyPolicy, normalizeEconomyPolicy } from "../shared/domain/mod
 import { buildSeatPlan } from "../shared/domain/seat-plan";
 import { buildTeamModelPlan } from "../shared/domain/team-model-plan";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
+import { type DesignJob, DesignRoleGapSchema } from "../shared/schemas/design";
 import type { Preferences } from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
@@ -20,6 +29,7 @@ import type { TeamPlanInput, TeamPlanOutput } from "../shared/schemas/team-plan"
 import { TeamPlanOutputSchema } from "../shared/schemas/team-plan";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
+import { designJob } from "./design-fixtures";
 import { fakePort, preferences } from "./fakes";
 import {
   architect,
@@ -563,13 +573,155 @@ describe("P1 contract integration: legacy fingerprint", () => {
   });
 });
 
-test.todo("AC-0b.7 / B03: 10-Team first paint uses at most one RPC — UI cache not integrated");
-test.todo("AC-0c.8 / C04: designer gap card exits and retry form — UI not integrated");
-test.todo(
-  "AC-0d.16 / C02: designer produces economy-all profileChoices end-to-end — C02 not integrated",
-);
+describe("AC-0b.7 / B03: the saved-Team first paint batches its RPCs", () => {
+  test("ten Teams arrive in one team.plan request and the cache is used for the next paint", async () => {
+    const calls: TeamPlanInput[] = [];
+    const client = createTeamPlanClient({
+      send: async (input) => {
+        calls.push(input);
+        return TeamPlanOutputSchema.parse({
+          schemaVersion: 1,
+          capabilities: {
+            modeContract: 2,
+            designRolePolicy: 1,
+            supportedModes: ["sota", "economy", "collaborative", "economy-all"],
+            runtimeCapabilities: capabilities,
+          },
+          checkedAt: "2026-10-01T10:00:00.000Z",
+          context: null,
+          results: input.items.map((item) => ({
+            key: item.key,
+            status: "unavailable",
+            effectiveMode: null,
+            selectionFingerprint: null,
+            rows: [],
+            issues: [],
+          })),
+        });
+      },
+    });
+    client.setScope({
+      hostId: "host",
+      profiles,
+      revisions: { roles: "r1", teams: "t1", preferences: "p1" },
+    });
+    const teams = Array.from(
+      { length: 10 },
+      (_, index): Team => ({
+        ...codingTeam,
+        id: `t-${index}`,
+        name: `Team ${index}`,
+      }),
+    );
+    client.planTeams(teams);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.items).toHaveLength(10);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(1);
+    client.planTeams(teams);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(1);
+    client.destroy();
+  });
+});
+
+describe("AC-0c.8 / C04: a gap job offers its exits and a prefilled retry", () => {
+  test("the card shows both gap exits and the retry form starts from the original request", () => {
+    const gap = {
+      responsibility: "数据库迁移评审",
+      reason: "现有 Role 不承担迁移评审",
+      use: "member" as const,
+      profiles: [
+        {
+          id: "p-sonnet",
+          name: "Sonnet",
+          provider: "claude",
+          model: "claude-sonnet-4-6",
+        },
+      ],
+      suggestedRole: {
+        id: "qa-migration",
+        name: "【质量】迁移评审",
+        responsibilities: ["评审迁移脚本"],
+        executionPolicy: { tier: "decision" as const, taskKind: "general" as const },
+      },
+    };
+    const job: DesignJob = designJob({
+      state: "failed",
+      mode: "sota",
+      existingRolesOnly: true,
+      outputContractVersion: 2,
+      roleGap: [gap],
+      resultId: null,
+      carrierWorkspaceId: "ws-carrier",
+      targetWorkspaceId: "ws-target",
+      allowed: { cancel: false, save: false, launch: false, continueAction: null },
+    });
+    expect(buildDesignRoleGapViews(job)).toHaveLength(1);
+    expect(buildDesignRoleGapViews(job)[0]?.suggestedRole?.id).toBe("qa-migration");
+
+    const cache = createDesignRetryCache();
+    cache.remember(job.jobId, {
+      clientRequestId: job.clientRequestId,
+      request: "原始需求全文",
+      mode: job.mode,
+      profileId: "p-sonnet",
+    });
+    const plan = planDesignGapRetry(job, cache.get(job.jobId), () => "retry-nonce");
+    if (!plan.ok) throw new Error("retry prefill missing");
+    expect(plan.prefill).toMatchObject({
+      text: "原始需求全文",
+      workspaceId: "ws-target",
+      mode: "sota",
+      profileChoice: "p-sonnet",
+      existingRolesOnly: false,
+      confirmReplace: true,
+    });
+    expect(planDesignGapRetry(job, null)).toEqual({
+      ok: false,
+      reason: "request-unavailable",
+    });
+  });
+});
+
+describe("AC-0d.16 / C02: economy-all gap suggestions are route-backed", () => {
+  test("a suggested Profile outside the execution route is rejected before the retry", () => {
+    const economy = economyOf({
+      pool: [],
+      taskOrder: {},
+      profileBudget: {},
+      allSeats: allSeatsPolicy(),
+    });
+    const routing = describeModeRouting({ profiles, availability: available, economy });
+    const gap = (profileId: string) =>
+      DesignRoleGapSchema.parse({
+        kind: "missing-role",
+        responsibility: "负责数据库迁移",
+        reason: "目录没有承担迁移的 Role",
+        use: "member",
+        profiles: { kind: "existing", profileIds: [profileId] },
+        suggestedRole: {
+          id: "eng-data",
+          name: "【工程】数据迁移",
+          responsibilities: ["迁移"],
+          executionPolicy: { tier: "execution", taskKind: "coding" },
+        },
+      });
+    expect(
+      checkGapEconomyEligibility({ mode: "economy-all", gap: gap(deepseek.id), routing }),
+    ).toEqual([]);
+    const rejected = checkGapEconomyEligibility({
+      mode: "economy-all",
+      gap: gap(sonnet.id),
+      routing,
+    });
+    expect(rejected[0]?.params).toMatchObject({
+      modeCode: "MODE_CHEAP_PROFILE_INVALID",
+      route: "execution",
+      profileId: sonnet.id,
+    });
+  });
+});
+
 test.todo("AC-0d.17 / I01: one label/description source for all surfaces — I01 not integrated");
 test.todo("AC-0d.14 / D03: CLI mode negotiation and help — D03 not integrated");
-test.todo(
-  "AC-0c.12 / C03: v1 design ledger + new-economy access gate cross-module — C03 not merged",
-);

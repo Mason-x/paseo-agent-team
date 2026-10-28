@@ -5,15 +5,19 @@
 // persists and the repository reader path (schema parse -> SettingsReader -> service). A settings
 // write would show up as changed bytes/mtime; no writer exists in either service.
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { z } from "zod";
+import { modeVisibleTo, projectJobForContract } from "../server/designer/compat";
+import { resolveDesignDataRoot } from "../server/designer/data-root";
+import { createDesignJobStore } from "../server/designer/store";
 import { createLaunchService } from "../server/launch-service";
 import type { SettingsReader } from "../server/planning-context";
 import { createTeamPlanService } from "../server/team-plan-service";
 import type { PaseoProfile } from "../shared/paseo/adapter";
+import { DesignJobSchema } from "../shared/schemas/design";
 import type { Preferences } from "../shared/schemas/preferences";
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import type { Role } from "../shared/schemas/role";
@@ -34,6 +38,7 @@ import {
   role,
   techLead,
 } from "./fixtures";
+import { DESIGN_V1_RECORD_FAILED } from "./fixtures/p1-compat/design-ledger-v1";
 
 const homes: string[] = [];
 
@@ -197,5 +202,51 @@ describe("P1 real settings store: zero writes on team.plan and launch.preview", 
       "agent-team-roles.json",
       "agent-team-teams.json",
     ]);
+  });
+});
+
+describe("AC-0c.12 / C03: a v1 design ledger and the economy access gate", () => {
+  test("the baseline record reads byte-identically and economy-all needs contract 2", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-v01b-design-"));
+    homes.push(home);
+    const root = await resolveDesignDataRoot(home);
+    await mkdir(root.jobs, { recursive: true });
+    const record = DESIGN_V1_RECORD_FAILED;
+    const file = path.join(root.jobs, `${record.job.jobId}.json`);
+    const bytes = `${JSON.stringify(record)}\n`;
+    await writeFile(file, bytes, "utf8");
+    const before = sha(bytes);
+    const store = createDesignJobStore({
+      home,
+      clock: { now: () => "2026-10-01T10:00:00.000Z" },
+      ids: { next: () => "00000000-0000-4000-8000-000000000999" },
+    });
+    await store.initialize();
+    const loaded = await store.get(record.job.jobId);
+    expect(loaded?.schemaVersion).toBe(1);
+    expect(loaded?.job).toMatchObject({ state: "failed", mode: "sota" });
+    expect(loaded?.job).not.toHaveProperty("existingRolesOnly");
+    expect(loaded?.job).not.toHaveProperty("gapRetry");
+    expect(sha(await readFile(file, "utf8"))).toBe(before);
+
+    expect(modeVisibleTo("economy-all", 1)).toBe(false);
+    expect(modeVisibleTo("economy-all", 2)).toBe(true);
+    const legacy = projectJobForContract(
+      DesignJobSchema.parse({ ...record.job, mode: "economy-all" }),
+      1,
+    );
+    expect(legacy).not.toHaveProperty("existingRolesOnly");
+    expect(
+      projectJobForContract(
+        DesignJobSchema.parse({
+          ...record.job,
+          mode: "economy-all",
+          existingRolesOnly: true,
+          outputContractVersion: 2,
+        }),
+        2,
+      ),
+    ).toMatchObject({ mode: "economy-all", existingRolesOnly: true });
+    await store.dispose();
   });
 });
