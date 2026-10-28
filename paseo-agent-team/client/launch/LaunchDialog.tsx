@@ -3,6 +3,7 @@ import { copyText, Icon, Modal, useToast } from "@getpaseo/plugin/client/react-n
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import type { PaseoAdapter } from "../../shared/paseo/adapter";
 import {
   type LaunchJob,
@@ -21,11 +22,15 @@ import { TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { LaunchPreview } from "./LaunchPreview";
-import { launchModeDisplay, launchPreviewRequest, launchStartRequest } from "./launch-args";
+import {
+  launchModeDisplay,
+  launchPreviewRequest,
+  launchStartRequest,
+  launchStatusRequest,
+} from "./launch-args";
 import {
   launchGate,
-  launchPreviewIdentity,
-  launchPreviewQueryKey,
+  launchPreviewCacheKey,
   PREVIEW_TASK_DEBOUNCE_MS,
   previewTaskState,
   startFailureAction,
@@ -137,6 +142,8 @@ export function LaunchDialog({
   onClose,
   onLaunched,
   onEditTeam,
+  modeContract = "legacy",
+  probeSettled = false,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -157,6 +164,10 @@ export function LaunchDialog({
   onLaunched: (runId: string, workspaceId: string | undefined) => void;
   /** Hosts that can navigate to the Team editor pass this; the saved mode is edited there. */
   onEditTeam?: (team: Team) => void;
+  /** The team.plan probe result; only v2 requests declare contractVersion 2. */
+  modeContract?: ModeContractSupport;
+  /** False until the probe settles: preview/start stay off (W-I2-1). */
+  probeSettled?: boolean;
 }) {
   const toast = useToast();
   const start = useRpc(launchStartRpc);
@@ -199,7 +210,7 @@ export function LaunchDialog({
     if (job?.state !== "running") return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      status({ runId: job.runId })
+      status(launchStatusRequest(job.runId, modeContract))
         .then((next) => {
           if (cancelled) return;
           if (next.job) {
@@ -218,7 +229,7 @@ export function LaunchDialog({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [job, status]);
+  }, [job, modeContract, status]);
 
   useEffect(() => {
     if (job?.state !== "succeeded" || announcedRunId.current === job.runId) return;
@@ -257,19 +268,23 @@ export function LaunchDialog({
     return () => clearTimeout(timer);
   }, [composing, trimmedTask]);
   const preview = useRpc(launchPreviewRpc);
-  const currentIdentity = launchPreviewIdentity({
-    hostId,
-    teamId,
-    task: previewTask,
-    target,
-    savedMode,
-  });
+  const previewCacheKey = launchPreviewCacheKey(
+    { hostId, teamId, task: previewTask, target, savedMode },
+    modeContract,
+  );
+  const currentIdentity = JSON.stringify(previewCacheKey);
   const previewQuery = useQuery({
-    queryKey: launchPreviewQueryKey({ hostId, teamId, task: previewTask, target, savedMode }),
-    enabled: open && Boolean(teamId) && previewTask.length > 0 && target !== null && !running,
+    queryKey: previewCacheKey,
+    enabled:
+      open &&
+      probeSettled &&
+      Boolean(teamId) &&
+      previewTask.length > 0 &&
+      target !== null &&
+      !running,
     queryFn: async () => {
       if (!target) throw new Error(zh.modes.previewNoTarget);
-      return preview(launchPreviewRequest({ teamId, task: previewTask, target }));
+      return preview(launchPreviewRequest({ teamId, task: previewTask, target }, modeContract));
     },
     staleTime: 0,
     retry: false,
@@ -304,7 +319,7 @@ export function LaunchDialog({
     fetching: previewQuery.isFetching,
     error: previewError,
   });
-  const blocked = gate.disabled;
+  const blocked = gate.disabled || !probeSettled;
 
   useEffect(() => {
     if (!currentIdentity) return;
@@ -336,12 +351,15 @@ export function LaunchDialog({
     setJob(null);
     try {
       const result = await start(
-        launchStartRequest({
-          teamId,
-          task: previewTask,
-          target,
-          expectedPlanHash: shown.planHash,
-        }),
+        launchStartRequest(
+          {
+            teamId,
+            task: previewTask,
+            target,
+            expectedPlanHash: shown.planHash,
+          },
+          modeContract,
+        ),
       );
       if (result.ok) {
         setJob(result.job);
@@ -505,7 +523,11 @@ export function LaunchDialog({
             error={previewError}
             result={visiblePreview}
           />
-          {gate.reason && !visiblePreview ? <Text style={muted}>{gate.reason}</Text> : null}
+          {!probeSettled ? (
+            <Text style={muted}>{zh.modes.previewLoadingContext}</Text>
+          ) : gate.reason && !visiblePreview ? (
+            <Text style={muted}>{gate.reason}</Text>
+          ) : null}
           {context.error ? (
             <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{context.error}</Text>
           ) : null}
@@ -521,6 +543,11 @@ export function LaunchDialog({
             </Text>
           ))}
           {running && job ? <Text style={muted}>{jobProgressLabel(job)}</Text> : null}
+          {[...new Set(job?.warnings ?? [])].map((warning) => (
+            <Text key={warning} style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+              {warning}
+            </Text>
+          ))}
           {error || failure ? (
             <Text selectable style={{ color: theme.colors.statusDanger }}>
               {error ?? failure}

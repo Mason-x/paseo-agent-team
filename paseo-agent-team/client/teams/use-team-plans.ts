@@ -10,6 +10,7 @@ import {
   createClientLifecycle,
   createTeamPlanClient,
   isAppStateActive,
+  modeContractForHost,
   scopeSignature,
   type TeamPlanBatchView,
   type TeamPlanClient,
@@ -71,11 +72,6 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
   }, []);
   const effectiveActive = options.active && appActive;
 
-  useEffect(() => {
-    client.setActive(effectiveActive);
-    if (effectiveActive) client.refreshIfStale();
-  }, [client, effectiveActive]);
-
   const lifecycleKey = useMemo(
     () =>
       `${scopeSignature({
@@ -88,16 +84,21 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
   const lastLifecycle = useRef("");
   useEffect(() => {
     if (!effectiveActive) {
-      lastLifecycle.current = "";
+      client.setActive(false);
       return;
     }
-    if (lifecycleKey === lastLifecycle.current) return;
-    lastLifecycle.current = lifecycleKey;
+    // Scope first: an activation after a host change must never refresh the previous host's list.
     client.setScope({
       hostId: options.hostId,
       profiles: options.profiles,
       revisions: options.revisions,
     });
+    client.setActive(true);
+    if (lifecycleKey === lastLifecycle.current) {
+      client.refreshIfStale();
+      return;
+    }
+    lastLifecycle.current = lifecycleKey;
     if (options.teams.length === 0) client.probe();
     else client.planTeams(options.teams);
   }, [
@@ -130,6 +131,8 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
 
   return {
     ...view,
+    // The first render after a host prop change still holds the previous host's view.
+    modeContract: modeContractForHost(view, options.hostId),
     summaries,
     planClient: client,
     invalidate: () => client.invalidate(),

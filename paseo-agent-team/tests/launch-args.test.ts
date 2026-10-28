@@ -3,6 +3,7 @@ import {
   launchModeDisplay,
   launchPreviewRequest,
   launchStartRequest,
+  launchStatusRequest,
   resolveLaunchPrefill,
 } from "../client/launch/launch-args";
 import { zh } from "../shared/zh";
@@ -99,24 +100,49 @@ describe("launchModeDisplay", () => {
 
 describe("launch requests", () => {
   const target = { kind: "workspace" as const, workspaceId: "ws-1" };
+  const input = {
+    teamId: "coding-team",
+    task: "Ship it",
+    target,
+    expectedPlanHash: "hash-1",
+  };
 
-  test("preview and start never send a mode", () => {
-    const preview = launchPreviewRequest({ teamId: "coding-team", task: "Ship it", target });
-    expect(preview).toEqual({ teamId: "coding-team", task: "Ship it", target });
+  test("legacy and unknown callers keep the baseline shape and never send a mode", () => {
+    for (const modeContract of ["legacy", "unknown"] as const) {
+      const preview = launchPreviewRequest(input, modeContract);
+      expect(preview).toEqual({ teamId: "coding-team", task: "Ship it", target });
+      expect(preview).not.toHaveProperty("mode");
+      expect(preview).not.toHaveProperty("contractVersion");
+
+      const start = launchStartRequest(input, modeContract);
+      expect(start).toEqual({
+        teamId: "coding-team",
+        task: "Ship it",
+        target,
+        expectedPlanHash: "hash-1",
+      });
+      expect(start).not.toHaveProperty("mode");
+      expect(start).not.toHaveProperty("contractVersion");
+
+      expect(launchStatusRequest("run-1", modeContract)).toEqual({ runId: "run-1" });
+    }
+  });
+
+  test("a confirmed v2 caller declares contractVersion 2 on every request", () => {
+    const preview = launchPreviewRequest(input, "v2");
+    expect(preview).toEqual({
+      teamId: "coding-team",
+      task: "Ship it",
+      target,
+      contractVersion: 2,
+    });
     expect(preview).not.toHaveProperty("mode");
 
-    const start = launchStartRequest({
-      teamId: "coding-team",
-      task: "Ship it",
-      target,
-      expectedPlanHash: "hash-1",
-    });
-    expect(start).toEqual({
-      teamId: "coding-team",
-      task: "Ship it",
-      target,
-      expectedPlanHash: "hash-1",
-    });
+    const start = launchStartRequest(input, "v2");
+    expect(start).toMatchObject({ expectedPlanHash: "hash-1", contractVersion: 2 });
     expect(start).not.toHaveProperty("mode");
+    expect(Object.keys(start).filter((key) => key === "contractVersion")).toHaveLength(1);
+
+    expect(launchStatusRequest("run-1", "v2")).toEqual({ runId: "run-1", contractVersion: 2 });
   });
 });

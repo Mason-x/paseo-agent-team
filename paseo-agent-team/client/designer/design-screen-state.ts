@@ -1,7 +1,11 @@
 import { formatDesignIssue } from "../../shared/domain/design-output";
 import type { DesignIssue, DesignJob } from "../../shared/schemas/design";
+import type { Role } from "../../shared/schemas/role";
 import type { TeamMode } from "../../shared/schemas/team-mode";
+import { AllSeatsRouteSchema } from "../../shared/schemas/team-mode";
 import { designZh } from "../../shared/zh/design";
+import type { EconomyEditorFocus } from "../settings/EconomyPoolEditor";
+import type { DesignGapOpenRole } from "./DesignRoleGapCard";
 import type { DesignPrefillEvent } from "./events";
 import type { DesignLaunchPrefill } from "./submission-state";
 
@@ -26,6 +30,32 @@ export function designerPrefillFromEvent(event: DesignPrefillEvent): DesignerPre
     workspaceId: event.workspaceId,
     ...(event.mode ? { mode: event.mode } : {}),
   };
+}
+
+/**
+ * "去绑定" from a Role-gap card opens the Role editor focused on the missing/unavailable
+ * Profile. An unknown Role is not silently opened on the wrong record.
+ */
+export function roleEditorTargetForGap(
+  roles: readonly Role[],
+  target: DesignGapOpenRole,
+): { role: Role; focusProfileId: string | null } | null {
+  const role = roles.find((entry) => entry.id === target.roleId);
+  return role ? { role, focusProfileId: target.profileId ?? null } : null;
+}
+
+/**
+ * "配置经济池" opens the editor on the all-seats layer. A route from the gap must be a real
+ * all-seats route; an invalid value is dropped instead of opening a misleading section.
+ */
+export function economyFocusForConfigure(target: {
+  layer: "standard" | "allSeats";
+  route?: string;
+}): EconomyEditorFocus | null {
+  if (target.layer === "standard") return { layer: "standard" };
+  if (target.route === undefined) return { layer: "allSeats" };
+  const parsed = AllSeatsRouteSchema.safeParse(target.route);
+  return parsed.success ? { layer: "allSeats", route: parsed.data } : null;
 }
 
 export type DesignLaunchSeed = {
@@ -94,4 +124,31 @@ export function shouldWarnOnlyWorkspace(
   selectedId: string,
 ): boolean {
   return selectedId !== "" && workspaceIds.length === 1 && workspaceIds[0] === selectedId;
+}
+
+/**
+ * A probe result is authoritative only for the host that produced it. The first render after a
+ * host prop change still holds the previous host's view, so identity must be compared explicitly.
+ */
+export function planSettledForHost(
+  view: { scopeHostId?: string | null; loaded: boolean; error: string | null },
+  hostId: string,
+): boolean {
+  return view.scopeHostId === hostId && (view.loaded || view.error !== null);
+}
+
+/**
+ * The Team screen owns one probe/batch. Until all three settings are readable, an empty Teams
+ * array means "not loaded", not "empty catalog": probing then would burn the first-screen RPC
+ * budget before the real batch. The launch entry may probe as soon as settings are ready.
+ */
+export function teamPlanActive(input: {
+  teamsTab: boolean;
+  launchOpen: boolean;
+  settingsReady: boolean;
+  profilesLoading: boolean;
+}): boolean {
+  if (!input.settingsReady) return false;
+  if (input.launchOpen) return true;
+  return input.teamsTab && !input.profilesLoading;
 }

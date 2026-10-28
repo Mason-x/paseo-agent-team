@@ -4,6 +4,8 @@ import {
   designLaunchSeed,
   designSaveAttemptKey,
   designStartFailureMessage,
+  economyFocusForConfigure,
+  roleEditorTargetForGap,
   shouldAutoSaveDesignJob,
   shouldCleanupDesignJob,
   shouldWarnOnlyWorkspace,
@@ -12,6 +14,31 @@ import type { DesignLaunchPrefill } from "../client/designer/submission-state";
 import type { DesignIssue } from "../shared/schemas/design";
 import { designZh } from "../shared/zh/design";
 import { designJob } from "./design-fixtures";
+import { architect } from "./fixtures";
+
+describe("gap exits", () => {
+  test("opens a known Role with the Profile the row names", () => {
+    expect(
+      roleEditorTargetForGap([architect], { roleId: architect.id, profileId: "profile-1" }),
+    ).toEqual({ role: architect, focusProfileId: "profile-1" });
+    expect(roleEditorTargetForGap([architect], { roleId: architect.id })).toEqual({
+      role: architect,
+      focusProfileId: null,
+    });
+    // A missing Role must not open the editor on a different record.
+    expect(roleEditorTargetForGap([architect], { roleId: "ghost" })).toBeNull();
+  });
+
+  test("maps gap policy exits onto the editor focus", () => {
+    expect(economyFocusForConfigure({ layer: "allSeats", route: "execution" })).toEqual({
+      layer: "allSeats",
+      route: "execution",
+    });
+    expect(economyFocusForConfigure({ layer: "allSeats" })).toEqual({ layer: "allSeats" });
+    expect(economyFocusForConfigure({ layer: "standard" })).toEqual({ layer: "standard" });
+    expect(economyFocusForConfigure({ layer: "allSeats", route: "turbo" })).toBeNull();
+  });
+});
 
 const issue: DesignIssue = {
   code: "DESIGN_NO_WORKSPACE",

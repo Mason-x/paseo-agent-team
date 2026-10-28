@@ -11,6 +11,7 @@ import {
   familyHintsFromEconomy,
   isAppStateActive,
   isMethodNotFound,
+  modeContractForHost,
   modelRowMeta,
   shouldShowPlanError,
   stableJson,
@@ -1239,5 +1240,59 @@ describe("rework 1 regressions", () => {
     expect(isAppStateActive("active")).toBe(true);
     expect(isAppStateActive("background")).toBe(false);
     expect(isAppStateActive("inactive")).toBe(false);
+  });
+
+  test("S1a: the batch view carries the host of its scope", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    expect(client.getBatchView().scopeHostId).toBe("host-1");
+    client.setScope({ ...scope, hostId: "host-2" });
+    expect(client.getBatchView().scopeHostId).toBe("host-2");
+  });
+
+  test("S2: pausing, switching host, then activating never sends the old host's list", async () => {
+    const fake = clock();
+    const calls: Array<{ host: string; size: number }> = [];
+    let host = "A";
+    const send = async (input: TeamPlanInput) => {
+      calls.push({ host, size: input.items.length });
+      return output(input.items.map((item) => result(item.key)));
+    };
+    const client = createTeamPlanClient({
+      send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.planTeams(teams(10));
+    await flush();
+    client.setActive(false);
+    fake.advance(120_000);
+    host = "B";
+    client.setScope({ ...scope, hostId: "host-2" });
+    client.setActive(true);
+    client.planTeams(teams(10));
+    await flush();
+    expect(calls).toEqual([
+      { host: "A", size: 10 },
+      { host: "B", size: 10 },
+    ]);
+  });
+
+  test("S4: a view from another host exposes no contract", () => {
+    expect(modeContractForHost({ scopeHostId: "A", modeContract: "v2" }, "B")).toBe("unknown");
+    expect(modeContractForHost({ scopeHostId: "A", modeContract: "legacy" }, "A")).toBe("legacy");
+    expect(modeContractForHost({ scopeHostId: undefined, modeContract: "v2" }, "A")).toBe(
+      "unknown",
+    );
   });
 });

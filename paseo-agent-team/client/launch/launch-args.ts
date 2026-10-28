@@ -1,3 +1,4 @@
+import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import type { LaunchPreviewInput, LaunchStartInput, LaunchTarget } from "../../shared/rpc";
 import type { Team } from "../../shared/schemas/team";
 import type { TeamMode } from "../../shared/schemas/team-mode";
@@ -46,23 +47,49 @@ export function launchModeDisplay(team: Team | undefined): LaunchModeDisplay {
 /**
  * Launch requests never carry `mode`: the host plans from the saved Team, so App and script
  * previews cannot disagree about the mode. The RPC field stays for advanced script use only.
+ *
+ * `contractVersion: 2` is declared only after the team.plan probe confirmed v2; legacy and
+ * unknown callers stay on the baseline shape (I01's status projection keys off the same field).
  */
-export function launchPreviewRequest(input: {
-  teamId: string;
-  task: string;
-  target: LaunchTarget;
-}): LaunchPreviewInput {
-  return { teamId: input.teamId, task: input.task, target: input.target };
+function contractField(modeContract: ModeContractSupport): { contractVersion?: 2 } {
+  return modeContract === "v2" ? { contractVersion: 2 } : {};
 }
 
-export function launchStartRequest(input: {
-  teamId: string;
-  task: string;
-  target: LaunchTarget;
-  expectedPlanHash: string;
-}): LaunchStartInput {
+export function launchPreviewRequest(
+  input: {
+    teamId: string;
+    task: string;
+    target: LaunchTarget;
+  },
+  modeContract: ModeContractSupport = "legacy",
+): LaunchPreviewInput {
   return {
-    ...launchPreviewRequest(input),
+    teamId: input.teamId,
+    task: input.task,
+    target: input.target,
+    ...contractField(modeContract),
+  };
+}
+
+export function launchStartRequest(
+  input: {
+    teamId: string;
+    task: string;
+    target: LaunchTarget;
+    expectedPlanHash: string;
+  },
+  modeContract: ModeContractSupport = "legacy",
+): LaunchStartInput {
+  return {
+    ...launchPreviewRequest(input, modeContract),
     expectedPlanHash: input.expectedPlanHash,
   };
+}
+
+/** `launch.status` uses the same rule so a v2 caller keeps the real job (no legacy projection). */
+export function launchStatusRequest(
+  runId: string,
+  modeContract: ModeContractSupport = "legacy",
+): { runId: string; contractVersion?: 2 } {
+  return { runId, ...contractField(modeContract) };
 }
