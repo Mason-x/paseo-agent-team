@@ -1,4 +1,6 @@
 import type { RunRecord } from "../../schemas/run-engine/ledger";
+import { budgetKey } from "./budget";
+import { executionTier } from "./tier";
 
 export type WakeCategory = "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7";
 
@@ -6,8 +8,11 @@ export type WakeRequest = {
   category: WakeCategory;
   subjectId: string | null;
   taskId: string | null;
+  /** Source identity is separate from the reason entity used for deduplication. */
+  decisionId: string | null;
+  budget: Pick<RunRecord["budgets"]["entries"][number], "scope" | "subjectId"> | null;
   dedupeKey: string;
-  source: "decision" | "task-failed" | "budget" | "run-finished";
+  source: "decision" | "budget" | "run-finished";
 };
 
 export type WakeContext = {
@@ -29,21 +34,18 @@ export function wakeKey(
 function addWake(
   requests: Map<string, WakeRequest>,
   runId: string,
-  category: WakeCategory,
-  subjectId: string | null,
-  taskId: string | null,
-  source: WakeRequest["source"],
   policyEpoch: string,
+  request: Omit<WakeRequest, "dedupeKey">,
 ): void {
-  const dedupeKey = wakeKey(runId, category, subjectId, policyEpoch);
+  const dedupeKey = wakeKey(runId, request.category, request.subjectId, policyEpoch);
   if (requests.has(dedupeKey)) return;
-  requests.set(dedupeKey, { category, subjectId, taskId, dedupeKey, source });
+  requests.set(dedupeKey, { ...request, dedupeKey });
 }
 
 /**
- * Wake only on the state delta, never on the event union (R3b-4): new open decisions, an S-tier
- * task becoming failed, a budget becoming exhausted, or the run finishing. Ordinary progress,
- * rework, escalation, evidence returns and lock waits produce nothing.
+ * Wake only on the state delta, never on the event union (R3b-4): new open decisions, a budget
+ * becoming exhausted, or the run finishing. D3 comes only from the reducer's decision, never
+ * from a failed task state (which may describe a first rework or an infrastructure failure).
  */
 export function classifyWake(
   prev: Pick<RunRecord, "runId" | "decisions" | "tasks" | "budgets" | "lifecycle">,
@@ -58,47 +60,68 @@ export function classifyWake(
       (decision.state === "open" || decision.state === "waiting-human"),
   );
   for (const decision of newDecisions) {
-    addWake(
-      requests,
-      next.runId,
-      decision.category,
-      decision.subjectId ?? decision.decisionId,
-      null,
-      "decision",
-      ctx.policyEpoch,
-    );
+    const taskId = next.tasks.find((task) => task.spec.id === decision.subjectId)?.spec.id ?? null;
+    const base = {
+      category: decision.category,
+      subjectId: decision.subjectId ?? decision.decisionId,
+      taskId,
+      decisionId: decision.decisionId,
+      budget: null,
+      source: "decision" as const,
+    };
+    // Canonical D4 subjects use budgetKey. A legacy bare subject can name multiple budgets:
+    // keep every matching scope rather than silently selecting the first one.
+    const canonical =
+      decision.category === "D4"
+        ? next.budgets.entries.filter((entry) => budgetKey(entry) === decision.subjectId)
+        : [];
+    const budgets =
+      canonical.length > 0
+        ? canonical
+        : decision.category === "D4"
+          ? next.budgets.entries.filter((entry) => entry.subjectId === decision.subjectId)
+          : [];
+    if (budgets.length === 0) {
+      addWake(requests, next.runId, ctx.policyEpoch, base);
+    } else {
+      for (const entry of budgets) {
+        addWake(requests, next.runId, ctx.policyEpoch, {
+          ...base,
+          subjectId: budgetKey(entry),
+          budget: { scope: entry.scope, subjectId: entry.subjectId },
+        });
+      }
+    }
   }
 
-  const decidedD3 = new Set(
-    newDecisions
-      .filter((decision) => decision.category === "D3")
-      .map((decision) => decision.subjectId),
-  );
-  const prevTasks = new Map(prev.tasks.map((task) => [task.spec.id, task]));
-  for (const task of next.tasks) {
-    const before = prevTasks.get(task.spec.id);
-    if (before?.state === "failed" || task.state !== "failed" || task.spec.tier !== "S") continue;
-    // A reducer-created D3 (subject task or null) already covers this incident.
-    if (decidedD3.has(task.spec.id) || decidedD3.has(null)) continue;
-    addWake(requests, next.runId, "D3", task.spec.id, task.spec.id, "task-failed", ctx.policyEpoch);
-  }
-
-  const prevBudgets = new Map(
-    prev.budgets.entries.map((entry) => [`${entry.scope}:${entry.subjectId}`, entry]),
-  );
+  const prevBudgets = new Map(prev.budgets.entries.map((entry) => [budgetKey(entry), entry]));
   for (const entry of next.budgets.entries) {
-    const before = prevBudgets.get(`${entry.scope}:${entry.subjectId}`);
+    const before = prevBudgets.get(budgetKey(entry));
     if (before !== undefined && !(before.reserved < entry.limit && entry.reserved >= entry.limit)) {
       continue;
     }
     if (before === undefined && entry.reserved < entry.limit) continue;
     if (entry.reserved >= entry.limit) {
-      addWake(requests, next.runId, "D4", entry.subjectId, null, "budget", ctx.policyEpoch);
+      addWake(requests, next.runId, ctx.policyEpoch, {
+        category: "D4",
+        subjectId: budgetKey(entry),
+        taskId: null,
+        decisionId: null,
+        budget: { scope: entry.scope, subjectId: entry.subjectId },
+        source: "budget",
+      });
     }
   }
 
   if (prev.lifecycle !== "finished" && next.lifecycle === "finished") {
-    addWake(requests, next.runId, "D6", null, null, "run-finished", ctx.policyEpoch);
+    addWake(requests, next.runId, ctx.policyEpoch, {
+      category: "D6",
+      subjectId: null,
+      taskId: null,
+      decisionId: null,
+      budget: null,
+      source: "run-finished",
+    });
   }
 
   return [...requests.values()].sort((left, right) =>
@@ -126,7 +149,7 @@ function cleanText(value: string): string {
   for (const char of value) {
     const code = char.codePointAt(0) ?? 0;
     const control = code < 0x20 || (code >= 0x7f && code <= 0x9f);
-    const bidi = (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+    const bidi = /\p{Bidi_Control}/u.test(char);
     folded += control || bidi ? " " : char;
   }
   return folded.replace(/\s+/gu, " ").trim();
@@ -141,26 +164,28 @@ export function buildWakeSummary(
   record: Pick<RunRecord, "tasks" | "budgets" | "decisions">,
 ): string {
   const lines: string[] = [`${request.category} 需要处理`];
+  const decision = record.decisions.find((entry) => entry.decisionId === request.decisionId);
+  if (decision) lines.push(`决策点 ${decision.category}`);
+  let goal: string | null = null;
   if (request.taskId !== null) {
     const task = record.tasks.find((entry) => entry.spec.id === request.taskId);
     if (task) {
-      lines.push(`任务 ${task.spec.id}「${cleanText(task.spec.title)}」状态=${task.state}`);
-      lines.push(`目标：${cleanText(task.spec.goal)}`);
+      lines.push(
+        `任务 ${cleanText(task.spec.id)}「${cleanText(task.spec.title)}」状态=${task.state} 当前层=${executionTier(task)}`,
+      );
       lines.push(`尝试=${task.attempts} 返工=${task.reworkCount} 质量失败=${task.qualityFailures}`);
+      if (task.ref) lines.push(`证据引用 ${task.ref.kind}:${cleanText(task.ref.value)}`);
+      goal = cleanText(task.spec.goal);
     }
   }
-  if (request.source === "budget" && request.subjectId !== null) {
+  const budget = request.budget;
+  if (budget !== null) {
     const entry = record.budgets.entries.find(
-      (candidate) => candidate.subjectId === request.subjectId,
+      (candidate) => candidate.scope === budget.scope && candidate.subjectId === budget.subjectId,
     );
-    if (entry) lines.push(`预算 ${entry.reserved}/${entry.limit}，已耗尽`);
+    if (entry) lines.push(`预算 ${cleanText(budgetKey(entry))} ${entry.reserved}/${entry.limit}`);
   }
-  if (request.source === "decision") {
-    const decision = record.decisions.find(
-      (candidate) => candidate.decisionId === request.subjectId,
-    );
-    if (decision) lines.push(`决策点 ${decision.category}`);
-  }
-  lines.push("选项：检查后重试；提供决定；取消");
-  return truncateUtf8(lines.join("\n"), 4096);
+  if (goal !== null) lines.push(`目标：${goal}`);
+  const options = "\n选项：检查后重试；提供决定；取消";
+  return truncateUtf8(lines.join("\n"), 4096 - new TextEncoder().encode(options).length) + options;
 }

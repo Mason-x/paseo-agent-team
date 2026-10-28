@@ -47,6 +47,8 @@ describe("wake classification", () => {
         category: "D1",
         subjectId: "subject-1",
         taskId: null,
+        decisionId: DECISION_ID,
+        budget: null,
         dedupeKey: wakeKey(next.runId, "D1", "subject-1", POLICY_EPOCH),
         source: "decision",
       },
@@ -60,12 +62,13 @@ describe("wake classification", () => {
     expect(classifyWake(record(), progress, { policyEpoch: POLICY_EPOCH })).toEqual([]);
   });
 
-  test("S failure, budget exhaustion and run finish map to D3/D4/D6", () => {
+  test("D3 requires a decision; budget exhaustion and run finish map to D4/D6", () => {
     const failed = record({
       tasks: [taskRecord(spec("T9", "Hard", { tier: "S" }), { state: "failed" })],
+      decisions: [{ ...decision("D3"), subjectId: "T9" }],
     });
     expect(classifyWake(record(), failed, { policyEpoch: POLICY_EPOCH })).toMatchObject([
-      { category: "D3", subjectId: "T9", taskId: "T9", source: "task-failed" },
+      { category: "D3", subjectId: "T9", taskId: "T9", source: "decision" },
     ]);
 
     const budgets = record({
@@ -83,7 +86,7 @@ describe("wake classification", () => {
       },
     });
     expect(classifyWake(record(), budgets, { policyEpoch: POLICY_EPOCH })).toMatchObject([
-      { category: "D4", subjectId: "seat-b1", source: "budget" },
+      { category: "D4", subjectId: "seat:seat-b1", source: "budget" },
     ]);
 
     const finished = record({ lifecycle: "finished" });
@@ -167,7 +170,7 @@ describe("wake summary", () => {
         state: "failed",
       }),
     ];
-    const next = record({ tasks });
+    const next = record({ tasks, decisions: [{ ...decision("D3"), subjectId: "T9" }] });
     const requests = classifyWake(record(), next, { policyEpoch: POLICY_EPOCH });
     if (!requests[0]) throw new Error("missing wake request");
     const summary = buildWakeSummary(requests[0], next);

@@ -91,7 +91,7 @@ export function normalizeLogicalPath(raw: string): NormalizedPath {
       return { ok: false, reason: "trailing-dot-space" };
     }
     const base = part.split(".")[0]?.toUpperCase() ?? "";
-    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(base)) {
+    if (/^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/u.test(base)) {
       return { ok: false, reason: "reserved" };
     }
     segments.push(part);
@@ -168,7 +168,13 @@ export function findLockConflicts(
     for (const scope of resolved) {
       // A task re-applying in a later phase keeps its own non-frozen claim; frozen still blocks.
       if (claim.taskId === request.taskId && !claim.frozen) continue;
-      const kind = lockConflicts(claim, scope, caseFold);
+      // A frozen range forbids new grants even for read/read. Apply this only at the grant
+      // boundary: lockConflicts still reports ordinary stored read claims as compatible.
+      const kind = lockConflicts(
+        claim.frozen ? { ...claim, access: "write" } : claim,
+        scope,
+        caseFold,
+      );
       if (kind === "none") continue;
       conflicts.push({
         claimId: claim.claimId,

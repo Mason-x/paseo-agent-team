@@ -2,8 +2,9 @@ import type {
   RunPolicySnapshot,
   RunRecord,
   RunSeatSnapshot,
-  RunTier,
+  RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
+import { executionTier, layerFailures } from "./tier";
 
 export type SchedulerMode = "sota" | "economy" | "economy-all" | "collaborative";
 
@@ -59,7 +60,8 @@ export type SeatDenial = {
     | "tier"
     | "duty"
     | "mode"
-    | "disabled-profile";
+    | "disabled-profile"
+    | "disabled-channel";
 };
 
 export type SeatEligibility = {
@@ -76,13 +78,6 @@ export type DispatchProposal = {
   qualification: string;
 };
 
-/** 05 §5 / RE4.2: L1–L2 need B, L3 needs A, L4 needs S (exact tier, no borrowing). */
-function requiredTier(level: string): RunTier {
-  if (level === "L4") return "S";
-  if (level === "L3") return "A";
-  return "B";
-}
-
 function rosterSeat(
   record: Pick<RunRecord, "roster">,
   seatId: string,
@@ -91,8 +86,8 @@ function rosterSeat(
 }
 
 /**
- * Ready is the reducer's decision. Scheduling only accepts task.state==="ready" and a null
- * waitingReason; it does not derive readiness from dependencies (R3b-2).
+ * Ready is the reducer's decision. Scheduling only consumes task.state==="ready";
+ * waitingReason is display text, never a second readiness gate (R3b-2).
  */
 export function eligibleSeats(
   record: Pick<RunRecord, "tasks" | "roster" | "policy">,
@@ -100,16 +95,38 @@ export function eligibleSeats(
   ctx: SchedulerContext,
 ): SeatEligibility {
   const task = record.tasks.find((entry) => entry.spec.id === taskId);
-  if (task?.state !== "ready" || task.waitingReason !== null) {
+  if (task?.state !== "ready") {
     return { candidates: [], denials: [], blocked: "not-ready" };
   }
-  const required = requiredTier(task.spec.level);
+  const required = executionTier(task);
   const denials: SeatDenial[] = [];
   const candidates: SeatChoice[] = [];
   for (const seat of ctx.seats) {
     const roster = rosterSeat(record, seat.seatId);
     if (!roster?.enabled || !seat.enabled) {
       denials.push({ seatId: seat.seatId, reason: "disabled" });
+      continue;
+    }
+    // Structural qualification comes first. An unrelated seat's busy state cannot imply that
+    // this task has same-tier capability to wait for (159 / I2).
+    if (roster.tier !== required) {
+      denials.push({ seatId: seat.seatId, reason: "tier" });
+      continue;
+    }
+    if (ctx.requiredDuty !== undefined && !roster.duties.includes(ctx.requiredDuty)) {
+      denials.push({ seatId: seat.seatId, reason: "duty" });
+      continue;
+    }
+    if (ctx.mode === "economy-all" && ctx.profileAllowed?.(seat.profileId) !== true) {
+      denials.push({ seatId: seat.seatId, reason: "mode" });
+      continue;
+    }
+    if (record.policy.disabledProfileIds.includes(seat.profileId)) {
+      denials.push({ seatId: seat.seatId, reason: "disabled-profile" });
+      continue;
+    }
+    if (record.policy.disabledChannels.includes(roster.channelId)) {
+      denials.push({ seatId: seat.seatId, reason: "disabled-channel" });
       continue;
     }
     if (seat.agentId === null || roster.agentId === null) {
@@ -134,22 +151,6 @@ export function eligibleSeats(
     }
     if (!seat.available) {
       denials.push({ seatId: seat.seatId, reason: "profile-unavailable" });
-      continue;
-    }
-    if (roster.tier !== required) {
-      denials.push({ seatId: seat.seatId, reason: "tier" });
-      continue;
-    }
-    if (ctx.requiredDuty !== undefined && !roster.duties.includes(ctx.requiredDuty)) {
-      denials.push({ seatId: seat.seatId, reason: "duty" });
-      continue;
-    }
-    if (ctx.mode === "economy-all" && ctx.profileAllowed?.(seat.profileId) !== true) {
-      denials.push({ seatId: seat.seatId, reason: "mode" });
-      continue;
-    }
-    if (record.policy.disabledProfileIds.includes(seat.profileId)) {
-      denials.push({ seatId: seat.seatId, reason: "disabled-profile" });
       continue;
     }
     candidates.push({
@@ -201,8 +202,10 @@ export type DispatchPlan = {
 };
 
 const TEMPORARY_DENIALS: ReadonlySet<SeatDenial["reason"]> = new Set([
+  "agent-missing",
   "busy",
   "permission",
+  "degraded",
   "channel",
   "profile-unavailable",
 ]);
@@ -220,7 +223,7 @@ export function planDispatchWithReasons(
   const proposals: DispatchProposal[] = [];
   const blocked: DispatchBlock[] = [];
   for (const task of record.tasks) {
-    if (task.state !== "ready" || task.waitingReason !== null) continue;
+    if (task.state !== "ready") continue;
     const eligibility = eligibleSeats(record, task.spec.id, { ...ctx, seats });
     const choice = eligibility.candidates[0];
     if (!choice) {
@@ -296,15 +299,11 @@ export type QualityFailurePlan =
   | { kind: "escalate"; nextTier: "A" | "S"; layerFailures: 0 }
   | { kind: "blocked"; decision: "D3" | "D4"; reason: string };
 
-export type QualityFailureInput = {
-  tier: RunTier;
-  /** Quality failures including the one being classified. */
-  qualityFailures: number;
-  /** Escalations already applied (B→A counts 1, A→S counts 2). */
-  escalations: number;
-  /** Implementation attempts spent, including the failed current attempt. */
-  attempts: number;
-};
+/** Counters include the failure being classified; escalations are the already applied epochs. */
+export type QualityFailureInput = Pick<
+  RunTaskRecord,
+  "spec" | "qualityFailures" | "escalations" | "attempts"
+>;
 
 /**
  * Single source for rework/escalation/D3 (AC-RE5.1/5.2). The reducer supplies counters and applies
@@ -315,17 +314,18 @@ export function nextQualityFailure(
   policy: Pick<RunPolicySnapshot, "perTask">,
 ): QualityFailurePlan {
   const perLayer = policy.perTask.reworkPerLayer + 1;
-  const layerFailures = Math.max(0, input.qualityFailures - input.escalations * perLayer);
+  const failures = layerFailures(input);
+  const tier = executionTier(input);
   // Quality ladder first: S exhaustion is D3 even when the attempt cap is also reached.
-  if (input.tier === "S" && layerFailures >= perLayer) {
+  if (tier === "S" && failures >= perLayer) {
     return { kind: "blocked", decision: "D3", reason: "S-quality-failure" };
   }
   const next =
-    layerFailures < perLayer
-      ? ({ kind: "rework", layerFailures } as const)
+    failures < perLayer
+      ? ({ kind: "rework", layerFailures: failures } as const)
       : ({
           kind: "escalate",
-          nextTier: input.tier === "B" ? "A" : "S",
+          nextTier: tier === "B" ? "A" : "S",
           layerFailures: 0,
         } as const);
   // Rework/escalation needs another implementation attempt; the cap is the only D4 here.

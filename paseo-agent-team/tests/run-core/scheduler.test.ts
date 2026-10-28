@@ -10,7 +10,7 @@ import {
   type SeatRuntime,
 } from "../../shared/domain/run-engine/scheduler";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { NORMAL_RUN_LEDGER, spec, taskRecord } from "../fixtures/run-engine";
+import { escalation, NORMAL_RUN_LEDGER, spec, taskRecord } from "../fixtures/run-engine";
 
 const NOW = "2026-10-28T00:00:00.000Z";
 
@@ -45,7 +45,7 @@ function ctx(overrides: Partial<SchedulerContext> = {}): SchedulerContext {
 }
 
 describe("scheduler eligibility and ordering", () => {
-  test("only a ready task with no waiting reason is schedulable", () => {
+  test("only task state determines readiness; waiting reason is display text", () => {
     expect(
       eligibleSeats(record({ tasks: [taskRecord(spec("T1", "Ship"))] }), "T1", ctx()),
     ).toMatchObject({ candidates: [], blocked: "not-ready" });
@@ -57,12 +57,12 @@ describe("scheduler eligibility and ordering", () => {
         "T1",
         ctx(),
       ).blocked,
-    ).toBe("not-ready");
+    ).toBeNull();
   });
 
   test("tier, duty, availability, channel, idle, permission and mode filters are explicit", () => {
     const l4 = record({
-      tasks: [taskRecord(spec("T1", "Ship", { level: "L4" }), { state: "ready" })],
+      tasks: [taskRecord(spec("T1", "Ship", { level: "L4", tier: "S" }), { state: "ready" })],
     });
     expect(eligibleSeats(l4, "T1", ctx()).denials).toContainEqual({
       seatId: "seat-b1",
@@ -198,33 +198,51 @@ describe("scheduler eligibility and ordering", () => {
 
   test("quality failure is the single rework/escalate/D3/D4 rule", () => {
     const policy = record().policy;
-    expect(
-      nextQualityFailure({ tier: "B", qualityFailures: 1, escalations: 0, attempts: 1 }, policy),
-    ).toEqual({ kind: "rework", layerFailures: 1 });
-    expect(
-      nextQualityFailure({ tier: "B", qualityFailures: 3, escalations: 0, attempts: 3 }, policy),
-    ).toEqual({ kind: "escalate", nextTier: "A", layerFailures: 0 });
-    expect(
-      nextQualityFailure({ tier: "A", qualityFailures: 4, escalations: 1, attempts: 4 }, policy),
-    ).toEqual({ kind: "rework", layerFailures: 1 });
-    expect(
-      nextQualityFailure({ tier: "S", qualityFailures: 3, escalations: 0, attempts: 3 }, policy),
-    ).toEqual({ kind: "blocked", decision: "D3", reason: "S-quality-failure" });
-    expect(
-      nextQualityFailure({ tier: "A", qualityFailures: 3, escalations: 0, attempts: 6 }, policy),
-    ).toEqual({ kind: "blocked", decision: "D4", reason: "implementation-attempts" });
+    const bToA = escalation();
+    const aToS = escalation({ fromTier: "A", toTier: "S", qualityFailures: 6, atAttempt: 6 });
+    const b = (
+      qualityFailures: number,
+      attempts = qualityFailures,
+      escalations = [] as (typeof bToA)[],
+    ) => taskRecord(spec("T1", "Ship"), { qualityFailures, attempts, escalations });
+    const direct = (tier: "A" | "S", qualityFailures: number, attempts = qualityFailures) =>
+      taskRecord(spec("T1", "Ship", { tier, level: tier === "S" ? "L4" : "L3" }), {
+        qualityFailures,
+        attempts,
+      });
+    expect(nextQualityFailure(b(1), policy)).toEqual({ kind: "rework", layerFailures: 1 });
+    expect(nextQualityFailure(b(3), policy)).toEqual({
+      kind: "escalate",
+      nextTier: "A",
+      layerFailures: 0,
+    });
+    expect(nextQualityFailure(b(4, 4, [bToA]), policy)).toEqual({
+      kind: "rework",
+      layerFailures: 1,
+    });
+    expect(nextQualityFailure(direct("S", 3), policy)).toEqual({
+      kind: "blocked",
+      decision: "D3",
+      reason: "S-quality-failure",
+    });
+    expect(nextQualityFailure(direct("A", 3, 6), policy)).toEqual({
+      kind: "blocked",
+      decision: "D4",
+      reason: "implementation-attempts",
+    });
     const capNine = { ...policy, perTask: { ...policy.perTask, implementationAttempts: 9 } };
     const capTen = { ...policy, perTask: { ...policy.perTask, implementationAttempts: 10 } };
     for (const policyWithCap of [capNine, capTen]) {
-      expect(
-        nextQualityFailure(
-          { tier: "S", qualityFailures: 9, escalations: 2, attempts: 9 },
-          policyWithCap,
-        ),
-      ).toEqual({ kind: "blocked", decision: "D3", reason: "S-quality-failure" });
+      expect(nextQualityFailure(b(9, 9, [bToA, aToS]), policyWithCap)).toEqual({
+        kind: "blocked",
+        decision: "D3",
+        reason: "S-quality-failure",
+      });
     }
-    expect(
-      nextQualityFailure({ tier: "A", qualityFailures: 6, escalations: 1, attempts: 6 }, policy),
-    ).toEqual({ kind: "blocked", decision: "D4", reason: "implementation-attempts" });
+    expect(nextQualityFailure(b(6, 6, [bToA]), policy)).toEqual({
+      kind: "blocked",
+      decision: "D4",
+      reason: "implementation-attempts",
+    });
   });
 });
