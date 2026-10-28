@@ -89,6 +89,23 @@ host settings. Downgrading to an older plugin can discard binding hints, preset 
 history on subsequent saves, but existing Profile ids still work. Damaged preset origins, Profile
 hints, or sync history are ignored rather than invalidating the catalog.
 
+## Team modes
+
+A Team stores one of four modes. The UI label is what you see; the stored value never changes
+meaning (`economy` always means 标准/standard, while only `economy-all` is the all-seats mode).
+
+| UI label | Stored value | Planning |
+| --- | --- | --- |
+| 旗舰（SOTA） | `sota` | Keeps every Role's original Profile binding; decision and execution both prefer it. |
+| 标准 | `economy` | Decision roles keep their bindings; execution seats use the **standard pool** (Profiles, task order, and budget labels under **Economy pool → 标准：执行池**). |
+| 经济 | `economy-all` | Every seat (coordinator, decision/review, execution, escalation/standby, retain) uses only allowlisted cheap Profiles from its own route. Each of the five routes needs a qualified candidate; otherwise the launch is blocked and there is no fallback to a Role's original binding. Configure the allowlist, five-layer routes, execution task order, and suggestions under **Economy pool → 经济：全席位**. |
+| 协作 | `collaborative` | Execution seats fan out across model families; a judge/test seat reviews before the winner continues. |
+
+An existing `economy` Team keeps running as 标准 after upgrade; it is not migrated to 经济. A Team
+saved with a mode this build does not recognize stays unlaunched (with a warning) until you pick
+a mode. The designer's "existing Roles only" switch belongs to one design request and does not
+change the Team mode.
+
 ## Launch
 
 From a workspace: **Agent Crew → Launch team**, the Command Center action **Launch agent
@@ -104,6 +121,13 @@ Preview shows the resolved Profile and source (member override, preferred, or fa
 warnings and blockers. Launch is disabled while blockers remain. Blockers include a coordinator
 whose provider cannot reach Paseo's delegation tools (Paseo MCP off, "Inject Paseo tools" off,
 or the provider's "Enable Paseo tools" off).
+
+The terminal client uses the Team's saved mode. `--mode` is an **advanced override for scripts and
+tests only** and is never written back to the Team; it accepts `sota`, `standard`, `economy`,
+`economy-all`, and `collaborative`. `standard` maps to the stored `economy` value (标准); the old
+`economy` spelling prints a notice and also means 标准; `economy-all` is 经济 and requires a
+configured all-seats policy. Every CLI request declares `contractVersion: 2`, which older daemons
+ignore; the host then applies the same preview/start access gate as the app.
 
 After confirm, the daemon host re-validates, creates the coordinator, then each member as a
 child, then sends the coordinator a kickoff message with the roster. The launch runs on the
