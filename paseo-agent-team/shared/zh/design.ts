@@ -33,7 +33,8 @@ export const designZh = {
   noWorkspace: "没有可承载设计的已有工作区，请先在Paseo创建工作区",
   workspaceUnavailable: "所选或承载工作区已不可用",
   profileUnavailable: "设计师Profile缺失或不可用，请重新选择",
-  inputTooLarge: "设计上下文过大，精简目录说明或需求后重试",
+  inputTooLarge:
+    "请停用无关 Role 或分批设计（当前 Role {roles} 个、Team {teams} 个，共 {bytes}B，上限 {limit}B）；也可精简说明后重试",
   outputMissing: "本轮没有完整的设计JSON块",
   outputMultiple: "本轮包含多个设计块，请只输出一个完整方案",
   outputTooLarge: "方案超过大小限制，请精简角色内容",
@@ -145,6 +146,7 @@ export const designZh = {
   resultMode: "模式",
   resultTeamLine: (name: string, id: string) => `${name} · ${id}`,
   resultNewRoleLine: (name: string, id: string) => `${name} · ${id}`,
+  resultNoveltyReason: "新增原因",
   resultTargetLabel: "目标工作区",
   resultNoTarget: "未指定目标工作区（不会自动使用承载工作区）",
   resultReuse: "复用 Role",

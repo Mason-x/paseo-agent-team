@@ -309,6 +309,7 @@ function buildNewRole(
     ...(role.color !== undefined ? { color: role.color } : {}),
     ...(role.icon !== undefined ? { icon: role.icon } : {}),
     executionPolicy: role.executionPolicy,
+    noveltyReason: role.noveltyReason,
     enabled: true,
     createdAt: identity.createdAt,
     updatedAt: identity.createdAt,
@@ -1851,6 +1852,16 @@ export function validateRoleGap(
           error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
             path: [...path, "roleId"].join("."),
             reason: "unknown-role",
+            roleId: gap.roleId,
+          }),
+        );
+      } else if (!role.enabled) {
+        // A disabled Role is not a launchability gap: the remedy is enabling/reusing another
+        // Role, not repairing its bindings. Keep the schema error so the model corrects it.
+        issues.push(
+          error("DESIGN_OUTPUT_SCHEMA", [...path, "roleId"], {
+            path: [...path, "roleId"].join("."),
+            reason: "role-disabled",
             roleId: gap.roleId,
           }),
         );

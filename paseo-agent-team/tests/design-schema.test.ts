@@ -73,6 +73,11 @@ describe("stored designer origin", () => {
   test("a damaged designer block drops only the origin, never the Role, Team, or Preferences document", () => {
     expect(RoleSchema.parse({ ...architect, designer: { jobId: 42 } }).designer).toBe(undefined);
     expect(RoleSchema.parse({ ...architect, designer: "broken" }).id).toBe(architect.id);
+    for (const bad of ["", "x".repeat(601), 42]) {
+      const parsed = RoleSchema.parse({ ...architect, noveltyReason: bad });
+      expect(parsed.id).toBe(architect.id);
+      expect(parsed.noveltyReason).toBeUndefined();
+    }
     expect(TeamSchema.parse({ ...codingTeam, designer: null }).id).toBe(codingTeam.id);
     expect(TeamSchema.parse({ ...codingTeam, designer: { createdAt: 1 } }).designer).toBe(
       undefined,
@@ -191,6 +196,11 @@ describe("strict model output", () => {
         newRoles: [{ ...roles[0], noveltyReason: "   " }],
       }).success,
     ).toBe(false);
+    const { noveltyReason: _omitted, ...withoutReason } = roles[0] ?? {};
+    expect(withoutReason).not.toHaveProperty("noveltyReason");
+    expect(DesignProposalSchema.safeParse({ ...proposal, newRoles: [withoutReason] }).success).toBe(
+      false,
+    );
     expect(
       DesignProposalSchema.safeParse({
         ...proposal,

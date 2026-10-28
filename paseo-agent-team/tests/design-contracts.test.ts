@@ -413,6 +413,13 @@ describe("shared boundary", () => {
     expect(legacy).not.toContain("3");
   });
 
+  test("the oversized prompt copy leads with the actionable advice", () => {
+    const text = designZh.inputTooLarge;
+    expect(text.indexOf("请停用无关 Role")).toBe(0);
+    expect(text.indexOf("请停用无关 Role")).toBeLessThan(text.indexOf("Role {roles}"));
+    expect(text).toContain("分批设计");
+  });
+
   test("every MODE_ISSUE_CODES entry renders real copy, not the fallback", () => {
     const params = {
       route: "execution",

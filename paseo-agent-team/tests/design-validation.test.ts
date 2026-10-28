@@ -546,6 +546,7 @@ describe("validateDesign", () => {
         source: "team-designer",
         designer: { jobId: DESIGN_JOB_ID },
         preferredProfiles: [{ profileId: "codex-xhigh" }],
+        noveltyReason: "现有 Role 没有覆盖这次改版的专职实现。",
       });
     }
 

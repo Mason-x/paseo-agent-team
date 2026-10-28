@@ -138,7 +138,11 @@ export type PromptCompression =
   | "notes-off"
   | "role-text-clamped"
   | "recipe-notes-off"
-  | "relevant-only";
+  | "relevant-only"
+  | "index-only"
+  | "recipes-compact"
+  | "index-only-6"
+  | "index-only-minimal";
 
 export type PromptBuildResult =
   | {
@@ -160,12 +164,12 @@ function clampCodePoints(value: string, max: number): string {
   return points.length <= max ? value : points.slice(0, max).join("");
 }
 
-function inputTooLarge(bytes: number, limit: number): DesignIssue {
+function inputTooLarge(bytes: number, limit: number, context: DesignPromptContext): DesignIssue {
   return {
     code: "DESIGN_INPUT_TOO_LARGE",
     severity: "error",
     path: [],
-    params: { bytes, limit },
+    params: { bytes, limit, roles: context.roles.length, teams: context.occupiedTeams.length },
     action: "none",
   };
 }
@@ -528,6 +532,12 @@ type PromptDetail = {
   roleText: "full" | "clamped";
   recipeNotes: boolean;
   relevantOnly: boolean;
+  /** v2 only: keep a bounded summary for relevant Roles, names/states for the rest. */
+  roleDetail: "full" | "index-only";
+  /** v2 only: number of relevant Role summaries while roleDetail is index-only. */
+  indexOnlyLimit: number;
+  /** v2 only: recipes keep id/name/member role ids instead of full payloads. */
+  recipes: "full" | "compact";
 };
 
 const FULL_DETAIL: PromptDetail = {
@@ -535,6 +545,9 @@ const FULL_DETAIL: PromptDetail = {
   roleText: "full",
   recipeNotes: true,
   relevantOnly: false,
+  roleDetail: "full",
+  indexOnlyLimit: 12,
+  recipes: "full",
 };
 
 function rolePayload(role: DesignPromptRoleSummary, detail: PromptDetail): Record<string, unknown> {
@@ -582,6 +595,17 @@ function recipeNote(recipe: TeamDesignRecipe): string | undefined {
 }
 
 function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<string, unknown> {
+  if (detail.recipes === "compact") {
+    return {
+      id: recipe.id,
+      name: recipe.name,
+      members: recipe.members.map((member) => ({
+        roleId: member.roleId,
+        minInstances: member.minInstances,
+        maxInstances: member.maxInstances,
+      })),
+    };
+  }
   const notes = recipeNote(recipe);
   return {
     id: recipe.id,
@@ -619,18 +643,47 @@ function roleTextOmitted(roles: readonly DesignPromptRoleSummary[]): string[] {
   return omitted;
 }
 
-function omissionsFor(context: DesignPromptContext, detail: PromptDetail): string[] {
-  const hidden = context.roles.length - detailedRoles(context, detail).length;
+function omissionsFor(
+  context: DesignPromptContext,
+  detail: PromptDetail,
+  rules: PromptRules,
+): string[] {
+  const notesOmitted = context.profiles.some((profile) => profile.notes);
+  const clamped = roleTextOmitted(
+    rules.version === 2 ? context.roles : detailedRoles(context, detail),
+  );
+  if (rules.version === 1) {
+    const hidden = context.roles.length - detailedRoles(context, detail).length;
+    return [
+      ...(detail.notes === "none" && notesOmitted ? ["profile-notes"] : []),
+      ...(detail.roleText === "clamped" ? clamped : []),
+      ...(detail.recipeNotes ||
+      !TEAM_DESIGN_RECIPES.some((recipe) => recipeNote(recipe) !== undefined)
+        ? []
+        : ["recipe-notes"]),
+      ...(hidden > 0 ? [`unrelated-role-details:${hidden}`] : []),
+    ];
+  }
+  const relevant = relevantRoleIds(context, rules, detail.indexOnlyLimit);
+  const hidden = context.roles.filter(
+    (role) =>
+      !roleSelectable(role, rules) ||
+      (detail.roleDetail === "index-only" && !relevant.has(role.id)),
+  ).length;
   return [
-    ...(detail.notes === "none" && context.profiles.some((profile) => profile.notes)
-      ? ["profile-notes"]
-      : []),
-    ...(detail.roleText === "clamped" ? roleTextOmitted(detailedRoles(context, detail)) : []),
+    ...(detail.notes === "none" && notesOmitted ? ["profile-notes"] : []),
+    ...(detail.roleText === "clamped" ? clamped : []),
     ...(detail.recipeNotes ||
     !TEAM_DESIGN_RECIPES.some((recipe) => recipeNote(recipe) !== undefined)
       ? []
       : ["recipe-notes"]),
     ...(hidden > 0 ? [`unrelated-role-details:${hidden}`] : []),
+    ...(detail.roleDetail === "index-only" ? ["role-summaries-index-only"] : []),
+    ...(detail.recipes === "compact" ? ["recipes-compact"] : []),
+    ...(detail.roleDetail === "index-only" && detail.indexOnlyLimit === 6 ? ["index-only-6"] : []),
+    ...(detail.roleDetail === "index-only" && detail.indexOnlyLimit === 0
+      ? ["role-summaries-none"]
+      : []),
   ];
 }
 
@@ -714,6 +767,152 @@ function roleIndexEntry(
   };
 }
 
+const REQUEST_STOP_TERMS: Record<string, true> = {
+  设计: true,
+  团队: true,
+  一个: true,
+  需要: true,
+  功能: true,
+  开发: true,
+  实现: true,
+  负责: true,
+  任务: true,
+  成员: true,
+  角色: true,
+  使用: true,
+  可以: true,
+  以及: true,
+  并且: true,
+  支持: true,
+  管理: true,
+  系统: true,
+  提供: true,
+  进行: true,
+  相关: true,
+  工作: true,
+  内容: true,
+  现有: true,
+  后台: true,
+  改版: true,
+  完成: true,
+  确保: true,
+  覆盖: true,
+  输出: true,
+  建议: true,
+  新增: true,
+  role: true,
+  roles: true,
+  dev: true,
+  team: true,
+  teams: true,
+  ai: true,
+  profile: true,
+  agent: true,
+  mode: true,
+};
+
+/** Prototype keys (constructor, toString, __proto__) must not count as stop words. */
+function isStopTerm(term: string): boolean {
+  return Object.hasOwn(REQUEST_STOP_TERMS, term);
+}
+
+/** Recipe roles plus Roles whose name/mission/responsibilities share a request term. */
+function relevantRoleIds(
+  context: DesignPromptContext,
+  rules: PromptRules,
+  limit: number,
+): ReadonlySet<string> {
+  if (limit <= 0) return new Set<string>();
+  const recipeIds = new Set<string>(
+    TEAM_DESIGN_RECIPES.flatMap((recipe) => [
+      recipe.coordinatorRoleId,
+      ...recipe.members.map((member) => member.roleId),
+    ]),
+  );
+  const terms = new Set<string>();
+  const request = context.request.toLowerCase();
+  for (const word of request.match(/[a-z0-9_]{2,}/gu) ?? []) {
+    if (!isStopTerm(word)) terms.add(word);
+  }
+  let domainText = request;
+  for (const stop of Object.keys(REQUEST_STOP_TERMS)) {
+    domainText = domainText.split(stop).join(" ");
+  }
+  for (const run of domainText.match(/[\u3400-\u9fff]+/gu) ?? []) {
+    for (let index = 0; index + 1 < run.length; index += 1) {
+      const term = run.slice(index, index + 2);
+      if (!isStopTerm(term)) terms.add(term);
+    }
+  }
+  const ranked = context.roles
+    .map((role, index) => {
+      const text =
+        `${role.name}\n${role.mission}\n${role.responsibilities.join("\n")}`.toLowerCase();
+      const score = [...terms].filter((term) => text.includes(term)).length;
+      return {
+        id: role.id,
+        index,
+        recipe: recipeIds.has(role.id),
+        score,
+        selectable: roleSelectable(role, rules),
+      };
+    })
+    .filter((entry) => entry.selectable);
+  // Request matches must never be crowded out by the static recipes. Matches sort first by
+  // overlap; recipe-only Roles fill the remaining slots in stable catalog order.
+  const matched = ranked
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  const recipes = ranked.filter((entry) => entry.score === 0 && entry.recipe);
+  recipes.sort((a, b) => a.index - b.index);
+  return new Set([...matched, ...recipes].slice(0, limit).map((entry) => entry.id));
+}
+
+function roleSelectable(role: DesignPromptRoleSummary, rules: PromptRules): boolean {
+  if (!role.enabled) return false;
+  if (rules.version === 1) return true;
+  const member = launchState(role.launchable, role.launchVerified);
+  const coordinator = launchState(role.coordinatorLaunchable, role.coordinatorLaunchVerified);
+  return member !== "blocked" || coordinator !== "blocked";
+}
+
+function roleDirectoryEntry(
+  role: DesignPromptRoleSummary,
+  rules: PromptRules,
+  detail: PromptDetail,
+  relevant: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (rules.version === 2 && !role.enabled) {
+    return { id: role.id, name: role.name, enabled: false };
+  }
+  if (rules.version === 2 && !roleSelectable(role, rules)) {
+    return {
+      id: role.id,
+      name: role.name,
+      memberLaunch: launchState(role.launchable, role.launchVerified),
+      coordinatorLaunch: launchState(role.coordinatorLaunchable, role.coordinatorLaunchVerified),
+      unavailableProfileIds: stringIds(role.unavailableProfileIds),
+    };
+  }
+  if (rules.version === 2 && detail.roleDetail === "index-only" && !relevant.has(role.id)) {
+    return {
+      id: role.id,
+      name: role.name,
+      tier: role.tier ?? null,
+      memberLaunch: launchState(role.launchable, role.launchVerified),
+      coordinatorLaunch: launchState(role.coordinatorLaunchable, role.coordinatorLaunchVerified),
+    };
+  }
+  const index = roleIndexEntry(role, rules);
+  const summary = rolePayload(role, detail);
+  return {
+    ...index,
+    mission: summary.mission,
+    responsibilities: summary.responsibilities,
+    taskKind: summary.taskKind,
+  };
+}
+
 function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undefined): string {
   if (rules.version === 1) {
     return "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
@@ -724,10 +923,12 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   // notes the unverified availability.
   const launchRule =
     "memberLaunch/coordinatorLaunch 是该用途判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=可用性未核实（照常使用该 Role 并在 reuse.reason 注明；不得声称 Role 缺失或不可启动，只有确实无 Role 承担时才报 missing-role，profiles.none 只表示不提供 Profile）。用途不可互推。";
+  const directoryLegend =
+    "条目形态：完整条目含 mission/responsibilities/taskKind；无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用，停用 Role 不可选，也不属于 unlaunchable-role（缺职责时报 missing-role）；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
   if (routing !== undefined) {
-    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${launchRule}`;
+    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${directoryLegend}${launchRule}`;
   }
-  return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
+  return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${directoryLegend}${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
 }
 
 function recipeInstruction(rules: PromptRules): string {
@@ -744,6 +945,8 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
   const { context } = input;
   const rules = promptRules(context);
   const routing = rules.version === 2 ? context.modeRouting : undefined;
+  const v2 = rules.version === 2;
+  const relevant = v2 ? relevantRoleIds(context, rules, detail.indexOnlyLimit) : new Set<string>();
   const target = context.target
     ? { id: context.target.id, name: context.target.name, path: context.target.path ?? null }
     : null;
@@ -787,25 +990,43 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
           "",
         ]),
     "## 目录与 Profile 白名单",
-    jsonBlock("目录约束", {
-      occupiedRoleIds: stringIds(context.occupiedRoleIds),
-      occupiedRoleNames: stringIds(context.occupiedRoleNames),
-      occupiedTeams: projectedTeams(context.occupiedTeams),
-      newRoleLimit: rules.limit,
-      namePrefixes: NAME_PREFIXES.map(([prefix, label]) => ({ prefix, label })),
-      coordinatorCannotBeMember: true,
-      duplicateRoleNeedsInstanceLabel: true,
-      preferReuse: true,
-    }),
+    jsonBlock(
+      "目录约束",
+      v2
+        ? {
+            occupiedTeams: projectedTeams(context.occupiedTeams),
+            newRoleLimit: rules.limit,
+            namePrefixes: NAME_PREFIXES.map(([prefix, label]) => ({ prefix, label })),
+            coordinatorCannotBeMember: true,
+            duplicateRoleNeedsInstanceLabel: true,
+            preferReuse: true,
+          }
+        : {
+            occupiedRoleIds: stringIds(context.occupiedRoleIds),
+            occupiedRoleNames: stringIds(context.occupiedRoleNames),
+            occupiedTeams: projectedTeams(context.occupiedTeams),
+            newRoleLimit: rules.limit,
+            namePrefixes: NAME_PREFIXES.map(([prefix, label]) => ({ prefix, label })),
+            coordinatorCannotBeMember: true,
+            duplicateRoleNeedsInstanceLabel: true,
+            preferReuse: true,
+          },
+    ),
     jsonBlock(
       "Role 索引",
-      context.roles.map((role) => roleIndexEntry(role, rules)),
+      context.roles.map((role) =>
+        v2 ? roleDirectoryEntry(role, rules, detail, relevant) : roleIndexEntry(role, rules),
+      ),
     ),
     indexRequirement(rules, routing),
-    jsonBlock(
-      "Role 摘要",
-      detailedRoles(context, detail).map((role) => rolePayload(role, detail)),
-    ),
+    ...(v2
+      ? []
+      : [
+          jsonBlock(
+            "Role 摘要",
+            detailedRoles(context, detail).map((role) => rolePayload(role, detail)),
+          ),
+        ]),
     jsonBlock(
       "Profile 白名单",
       context.profiles.map((profile) => profilePayload(profile, detail)),
@@ -828,7 +1049,11 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
 
 type CompressionStep = { detail: PromptDetail; compression: PromptCompression };
 
-function compressed(input: DesignPromptInput, detail: PromptDetail): CompressionStep | null {
+function compressed(
+  input: DesignPromptInput,
+  detail: PromptDetail,
+  rules: PromptRules,
+): CompressionStep | null {
   const { context } = input;
   if (detail.notes === "full" && context.profiles.some((profile) => profile.notes)) {
     return { detail: { ...detail, notes: "none" }, compression: "notes-off" };
@@ -842,11 +1067,25 @@ function compressed(input: DesignPromptInput, detail: PromptDetail): Compression
   ) {
     return { detail: { ...detail, recipeNotes: false }, compression: "recipe-notes-off" };
   }
-  if (!detail.relevantOnly && context.relevantRoleIds !== undefined) {
+  // The legacy relevant-only tier depended on a field production never supplied. Keep its
+  // historical v1 behavior, but compress v2 deterministically inside the prompt.
+  if (rules.version === 1 && !detail.relevantOnly && context.relevantRoleIds !== undefined) {
     return {
       detail: { ...detail, relevantOnly: true, roleText: "full" },
       compression: "relevant-only",
     };
+  }
+  if (rules.version === 2 && detail.roleDetail === "full") {
+    return { detail: { ...detail, roleDetail: "index-only" }, compression: "index-only" };
+  }
+  if (rules.version === 2 && detail.recipes === "full") {
+    return { detail: { ...detail, recipes: "compact" }, compression: "recipes-compact" };
+  }
+  if (rules.version === 2 && detail.indexOnlyLimit > 6) {
+    return { detail: { ...detail, indexOnlyLimit: 6 }, compression: "index-only-6" };
+  }
+  if (rules.version === 2 && detail.indexOnlyLimit > 0) {
+    return { detail: { ...detail, indexOnlyLimit: 0 }, compression: "index-only-minimal" };
   }
   return null;
 }
@@ -860,14 +1099,15 @@ type BudgetFit = {
 };
 
 function withinBudget(input: DesignPromptInput, limit: number): BudgetFit {
+  const rules = promptRules(input.context);
   let detail = FULL_DETAIL;
   let compression: PromptCompression = "full";
   for (;;) {
     const text = compose(input, detail);
     const bytes = utf8ByteLength(text);
-    const omissions = omissionsFor(input.context, detail);
+    const omissions = omissionsFor(input.context, detail, rules);
     if (bytes <= limit) return { ok: true, text, bytes, omissions, compression };
-    const next = compressed(input, detail);
+    const next = compressed(input, detail, rules);
     if (!next) return { ok: false, text, bytes, omissions, compression };
     detail = next.detail;
     compression = next.compression;
@@ -906,6 +1146,7 @@ export function buildDesignKickoff(input: DesignPromptInput): PromptBuildResult 
       inputTooLarge(
         fitted.bytes,
         rules.version === 1 ? DESIGN_KICKOFF_MAX_BYTES : DESIGN_KICKOFF_TARGET_BYTES,
+        input.context,
       ),
     ],
   };
@@ -970,7 +1211,10 @@ export function buildDesignCorrection(input: {
   ].join("\n");
   const bytes = utf8ByteLength(text);
   if (bytes > DESIGN_CORRECTION_MAX_BYTES) {
-    return { ok: false, issues: [inputTooLarge(bytes, DESIGN_CORRECTION_MAX_BYTES)] };
+    return {
+      ok: false,
+      issues: [inputTooLarge(bytes, DESIGN_CORRECTION_MAX_BYTES, input.context)],
+    };
   }
   return { ok: true, text, utf8Bytes: bytes, omissions: [], compression: "full" };
 }

@@ -2504,6 +2504,52 @@ describe("design service", () => {
     await service.dispose();
   });
 
+  test("a new Role without noveltyReason enters a correction round", async () => {
+    const evidence = JSON.parse(
+      await readFile(join(import.meta.dirname, "fixtures", "v01b-dev-d5-off-start.json"), "utf8"),
+    ) as { req: { clientRequestId: string; request: string } };
+    const store = new FakeStore();
+    const adapter = new FakeAdapter();
+    const service = createDesignService(serviceDeps(store, adapter));
+    const started = await service.start({
+      ...input(),
+      clientRequestId: evidence.req.clientRequestId,
+      request: evidence.req.request,
+      existingRolesOnly: false,
+    });
+    if (!started.ok) throw new Error("start failed");
+    await until(() => store.records.get(started.job.jobId)?.job.agentCreated === true);
+    const stored = await store.get(started.job.jobId);
+    if (!stored) throw new Error("missing");
+    const { noveltyReason: _omitted, ...role } = newDesignRole({
+      id: "qa-security-migration",
+      name: "【工程】安全加固与迁移审计",
+    });
+    const base = proposalFor(stored);
+    const proposal = {
+      ...base,
+      team: {
+        ...base.team,
+        members: base.team.members.map((member) =>
+          member.key === "m2" ? { ...member, roleId: role.id } : member,
+        ),
+      },
+      newRoles: [role],
+      reuse: base.reuse.filter((entry) => entry.roleId !== "developer"),
+    };
+    adapter.entries = answerFor(stored, proposal);
+    await service.onTurnEnded({
+      agent: { id: started.job.jobId, labels: adapter.agents.get(started.job.jobId)?.labels },
+      outcome: { kind: "completed" },
+    });
+    await until(() => adapter.sent.length === 1);
+    const after = await store.get(started.job.jobId);
+    expect(after?.result).toBeNull();
+    expect(after?.job.state).not.toBe("ready");
+    expect(adapter.sent[0]).toContain("newRoles.0.noveltyReason");
+    await service.dispose();
+  });
+
   test("authorizes canceled cleanup only for written roles", async () => {
     const store = new FakeStore();
     const adapter = new FakeAdapter();
