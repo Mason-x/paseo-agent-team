@@ -17,6 +17,7 @@ import {
 import { preferencesSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
 import { modesZh } from "../../shared/zh/modes";
+import { teamPlanZh } from "../../shared/zh/team-plan";
 import { GhostIconButton, ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
 import { Field, inputStyle } from "../shared/Field";
@@ -130,6 +131,11 @@ function allSeatsStatus(
     : { text: modesZh.economyAllEntryDisabled, warning: false };
 }
 
+export type EconomyEditorFocus = {
+  layer: "standard" | "allSeats";
+  route?: AllSeatsRoute;
+};
+
 export function EconomyPoolEditor({
   theme,
   layout,
@@ -141,6 +147,7 @@ export function EconomyPoolEditor({
   profilesError,
   onClose,
   onSaved,
+  focus,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -152,6 +159,8 @@ export function EconomyPoolEditor({
   profilesError?: string;
   onClose: () => void;
   onSaved: () => void;
+  /** Opened from a plan row: name the layer (and route when known); never scrolls or edits. */
+  focus?: EconomyEditorFocus;
 }) {
   const readPreferences = useRpc(preferencesRead);
   const writePreferences = useRpc(preferencesWrite);
@@ -222,6 +231,8 @@ export function EconomyPoolEditor({
       root: { gap: layout.compact ? 10 : 14 },
       section: { gap: 6 },
       sectionTitle: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
+      sectionTitleFocused: { color: theme.colors.accent },
+      rowFocused: { borderColor: theme.colors.accent },
       muted: { color: theme.colors.foregroundMuted, fontSize: 11 },
       danger: { color: theme.colors.statusDanger, fontSize: 12 },
       warning: { color: theme.colors.statusWarning, fontSize: 11 },
@@ -505,6 +516,26 @@ export function EconomyPoolEditor({
       <Modal.Content>
         <View style={styles.root}>
           <Text style={styles.muted}>{zh.economyPoolIntro}</Text>
+          {focus ? (
+            <View
+              style={{
+                padding: 8,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: theme.colors.accent,
+                backgroundColor: theme.colors.surface2,
+              }}
+            >
+              <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
+                {teamPlanZh.economyFocus(
+                  focus.layer === "allSeats" ? modesZh.economyAllTitle : modesZh.standardPoolTitle,
+                  focus.route === undefined
+                    ? undefined
+                    : modesZh.economyAllRouteLabels[focus.route],
+                )}
+              </Text>
+            </View>
+          ) : null}
           {loading ? <Text style={styles.muted}>{zh.economyPoolLoading}</Text> : null}
           {loadError ? (
             <View style={styles.section}>
@@ -524,7 +555,14 @@ export function EconomyPoolEditor({
           {!loading && !loadError ? (
             <>
               <View style={styles.section}>
-                <Text style={styles.sectionTitle}>{modesZh.standardPoolTitle}</Text>
+                <Text
+                  style={[
+                    styles.sectionTitle,
+                    focus?.layer === "standard" && styles.sectionTitleFocused,
+                  ]}
+                >
+                  {modesZh.standardPoolTitle}
+                </Text>
                 {state.pool.length === 0 ? (
                   <Text style={styles.muted}>{zh.economyPoolEmpty}</Text>
                 ) : null}
@@ -857,7 +895,13 @@ export function EconomyPoolEditor({
                     (entry) => !routeIds.includes(entry.profileId),
                   );
                   return (
-                    <View key={route} style={styles.row}>
+                    <View
+                      key={route}
+                      style={[
+                        styles.row,
+                        focus?.layer === "allSeats" && focus.route === route && styles.rowFocused,
+                      ]}
+                    >
                       <Text style={styles.name}>{modesZh.economyAllRouteLabels[route]}</Text>
                       {routeIds.length === 0 ? (
                         <Text style={styles.muted}>{modesZh.economyAllRouteEmpty}</Text>

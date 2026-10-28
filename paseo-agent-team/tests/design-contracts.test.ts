@@ -1,7 +1,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import { modeIssueText } from "../client/launch/launch-preview-state";
+import {
+  legacyModeIssue,
+  projectJobForContract,
+  projectResultForContract,
+  projectStatusForContract,
+} from "../server/designer/compat";
 import { formatDesignIssue } from "../shared/domain/design-output";
 import { availableProfileIds } from "../shared/domain/design-planning";
 import { TEAM_MODES, teamModeDisplay } from "../shared/domain/mode-contract";
@@ -22,11 +29,13 @@ import {
   launchStartRpc,
   launchStatusRpc,
 } from "../shared/rpc";
+import { SlugSchema } from "../shared/schemas/common";
 import type { DesignStartOutput } from "../shared/schemas/design";
 import {
   DESIGN_ISSUE_CODES,
   DesignCancelInputSchema,
   DesignContinueInputSchema,
+  DesignIssueSchema,
   DesignMarkSavedInputSchema,
   DesignPrepareSaveInputSchema,
   DesignResultInputSchema,
@@ -34,12 +43,17 @@ import {
   DesignStartInputSchema,
   DesignStatusInputSchema,
 } from "../shared/schemas/design";
+import { ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
+import { RoleSchema } from "../shared/schemas/role";
+import { TeamSchema } from "../shared/schemas/team";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
 import { launchModeZh, zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
+import { designGapZh } from "../shared/zh/design-gap";
 import { launchContractZh } from "../shared/zh/launch-contract";
 import { cheapIssueText } from "../shared/zh/mode-plan";
 import { modesZh } from "../shared/zh/modes";
+import { teamPlanZh } from "../shared/zh/team-plan";
 import {
   DESIGN_CLIENT_REQUEST_ID,
   DESIGN_HASH,
@@ -51,6 +65,126 @@ import {
 } from "./design-fixtures";
 
 const failures = { ok: false, issues: [], job: null };
+
+/** Literal copy of 75ec305's Job/Result shapes: three legacy modes, no contract-2 fields. */
+const baselineMode = z.enum(["sota", "economy", "collaborative"]);
+const baselineJob = z.object({
+  jobId: z.string().uuid(),
+  clientRequestId: z.string().uuid(),
+  stateRevision: z.string().uuid(),
+  state: z.enum([
+    "starting",
+    "designing",
+    "validating",
+    "fixing",
+    "ready",
+    "saving",
+    "saved",
+    "needs_continue",
+    "save_conflict",
+    "canceling",
+    "canceled",
+    "failed",
+  ]),
+  attempt: z.number().int().min(0).max(3),
+  mode: baselineMode,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().nullable(),
+  requestExcerpt: z.string(),
+  agentId: z.string().uuid(),
+  agentCreated: z.boolean(),
+  carrierWorkspaceId: z.string().min(1).max(256).nullable(),
+  targetWorkspaceId: z.string().min(1).max(256).nullable(),
+  designerProfile: z
+    .object({
+      id: z.string().min(1).max(256),
+      name: z.string(),
+      provider: z.string().min(1).max(256),
+      model: z.string().optional(),
+      modeId: z.string().optional(),
+      thinkingOptionId: z.string().optional(),
+    })
+    .nullable(),
+  agentStatus: z.enum(["initializing", "idle", "running", "closed", "error"]).nullable(),
+  requiresAttention: z.boolean(),
+  attentionReason: z.enum(["finished", "error", "permission"]).nullable(),
+  pendingPermissions: z.array(
+    z.object({
+      id: z.string().min(1).max(256),
+      kind: z.enum(["tool", "plan", "question", "mode", "other"]),
+      title: z.string(),
+      description: z.string().optional(),
+    }),
+  ),
+  permissionsTruncated: z.boolean(),
+  resultId: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .nullable(),
+  savedTeamId: SlugSchema.nullable(),
+  saveState: z.enum(["none", "roles-only", "committed", "unknown"]),
+  cancelRequested: z.boolean(),
+  needsCleanup: z.boolean(),
+  issues: z.array(DesignIssueSchema),
+  issuesTruncated: z.number().int().nonnegative(),
+  recovered: z.boolean(),
+  saveLeaseExpiresAt: z.string().datetime().nullable(),
+  allowed: z.object({
+    cancel: z.boolean(),
+    save: z.boolean(),
+    launch: z.boolean(),
+    continueAction: z.enum(["recheck", "repair"]).nullable(),
+  }),
+});
+
+const baselineResult = z.object({
+  version: z.literal(1),
+  jobId: z.string().uuid(),
+  resultId: z.string().regex(/^[a-f0-9]{64}$/),
+  attempt: z.number().int().min(1).max(3),
+  materializedAt: z.string().datetime(),
+  request: z.string(),
+  mode: baselineMode,
+  summary: z.string(),
+  carrierWorkspaceId: z.string().min(1).max(256),
+  targetWorkspaceId: z.string().min(1).max(256).nullable(),
+  team: TeamSchema,
+  newRoles: z.array(RoleSchema),
+  reuse: z.array(
+    z.object({
+      roleId: SlugSchema,
+      behaviorHash: z.string().regex(/^[a-f0-9]{64}$/),
+      reason: z.string(),
+    }),
+  ),
+  memberReasons: z.array(
+    z.object({
+      target: z.union([z.literal("coordinator"), z.string().regex(/^m[1-9][0-9]?$/)]),
+      logicalSeatId: z.string().min(1).max(256),
+      reason: z.string(),
+      expectedProfileIds: z.array(z.string().min(1).max(256)),
+    }),
+  ),
+  preview: ModeLaunchPreviewSchema,
+  planningFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  warnings: z.array(DesignIssueSchema),
+});
+
+const baselineFailure = z.object({
+  ok: z.literal(false),
+  issues: z.array(DesignIssueSchema),
+  issuesTruncated: z.number().int().nonnegative(),
+  job: baselineJob.nullable(),
+});
+
+const baselineStatusSuccess = z.object({
+  ok: z.literal(true),
+  scopeId: z.string().uuid(),
+  jobs: z.array(baselineJob),
+  truncated: z.boolean(),
+  discoveryIssues: z.array(DesignIssueSchema),
+});
 
 describe("planning port", () => {
   test("standby selections contribute no expected Profile IDs", () => {
@@ -279,6 +413,16 @@ describe("shared boundary", () => {
     expect(zh).not.toHaveProperty("teamModeEconomyHint");
   });
 
+  test("zh aggregates the design gap and team plan copy in their own namespaces", () => {
+    expect(zh.designGap).toBe(designGapZh);
+    expect(zh.teamPlan).toBe(teamPlanZh);
+    const keys = Object.keys(zh);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.flagship);
+    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.standard);
+    expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("SOTA 或标准");
+  });
+
   test("mode labels come from the one display table", () => {
     expect(zh.teamModeSota).toBe(modesZh.modeLabels.flagship);
     expect(zh.teamModeCollaborative).toBe(modesZh.modeLabels.collaborative);
@@ -372,13 +516,110 @@ describe("shared boundary", () => {
     }
   });
 
+  test("all eight design RPC objects take an optional integer contractVersion", () => {
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    const hash = "a".repeat(64);
+    const cases = [
+      [designStartRpc, { clientRequestId: uuid, request: "设计一个团队" }],
+      [designStatusRpc, {}],
+      [designResultRpc, { jobId: uuid }],
+      [designPrepareSaveRpc, { jobId: uuid, resultId: hash, clientId: uuid }],
+      [designMarkSavedRpc, { jobId: uuid, resultId: hash }],
+      [
+        designSaveFailedRpc,
+        { jobId: uuid, resultId: hash, leaseId: uuid, phase: "team", reason: "unknown" },
+      ],
+      [designCancelRpc, { jobId: uuid }],
+      [designContinueRpc, { jobId: uuid, expectedRevision: uuid, action: "recheck" }],
+    ] as const;
+    for (const [rpc, input] of cases) {
+      expect(rpc.input.safeParse(input).success, rpc.name).toBe(true);
+      expect(rpc.input.safeParse({ ...input, contractVersion: 2 }).success, rpc.name).toBe(true);
+      expect(rpc.input.safeParse({ ...input, contractVersion: 2.5 }).success, rpc.name).toBe(false);
+      expect(rpc.input.safeParse({ ...input, contractVersion: "2" }).success, rpc.name).toBe(false);
+    }
+  });
+
   test("design.start takes an optional integer contractVersion", () => {
-    // Stage 2 extends this to the other seven RPCs once C03's optional fields are integrated.
+    // The object-layer matrix above covers all eight; this pins the start shape itself.
     const input = { clientRequestId: DESIGN_CLIENT_REQUEST_ID, request: "设计一个团队" };
     expect(designStartRpc.input.parse(input)).toMatchObject({ request: "设计一个团队" });
     expect(designStartRpc.input.parse({ ...input, contractVersion: 2 })).toMatchObject({
       contractVersion: 2,
     });
     expect(() => designStartRpc.input.parse({ ...input, contractVersion: 2.5 })).toThrow();
+  });
+});
+
+describe("contract-1 projections against the frozen 75ec305 DTOs", () => {
+  test("the baseline Job schema cannot parse a v2 economy-all job", () => {
+    const job = designJob({ mode: "economy-all" });
+    expect(baselineJob.safeParse(job).success).toBe(false);
+  });
+
+  test("a projected v2 job parses and loses every new field", () => {
+    const job = designJob({
+      mode: "sota",
+      existingRolesOnly: true,
+      outputContractVersion: 2,
+      roleGap: null,
+      gapRetry: { request: "原需求", profileId: null, useDefaultProfileHints: false },
+    });
+    const projected = projectJobForContract(job, 1);
+    expect(projected).not.toHaveProperty("existingRolesOnly");
+    expect(projected).not.toHaveProperty("outputContractVersion");
+    expect(projected).not.toHaveProperty("roleGap");
+    expect(projected).not.toHaveProperty("gapRetry");
+    expect(baselineJob.safeParse(projected).success).toBe(true);
+  });
+
+  test("a legacy list hides the v2 job, sets truncated, and adds the refresh issue", () => {
+    const visible = designJob({
+      jobId: "aaaaaaaa-0000-4000-8000-000000000001",
+      mode: "sota",
+    });
+    const hidden = designJob({
+      jobId: "aaaaaaaa-0000-4000-8000-000000000002",
+      mode: "economy-all",
+    });
+    const projected = projectStatusForContract(
+      { jobs: [visible, hidden], truncated: false, discoveryIssues: [] },
+      1,
+    );
+    expect(projected.jobs.map((job) => job.jobId)).toEqual([visible.jobId]);
+    expect(projected.truncated).toBe(true);
+    expect(projected.discoveryIssues).toEqual([
+      expect.objectContaining({
+        code: "DESIGN_MODE_UNAVAILABLE",
+        action: "refresh",
+        params: expect.objectContaining({ reason: "hidden-by-contract", hidden: 1 }),
+      }),
+    ]);
+    expect(
+      baselineStatusSuccess.safeParse({
+        ok: true,
+        scopeId: DESIGN_JOB_ID,
+        jobs: projected.jobs,
+        truncated: projected.truncated,
+        discoveryIssues: projected.discoveryIssues,
+      }).success,
+    ).toBe(true);
+  });
+
+  test("a by-id refusal parses as the baseline failure with no job", () => {
+    const refusal = {
+      ok: false as const,
+      issues: [legacyModeIssue("economy-all")],
+      issuesTruncated: 0,
+      job: null,
+    };
+    expect(baselineFailure.safeParse(refusal).success).toBe(true);
+    expect(refusal.job).toBeNull();
+  });
+
+  test("the projected result still parses with the baseline Result schema", () => {
+    const projected = projectResultForContract(designResult());
+    expect(projected).not.toBeNull();
+    expect(baselineResult.safeParse(projected).success).toBe(true);
   });
 });

@@ -7,6 +7,11 @@ import type { DesignJob } from "../../shared/schemas/design";
 import { designZh } from "../../shared/zh/design";
 import type { PluginTheme } from "../shared/theme";
 import {
+  type DesignGapConfigureEconomy,
+  type DesignGapOpenRole,
+  DesignRoleGapCard,
+} from "./DesignRoleGapCard";
+import {
   openDesignAgent,
   resolveDesignJobCardSections,
   resolveDesignJobView,
@@ -25,6 +30,13 @@ export type DesignJobCardProps = {
   /** A client-side save failure that has not yet moved the server job state. */
   forceRetrySave?: boolean;
   onContinue?: (job: DesignJob, action: "recheck" | "repair") => void;
+  /** Role-gap exits. Each one renders only when its callback is given (no dead buttons). */
+  onGapRetry?: (job: DesignJob) => void;
+  gapRetryBusy?: boolean;
+  gapRetryNotice?: string | null;
+  onOpenRole?: (target: DesignGapOpenRole) => void;
+  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
+  onCreateRole?: () => void;
 };
 
 function Action({
@@ -83,6 +95,12 @@ export function DesignJobCard({
   onRetrySave,
   forceRetrySave = false,
   onContinue,
+  onGapRetry,
+  gapRetryBusy = false,
+  gapRetryNotice,
+  onOpenRole,
+  onConfigureEconomy,
+  onCreateRole,
 }: DesignJobCardProps) {
   const [collapsed, setCollapsed] = useState(false);
   const view = useMemo(() => resolveDesignJobView(job), [job]);
@@ -169,6 +187,7 @@ export function DesignJobCard({
       <View style={[styles.body, !sections.showBody && styles.hidden]}>
         <View style={styles.meta}>
           <Text style={styles.muted}>{designZh.jobModeValue(view.modeLabel)}</Text>
+          <Text style={styles.muted}>{view.rulesLabel}</Text>
           {view.designerProfileLabel ? (
             <Text style={styles.muted}>
               {designZh.jobDesignerProfileValue(view.designerProfileLabel)}
@@ -229,6 +248,20 @@ export function DesignJobCard({
               <Text style={styles.muted}>{designZh.jobIssuesTruncated(view.issuesTruncated)}</Text>
             ) : null}
           </View>
+        ) : null}
+
+        {view.gaps.length > 0 ? (
+          <DesignRoleGapCard
+            theme={theme}
+            gaps={view.gaps}
+            rulesLabel={view.rulesLabel}
+            onOpenRole={onOpenRole}
+            onConfigureEconomy={onConfigureEconomy}
+            onCreateRole={onCreateRole}
+            onRetry={onGapRetry ? () => onGapRetry(job) : undefined}
+            retryBusy={gapRetryBusy}
+            retryNotice={gapRetryNotice}
+          />
         ) : null}
 
         <View style={styles.actions}>

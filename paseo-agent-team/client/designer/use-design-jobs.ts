@@ -25,8 +25,16 @@ import type {
 } from "../../shared/schemas/design";
 import { designZh } from "../../shared/zh/design";
 import {
+  type DesignModeContract,
+  prepareDesignStartInput,
+  withDesignContract,
+} from "./design-gateway";
+import {
   createDesignClientRequestId,
+  createDesignRetryCache,
+  type DesignGapRetrySource,
   fingerprintDesignStartInput,
+  readGapRetrySeed,
   resolveDesignJobsRefreshInterval,
 } from "./submission-state";
 
@@ -44,6 +52,12 @@ export type UseDesignJobsOptions = {
   active: boolean;
   /** Test seam; the real screen leaves this undefined and uses the registered RPCs. */
   rpc?: Partial<DesignJobsRpc>;
+  /**
+   * The host's mode contract from the `team.plan` probe. Design RPCs carry `contractVersion: 2`
+   * (and the explicit rule) only for a confirmed "v2"; missing, "legacy", and "unknown" all speak
+   * the baseline contract.
+   */
+  modeContract?: DesignModeContract;
 };
 
 export type DesignStartRequest = Omit<DesignStartInput, "clientRequestId"> & {
@@ -66,6 +80,11 @@ export type UseDesignJobsResult = {
   }): Promise<DesignContinueOutput>;
   refresh(): Promise<readonly DesignJob[]>;
   result(jobId: string): Promise<DesignResultOutput>;
+  /**
+   * What a Role-gap job was asked, for "close the switch and retry": the server's seed first (it
+   * survives a reload), then this session's memory; null when neither has it.
+   */
+  retrySourceFor(job: DesignJob): Promise<DesignGapRetrySource | null>;
 };
 
 const EMPTY_JOBS: readonly DesignJob[] = [];
@@ -82,6 +101,7 @@ function statusError(issues: readonly DesignIssue[]): string {
  */
 export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResult {
   const { hostId, active } = options;
+  const modeContract: DesignModeContract = options.modeContract ?? "legacy";
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["agent-team", "design-jobs", hostId], [hostId]);
 
@@ -98,10 +118,10 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
   const continueCall = options.rpc?.continueJob ?? continueRpc;
 
   const query = useQuery({
-    queryKey,
+    queryKey: [...queryKey, modeContract],
     enabled: active,
     queryFn: async () => {
-      const output = await statusCall({});
+      const output = await statusCall(withDesignContract({}, modeContract));
       if (!output.ok) throw new Error(statusError(output.issues));
       return output;
     },
@@ -115,12 +135,14 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
     promise: Promise<DesignStartOutput>;
   } | null>(null);
   const unknownRequest = useRef<{ fingerprint: string; clientRequestId: string } | null>(null);
+  const retryCache = useRef(createDesignRetryCache());
 
   useEffect(() => {
     if (hostRef.current === hostId) return;
     hostRef.current = hostId;
     inFlight.current = null;
     unknownRequest.current = null;
+    retryCache.current.clear();
   }, [hostId]);
 
   const start = useCallback(
@@ -140,13 +162,17 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
         (remembered && remembered.fingerprint === fingerprint
           ? remembered.clientRequestId
           : createDesignClientRequestId());
-      const payload: DesignStartInput = { ...request, clientRequestId: id };
+      const payload: DesignStartInput = prepareDesignStartInput(
+        { ...request, clientRequestId: id },
+        modeContract,
+      );
 
       const promise = startCall(payload).then(
         (output) => {
           if (hostRef.current === hostAtStart) {
             if (output.ok) {
               unknownRequest.current = null;
+              retryCache.current.remember(output.job.jobId, payload);
               void queryClient.invalidateQueries({ queryKey });
             } else if (unknownRequest.current?.clientRequestId === id) {
               unknownRequest.current = null;
@@ -167,17 +193,17 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
       inFlight.current = { fingerprint, promise: tracked };
       return tracked;
     },
-    [hostId, queryClient, queryKey, startCall],
+    [hostId, modeContract, queryClient, queryKey, startCall],
   );
 
   const cancel = useCallback(
     async (jobId: string): Promise<DesignCancelOutput> => {
       const hostAtStart = hostRef.current;
-      const output = await cancelCall({ jobId });
+      const output = await cancelCall(withDesignContract({ jobId }, modeContract));
       if (hostRef.current === hostAtStart) void queryClient.invalidateQueries({ queryKey });
       return output;
     },
-    [cancelCall, queryClient, queryKey],
+    [cancelCall, modeContract, queryClient, queryKey],
   );
 
   const continueJob = useCallback(
@@ -187,11 +213,11 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
       action: "recheck" | "repair";
     }): Promise<DesignContinueOutput> => {
       const hostAtStart = hostRef.current;
-      const output = await continueCall(input);
+      const output = await continueCall(withDesignContract(input, modeContract));
       if (hostRef.current === hostAtStart) void queryClient.invalidateQueries({ queryKey });
       return output;
     },
-    [continueCall, queryClient, queryKey],
+    [continueCall, modeContract, queryClient, queryKey],
   );
 
   const refresh = useCallback(async (): Promise<readonly DesignJob[]> => {
@@ -200,8 +226,27 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
   }, [query]);
 
   const readResult = useCallback(
-    (jobId: string): Promise<DesignResultOutput> => resultCall({ jobId }),
-    [resultCall],
+    (jobId: string): Promise<DesignResultOutput> =>
+      resultCall(withDesignContract({ jobId }, modeContract)),
+    [modeContract, resultCall],
+  );
+
+  const retrySourceFor = useCallback(
+    async (job: DesignJob): Promise<DesignGapRetrySource | null> => {
+      if (modeContract === "v2") {
+        try {
+          const output = await statusCall(withDesignContract({ jobId: job.jobId }, modeContract));
+          if (output.ok) {
+            const seed = readGapRetrySeed(output.jobs.find((entry) => entry.jobId === job.jobId));
+            if (seed) return seed;
+          }
+        } catch {
+          // The session memory below is the fallback for a failed or older host.
+        }
+      }
+      return retryCache.current.get(job.jobId);
+    },
+    [modeContract, statusCall],
   );
 
   useEffect(() => {
@@ -221,5 +266,6 @@ export function useDesignJobs(options: UseDesignJobsOptions): UseDesignJobsResul
     continueJob,
     refresh,
     result: readResult,
+    retrySourceFor,
   };
 }

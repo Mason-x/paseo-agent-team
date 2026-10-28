@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
@@ -13,7 +15,9 @@ import {
 } from "../server/ledger/atomic-json";
 import {
   acquireProcessLock,
+  createNodeLockFs,
   createProcessLiveness,
+  EXCLUSIVE_OPEN_ATTEMPTS,
   type LockFs,
   type ProcessLiveness,
 } from "../server/ledger/process-lock";
@@ -1044,6 +1048,90 @@ describe("process-lock failure branches", () => {
     await expect(lockFixture({ disk: unwritable })).rejects.toMatchObject({
       code: "lock-unavailable",
     });
+  });
+
+  test("retries a transient exclusive-open EPERM and then takes the lock", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paseo-lock-eperm-ok-"));
+    const lockFile = path.join(root, ".lock");
+    let attempts = 0;
+    const openFile = async (target: string, flags: string) => {
+      attempts += 1;
+      if (attempts <= 2) throw fsError("EPERM");
+      return open(target, flags);
+    };
+    try {
+      const lock = await acquireProcessLock({
+        file: lockFile,
+        files: createNodeLockFs({
+          openFile,
+          sleeper: { sleep: async () => undefined },
+        }),
+        acquireTimeoutMs: 1000,
+        ownerToken: "retry-ok",
+      });
+      expect(attempts).toBe(3);
+      expect(lock.ownerToken).toBe("retry-ok");
+      await lock.assertHeld();
+      await lock.release();
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  });
+
+  test("gives lock-unavailable after bounded exclusive-open EPERM retries", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paseo-lock-eperm-fail-"));
+    const lockFile = path.join(root, ".lock");
+    let attempts = 0;
+    let nowMs = 0;
+    const openFile = async () => {
+      attempts += 1;
+      throw fsError("EPERM");
+    };
+    try {
+      await expect(
+        acquireProcessLock({
+          file: lockFile,
+          files: createNodeLockFs({
+            openFile,
+            sleeper: {
+              async sleep(milliseconds) {
+                nowMs += milliseconds;
+              },
+            },
+            now: () => nowMs,
+          }),
+          acquireTimeoutMs: 1000,
+        }),
+      ).rejects.toMatchObject({ code: "lock-unavailable" });
+      expect(attempts).toBe(EXCLUSIVE_OPEN_ATTEMPTS);
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  });
+
+  test("does not retry a non-transient exclusive-open error", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paseo-lock-enoent-"));
+    const lockFile = path.join(root, ".lock");
+    let attempts = 0;
+    const openFile = async () => {
+      attempts += 1;
+      throw fsError("ENOENT");
+    };
+    try {
+      await expect(
+        acquireProcessLock({
+          file: lockFile,
+          files: createNodeLockFs({
+            openFile,
+            sleeper: { sleep: async () => undefined },
+          }),
+          acquireTimeoutMs: 1000,
+        }),
+      ).rejects.toMatchObject({ code: "lock-unavailable" });
+      expect(attempts).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
   });
 
   test("classifies EPERM liveness as unknown and only knows its own process start", () => {

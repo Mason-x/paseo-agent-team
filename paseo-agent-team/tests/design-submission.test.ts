@@ -130,6 +130,7 @@ describe("submission nonce and double click", () => {
       mode: "economy",
       workspaceId: "",
       profileChoice: "codex-xhigh",
+      existingRolesOnly: true,
     });
     expect(state.draftState.inputRevision).toBe(1);
   });
@@ -236,7 +237,13 @@ describe("unknown transport outcomes", () => {
 describe("request payload normalization", () => {
   test("default Profile choice sends neither profileId nor the default-hints flag", () => {
     const built = buildDesignStartInput(
-      { request: "需求", mode: "economy", workspaceId: "ws-1", profileChoice: null },
+      {
+        request: "需求",
+        mode: "economy",
+        workspaceId: "ws-1",
+        profileChoice: null,
+        existingRolesOnly: true,
+      },
       DESIGN_CLIENT_REQUEST_ID,
     );
     expect(built).toEqual({
@@ -246,18 +253,31 @@ describe("request payload normalization", () => {
         request: "需求",
         mode: "economy",
         workspaceId: "ws-1",
+        existingRolesOnly: true,
       },
     });
   });
 
   test("an explicit auto choice sends useDefaultProfileHints and an id sends profileId", () => {
     const auto = buildDesignStartInput(
-      { request: "需求", mode: "sota", workspaceId: "", profileChoice: "" },
+      {
+        request: "需求",
+        mode: "sota",
+        workspaceId: "",
+        profileChoice: "",
+        existingRolesOnly: true,
+      },
       DESIGN_CLIENT_REQUEST_ID,
     );
     expect(auto.ok && auto.input.useDefaultProfileHints).toBe(true);
     const explicit = buildDesignStartInput(
-      { request: "需求", mode: "sota", workspaceId: "", profileChoice: "codex-xhigh" },
+      {
+        request: "需求",
+        mode: "sota",
+        workspaceId: "",
+        profileChoice: "codex-xhigh",
+        existingRolesOnly: true,
+      },
       DESIGN_CLIENT_REQUEST_ID,
     );
     expect(explicit.ok && explicit.input.profileId).toBe("codex-xhigh");
