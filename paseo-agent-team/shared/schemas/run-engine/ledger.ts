@@ -779,7 +779,9 @@ export const RunRecordSchema = z
   .object({
     schemaVersion: z.literal(RUN_SCHEMA_VERSION),
     runId: RunIdSchema,
-    revision: RunRevisionSchema,
+    // The persisted root is the codec header: validateHeader (atomic-json.ts) requires revision >= 1.
+    // Only this field is tightened; RunRevisionSchema stays non-negative for the other structures.
+    revision: RunRevisionSchema.min(1),
     previousDigest: RunHeaderDigestSchema,
     createdAt: RunTimeSchema,
     updatedAt: RunTimeSchema,

@@ -28,6 +28,22 @@ export const RunIssueViewSchema = z.object({
 });
 export type RunIssueView = z.infer<typeof RunIssueViewSchema>;
 
+/**
+ * run.get returns the first history page plus this issue when a `historyCursor` no longer matches
+ * the run it was issued for (the cursor is opaque and bound to a revision). Paging then restarts.
+ */
+export const RUN_HISTORY_CURSOR_EXPIRED = "history-cursor-expired";
+
+export function runHistoryCursorExpiredIssue(): RunIssueView {
+  return {
+    code: RUN_HISTORY_CURSOR_EXPIRED,
+    severity: "warning",
+    path: ["historyCursor"],
+    params: {},
+    action: "refresh",
+  };
+}
+
 /** Redacted task row. No nonce, no payload, no prompt. */
 export const RunTaskViewSchema = z.object({
   taskId: Text(64),
