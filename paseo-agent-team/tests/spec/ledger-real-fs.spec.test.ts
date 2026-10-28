@@ -53,6 +53,8 @@ const replySchema = z.looseObject({
   code: z.string().optional(),
   status: z.string().optional(),
   revision: z.number().optional(),
+  released: z.boolean().optional(),
+  releaseError: z.string().optional(),
   reason: z.string().optional(),
   diagnostic: z.string().optional(),
   error: z.string().optional(),
@@ -102,6 +104,21 @@ function report(payload) {
   if (reported) return;
   reported = true;
   console.log(JSON.stringify(payload));
+}
+async function finishRelease(lock, payload) {
+  let released = false;
+  let releaseError;
+  try {
+    await lock.release();
+    released = true;
+  } catch (error) {
+    releaseError = String(error);
+  }
+  report({
+    ...payload,
+    released,
+    ...(releaseError === undefined ? {} : { releaseError }),
+  });
 }
 if (args.barrier) await waitFor(args.barrier);
 const codec = {
@@ -255,12 +272,7 @@ try {
     } catch (error) {
       committed = { ok: false, code: error.code ?? "unknown" };
     }
-    try {
-      await lock.release();
-    } catch {
-      // A release error must not replace the commit result.
-    }
-    report(committed);
+    await finishRelease(lock, committed);
     process.exit(0);
   }
   if (mode === "atomic-locked-write") {
@@ -287,12 +299,7 @@ try {
     } catch (error) {
       committed = { ok: false, code: error.code ?? "unknown" };
     }
-    try {
-      await lock.release();
-    } catch {
-      // A release error must not replace the commit result.
-    }
-    report(committed);
+    await finishRelease(lock, committed);
     process.exit(0);
   }
   report({ ok: false, code: "bad-mode" });
@@ -675,8 +682,14 @@ describe("ledger on the real filesystem", () => {
     const second = spawnChild("atomic-locked-write", { ...baseArgs, value: "second" });
     await writeFile(barrier, "go");
     const [outcomeA, outcomeB] = await Promise.all([first.done, second.done]);
-    expect(outcomeA.reply, receipts([outcomeA, outcomeB])).toMatchObject({ ok: true });
-    expect(outcomeB.reply, receipts([outcomeA, outcomeB])).toMatchObject({ ok: true });
+    expect(outcomeA.reply, receipts([outcomeA, outcomeB])).toMatchObject({
+      ok: true,
+      released: true,
+    });
+    expect(outcomeB.reply, receipts([outcomeA, outcomeB])).toMatchObject({
+      ok: true,
+      released: true,
+    });
     const revisions = [outcomeA.reply?.revision, outcomeB.reply?.revision].sort();
     expect(revisions).toEqual([2, 3]);
     const lastWriter = outcomeA.reply?.revision === 3 ? outcomeA.reply : outcomeB.reply;
@@ -710,6 +723,7 @@ describe("ledger on the real filesystem", () => {
       ok: true,
       revision: 2,
       value: "winner",
+      released: true,
     });
 
     await writeFile(go, "go");
@@ -717,6 +731,7 @@ describe("ledger on the real filesystem", () => {
     expect(rejected.reply, receipts([winner, rejected])).toMatchObject({
       ok: false,
       code: "cas-mismatch",
+      released: true,
     });
     const final = await store.read();
     if (final.status !== "ok") throw new Error(`unexpected ${final.status}`);

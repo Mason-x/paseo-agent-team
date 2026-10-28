@@ -76,7 +76,7 @@ describe("pending commits against a real origin", () => {
           ref: "refs/heads/trunk",
           sourceUrl: remote,
         };
-        const deadline = Date.now() + 20_000;
+        const deadline = Date.now() + VERSION_PROCESS_TIMEOUT_MS;
         const outcome = await readPendingCommits({
           git: createGit(nodeExec(), process.env),
           cwd: work,
