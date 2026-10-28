@@ -1,6 +1,6 @@
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Switch, Text, View } from "react-native";
 import {
   checkDesignRequest,
   DESIGN_REQUEST_MAX_CODE_POINTS,
@@ -11,6 +11,7 @@ import type { DesignJob, DesignStartInput, DesignStartOutput } from "../../share
 import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 import { designZh } from "../../shared/zh/design";
+import { designGapZh } from "../../shared/zh/design-gap";
 import { CompactPicker } from "../shared/CompactPicker";
 import { Field, inputStyle } from "../shared/Field";
 import { ImeTextInput } from "../shared/ImeTextInput";
@@ -25,6 +26,7 @@ import {
   resolveStartBlock,
   type StartBlock,
 } from "./card-state";
+import { type DesignModeContract, designModeNeedsV2 } from "./design-gateway";
 import {
   type DesignerPrefill,
   designStartFailureMessage,
@@ -35,6 +37,7 @@ import {
   type DesignDraft,
   type DesignSubmissionController,
   type DesignSubmissionState,
+  shouldConfirmDraftReplace,
 } from "./submission-state";
 import { useDesignerWorkspaces } from "./use-designer-workspaces";
 
@@ -65,6 +68,11 @@ export type TeamDesignerCardProps = {
   initialWorkspaceId?: string;
   /** One-shot `/team-design` prefill; consumed by nonce, never by re-render. */
   prefill?: DesignerPrefill;
+  /**
+   * The host's mode contract from the `team.plan` probe. Until it is a confirmed "v2" the switch
+   * is shown locked (the old rule applies) and economy-all cannot be started.
+   */
+  modeContract?: DesignModeContract;
   /** A hard reason the designer cannot start right now; disables the button and is shown beside it. */
   disabledReason?: string;
   /** Absent means the designer is not wired up yet: the button stays disabled with a notice. */
@@ -101,6 +109,7 @@ export function TeamDesignerCard({
   initialRequest,
   initialWorkspaceId,
   prefill,
+  modeContract = "legacy",
   disabledReason,
   onStart,
   onAccepted,
@@ -137,6 +146,8 @@ export function TeamDesignerCard({
   const submittingRef = useRef(false);
   const seeded = useRef({ request: initialRequest, workspaceId: initialWorkspaceId });
   const seenPrefill = useRef<string | null>(null);
+  // A retry prefill waiting for the user to agree to replace what they typed.
+  const [pendingReplace, setPendingReplace] = useState<DesignerPrefill | null>(null);
   const draft = submission.draftState.draft;
   const request = draft.request;
   const profileChoice = draft.profileChoice;
@@ -160,7 +171,10 @@ export function TeamDesignerCard({
         request: next.text,
         workspaceId: next.workspaceId ?? "",
         mode: next.mode ?? current.mode,
-        profileChoice: current.profileChoice,
+        profileChoice:
+          next.profileChoice === undefined ? current.profileChoice : next.profileChoice,
+        // Only the Role-gap retry sets the rule (false); any other prefill is a new draft: on.
+        existingRolesOnly: next.existingRolesOnly ?? true,
       });
       setSubmission(controller.getState());
       setFold("expanded");
@@ -169,11 +183,20 @@ export function TeamDesignerCard({
   );
 
   // The nonce is the one-shot guard; re-rendering with the same prefill never reseeds the draft.
+  // It never starts anything: it only fills the form.
   useEffect(() => {
     if (!prefill || seenPrefill.current === prefill.nonce) return;
     seenPrefill.current = prefill.nonce;
+    if (
+      prefill.confirmReplace &&
+      shouldConfirmDraftReplace(controller.getState().draftState.draft.request, prefill.text)
+    ) {
+      setPendingReplace(prefill);
+      setFold("expanded");
+      return;
+    }
     applyPrefill(prefill);
-  }, [applyPrefill, prefill]);
+  }, [applyPrefill, controller, prefill]);
 
   useEffect(() => {
     if (prefill !== undefined) return;
@@ -195,6 +218,7 @@ export function TeamDesignerCard({
       workspaceId: nextWorkspace ?? current.workspaceId,
       mode: current.mode,
       profileChoice: current.profileChoice,
+      existingRolesOnly: current.existingRolesOnly,
     });
     setSubmission(controller.getState());
     setFold("expanded");
@@ -222,6 +246,7 @@ export function TeamDesignerCard({
     profiles,
     profilesLoading,
   );
+  const modeNeedsUpgrade = designModeNeedsV2(draft.mode, modeContract);
   const effectiveDisabledReason =
     draft.mode === "collaborative" && !LAUNCH_RUNTIME_CAPABILITIES.collaboration
       ? designZh.modeUnavailable
@@ -234,6 +259,7 @@ export function TeamDesignerCard({
     workspaceMissing: workspace.missing,
     profileMissing: profile.missing,
     profilesLoading,
+    modeNeedsUpgrade,
   });
 
   const workspaceItems = useMemo<PickerItem[]>(
@@ -332,6 +358,18 @@ export function TeamDesignerCard({
         fontSize: 14,
       },
       retry: { color: theme.colors.accent, fontWeight: "600" as const, fontSize: 12 },
+      ruleRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10 },
+      ruleText: { flex: 1, minWidth: 0, gap: 2 },
+      ruleLabel: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
+      confirm: {
+        gap: 6,
+        padding: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: theme.colors.statusWarning,
+      },
+      confirmTitle: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
+      confirmActions: { flexDirection: "row" as const, gap: 16 },
       children: { gap: 8 },
     }),
     [compact, theme, tooLong],
@@ -357,6 +395,10 @@ export function TeamDesignerCard({
         return zh.loadingProfiles;
       case "submitting":
         return zh.designerStarting;
+      case "mode-needs-upgrade":
+        return modeContract === "unknown"
+          ? designGapZh.modeProbePending
+          : designGapZh.modeNeedsUpgrade;
     }
   }
 
@@ -398,7 +440,10 @@ export function TeamDesignerCard({
         : null;
   // Field-level reasons already sit under their own control; the button note carries the rest.
   const note =
-    block === "unavailable" || block === "disabled" || block === "profiles-loading"
+    block === "unavailable" ||
+    block === "disabled" ||
+    block === "profiles-loading" ||
+    block === "mode-needs-upgrade"
       ? blockText(block)
       : null;
   const summaryStyle = [
@@ -530,6 +575,53 @@ export function TeamDesignerCard({
             onModeChange?.(next);
           }}
         />
+        <View style={styles.ruleRow}>
+          <View style={styles.ruleText}>
+            <Text style={styles.ruleLabel}>{designGapZh.switchLabel}</Text>
+            <Text style={styles.muted}>
+              {modeContract !== "v2"
+                ? modeContract === "unknown"
+                  ? designGapZh.switchProbePending
+                  : designGapZh.switchNeedsUpgrade
+                : draft.existingRolesOnly
+                  ? designGapZh.switchHintOn
+                  : designGapZh.switchHintOff}
+            </Text>
+          </View>
+          <Switch
+            accessibilityLabel={designGapZh.switchLabel}
+            // A baseline host has no such rule: show it locked at "on" rather than a choice that
+            // would be dropped silently.
+            value={modeContract === "v2" ? draft.existingRolesOnly : true}
+            disabled={submitting || modeContract !== "v2"}
+            onValueChange={(next) => editDraft({ existingRolesOnly: next })}
+          />
+        </View>
+        {pendingReplace ? (
+          <View style={styles.confirm}>
+            <Text style={styles.confirmTitle}>{designGapZh.retryConfirmTitle}</Text>
+            <Text style={styles.muted}>{designGapZh.retryConfirmBody}</Text>
+            <View style={styles.confirmActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={designGapZh.retryConfirmReplace}
+                onPress={() => {
+                  applyPrefill(pendingReplace);
+                  setPendingReplace(null);
+                }}
+              >
+                <Text style={styles.retry}>{designGapZh.retryConfirmReplace}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={designGapZh.retryConfirmCancel}
+                onPress={() => setPendingReplace(null)}
+              >
+                <Text style={styles.muted}>{designGapZh.retryConfirmCancel}</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
         <View style={styles.actions}>
           {note ? <Text style={[styles.muted, styles.note]}>{note}</Text> : null}
           <Pressable
