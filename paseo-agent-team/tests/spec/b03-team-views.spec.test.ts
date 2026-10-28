@@ -461,6 +461,75 @@ describe("collaboration rows", () => {
   });
 });
 
+describe("all-seats outage", () => {
+  test("a cheap-route outage offers only the economy route, with a layer/route", async () => {
+    const cheap = {
+      id: "cheap-deepseek",
+      name: "Cheap DeepSeek",
+      provider: "deepseek",
+      model: "deepseek-coder",
+    };
+    const outageTeam = team("t-outage", { mode: "economy-all" });
+    const settings = new DesignSettingsStore({
+      roles: { roles: [techLead, architect, developer] },
+      teams: { teams: [outageTeam] },
+      preferences: {
+        ...preferences,
+        economy: {
+          allSeats: {
+            version: 1,
+            profiles: [
+              {
+                profileId: cheap.id,
+                enabled: true,
+                costClass: "low",
+                family: "deepseek",
+                boundModel: { provider: "deepseek", model: cheap.model },
+              },
+            ],
+            routes: {
+              coordinator: [cheap.id],
+              decision: [cheap.id],
+              execution: [cheap.id],
+              escalation: [cheap.id],
+              retain: [cheap.id],
+            },
+          },
+        },
+      },
+    });
+    const port = fakePort({
+      agentProfiles: [claudeOpus, cheap],
+      mcp: { enabled: true, injectIntoAgents: true },
+    }).port;
+    port.providers.listAvailable.mockResolvedValue({
+      providers: [
+        { provider: "claude", available: true },
+        { provider: "deepseek", available: false, error: "quota" },
+      ],
+    });
+    const service = createTeamPlanService({ readers: readers(settings) });
+    const output = await service.plan(
+      { items: [{ key: "t-outage", kind: "saved", teamId: "t-outage" }] },
+      port,
+    );
+    const result = output.results[0];
+    if (!result) throw new Error("missing result");
+    expect(result.status).toBe("blocked");
+    const views = buildTeamModelRows({ result });
+    expect(views.length).toBeGreaterThan(0);
+    for (const view of views) {
+      expect(view.actions.some((action) => action.kind === "role")).toBe(false);
+      const economy = view.actions.find((action) => action.kind === "economy");
+      expect(economy).toBeDefined();
+      if (economy?.kind === "economy") {
+        expect(economy.layer).toBe("allSeats");
+        expect(economy.route).toBeTruthy();
+      }
+    }
+  });
+});
+
 describe("family hints from the real policy", () => {
   test("a tuple-matched all-seats entry is the only hint", () => {
     const hints = familyHintsFromEconomy(

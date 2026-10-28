@@ -2,11 +2,15 @@ import { describe, expect, test, vi } from "vitest";
 import {
   buildTeamModelRows,
   buildTeamPlanIssues,
+  buildTeamSummaries,
   buildTeamSummary,
   createTeamPlanClient,
   draftInputProblem,
   draftRowKey,
   familyHintsFromEconomy,
+  isMethodNotFound,
+  modelRowMeta,
+  shouldShowPlanError,
   stableJson,
   TEAM_PLAN_DEBOUNCE_MS,
   type TeamPlanRevisions,
@@ -63,7 +67,11 @@ function result(key: string, overrides: Partial<TeamPlanResult> = {}): TeamPlanR
 
 function output(
   results: TeamPlanResult[],
-  options: { modeContract?: number; checkedAt?: string } = {},
+  options: {
+    modeContract?: number;
+    checkedAt?: string;
+    context?: TeamPlanOutput["context"];
+  } = {},
 ): TeamPlanOutput {
   return {
     schemaVersion: TEAM_PLAN_SCHEMA_VERSION,
@@ -74,11 +82,14 @@ function output(
       runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
     },
     checkedAt: options.checkedAt ?? "2026-10-01T10:00:00.000Z",
-    context: {
-      revisions,
-      profilesFingerprint: "pf",
-      availabilityFingerprint: "af",
-    },
+    context:
+      options.context === undefined
+        ? {
+            revisions,
+            profilesFingerprint: "pf",
+            availabilityFingerprint: "af",
+          }
+        : options.context,
     results,
   };
 }
@@ -654,5 +665,420 @@ describe("family hints", () => {
 
   test("stableJson ignores key order", () => {
     expect(stableJson({ a: 1, b: { c: 2, d: 3 } })).toBe(stableJson({ b: { d: 3, c: 2 }, a: 1 }));
+  });
+});
+
+describe("rework 1 regressions", () => {
+  test("I1: a scope change replans the same saved list without a new array", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    const list = teams(3);
+    client.planTeams(list);
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    client.setScope({ ...scope, revisions: { ...revisions, preferences: "p2" } });
+    await flush();
+    expect(port.calls).toHaveLength(2);
+    expect(client.getBatchView().results.size).toBe(3);
+  });
+
+  test("I2: invalidate re-requests the active draft", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      coordinatorRoleId: "tech-lead",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    fake.advance(200);
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    client.invalidate();
+    fake.advance(200);
+    await flush();
+    expect(port.calls).toHaveLength(2);
+    expect(client.getDraftState("editor").status).toBe("result");
+  });
+
+  test("I3/D1: an older draft failure cannot overwrite the newer result", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    const draft = (mode: string) => ({
+      sessionId: "editor",
+      mode,
+      coordinatorRoleId: "tech-lead",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    client.requestDraft(draft("sota"));
+    fake.advance(200);
+    await flush();
+    client.requestDraft(draft("economy"));
+    fake.advance(200);
+    await flush();
+    const newest = port.calls[1]?.items[0];
+    port.resolve(1, output([result(newest?.key ?? "newest", { effectiveMode: "economy" })]));
+    await flush();
+    port.reject(0, new Error("socket hang up"));
+    await flush();
+    const state = client.getDraftState("editor");
+    expect(state.status).toBe("result");
+    if (state.status === "result") expect(state.result.effectiveMode).toBe("economy");
+  });
+
+  test("I3/S1: an older saved batch failure cannot delete the newer batch results", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.planTeams([teams(1)[0] as Team]);
+    await flush();
+    client.planTeams(teams(2));
+    await flush();
+    port.resolve(1, output(port.calls[1]?.items.map((item) => result(item.key)) ?? []));
+    await flush();
+    port.reject(0, new Error("socket hang up"));
+    await flush();
+    const view = client.getBatchView();
+    expect(view.results.has("team-1")).toBe(true);
+    expect(view.results.has("team-2")).toBe(true);
+    expect(view.failedKeys.has("team-1")).toBe(false);
+  });
+
+  test("I3/D2: an invalid draft advances the identity and blocks an older success", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    fake.advance(200);
+    await flush();
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      members: [{ rowKey: "coordinator", roleId: "tech-lead", enabled: true }],
+    });
+    const firstKey = port.calls[0]?.items[0]?.key;
+    port.resolve(0, output([result(firstKey ?? "old")]));
+    await flush();
+    expect(client.getDraftState("editor")).toMatchObject({
+      status: "error",
+      reason: "invalid",
+    });
+  });
+
+  test("I3/unmount: cancelDraft drops an in-flight response", async () => {
+    const fake = clock();
+    const port = pendingSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    fake.advance(200);
+    await flush();
+    client.cancelDraft("editor");
+    const key = port.calls[0]?.items[0]?.key;
+    port.resolve(0, output([result(key ?? "old")]));
+    await flush();
+    expect(client.getDraftState("editor")).toEqual({ status: "idle" });
+  });
+
+  test("I4: capability resets on host change and only a method-shaped 404 is legacy", async () => {
+    const fake = clock();
+    let host = "A";
+    let calls = 0;
+    const client = createTeamPlanClient({
+      send: async () => {
+        calls += 1;
+        if (host === "A") throw new Error("method not found: agent-team.team.plan");
+        return output([]);
+      },
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.probe();
+    await flush();
+    expect(client.modeContract()).toBe("legacy");
+
+    host = "B";
+    client.setScope({ ...scope, hostId: "host-2" });
+    expect(client.modeContract()).toBe("unknown");
+    client.probe();
+    await flush();
+    expect(calls).toBe(2);
+    expect(client.modeContract()).toBe("v2");
+
+    expect(isMethodNotFound(new Error("transport: host not registered"))).toBe(false);
+    expect(isMethodNotFound(new Error("rpc method not found"))).toBe(true);
+    expect(isMethodNotFound(new Error("host is not registered"))).toBe(false);
+  });
+
+  test("I4: renegotiate lets a same-host upgrade escape legacy", async () => {
+    const fake = clock();
+    let upgraded = false;
+    let calls = 0;
+    const client = createTeamPlanClient({
+      send: async () => {
+        calls += 1;
+        if (!upgraded) throw new Error("method not found: agent-team.team.plan");
+        return output([]);
+      },
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.probe();
+    await flush();
+    expect(client.modeContract()).toBe("legacy");
+    upgraded = true;
+    client.renegotiate();
+    await flush();
+    expect(client.modeContract()).toBe("v2");
+    expect(calls).toBe(2);
+  });
+
+  test("I5: a visible list refreshes after 60s; hidden pauses; stale resume refreshes", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: port.send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.setActive(true);
+    client.planTeams(teams(2));
+    await flush();
+    expect(port.calls).toHaveLength(1);
+    fake.advance(60_000);
+    await flush();
+    expect(port.calls).toHaveLength(2);
+
+    client.setActive(false);
+    fake.advance(120_000);
+    await flush();
+    expect(port.calls).toHaveLength(2);
+
+    client.setActive(true);
+    await flush();
+    expect(port.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("I6: a cheap-route outage never offers Role rebinding and keeps the route", () => {
+    const views = buildTeamModelRows({
+      result: result("t", {
+        status: "blocked",
+        effectiveMode: "economy-all",
+        rows: [
+          row({
+            rowKey: "member:0",
+            route: undefined,
+            profile: null,
+            issues: [
+              {
+                code: "MODE_CHEAP_ROUTE_UNAVAILABLE",
+                severity: "blocker",
+                params: { route: "execution", reason: "provider-unavailable" },
+              },
+            ],
+          }),
+        ],
+      }),
+    });
+    expect(views[0]?.actions).toEqual([{ kind: "economy", layer: "allSeats", route: "execution" }]);
+  });
+
+  test("I7: null rows distinguish disabled, unbound, and blocked selections", () => {
+    const views = buildTeamModelRows({
+      result: result("t", {
+        status: "blocked",
+        effectiveMode: "economy",
+        rows: [
+          row({ rowKey: "a", enabled: false, profile: null }),
+          row({
+            rowKey: "b",
+            profile: null,
+            issues: [
+              {
+                code: "MODE_PROFILE_UNRESOLVED",
+                severity: "blocker",
+                params: { reason: "no-candidates" },
+              },
+            ],
+          }),
+          row({
+            rowKey: "d",
+            profile: null,
+            issues: [
+              {
+                code: "MODE_PROFILE_UNRESOLVED",
+                severity: "blocker",
+                params: { reason: "all-missing" },
+              },
+            ],
+          }),
+          row({
+            rowKey: "c",
+            profile: null,
+            availability: "unavailable",
+            issues: [
+              {
+                code: "MODE_PROFILE_UNRESOLVED",
+                severity: "blocker",
+                params: { reason: "provider-unavailable" },
+              },
+            ],
+          }),
+        ],
+      }),
+    });
+    expect(views[0]?.profileStatus).toBeNull();
+    expect(views[1]?.profileStatus).toBe("未绑定");
+    expect(views[3]?.profileStatus).toBe("当前无可运行的选中 Profile");
+    expect(views[2]?.profileStatus).toBe("当前无可运行的选中 Profile");
+    expect(views[2]?.availability).toBe("available");
+    expect(views[1]?.budget).toContain("SOTA");
+    expect(modelRowMeta(views[3] as NonNullable<(typeof views)[3]>)).toContain("不可用");
+  });
+
+  test("N2: an open source string cannot resolve Object.prototype members", () => {
+    const views = buildTeamModelRows({
+      result: result("t", { rows: [row({ source: "__proto__" })] }),
+    });
+    expect(views[0]?.source).toBe("__proto__");
+    expect(typeof views[0]?.source).toBe("string");
+  });
+
+  test("I8: failed keys become unavailable summaries and global errors survive empties", () => {
+    const summaries = buildTeamSummaries({
+      results: new Map([["t-one", result("t-one")]]),
+      failedKeys: new Set(["t-two"]),
+      hasContext: true,
+      error: "暂无法读取模型",
+    });
+    expect(summaries.get("t-one")?.kind).toBe("summary");
+    expect(summaries.get("t-two")).toEqual({
+      kind: "unavailable",
+      text: "暂无法读取模型",
+    });
+    expect(shouldShowPlanError({ modeContract: "unknown", error: "x", summaryCount: 0 })).toBe(
+      true,
+    );
+    expect(shouldShowPlanError({ modeContract: "v2", error: "x", summaryCount: 0 })).toBe(true);
+    expect(shouldShowPlanError({ modeContract: "v2", error: "x", summaryCount: 3 })).toBe(false);
+    expect(shouldShowPlanError({ modeContract: "legacy", error: "x", summaryCount: 0 })).toBe(
+      false,
+    );
+  });
+
+  test("I8/U3: a known legacy host never sends a draft request", async () => {
+    const fake = clock();
+    const port = autoSend();
+    const client = createTeamPlanClient({
+      send: async () => {
+        throw new Error("method not found: agent-team.team.plan");
+      },
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.probe();
+    await flush();
+    expect(client.modeContract()).toBe("legacy");
+    client.requestDraft({
+      sessionId: "editor",
+      mode: "sota",
+      members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
+    });
+    fake.advance(200);
+    await flush();
+    expect(port.calls).toHaveLength(0);
+    expect(client.getDraftState("editor")).toEqual({ status: "idle" });
+  });
+
+  test("I5: a changed server snapshot clears the plan cache and is exposed", async () => {
+    const fake = clock();
+    let call = 0;
+    const send = async (input: TeamPlanInput) => {
+      call += 1;
+      const payload = input.items.map((item) => result(item.key));
+      return output(payload, {
+        context: {
+          revisions,
+          profilesFingerprint: call === 1 ? "pf-1" : "pf-2",
+          availabilityFingerprint: "af",
+        },
+      });
+    };
+    const client = createTeamPlanClient({
+      send,
+      now: fake.now,
+      schedule: fake.schedule,
+      cancel: fake.cancel,
+    });
+    client.setScope(scope);
+    client.planTeams(teams(2));
+    await flush();
+    expect(client.getBatchView().context?.profilesFingerprint).toBe("pf-1");
+    client.planTeams(teams(2));
+    await flush();
+    expect(call).toBe(1);
+    client.planTeams(teams(3));
+    await flush();
+    expect(call).toBe(2);
+    expect(client.getBatchView().context?.profilesFingerprint).toBe("pf-2");
+    // The old two-Team cache entry was produced from the previous snapshot and is gone.
+    client.planTeams(teams(2));
+    await flush();
+    expect(call).toBe(3);
   });
 });
