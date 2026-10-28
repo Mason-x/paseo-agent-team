@@ -55,6 +55,7 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-permission",
       state: "open",
+      answer: null,
       severity: "warning",
       summary: "Permission request needs a human; the engine never responds to it.",
       createdAt: AT_UPDATED,
@@ -140,6 +141,7 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
       category: "D6",
       controlNonceDigest: "d".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-fin|D6|phase-end",
       subjectId: null,
       summary: "Phase complete; awaiting strategic close-out.",
@@ -151,6 +153,7 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
       category: "D4",
       controlNonceDigest: "d".repeat(64),
       state: "answered",
+      answer: { action: "increase-budget", taskIds: [], answeredAt: AT_UPDATED },
       dedupeKey: "run-rec0re-fin|D4|budget-final",
       subjectId: "seat-s1",
       summary: "Budget increase approved before the last task.",

@@ -57,6 +57,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "c".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-unk|D1|outcome-unknown|intent-t2-a1",
       subjectId: "T2",
       summary: "Send outcome unknown after one recovery attempt; frozen for a human decision.",
@@ -68,6 +69,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-outcome-unknown",
       state: "open",
+      answer: null,
       severity: "critical",
       summary: "Outcome unknown: message may have been delivered; do not resend.",
       createdAt: AT_UPDATED,
@@ -126,6 +128,7 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-cancel-pending",
       state: "open",
+      answer: null,
       severity: "warning",
       summary: "Cancel receipt not confirmed; resources stay frozen.",
       createdAt: AT_UPDATED,
@@ -158,6 +161,20 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
     }),
   ],
   outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  decisions: [
+    {
+      decisionId: DECISION_D1,
+      category: "D1",
+      controlNonceDigest: "d".repeat(64),
+      state: "answered",
+      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      dedupeKey: "run-rec0re-qsc|D1|quiescent|T2",
+      subjectId: "T2",
+      summary: "Operator approved cancellation after quiescence.",
+      createdAt: AT_UPDATED,
+      answeredAt: AT_UPDATED,
+    },
+  ],
 });
 
 /** RE1.8 / I3: a blocked task keeps a frozen claim; releasing it would need an explicit decision. */
@@ -192,6 +209,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "f".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-blk|D1|missing-seat|T2",
       subjectId: "T2",
       summary: "No qualified A seat for T2; the frozen claim is retained.",
@@ -203,6 +221,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-missing-seat",
       state: "open",
+      answer: null,
       severity: "warning",
       summary: "T2 waits for a qualified seat; its frozen claim is retained.",
       createdAt: AT_UPDATED,

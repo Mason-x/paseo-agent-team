@@ -14,6 +14,7 @@ import {
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
   RUN_TASK_PHASES,
+  RunCancellationEvidenceSchema,
   RunDecisionPointSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
@@ -786,6 +787,7 @@ describe("R01c decision nonce digest and frozen phase", () => {
     category: "D1",
     controlNonceDigest: "a".repeat(64),
     state: "open",
+    answer: null,
     dedupeKey: "run: D1: decision",
     subjectId: null,
     summary: "A decision needs a reply.",
@@ -878,6 +880,90 @@ describe("R01c decision nonce digest and frozen phase", () => {
     if (!unknown.success) {
       expect(unknown.error.issues).toHaveLength(1);
       expect(unknown.error.issues[0]?.path).toEqual(["phase"]);
+    }
+  });
+});
+
+describe("R01f cancellation refresh and decision answer", () => {
+  const evidence = {
+    assignmentId: "assignment-1",
+    lastTurnId: "turn-1",
+    endedEventKey: "agent|turn-1|turn_ended",
+    refresh: {
+      agentId: "agent-1",
+      status: "idle",
+      activeTurn: false,
+      observedAt: NOW,
+    },
+    refreshObservedAt: NOW,
+    observationSeq: 1,
+    cancelIntentId: "intent-cancel",
+    receipt: { kind: "archive", confirmedAt: NOW, externalId: "archive-1" },
+  };
+  const answered = {
+    decisionId: "99999999-9999-4999-8999-999999999999",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "answered",
+    answer: { action: "cancel", taskIds: ["t1"], answeredAt: NOW },
+    dedupeKey: "run: D1",
+    subjectId: "t1",
+    summary: "cancel approved",
+    createdAt: NOW,
+    answeredAt: NOW,
+  };
+
+  test("refresh is a required typed observation; decision answers are required only when answered", () => {
+    expect(RunCancellationEvidenceSchema.safeParse(evidence).success).toBe(true);
+    expect(RunDecisionPointSchema.safeParse(answered).success).toBe(true);
+    expect(
+      RunDecisionPointSchema.safeParse({ ...answered, state: "open", answer: null }).success,
+    ).toBe(true);
+
+    const badEvidence = [
+      {
+        value: (() => {
+          const { refresh: _omit, ...rest } = evidence;
+          return rest;
+        })(),
+        path: ["refresh"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, status: "busy" } },
+        path: ["refresh", "status"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, activeTurn: true } },
+        path: ["refresh", "activeTurn"],
+      },
+    ];
+    for (const entry of badEvidence) {
+      const parsed = RunCancellationEvidenceSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("answered without answer and invalid answer actions are single defects", () => {
+    const missing = { ...answered, answer: null };
+    const parsedMissing = RunDecisionPointSchema.safeParse(missing);
+    expect(parsedMissing.success).toBe(false);
+    if (!parsedMissing.success) {
+      expect(parsedMissing.error.issues).toHaveLength(1);
+      expect(parsedMissing.error.issues[0]?.path).toEqual(["answer"]);
+    }
+    const badAction = {
+      ...answered,
+      answer: { ...answered.answer, action: "force-done" },
+    };
+    const parsedAction = RunDecisionPointSchema.safeParse(badAction);
+    expect(parsedAction.success).toBe(false);
+    if (!parsedAction.success) {
+      expect(parsedAction.error.issues).toHaveLength(1);
+      expect(parsedAction.error.issues[0]?.path).toEqual(["answer", "action"]);
     }
   });
 });

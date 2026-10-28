@@ -249,6 +249,15 @@ export const RunCancellationEvidenceSchema = z
     assignmentId: RunIdRefSchema,
     lastTurnId: z.string().min(1).max(128).nullable(),
     endedEventKey: z.string().min(1).max(256).nullable(),
+    /** The actual refresh observation backing quiescence; a timestamp alone is not evidence. */
+    refresh: z
+      .object({
+        agentId: RunIdRefSchema,
+        status: z.enum(["idle", "closed", "missing"]),
+        activeTurn: z.literal(false),
+        observedAt: RunTimeSchema,
+      })
+      .passthrough(),
     refreshObservedAt: RunTimeSchema,
     /** Must be ≥ the observationSeq at the refresh that produced this evidence. */
     observationSeq: RunSeqSchema,
@@ -466,6 +475,18 @@ export const RunBudgetEntrySchema = z
   })
   .passthrough();
 
+export const RUN_DECISION_ANSWER_ACTIONS = [
+  "replan",
+  "assign-seat",
+  "increase-budget",
+  "retry",
+  "cancel",
+  "defer-channel",
+  "resume-seat",
+  "reject",
+] as const;
+export const RunDecisionAnswerActionSchema = z.enum(RUN_DECISION_ANSWER_ACTIONS);
+
 export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
@@ -476,10 +497,28 @@ export const RunDecisionPointSchema = z
     dedupeKey: z.string().min(1).max(256),
     subjectId: RunIdRefSchema.nullable(),
     summary: z.string().min(1).max(4096),
+    /** The answer survives checkpoint compression; required exactly when state=answered. */
+    answer: z
+      .object({
+        action: RunDecisionAnswerActionSchema,
+        taskIds: z.array(z.string().min(1).max(64)).max(64),
+        answeredAt: RunTimeSchema,
+      })
+      .passthrough()
+      .nullable(),
     createdAt: RunTimeSchema,
     answeredAt: RunTimeSchema.nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((decision, ctx) => {
+    if (decision.state === "answered" && decision.answer === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["answer"],
+        message: "an answered decision must record its answer",
+      });
+    }
+  });
 
 export const RunApprovalSchema = z
   .object({

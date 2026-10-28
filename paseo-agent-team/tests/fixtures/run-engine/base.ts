@@ -336,6 +336,12 @@ export const QUIESCENT_CANCELLATION: RunCancellationEvidence = {
   assignmentId: ASSIGNMENT_T2,
   lastTurnId: "turn-7",
   endedEventKey: "agent-b1|turn-7|turn_ended",
+  refresh: {
+    agentId: "agent-b1",
+    status: "idle",
+    activeTurn: false,
+    observedAt: AT_UPDATED,
+  },
   refreshObservedAt: AT_UPDATED,
   observationSeq: 7,
   cancelIntentId: INTENT_CANCEL,
