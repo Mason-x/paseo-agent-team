@@ -1,0 +1,53 @@
+{
+  "req": {
+    "clientRequestId": "eadca3f3-3769-4447-870e-c951188113dd",
+    "request": "DEV D5 off: 需要新增安全加固与迁移审计 Role 的后台改版团队。",
+    "mode": "sota",
+    "profileId": "dev-haiku-55",
+    "existingRolesOnly": false,
+    "contractVersion": 2
+  },
+  "start": {
+    "ok": true,
+    "job": {
+      "jobId": "0f631bb1-169e-4af4-862f-5a97515569a6",
+      "clientRequestId": "eadca3f3-3769-4447-870e-c951188113dd",
+      "stateRevision": "febae97e-65d5-49ac-9522-c26f7931cdc1",
+      "state": "starting",
+      "attempt": 0,
+      "mode": "sota",
+      "existingRolesOnly": false,
+      "outputContractVersion": 2,
+      "roleGap": null,
+      "createdAt": "2026-10-28T08:18:15.240Z",
+      "updatedAt": "2026-10-28T08:18:15.240Z",
+      "finishedAt": null,
+      "requestExcerpt": "DEV D5 off: 需要新增安全加固与迁移审计 Role 的后台改版团队。",
+      "agentId": "0f631bb1-169e-4af4-862f-5a97515569a6",
+      "agentCreated": false,
+      "carrierWorkspaceId": null,
+      "targetWorkspaceId": null,
+      "designerProfile": null,
+      "agentStatus": null,
+      "requiresAttention": false,
+      "attentionReason": null,
+      "pendingPermissions": [],
+      "permissionsTruncated": false,
+      "resultId": null,
+      "savedTeamId": null,
+      "saveState": "none",
+      "cancelRequested": false,
+      "needsCleanup": false,
+      "issues": [],
+      "issuesTruncated": 0,
+      "recovered": false,
+      "saveLeaseExpiresAt": null,
+      "allowed": {
+        "cancel": true,
+        "save": false,
+        "launch": false,
+        "continueAction": null
+      }
+    }
+  }
+}

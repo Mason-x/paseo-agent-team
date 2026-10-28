@@ -309,6 +309,7 @@ function buildNewRole(
     ...(role.color !== undefined ? { color: role.color } : {}),
     ...(role.icon !== undefined ? { icon: role.icon } : {}),
     executionPolicy: role.executionPolicy,
+    noveltyReason: role.noveltyReason,
     enabled: true,
     createdAt: identity.createdAt,
     updatedAt: identity.createdAt,

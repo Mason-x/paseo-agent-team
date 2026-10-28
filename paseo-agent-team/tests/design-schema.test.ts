@@ -191,6 +191,11 @@ describe("strict model output", () => {
         newRoles: [{ ...roles[0], noveltyReason: "   " }],
       }).success,
     ).toBe(false);
+    const { noveltyReason: _omitted, ...withoutReason } = roles[0] ?? {};
+    expect(withoutReason).not.toHaveProperty("noveltyReason");
+    expect(DesignProposalSchema.safeParse({ ...proposal, newRoles: [withoutReason] }).success).toBe(
+      false,
+    );
     expect(
       DesignProposalSchema.safeParse({
         ...proposal,
