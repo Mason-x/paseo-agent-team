@@ -1,5 +1,8 @@
 // Generated from .notes/30b-d02-baseline.md and 30c-d02-coordinator-baseline.md (fa58137).
 // These are golden literals: T1b compares the whole object with toEqual, including array order.
+// Intentional deviation (AC-0d.21): the two collaboration blockers now use the renamed display
+// copy "旗舰（SOTA）或标准模式" instead of the old fa58137 "SOTA 或标准模式"; choices, thresholds,
+// issue codes, and hashes are unchanged.
 
 export const D02_BASELINE_LEGACY: readonly Record<string, unknown>[] = [
   {

@@ -1,14 +1,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { z } from "zod";
 import { modeIssueText } from "../client/launch/launch-preview-state";
 import {
-  legacyModeIssue,
   projectJobForContract,
   projectResultForContract,
   projectStatusForContract,
 } from "../server/designer/compat";
+import { createDesignService } from "../server/designer/service";
+import type { DesignJobStore, StoredDesignJob } from "../server/designer/store";
 import { formatDesignIssue } from "../shared/domain/design-output";
 import { availableProfileIds } from "../shared/domain/design-planning";
 import { TEAM_MODES, teamModeDisplay } from "../shared/domain/mode-contract";
@@ -29,13 +29,11 @@ import {
   launchStartRpc,
   launchStatusRpc,
 } from "../shared/rpc";
-import { SlugSchema } from "../shared/schemas/common";
 import type { DesignStartOutput } from "../shared/schemas/design";
 import {
   DESIGN_ISSUE_CODES,
   DesignCancelInputSchema,
   DesignContinueInputSchema,
-  DesignIssueSchema,
   DesignMarkSavedInputSchema,
   DesignPrepareSaveInputSchema,
   DesignResultInputSchema,
@@ -43,9 +41,6 @@ import {
   DesignStartInputSchema,
   DesignStatusInputSchema,
 } from "../shared/schemas/design";
-import { ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
-import { RoleSchema } from "../shared/schemas/role";
-import { TeamSchema } from "../shared/schemas/team";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../shared/settings";
 import { launchModeZh, zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
@@ -63,128 +58,51 @@ import {
   designJob,
   designResult,
 } from "./design-fixtures";
+import {
+  baselineFailure,
+  baselineJob,
+  baselineResult,
+  baselineStatusSuccess,
+} from "./fixtures/p1-compat/design-dto-75ec305";
 
 const failures = { ok: false, issues: [], job: null };
 
-/** Literal copy of 75ec305's Job/Result shapes: three legacy modes, no contract-2 fields. */
-const baselineMode = z.enum(["sota", "economy", "collaborative"]);
-const baselineJob = z.object({
-  jobId: z.string().uuid(),
-  clientRequestId: z.string().uuid(),
-  stateRevision: z.string().uuid(),
-  state: z.enum([
-    "starting",
-    "designing",
-    "validating",
-    "fixing",
-    "ready",
-    "saving",
-    "saved",
-    "needs_continue",
-    "save_conflict",
-    "canceling",
-    "canceled",
-    "failed",
-  ]),
-  attempt: z.number().int().min(0).max(3),
-  mode: baselineMode,
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-  finishedAt: z.string().datetime().nullable(),
-  requestExcerpt: z.string(),
-  agentId: z.string().uuid(),
-  agentCreated: z.boolean(),
-  carrierWorkspaceId: z.string().min(1).max(256).nullable(),
-  targetWorkspaceId: z.string().min(1).max(256).nullable(),
-  designerProfile: z
-    .object({
-      id: z.string().min(1).max(256),
-      name: z.string(),
-      provider: z.string().min(1).max(256),
-      model: z.string().optional(),
-      modeId: z.string().optional(),
-      thinkingOptionId: z.string().optional(),
-    })
-    .nullable(),
-  agentStatus: z.enum(["initializing", "idle", "running", "closed", "error"]).nullable(),
-  requiresAttention: z.boolean(),
-  attentionReason: z.enum(["finished", "error", "permission"]).nullable(),
-  pendingPermissions: z.array(
-    z.object({
-      id: z.string().min(1).max(256),
-      kind: z.enum(["tool", "plan", "question", "mode", "other"]),
-      title: z.string(),
-      description: z.string().optional(),
-    }),
-  ),
-  permissionsTruncated: z.boolean(),
-  resultId: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .nullable(),
-  savedTeamId: SlugSchema.nullable(),
-  saveState: z.enum(["none", "roles-only", "committed", "unknown"]),
-  cancelRequested: z.boolean(),
-  needsCleanup: z.boolean(),
-  issues: z.array(DesignIssueSchema),
-  issuesTruncated: z.number().int().nonnegative(),
-  recovered: z.boolean(),
-  saveLeaseExpiresAt: z.string().datetime().nullable(),
-  allowed: z.object({
-    cancel: z.boolean(),
-    save: z.boolean(),
-    launch: z.boolean(),
-    continueAction: z.enum(["recheck", "repair"]).nullable(),
-  }),
-});
+/** Sample arguments for every function-valued display key in the two namespaces. */
+const COPY_SAMPLES: Record<string, readonly unknown[]> = {
+  gapCount: [2],
+  gapUse: ["member"],
+  suggestedRoleLine: ["role-id", "角色名"],
+  suggestedRolePolicy: ["execution", "coding"],
+  unlaunchableRole: ["角色名", "role-id"],
+  unavailableBindings: [["Profile A", "Profile B"]],
+  profileLine: ["Profile", "omp", "model"],
+  noSuitableProfileReason: ["没有候选"],
+  unknownMode: ["turbo"],
+  group: ["成员", 2],
+  groupWithStandby: ["成员", 2, 1],
+  unresolved: [2, "未绑定"],
+  reasonCount: ["未绑定", 2],
+  configured: ["Profile"],
+  tooManyMembers: [3],
+  missing: ["Profile"],
+  expand: [2],
+  roleFocusProfile: ["Profile"],
+  economyFocus: ["allSeats", "execution"],
+};
 
-const baselineResult = z.object({
-  version: z.literal(1),
-  jobId: z.string().uuid(),
-  resultId: z.string().regex(/^[a-f0-9]{64}$/),
-  attempt: z.number().int().min(1).max(3),
-  materializedAt: z.string().datetime(),
-  request: z.string(),
-  mode: baselineMode,
-  summary: z.string(),
-  carrierWorkspaceId: z.string().min(1).max(256),
-  targetWorkspaceId: z.string().min(1).max(256).nullable(),
-  team: TeamSchema,
-  newRoles: z.array(RoleSchema),
-  reuse: z.array(
-    z.object({
-      roleId: SlugSchema,
-      behaviorHash: z.string().regex(/^[a-f0-9]{64}$/),
-      reason: z.string(),
-    }),
-  ),
-  memberReasons: z.array(
-    z.object({
-      target: z.union([z.literal("coordinator"), z.string().regex(/^m[1-9][0-9]?$/)]),
-      logicalSeatId: z.string().min(1).max(256),
-      reason: z.string(),
-      expectedProfileIds: z.array(z.string().min(1).max(256)),
-    }),
-  ),
-  preview: ModeLaunchPreviewSchema,
-  planningFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  warnings: z.array(DesignIssueSchema),
-});
-
-const baselineFailure = z.object({
-  ok: z.literal(false),
-  issues: z.array(DesignIssueSchema),
-  issuesTruncated: z.number().int().nonnegative(),
-  job: baselineJob.nullable(),
-});
-
-const baselineStatusSuccess = z.object({
-  ok: z.literal(true),
-  scopeId: z.string().uuid(),
-  jobs: z.array(baselineJob),
-  truncated: z.boolean(),
-  discoveryIssues: z.array(DesignIssueSchema),
-});
+/** Every display string, including nested groups and invoked functions (sample arguments). */
+function expandCopy(value: unknown, key = ""): string[] {
+  if (typeof value === "string") return [value];
+  if (typeof value === "function") {
+    const args = COPY_SAMPLES[key] ?? [];
+    return [String((value as (...values: unknown[]) => unknown)(...args))];
+  }
+  if (Array.isArray(value)) return value.flatMap((item) => expandCopy(item, key));
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([childKey, child]) => expandCopy(child, childKey));
+  }
+  return [];
+}
 
 describe("planning port", () => {
   test("standby selections contribute no expected Profile IDs", () => {
@@ -423,6 +341,19 @@ describe("shared boundary", () => {
     expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("SOTA 或标准");
   });
 
+  test("designGap/teamPlan display copy contains no stale stored values or labels", () => {
+    const texts = [...expandCopy(designGapZh), ...expandCopy(teamPlanZh)].join("\n");
+    for (const stale of ["economy-all", "sota", "SOTA 或标准", "SOTA 池", "配置 SOTA"]) {
+      expect(texts).not.toContain(stale);
+    }
+    // The two economy-pool entrances are one phrase, and the route hint follows its title.
+    expect(designGapZh.actionConfigureEconomy).toBe(modesZh.economyPoolAction);
+    expect(teamPlanZh.configureEconomy).toBe(modesZh.economyPoolAction);
+    expect(modesZh.economyAllTitle).toBe("经济：全席位");
+    expect(designGapZh.economyHint).toContain(modesZh.economyAllTitle);
+    expect(designGapZh.modeNeedsUpgrade).toContain(modesZh.modeLabels.economy);
+  });
+
   test("mode labels come from the one display table", () => {
     expect(zh.teamModeSota).toBe(modesZh.modeLabels.flagship);
     expect(zh.teamModeCollaborative).toBe(modesZh.modeLabels.collaborative);
@@ -551,7 +482,7 @@ describe("shared boundary", () => {
   });
 });
 
-describe("contract-1 projections against the frozen 75ec305 DTOs", () => {
+describe("contract-1 projections against fully frozen 75ec305 DTOs", () => {
   test("the baseline Job schema cannot parse a v2 economy-all job", () => {
     const job = designJob({ mode: "economy-all" });
     expect(baselineJob.safeParse(job).success).toBe(false);
@@ -606,20 +537,90 @@ describe("contract-1 projections against the frozen 75ec305 DTOs", () => {
     ).toBe(true);
   });
 
-  test("a by-id refusal parses as the baseline failure with no job", () => {
-    const refusal = {
-      ok: false as const,
-      issues: [legacyModeIssue("economy-all")],
-      issuesTruncated: 0,
-      job: null,
+  test("the real C03 by-id refusal parses as a baseline failure with no job", async () => {
+    const job = designJob({ mode: "economy-all", state: "failed" });
+    const record: StoredDesignJob = {
+      schemaVersion: 2,
+      job,
+      request: "设计",
+      requestHash: DESIGN_HASH,
+      requestHashVersion: 2,
+      outputContractVersion: 2,
+      existingRolesOnly: false,
+      roleGap: null,
+      mode: "economy-all",
+      selectionIntent: null,
+      creation: null,
+      attempts: [],
+      proposal: null,
+      result: null,
+      reuseFingerprints: {},
+      leaseOwner: null,
+      receipts: {},
+      outcomeUnknown: false,
     };
-    expect(baselineFailure.safeParse(refusal).success).toBe(true);
-    expect(refusal.job).toBeNull();
+    const store: DesignJobStore = {
+      initialize: async () => {},
+      dispose: async () => {},
+      list: async () => [record],
+      problems: async () => [],
+      get: async (jobId) => (jobId === job.jobId ? record : null),
+      findRequest: async () => null,
+      create: async () => {},
+      update: async () => {},
+    };
+    const service = createDesignService({
+      store,
+      readers: {} as never,
+      getAdapter: () => null,
+      planner: {} as never,
+      clock: { now: () => job.createdAt },
+      ids: { next: () => DESIGN_JOB_ID },
+      hasher: () => DESIGN_HASH,
+      capabilities: { onDemand: false, expansion: false, collaboration: false },
+    });
+    const refusal = await service.status({ jobId: job.jobId, contractVersion: 1 });
+    expect(refusal.ok).toBe(false);
+    if (!refusal.ok) {
+      expect(refusal.issues[0]?.code).toBe("DESIGN_MODE_UNAVAILABLE");
+      expect(refusal.job).toBeNull();
+      expect(baselineFailure.safeParse(refusal).success).toBe(true);
+    }
+    await service.dispose();
   });
 
-  test("the projected result still parses with the baseline Result schema", () => {
+  test("the fully frozen Result rejects five shapes a widened copy accepted", () => {
     const projected = projectResultForContract(designResult());
     expect(projected).not.toBeNull();
+    if (!projected) return;
     expect(baselineResult.safeParse(projected).success).toBe(true);
+    const mutate = (change: (copy: DesignResultMut) => void) => {
+      const copy = structuredClone(projected) as unknown as DesignResultMut;
+      change(copy);
+      return baselineResult.safeParse(copy).success;
+    };
+    expect(mutate((copy) => (copy.preview.coordinator.route = "coordinator"))).toBe(false);
+    const seat = mutate((copy) => (copy.preview.seats[0].budgetBasis = "route"));
+    expect(seat).toBe(false);
+    expect(
+      mutate((copy) => {
+        copy.preview.requestedMode = "economy-all";
+      }),
+    ).toBe(false);
+    expect(
+      mutate((copy) => {
+        delete copy.preview.requestedMode;
+      }),
+    ).toBe(false);
+    expect(mutate((copy) => (copy.request = ""))).toBe(false);
   });
 });
+
+type DesignResultMut = {
+  request: string;
+  preview: {
+    requestedMode?: string;
+    coordinator: { route?: string };
+    seats: { budgetBasis: string }[];
+  };
+};

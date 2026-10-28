@@ -1,9 +1,11 @@
 /**
  * Chinese copy for the Team model plan (list summaries, editor rows, and the two problem exits).
  *
- * `zh.teamPlan` is wired by I01; B03 imports this module directly until then. No other task
- * writes this file.
+ * I01 also exposes this module as `zh.teamPlan` for API parity; the B03 components import it
+ * directly, so edits here reach both. No other task writes this file.
  */
+import { modesZh } from "./modes";
+
 export const teamPlanZh = {
   pending: "正在计算模型…",
   loadFailed: "暂无法读取模型",
@@ -54,7 +56,7 @@ export const teamPlanZh = {
   noProfile: "未绑定",
   noSelection: "当前无可运行的选中 Profile",
   rebind: "去绑定",
-  configureEconomy: "配置经济池",
+  configureEconomy: modesZh.economyPoolAction,
 
   reservedRowKey: "成员行不能占用协调者的 rowKey",
   duplicateRowKey: "成员行存在重复 rowKey，请刷新后重试",
