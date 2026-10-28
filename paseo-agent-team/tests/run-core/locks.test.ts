@@ -73,6 +73,24 @@ describe("logical path and scope rules", () => {
     }
   });
 
+  test("L3 canonical-equivalent NFC and escaped NFD paths conflict", () => {
+    const nfc = "src/caf\u00e9.ts";
+    const nfd = "src/cafe\u0301.ts";
+    for (const [held, requested] of [
+      [nfc, nfd],
+      [nfd, nfc],
+    ]) {
+      expect(lockConflicts(claim({ path: held }), scope({ path: requested }))).toBe("write");
+      expect(
+        findLockConflicts(record([claim({ path: held })]), {
+          taskId: "T2",
+          scopes: [scope({ path: requested })],
+        }),
+      ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
+    }
+    expect(scopeCovers({ path: "src/cafe\u0301" }, { path: "src/caf\u00e9/a.ts" })).toBe(true);
+  });
+
   test("directory coverage and read/read compatibility", () => {
     expect(scopeCovers({ path: "src" }, { path: "src/a.ts" })).toBe(true);
     expect(scopeCovers({ path: "src/a.ts" }, { path: "src/a.ts" })).toBe(true);

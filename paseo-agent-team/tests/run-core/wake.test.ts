@@ -148,6 +148,16 @@ describe("wake classification", () => {
 });
 
 describe("wake summary", () => {
+  test.each([5, 6, 7, 11, 13])(
+    "W8 truncation at %i bytes cannot split a surrogate pair",
+    (maxBytes) => {
+      const value = `ab${"\u{1f600}".repeat(5)}`;
+      const truncated = truncateUtf8(value, maxBytes);
+      expect(truncated.isWellFormed()).toBe(true);
+      expect(new TextEncoder().encode(truncated).length).toBeLessThanOrEqual(maxBytes);
+    },
+  );
+
   test("bounded sanitized text excludes worker text and is deterministic", () => {
     const tasks = [taskRecord(spec("T9", "Ship", { tier: "S" }), { state: "failed" })];
     const next = record({ tasks, decisions: [decision("D1")] });
