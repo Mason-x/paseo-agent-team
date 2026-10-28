@@ -32,6 +32,12 @@ export const RunIdSchema = z
   .max(96)
   .regex(/^run-[a-z0-9]+-[a-z0-9]+$/);
 export const RunDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+/** The ledger header digest as written by AtomicJsonCodec: "" on revision 1, then sha256:<64>. */
+export const RunHeaderDigestSchema = z.union([
+  z.literal(""),
+  z.string().regex(/^sha256:[a-f0-9]{64}$/),
+]);
 export const RunNonceSchema = z.string().uuid();
 export const RunTimeSchema = z.string().datetime();
 export const RunIdRefSchema = z.string().min(1).max(128);
@@ -479,7 +485,7 @@ export const RunMetricsBookSchema = z
  */
 export const RunModelPlanBasisSchema = z
   .object({
-    launchPlanFingerprint: RunDigestSchema,
+    p1PlanHash: RunDigestSchema,
     mode: z.string().min(1).max(64),
     targetWorkspaceId: z.string().min(1).max(128).nullable(),
     task: z.string().min(1).max(4000),
@@ -765,12 +771,16 @@ export const RunPolicySnapshotSchema = z
   .passthrough();
 export type RunPolicySnapshot = z.infer<typeof RunPolicySnapshotSchema>;
 
+/**
+ * Schema v1 is frozen once R05 persists it. A later shape change must bump the version or add an
+ * explicit tolerant read path; old shapes are corrupt, never unknown-version.
+ */
 export const RunRecordSchema = z
   .object({
     schemaVersion: z.literal(RUN_SCHEMA_VERSION),
     runId: RunIdSchema,
     revision: RunRevisionSchema,
-    previousDigest: RunDigestSchema,
+    previousDigest: RunHeaderDigestSchema,
     createdAt: RunTimeSchema,
     updatedAt: RunTimeSchema,
     hostBinding: z.object({ serverId: z.string().min(1).max(128) }).passthrough(),
@@ -826,5 +836,28 @@ export const RunRecordSchema = z
     alerts: z.array(RunAlertSchema).max(1024),
     metrics: RunMetricsBookSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((record, ctx) => {
+    if (record.revision === 1 && record.previousDigest !== "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "first revision must not have a previous digest",
+      });
+    }
+    if (record.revision !== 1 && record.previousDigest === "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "only the first revision may omit the previous digest",
+      });
+    }
+    if (record.launch.modelPlan.p1PlanHash !== record.team.modelPlanHash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["team", "modelPlanHash"],
+        message: "modelPlanHash must equal launch.modelPlan.p1PlanHash",
+      });
+    }
+  });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
