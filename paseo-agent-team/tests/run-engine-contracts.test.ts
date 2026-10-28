@@ -1,4 +1,12 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { hashLaunchPlan } from "../server/launch-hash";
+import { type AtomicJsonCodec, createAtomicJson } from "../server/ledger/atomic-json";
+import { buildLaunchPlan } from "../shared/domain/launch-plan";
+import type { EconomyPolicy } from "../shared/domain/mode-resolver";
+import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import { RunTeamEngineConfigSchema } from "../shared/schemas/run-engine/config";
 import {
   RUN_HARD_BYTES,
@@ -22,13 +30,17 @@ import {
   RunTaskReportBlockSchema,
 } from "../shared/schemas/run-engine/protocol";
 import {
+  RUN_HISTORY_CURSOR_EXPIRED,
   RunControlInputSchema,
   type RunDetailView,
   RunDetailViewSchema,
   RunGetInputSchema,
   RunGetOutputSchema,
+  RunIssueViewSchema,
   RunReconcileOutputSchema,
+  runHistoryCursorExpiredIssue,
 } from "../shared/schemas/run-engine/rpc";
+import { architect, claudeOpus, codexXhigh, codingTeam, developer, techLead } from "./fixtures";
 
 const NOW = "2026-10-27T12:00:00.000Z";
 const RUN_ID = "run-abc123-xyz789";
@@ -130,7 +142,7 @@ function assignment(overrides: Record<string, unknown> = {}) {
 
 function modelPlan(overrides: Record<string, unknown> = {}) {
   return {
-    launchPlanFingerprint: DIGEST,
+    p1PlanHash: DIGEST,
     mode: "economy-all",
     targetWorkspaceId: null,
     task: "run the sealed DAG",
@@ -207,7 +219,7 @@ function runRecord(overrides: Record<string, unknown> = {}) {
     schemaVersion: RUN_SCHEMA_VERSION,
     runId: RUN_ID,
     revision: 3,
-    previousDigest: DIGEST,
+    previousDigest: `sha256:${DIGEST}`,
     createdAt: NOW,
     updatedAt: NOW,
     hostBinding: { serverId: "srv-1" },
@@ -300,17 +312,48 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
     expect(RunRecordSchema.parse(parsed)).toEqual(parsed);
   });
 
-  test("schemaVersion, ids, digests, and revisions are exact", () => {
+  test("schemaVersion, ids, digests, revisions, and the two header shapes are exact", () => {
     expect(RunRecordSchema.safeParse(runRecord({ schemaVersion: 2 })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-abc" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-AbC-xyz" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ revision: -1 })).success).toBe(false);
-    expect(RunRecordSchema.safeParse(runRecord({ previousDigest: "abc" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ lifecycle: "paused" })).success).toBe(true);
     // A state this version does not know is a damaged v1 record, not passthrough data.
     expect(
       RunRecordSchema.safeParse(runRecord({ tasks: [taskRecord({ state: "holding" })] })).success,
     ).toBe(false);
+
+    // F11: revision 1 is "", later revisions are sha256:<64>, and bare 64hex is not a header.
+    expect(RunRecordSchema.safeParse(runRecord({ revision: 1, previousDigest: "" })).success).toBe(
+      true,
+    );
+    expect(
+      RunRecordSchema.safeParse(runRecord({ revision: 1, previousDigest: `sha256:${DIGEST}` }))
+        .success,
+    ).toBe(false);
+    expect(RunRecordSchema.safeParse(runRecord({ revision: 2, previousDigest: "" })).success).toBe(
+      false,
+    );
+    expect(
+      RunRecordSchema.safeParse(runRecord({ revision: 2, previousDigest: DIGEST })).success,
+    ).toBe(false);
+    expect(RunRecordSchema.safeParse(runRecord({ previousDigest: "abc" })).success).toBe(false);
+
+    // 143 I1: revision 0 is not a persisted header (validateHeader needs revision >= 1), whatever
+    // the digest says. Only the record root is tightened.
+    for (const previousDigest of ["", `sha256:${DIGEST}`]) {
+      const zero = RunRecordSchema.safeParse(runRecord({ revision: 0, previousDigest }));
+      expect(zero.success, `revision 0 / "${previousDigest}"`).toBe(false);
+      if (!zero.success) {
+        expect(zero.error.issues.map((issue) => issue.path.join("."))).toContain("revision");
+      }
+    }
+
+    // F15: the two copies of the P1 plan digest must agree.
+    const split = runRecord({
+      team: { ...runRecord().team, modelPlanHash: "b".repeat(64) },
+    });
+    expect(RunRecordSchema.safeParse(split).success).toBe(false);
   });
 
   test("the hard capacity is enforced by the schema", () => {
@@ -732,6 +775,167 @@ describe("protocol blocks are strict and identity-bound", () => {
   });
 });
 
+describe("RunRecord persists through the real AtomicJsonCodec", () => {
+  test("create/read/update/CAS keep the codec header and unknown fields", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "r01b-codec-"));
+    try {
+      const codec: AtomicJsonCodec<RunRecord> = {
+        schemaVersion: RUN_SCHEMA_VERSION,
+        parse: (value) => RunRecordSchema.parse(value),
+        readHeader: (record) => ({
+          schemaVersion: record.schemaVersion,
+          revision: record.revision,
+          previousDigest: record.previousDigest,
+        }),
+        withHeader: (record, header) => RunRecordSchema.parse({ ...record, ...header }),
+      };
+      const store = createAtomicJson({
+        file: path.join(root, "run.json"),
+        issuesDir: path.join(root, "issues"),
+        containmentRoot: root,
+        codec,
+      });
+      const firstRecord = RunRecordSchema.parse(
+        runRecord({
+          revision: 1,
+          previousDigest: "",
+          futureTop: { keep: true },
+          launch: { ...runRecord().launch, futureLaunch: "kept" },
+        }),
+      );
+      await store.commit(firstRecord, { revision: 0, digest: "" });
+      const first = await store.read();
+      if (first.status !== "ok") throw new Error(`first read: ${first.status}`);
+      expect(first.record.previousDigest).toBe("");
+      expect(first.digest).toMatch(/^sha256:[a-f0-9]{64}$/u);
+      expect(first.record.futureTop).toEqual({ keep: true });
+      expect(first.record.launch.futureLaunch).toBe("kept");
+
+      await store.commit(
+        RunRecordSchema.parse(
+          runRecord({
+            revision: 2,
+            previousDigest: first.digest,
+            futureTop: { keep: true },
+            launch: { ...runRecord().launch, futureLaunch: "kept" },
+          }),
+        ),
+        { revision: 1, digest: first.digest },
+      );
+      const second = await store.read();
+      if (second.status !== "ok") throw new Error(`second read: ${second.status}`);
+      expect(second.record.previousDigest).toBe(first.digest);
+      expect(second.record.futureTop).toEqual({ keep: true });
+      expect(second.record.launch.futureLaunch).toBe("kept");
+
+      await expect(
+        store.commit(
+          RunRecordSchema.parse(runRecord({ revision: 3, previousDigest: second.digest })),
+          { revision: 1, digest: first.digest },
+        ),
+      ).rejects.toThrow(/cas-mismatch|changed/);
+      await expect(
+        store.commit(
+          RunRecordSchema.parse(
+            runRecord({ revision: 3, previousDigest: `sha256:${"b".repeat(64)}` }),
+          ),
+          { revision: 2, digest: second.digest },
+        ),
+      ).rejects.toThrow(/header-invalid|previousDigest/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("revision 0 is rejected by the schema and by the codec header check alike", () => {
+  test("the same record that RunRecordSchema refuses never reaches the disk", async () => {
+    const zero = runRecord({ revision: 0, previousDigest: `sha256:${DIGEST}` });
+    expect(RunRecordSchema.safeParse(zero).success).toBe(false);
+
+    const root = await mkdtemp(path.join(tmpdir(), "r01b-rev0-"));
+    try {
+      // A lenient parse isolates the codec header check from the schema.
+      const codec: AtomicJsonCodec<RunRecord> = {
+        schemaVersion: RUN_SCHEMA_VERSION,
+        parse: (value) => value as RunRecord,
+        readHeader: (record) => ({
+          schemaVersion: record.schemaVersion,
+          revision: record.revision,
+          previousDigest: record.previousDigest,
+        }),
+        withHeader: (record, header) => ({ ...record, ...header }) as RunRecord,
+      };
+      const store = createAtomicJson({
+        file: path.join(root, "run.json"),
+        issuesDir: path.join(root, "issues"),
+        containmentRoot: root,
+        codec,
+      });
+      await expect(
+        store.commit(zero as unknown as RunRecord, { revision: 0, digest: "" }),
+      ).rejects.toThrow(/header-invalid|positive integer/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("F15 reuses the real hashLaunchPlan digest", () => {
+  test("p1PlanHash and modelPlanHash are the same bare 64hex", () => {
+    const team = { ...codingTeam, mode: "sota" as const };
+    const roles = [techLead, architect, developer];
+    const profiles: PaseoProfile[] = [claudeOpus, codexXhigh];
+    const availability: ProviderAvailability[] = [
+      { provider: "claude", available: true },
+      { provider: "codex", available: true },
+    ];
+    const economy: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
+    const runtimeCapabilities = { onDemand: true, expansion: true, collaboration: true };
+    const task = "Add Stripe";
+    const plan = buildLaunchPlan({
+      team,
+      roles,
+      profiles,
+      availability,
+      workspaceId: "ws-1",
+      task,
+      runId: "run-f15",
+      maxMembers: 8,
+      economy,
+      runtimeCapabilities,
+      daemonConfig: { mcp: { enabled: true, injectIntoAgents: true } },
+    });
+    const digest = hashLaunchPlan({
+      team,
+      roles,
+      plan,
+      host: { status: "ready", profiles, availability },
+      economy,
+      target: { kind: "workspace", workspaceId: "ws-1" },
+      task,
+      maxMembers: 8,
+      runtimeCapabilities,
+    });
+    expect(digest).toMatch(/^[a-f0-9]{64}$/u);
+    const parsed = RunRecordSchema.parse(
+      runRecord({
+        launch: { ...runRecord().launch, modelPlan: modelPlan({ p1PlanHash: digest }) },
+        team: { ...runRecord().team, modelPlanHash: digest },
+      }),
+    );
+    expect(parsed.launch.modelPlan.p1PlanHash).toBe(digest);
+    expect(parsed.team.modelPlanHash).toBe(digest);
+
+    const { p1PlanHash: _omitted, ...legacyPlan } = modelPlan();
+    expect(
+      RunRecordSchema.safeParse(
+        runRecord({ launch: { ...runRecord().launch, modelPlan: legacyPlan } }),
+      ).success,
+    ).toBe(false);
+  });
+});
+
 describe("RPC contracts reject unknown input and never leak ledger internals", () => {
   test("inputs are strict and carry the run contract version", () => {
     expect(RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID }).success).toBe(
@@ -744,6 +948,27 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
     expect(
       RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID, extra: 1 }).success,
     ).toBe(false);
+    expect(
+      RunGetInputSchema.safeParse({
+        runContractVersion: 1,
+        runId: RUN_ID,
+        historyCursor: "cursor-1",
+        limit: 50,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunGetInputSchema.safeParse({
+        runContractVersion: 1,
+        runId: RUN_ID,
+        knownRevision: 3,
+        historyCursor: "cursor-1",
+      }).success,
+    ).toBe(false);
+    for (const limit of [0, 51]) {
+      expect(
+        RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID, limit }).success,
+      ).toBe(false);
+    }
   });
 
   test("run.get returns unchanged or a redacted view with no nonce/prompt fields", () => {
@@ -763,6 +988,10 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
         plannerVersion: 2,
       },
       dagRevision: 1,
+      dag: {
+        revision: 1,
+        tasks: [{ taskId: "t1", title: "Ship", layer: 0, deps: [], state: "review" }],
+      },
       tasks: [
         {
           taskId: "t1",
@@ -799,11 +1028,208 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
       issues: [],
     };
     const parsed = RunDetailViewSchema.parse(view);
-    const serialized = JSON.stringify(parsed);
+    const ready = RunGetOutputSchema.parse({
+      runContractVersion: 1,
+      status: "ready",
+      run: parsed,
+      history: {
+        events: [
+          {
+            seq: 1,
+            kind: "task_started",
+            at: NOW,
+            taskId: "t1",
+            summary: "started t1",
+          },
+        ],
+        nextCursor: null,
+      },
+      issues: [],
+    });
+    const serialized = JSON.stringify(ready);
     for (const forbidden of ["nonce", "prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
       expect(serialized).not.toContain(forbidden);
     }
     expect(parsed.tasks[0]).toMatchObject({ phase: "awaiting-rework", frozen: false });
+
+    // Q1: ready always carries run+history; the failure branches never do.
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        run: null,
+        history: { events: [], nextCursor: null },
+        issues: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        run: parsed,
+        issues: [],
+      }).success,
+    ).toBe(false);
+    for (const status of ["unknown-version", "corrupt", "missing"] as const) {
+      expect(
+        RunGetOutputSchema.safeParse({
+          runContractVersion: 1,
+          status,
+          run: null,
+          issues: [],
+        }).success,
+      ).toBe(true);
+    }
+
+    // 144 I2: a failure branch never carries a run, and a ready result needs both run and history.
+    for (const status of ["unknown-version", "corrupt", "missing"] as const) {
+      const withRun = RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status,
+        run: parsed,
+        issues: [],
+      });
+      expect(withRun.success, `${status} with a run`).toBe(false);
+      if (!withRun.success) {
+        expect(withRun.error.issues.map((issue) => issue.path.join("."))).toContain("run");
+      }
+    }
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        history: { events: [], nextCursor: null },
+        issues: [],
+      }).success,
+      "ready without a run",
+    ).toBe(false);
+    // The view never carries history on unchanged or failure results: it is parsed away.
+    const unchangedWithHistory = RunGetOutputSchema.parse({
+      runContractVersion: 1,
+      status: "unchanged",
+      revision: 3,
+      history: { events: [], nextCursor: null },
+    });
+    expect("history" in unchangedWithHistory).toBe(false);
+
+    // 144 S4: an expired cursor is a fixed warning, and the first page still comes back.
+    const expired = runHistoryCursorExpiredIssue();
+    expect(expired.code).toBe("history-cursor-expired");
+    expect(RUN_HISTORY_CURSOR_EXPIRED).toBe(expired.code);
+    expect(RunIssueViewSchema.parse(expired)).toEqual(expired);
+    expect(expired).toMatchObject({ severity: "warning", action: "refresh" });
+    expect(RunGetOutputSchema.parse({ ...ready, issues: [expired] })).toMatchObject({
+      status: "ready",
+      issues: [{ code: "history-cursor-expired" }],
+    });
+
+    // R1b-1: layer is the topological depth, and deps must exist.
+    const dagNode = view.dag.tasks[0];
+    const firstRow = view.tasks[0];
+    if (!dagNode || !firstRow) throw new Error("fixture node/row missing");
+    const wrongLayer = {
+      ...view,
+      dag: { revision: 1, tasks: [{ ...dagNode, layer: 1 }] },
+    };
+    expect(RunDetailViewSchema.safeParse(wrongLayer).success).toBe(false);
+    const missingDep = {
+      ...view,
+      dag: { revision: 1, tasks: [{ ...dagNode, deps: ["missing"] }] },
+    };
+    expect(RunDetailViewSchema.safeParse(missingDep).success).toBe(false);
+    const secondRow = { ...firstRow, taskId: "t2", title: "Then" };
+    const dagSecond = { ...dagNode, taskId: "t2", title: "Then", deps: ["t1"], layer: 1 };
+    const twoRows = [firstRow, secondRow];
+    // Every case starts from this valid two-node graph and changes exactly one thing.
+    const validTwo = { ...view, dag: { revision: 1, tasks: [dagNode, dagSecond] }, tasks: twoRows };
+    expect(RunDetailViewSchema.safeParse(validTwo).success).toBe(true);
+
+    // Declaration order need not be topological: a diamond whose join node comes first is valid.
+    const thirdRow = { ...firstRow, taskId: "t3", title: "Join" };
+    const join = { ...dagNode, taskId: "t3", title: "Join", deps: ["t1", "t2"], layer: 2 };
+    const diamond = {
+      ...view,
+      dag: { revision: 1, tasks: [join, dagNode, dagSecond] },
+      tasks: [firstRow, secondRow, thirdRow],
+    };
+    expect(RunDetailViewSchema.safeParse(diamond).success).toBe(true);
+
+    const issuePaths = (candidate: unknown): string[] | null => {
+      const result = RunDetailViewSchema.safeParse(candidate);
+      return result.success ? null : result.error.issues.map((issue) => issue.path.join("."));
+    };
+    const dagCases: { id: string; dag: unknown; path: string; only?: boolean }[] = [
+      {
+        id: "revision",
+        dag: { revision: 2, tasks: [dagNode, dagSecond] },
+        path: "dag.revision",
+        only: true,
+      },
+      {
+        id: "title",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, title: "Other" }] },
+        path: "dag.tasks.1",
+        only: true,
+      },
+      {
+        id: "state",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, state: "done" }] },
+        path: "dag.tasks.1",
+        only: true,
+      },
+      {
+        id: "layer-disagrees-with-deps",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, layer: 0 }] },
+        path: "dag.tasks.1.layer",
+        only: true,
+      },
+      {
+        id: "self-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["t1", "t2"] }] },
+        path: "dag.tasks.1.deps",
+      },
+      {
+        id: "duplicate-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["t1", "t1"] }] },
+        path: "dag.tasks.1.deps",
+        only: true,
+      },
+      {
+        id: "missing-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["ghost"] }] },
+        path: "dag.tasks.1.deps",
+      },
+      {
+        id: "missing-dag-task",
+        dag: { revision: 1, tasks: [dagNode] },
+        path: "dag.tasks",
+        only: true,
+      },
+      {
+        id: "duplicate-dag-task",
+        dag: { revision: 1, tasks: [dagNode, dagSecond, dagSecond] },
+        path: "dag.tasks.2.taskId",
+        only: true,
+      },
+      {
+        id: "cycle",
+        dag: {
+          revision: 1,
+          tasks: [
+            { ...dagNode, deps: ["t2"], layer: 1 },
+            { ...dagSecond, deps: ["t1"], layer: 1 },
+          ],
+        },
+        path: "dag.tasks.0.deps",
+      },
+    ];
+    for (const entry of dagCases) {
+      const paths = issuePaths({ ...view, dag: entry.dag, tasks: twoRows });
+      expect(paths, entry.id).not.toBeNull();
+      expect(paths, entry.id).toContain(entry.path);
+      // A case that must fail for exactly one reason is not allowed to fail for another.
+      if (entry.only) expect(paths, entry.id).toEqual([entry.path]);
+    }
     // Compile-time guard: a parsed ledger record is structurally incompatible with the view.
     const ledgerRecord: RunRecord = RunRecordSchema.parse(runRecord());
     // @ts-expect-error a ledger record must not be assignable to the redacted view
