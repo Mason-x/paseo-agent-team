@@ -6,7 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 type Effect = {
   deps?: unknown[];
   cleanup?: () => void;
-  setup: () => (() => void) | void;
+  setup: () => (() => void) | undefined;
   run: boolean;
 };
 const rt = vi.hoisted(() => ({
@@ -62,7 +62,7 @@ vi.mock("react", () => {
     useCallback<T>(fn: T, deps: unknown[]) {
       return memo(() => fn, deps);
     },
-    useEffect(setup: () => (() => void) | void, deps?: unknown[]) {
+    useEffect(setup: () => (() => void) | undefined, deps?: unknown[]) {
       const fiber = f();
       const i = fiber.i++;
       const prev = fiber.effects[i] as Effect | undefined;
@@ -115,28 +115,38 @@ const output = (): TeamPlanOutput => ({
 
 describe("useTeamPlans first paint", () => {
   test("ten saved Teams send one batch and no empty probe", async () => {
+    vi.useFakeTimers();
     const send = vi.fn(async (_input: TeamPlanInput) => output());
     const fiber = { slots: [] as unknown[], i: 0, effects: [] as Effect[] };
-    rt.cur = fiber;
-    (useTeamPlans as (options: unknown) => unknown)({
-      hostId: "host-a",
-      profiles: [claudeOpus, codexXhigh],
-      revisions: { roles: "r1", teams: "t1", preferences: "p1" },
-      teams,
-      active: true,
-      send,
-    });
-    rt.cur = null;
-    for (const e of fiber.effects.filter((x) => x && x.run)) {
-      e.run = false;
-      e.cleanup = (e.setup() as (() => void) | undefined) ?? undefined;
-    }
-    await Promise.resolve();
-    await Promise.resolve();
+    try {
+      rt.cur = fiber;
+      (useTeamPlans as (options: unknown) => unknown)({
+        hostId: "host-a",
+        profiles: [claudeOpus, codexXhigh],
+        revisions: { roles: "r1", teams: "t1", preferences: "p1" },
+        teams,
+        active: true,
+        send,
+      });
+      rt.cur = null;
+      for (const e of fiber.effects.filter((x) => x?.run)) {
+        e.run = false;
+        e.cleanup = (e.setup() as (() => void) | undefined) ?? undefined;
+      }
+      await Promise.resolve();
+      await Promise.resolve();
 
-    expect(send).toHaveBeenCalledTimes(1);
-    const input = send.mock.calls[0]?.[0] as TeamPlanInput;
-    expect(input.items).toHaveLength(10);
-    expect(send.mock.calls.some(([call]) => call.items.length === 0)).toBe(false);
+      expect(send).toHaveBeenCalledTimes(1);
+      const input = send.mock.calls[0]?.[0] as TeamPlanInput;
+      expect(input.items).toHaveLength(10);
+      expect(send.mock.calls.some(([call]) => call.items.length === 0)).toBe(false);
+    } finally {
+      rt.cur = null;
+      for (const e of [...fiber.effects].reverse()) e?.cleanup?.();
+      fiber.effects = [];
+      vi.runOnlyPendingTimers();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    }
   });
 });

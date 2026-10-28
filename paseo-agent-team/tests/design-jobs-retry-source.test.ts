@@ -6,7 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 type Effect = {
   deps?: unknown[];
   cleanup?: () => void;
-  setup: () => (() => void) | void;
+  setup: () => (() => void) | undefined;
   run: boolean;
 };
 const rt = vi.hoisted(() => ({
@@ -41,7 +41,7 @@ vi.mock("react", () => {
     useCallback<T>(fn: T, deps: unknown[]) {
       return memo(() => fn, deps);
     },
-    useEffect(setup: () => (() => void) | void, deps?: unknown[]) {
+    useEffect(setup: () => (() => void) | undefined, deps?: unknown[]) {
       const fiber = f();
       const i = fiber.i++;
       const prev = fiber.effects[i] as Effect | undefined;
@@ -85,7 +85,7 @@ function mount(props: unknown) {
     fiber.i = 0;
     latest = (useDesignJobs as (o: unknown) => ReturnType<typeof useDesignJobs>)(p);
     rt.cur = null;
-    for (const e of fiber.effects.filter((x) => x && x.run)) {
+    for (const e of fiber.effects.filter((x) => x?.run)) {
       e.run = false;
       e.cleanup = (e.setup() as (() => void) | undefined) ?? undefined;
     }
