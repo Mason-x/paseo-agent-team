@@ -237,13 +237,13 @@ const CONTRACT_GAP = {
   suggestedRole: {
     id: "≤48 slug",
     name: "1–40，前缀按目录",
-    responsibilities: "1–8 项，每项 1–500",
+    responsibilities: "1–8 项",
     executionPolicy: {
       tier: ["decision", "execution", "escalation", "retain"],
       taskKind: ["coding", "testing", "acceptance", "codebase", "ops", "general"],
     },
   },
-  bounds: "gaps 1–8；profileIds 去重",
+  bounds: "gaps 1–8",
   forbidden: ["team", "newRoles", "profileChoices"],
 } as const;
 
@@ -377,7 +377,7 @@ function teamSample(
             { key: "m1", roleId: "eng-fullstack" },
             { key: "m2", roleId: "qa-review" },
           ],
-      collaboration: { replicas: 2, judgeRoleId: "qa-review" },
+      ...(withNewRole ? { collaboration: { replicas: 2, judgeRoleId: "qa-review" } } : {}),
     },
     reuse: withNewRole
       ? [
@@ -411,11 +411,11 @@ function gapSample(input: DesignPromptInput): Record<string, unknown> {
     jobId: input.jobId,
     attempt: input.attempt,
     nonce: input.nonce,
-    summary: "现有 Role 覆盖不了这次数据迁移",
+    summary: "现有 Role 覆盖不了数据迁移",
     gaps: [
       {
         kind: "missing-role",
-        responsibility: "负责数据库迁移与回滚脚本",
+        responsibility: "负责数据库迁移",
         reason: "目录没有承担迁移的 Role",
         use: "member",
         profiles: { kind: "existing", profileIds: ["profile-1"] },
@@ -718,10 +718,14 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   if (rules.version === 1) {
     return "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
   }
+  // AC-0c.6 defines missing-role as "no Role carries the responsibility"; an unverified
+  // availability row proves nothing about the Role, so it must not be reclassified. AC-0c.14
+  // forbids reporting an available route as unlaunchable, so `unknown` reuses the Role and only
+  // notes the unverified availability.
   const launchRule =
-    "memberLaunch/coordinatorLaunch 是该用途的判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=无法核实（不得报 unlaunchable-role，改报 missing-role 或 profiles.none）。两种用途不可互推。";
+    "memberLaunch/coordinatorLaunch 是该用途判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=可用性未核实（照常使用该 Role 并在 reuse.reason 注明；不得声称 Role 缺失或不可启动，只有确实无 Role 承担时才报 missing-role，profiles.none 只表示不提供 Profile）。用途不可互推。";
   if (routing !== undefined) {
-    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选 Profile（不是 Role 绑定），补救是调整「经济：全席位」路由。${launchRule}`;
+    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${launchRule}`;
   }
   return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
 }

@@ -541,6 +541,33 @@ describe("design output contract", () => {
     expect(v1Index[0]).not.toHaveProperty("coordinatorLaunch");
   });
 
+  test("an unknown launch verdict keeps the Role instead of reclassifying the gap", () => {
+    // AC-0c.6: missing-role means no Role carries the responsibility; unverified availability
+    // is neither that nor a proven unlaunchable Role (AC-0c.14), so the prompt must reuse it.
+    const rendered = textOf(
+      kickoff({
+        outputContractVersion: 2,
+        existingRolesOnly: true,
+        roles: [
+          role(1, {
+            launchable: false,
+            launchVerified: false,
+            coordinatorLaunchable: false,
+            coordinatorLaunchVerified: false,
+          }),
+        ],
+      }),
+    );
+    const index = jsonBlockAt(rendered, "Role 索引") as Array<Record<string, unknown>>;
+    expect(index[0]).toMatchObject({
+      memberLaunch: "unknown",
+      coordinatorLaunch: "unknown",
+    });
+    expect(rendered).toContain("照常使用该 Role");
+    expect(rendered).toContain("只有确实无 Role 承担时才报 missing-role");
+    expect(rendered).not.toContain("改报 missing-role");
+  });
+
   test("economy-all v2 renders the route summary and explains the remedy", () => {
     const text = textOf(
       kickoff({
@@ -551,7 +578,7 @@ describe("design output contract", () => {
       }),
     );
     expect(text).toContain("## 经济：全席位路由");
-    expect(text).toContain("不是 Role 绑定");
+    expect(text).toContain("非 Role 绑定");
     expect(text).toContain('"route":"execution"');
     expect(text).toContain('"failedReasons":["unverified","high-cost-family"]');
     expect(text).toContain('"failedIds":["profile-2","profile-3"]');
@@ -646,8 +673,8 @@ describe("design output contract", () => {
   }
 
   test("both switches stay within the 30KiB target, including the 21-Role stress", () => {
-    // catalog / economy-all / 21-Role + 6000-char-notes stress; measured 24357/24668,
-    // 24838/25149 and 30461/30664 bytes (off/on, all <= 30720).
+    // catalog / economy-all / 21-Role + 6000-char-notes stress; measured 24471/24667,
+    // 24941/25137 and 30575/30663 bytes (off/on, all <= 30720; stress-on compressed recipe notes).
     const cases = [
       {},
       { requestedMode: "economy-all" as const, modeRouting: ROUTING },

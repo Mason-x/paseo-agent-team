@@ -222,6 +222,8 @@ describe("C02 designer prompt contract", () => {
     expect(index[0]).toMatchObject({ coordinatorLaunch: "blocked" });
     expect(index[1]).toMatchObject({ launchable: false, memberLaunch: "blocked" });
     expect(index[1]).toMatchObject({ coordinatorLaunch: "ok" });
+    expect(rendered).toContain("照常使用该 Role");
+    expect(rendered).not.toContain("改报 missing-role");
   });
 
   test("both switches stay inside the 30KiB target at catalog size", () => {
