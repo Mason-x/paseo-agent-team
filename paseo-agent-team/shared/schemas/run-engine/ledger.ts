@@ -177,29 +177,54 @@ export const RunTaskSpecShape = {
   implementationPolicy: z.enum(["default", "a-with-s-plan"]),
   architectureTaskId: z.string().min(1).max(64).nullable(),
 };
-export const RunTaskSpecSchema = z
-  .object(RunTaskSpecShape)
-  .passthrough()
-  .superRefine((spec, ctx) => {
-    const expected =
-      spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
-    if (spec.implementationPolicy === "a-with-s-plan") {
-      if (spec.level !== "L4") {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["level"],
-          message: "a-with-s-plan is only valid on L4",
-        });
-      }
-      if (spec.tier !== "A") {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["tier"],
-          message: "a-with-s-plan must execute at tier A",
-        });
-      }
-      return;
+type TaskSpecRefineInput = {
+  id: string;
+  level: RunLevel;
+  tier: RunTier;
+  deps: readonly string[];
+  implementationPolicy: "default" | "a-with-s-plan";
+  architectureTaskId: string | null;
+};
+
+/** Shared by the stored task spec and the strict protocol DAG task spec. */
+export function refineTaskSpec(spec: TaskSpecRefineInput, ctx: z.RefinementCtx): void {
+  const expected =
+    spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
+  if (spec.implementationPolicy === "a-with-s-plan") {
+    if (spec.level !== "L4") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["level"],
+        message: "a-with-s-plan is only valid on L4",
+      });
     }
+    if (spec.tier !== "A") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tier"],
+        message: "a-with-s-plan must execute at tier A",
+      });
+    }
+    if (spec.architectureTaskId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "a-with-s-plan requires an architecture task",
+      });
+    } else if (spec.architectureTaskId === spec.id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "architectureTaskId must not be the task itself",
+      });
+    } else if (!spec.deps.includes(spec.architectureTaskId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "architectureTaskId must be one of deps",
+      });
+    }
+  } else {
     if (spec.tier !== expected) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -207,7 +232,20 @@ export const RunTaskSpecSchema = z
         message: `tier must be ${expected} for ${spec.level}`,
       });
     }
-  });
+    if (spec.architectureTaskId !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "default tasks must not name an architecture task",
+      });
+    }
+  }
+}
+
+export const RunTaskSpecSchema = z
+  .object(RunTaskSpecShape)
+  .passthrough()
+  .superRefine(refineTaskSpec);
 export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 
 /** Evidence summary (05 §3): bounded, redacted, path-only; secrets never enter the ledger. */
@@ -258,7 +296,6 @@ export const RunCancellationEvidenceSchema = z
         observedAt: RunTimeSchema,
       })
       .passthrough(),
-    refreshObservedAt: RunTimeSchema,
     /** Must be ≥ the observationSeq at the refresh that produced this evidence. */
     observationSeq: RunSeqSchema,
     cancelIntentId: RunIdRefSchema,
@@ -511,11 +548,43 @@ export const RunDecisionPointSchema = z
   })
   .passthrough()
   .superRefine((decision, ctx) => {
-    if (decision.state === "answered" && decision.answer === null) {
+    if (decision.state === "answered") {
+      if (decision.answer === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["answer"],
+          message: "an answered decision must record its answer",
+        });
+      } else {
+        if (decision.answeredAt === null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "an answered decision must record answeredAt",
+          });
+        } else if (decision.answeredAt !== decision.answer.answeredAt) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must equal answer.answeredAt",
+          });
+        }
+        if (
+          decision.answeredAt !== null &&
+          Date.parse(decision.answeredAt) < Date.parse(decision.createdAt)
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must not predate createdAt",
+          });
+        }
+      }
+    } else if (decision.answer !== null || decision.answeredAt !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["answer"],
-        message: "an answered decision must record its answer",
+        message: "only answered decisions may carry an answer/answeredAt",
       });
     }
   });
@@ -656,7 +725,11 @@ export const RunModelPlanBasisSchema = z
   .passthrough();
 export type RunModelPlanBasis = z.infer<typeof RunModelPlanBasisSchema>;
 
-/** One B→A/A→S escalation. The chain is validated against the frozen spec tier. */
+/**
+ * One B→A/A→S escalation. `atAttempt` is the attempt that just failed (not the next attempt that
+ * will be dispatched); the reducer records the failure first, then appends this escalation.
+ * The chain is validated against the frozen spec tier.
+ */
 export const RunTaskEscalationSchema = z
   .object({
     fromTier: RunTierSchema,
@@ -705,15 +778,25 @@ export const RunTaskRecordSchema = z
     }
     for (const [index, escalation] of task.escalations.entries()) {
       const previous = index === 0 ? undefined : task.escalations[index - 1];
-      if (
-        previous !== undefined &&
-        (escalation.qualityFailures < previous.qualityFailures ||
-          escalation.atAttempt < previous.atAttempt)
-      ) {
+      if (escalation.qualityFailures === 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["escalations", index, "qualityFailures"],
-          message: "escalation counters must not decrease",
+          message: "escalation qualityFailures must be positive",
+        });
+      }
+      if (previous !== undefined && escalation.qualityFailures <= previous.qualityFailures) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures must strictly increase",
+        });
+      }
+      if (previous !== undefined && escalation.atAttempt <= previous.atAttempt) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "atAttempt"],
+          message: "escalation atAttempt must strictly increase",
         });
       }
       if (escalation.qualityFailures > task.qualityFailures) {

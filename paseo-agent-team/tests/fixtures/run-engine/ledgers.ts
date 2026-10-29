@@ -69,7 +69,6 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-outcome-unknown",
       state: "open",
-      answer: null,
       severity: "critical",
       summary: "Outcome unknown: message may have been delivered; do not resend.",
       createdAt: AT_UPDATED,
@@ -128,7 +127,6 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-cancel-pending",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "Cancel receipt not confirmed; resources stay frozen.",
       createdAt: AT_UPDATED,
@@ -171,6 +169,54 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
       dedupeKey: "run-rec0re-qsc|D1|quiescent|T2",
       subjectId: "T2",
       summary: "Operator approved cancellation after quiescence.",
+      createdAt: AT_UPDATED,
+      answeredAt: AT_UPDATED,
+    },
+  ],
+});
+
+/**
+ * 167 ③: cancellation authorization is already answered, but no release has run yet. This is the
+ * seed R03a consumes with `cancellation-checked`; the task stays blocked+frozen with its claim.
+ */
+export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
+  runId: "run-rec0re-caf",
+  revision: 12,
+  lifecycle: "paused",
+  tasks: [
+    T1,
+    {
+      ...T2,
+      state: "blocked",
+      phase: "frozen",
+      waitingReason: "cancelled-by-operator",
+      frozenClaimId: "claim-t2",
+    } as RunTaskRecord,
+    T3,
+  ],
+  resources: [claim({ frozen: true, taskId: "T2" })],
+  assignments: [
+    assignment({
+      assignmentId: "assignment-t2-a1",
+      attempt: 1,
+      nonce: NONCE_T2,
+      messageId: MESSAGE_T2,
+      state: "assigned",
+      turnId: "turn-7",
+      cancellation: QUIESCENT_CANCELLATION,
+    }),
+  ],
+  outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  decisions: [
+    {
+      decisionId: DECISION_D1,
+      category: "D1",
+      controlNonceDigest: "e".repeat(64),
+      state: "answered",
+      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      dedupeKey: "cancel:T2",
+      subjectId: "T2",
+      summary: "Operator approved cancellation; release still requires quiescence evidence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
     },
@@ -221,7 +267,6 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-missing-seat",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "T2 waits for a qualified seat; its frozen claim is retained.",
       createdAt: AT_UPDATED,

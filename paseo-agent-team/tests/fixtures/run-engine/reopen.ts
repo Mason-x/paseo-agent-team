@@ -186,7 +186,6 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-closed-while-assigned",
       state: "open",
-      answer: null,
       severity: "critical",
       summary: "Reopen failed or not attempted; work attempt is unchanged.",
       createdAt: AT_UPDATED,

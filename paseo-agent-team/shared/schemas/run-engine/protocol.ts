@@ -9,6 +9,7 @@ import {
   RunPathSchema,
   RunScopeShape,
   RunTaskSpecShape,
+  refineTaskSpec,
 } from "./ledger";
 
 /**
@@ -96,14 +97,19 @@ const StrictEvidenceSchema = z.strictObject({
   isolation: z.strictObject({ homePath: RunPathSchema, outsideRealHome: z.boolean() }).optional(),
 });
 
-const ProtocolTaskSpecSchema = z.strictObject({
-  ...RunTaskSpecShape,
-  scopes: z.array(z.strictObject(RunScopeShape)).min(1).max(64),
-  evidence: z.array(z.strictObject(RunEvidenceRequirementShape)).min(1).max(64),
-  irreversible: z
-    .strictObject({ ...RunIrreversibleSpecShape, artifactRef: StrictArtifactRefSchema.nullable() })
-    .nullable(),
-});
+const ProtocolTaskSpecSchema = z
+  .strictObject({
+    ...RunTaskSpecShape,
+    scopes: z.array(z.strictObject(RunScopeShape)).min(1).max(64),
+    evidence: z.array(z.strictObject(RunEvidenceRequirementShape)).min(1).max(64),
+    irreversible: z
+      .strictObject({
+        ...RunIrreversibleSpecShape,
+        artifactRef: StrictArtifactRefSchema.nullable(),
+      })
+      .nullable(),
+  })
+  .superRefine(refineTaskSpec);
 
 export const RunTaskDagBlockSchema = z.strictObject({
   ...ControlIdentityShape,

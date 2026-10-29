@@ -94,7 +94,6 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-budget-sts",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "80% and 100% merged into one D4; no new intent may be submitted.",
       createdAt: AT_UPDATED,
@@ -234,7 +233,6 @@ export const PROBE_FAILED_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-probe-failed",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "Probe ended without completion; channel stays paused and until is empty.",
       createdAt: AT_UPDATED,
@@ -265,7 +263,6 @@ export const PROBE_UNKNOWN_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-probe-unknown",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "Probe outcome unknown; channel remains paused.",
       createdAt: AT_UPDATED,

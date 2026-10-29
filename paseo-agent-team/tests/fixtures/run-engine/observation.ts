@@ -55,7 +55,6 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
     {
       alertId: "alert-permission",
       state: "open",
-      answer: null,
       severity: "warning",
       summary: "Permission request needs a human; the engine never responds to it.",
       createdAt: AT_UPDATED,
