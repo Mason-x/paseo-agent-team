@@ -10,6 +10,7 @@ import {
   PROFILE_HAIKU,
   probeIntent,
   spec,
+  T3_ASSIGNMENT,
   t1,
   t2,
   taskRecord,
@@ -36,7 +37,7 @@ function pausedChannel(until: string | null, incidentId = "incident-claude-1"): 
 export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-ctl",
   nonceRegistry: noncesForRun("run-rec0re-ctl"),
-  assignments: assignmentsForRun("run-rec0re-ctl"),
+  assignments: [...assignmentsForRun("run-rec0re-ctl"), T3_ASSIGNMENT],
   revision: 21,
   tasks: [
     {

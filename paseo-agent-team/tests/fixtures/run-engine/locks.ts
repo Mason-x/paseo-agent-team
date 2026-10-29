@@ -10,6 +10,7 @@ import {
   PROFILE_HAIKU,
   probeIntent,
   REPO_ID,
+  T3_ASSIGNMENT,
   withLedger,
 } from "./base";
 import type { ChannelFixture, LedgerFixture } from "./types";
@@ -44,7 +45,7 @@ export const LOCK_CONFLICT_RUN_A: LedgerFixture = withLedger({
 export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
   nonceRegistry: noncesForRun("run-rec0re-lkb"),
-  assignments: assignmentsForRun("run-rec0re-lkb"),
+  assignments: [...assignmentsForRun("run-rec0re-lkb"), T3_ASSIGNMENT],
   revision: 6,
   resources: [
     claim({

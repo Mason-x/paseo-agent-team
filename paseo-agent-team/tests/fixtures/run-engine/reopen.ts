@@ -65,6 +65,7 @@ export const CLOSED_AFTER_REPORT_LEDGER: LedgerFixture = withLedger({
       turnId: "turn-7",
       startedAt: AT_CREATED,
       endedAt: AT_UPDATED,
+      endedEventKey: "agent-b1|turn-7|turn_ended",
     }),
   ],
   eventReceipts: [
@@ -207,6 +208,7 @@ export const REOPEN_STARTED_LEDGER: LedgerFixture = withLedger({
   nonceRegistry: noncesForRun("run-rec0re-rpn"),
   revision: 18,
   tasks: [t1, { ...t2, state: "in_progress", phase: "implementation" } as RunTaskRecord, t3],
+  resources: [claim({ originAssignmentId: "assignment-t2-a2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a2",

@@ -139,23 +139,44 @@ function assertAssociations(id: string, record: LedgerFixture): void {
         expect(dispatch.recipient).toBe(assignment.agentId);
         expect(dispatch.messageId).toBe(assignment.messageId);
       }
-      if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
-        expect(assignment.delivery, `${id} delivery`).not.toBeNull();
-        const producerId = assignment.delivery?.producerAssignmentId;
-        const producer = record.assignments.find((entry) => entry.assignmentId === producerId);
-        expect(producer, `${id} producer`).toBeDefined();
-        expect(producer?.taskId).toBe(assignment.taskId);
-        expect(producer?.attempt).toBe(assignment.attempt);
-        expect(producer?.acceptedProof).not.toBeNull();
-        if (producer?.acceptedProof && "status" in producer.acceptedProof) {
-          expect(producer.acceptedProof.status).toBe("done");
-        }
-      } else {
+      if (assignment.purpose !== "reviewer" && assignment.purpose !== "smoker") {
         expect(assignment.delivery).toBeNull();
       }
     } else if (nonce) {
       expect(nonce.acceptedAt, `${id} unaccepted At`).toBeNull();
       expect(nonce.acceptedEventKey, `${id} unaccepted key`).toBeNull();
+    }
+    const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
+    expect(task, `${id} assignment task`).toBeDefined();
+    const seat = record.roster.find((entry) => entry.seatId === assignment.seatId);
+    expect(seat, `${id} roster seat`).toBeDefined();
+    if (seat) {
+      expect(seat.agentId, `${id} seat agent`).toBe(assignment.agentId);
+      expect(seat.tier, `${id} seat tier`).toBe(assignment.tier);
+      if (task) {
+        const duty =
+          assignment.purpose === "reviewer"
+            ? task.spec.dispatchDuties.review
+            : assignment.purpose === "smoker"
+              ? task.spec.dispatchDuties.smoke
+              : task.spec.dispatchDuties.produce;
+        expect(duty, `${id} duty`).not.toBeNull();
+        if (duty) expect(seat.duties, `${id} seat duty`).toContain(duty);
+      }
+    }
+    if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
+      expect(assignment.delivery, `${id} delivery`).not.toBeNull();
+      const producerId = assignment.delivery?.producerAssignmentId;
+      const producer = record.assignments.find((entry) => entry.assignmentId === producerId);
+      expect(producer, `${id} producer`).toBeDefined();
+      expect(producer?.taskId).toBe(assignment.taskId);
+      expect(producer?.attempt).toBe(assignment.attempt);
+      expect(producer?.acceptedProof).not.toBeNull();
+      if (producer?.acceptedProof && "status" in producer.acceptedProof) {
+        expect(producer.acceptedProof.status).toBe("done");
+      }
+      expect(producer?.agentId, `${id} independent agent`).not.toBe(assignment.agentId);
+      expect(producer?.seatId, `${id} independent seat`).not.toBe(assignment.seatId);
     }
     if (assignment.cancellation) {
       const cancelIntent = record.outbox.find(
@@ -168,6 +189,17 @@ function assertAssociations(id: string, record: LedgerFixture): void {
         expect(cancelIntent.assignmentId).toBe(assignment.assignmentId);
         expect(cancelIntent.recipient).toBe(assignment.agentId);
       }
+    }
+    if (assignment.state === "ended") {
+      expect(assignment.turnId, `${id} ended turn required`).not.toBeNull();
+      expect(assignment.endedAt, `${id} ended at required`).not.toBeNull();
+      expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
+    }
+    if (assignment.state === "cancelled") {
+      expect(
+        assignment.cancellation !== null || assignment.endedEventKey !== null,
+        `${id} cancelled evidence`,
+      ).toBe(true);
     }
     if (assignment.endedEventKey !== null) {
       expect(assignment.turnId, `${id} ended turn`).not.toBeNull();
@@ -183,12 +215,34 @@ function assertAssociations(id: string, record: LedgerFixture): void {
       expect(receipt, `${id} ended receipt`).toBeDefined();
     }
   }
+  for (const task of record.tasks) {
+    const producers = record.assignments.filter(
+      (entry) =>
+        entry.taskId === task.spec.id &&
+        ["member", "coordinator", "reopen"].includes(entry.purpose) &&
+        entry.acceptedProof !== null &&
+        "status" in entry.acceptedProof &&
+        entry.acceptedProof.status === "done",
+    );
+    producers.sort((a, b) => b.attempt - a.attempt);
+    const proof = producers[0]?.acceptedProof;
+    if (proof && "ref" in proof && "changedFiles" in proof) {
+      expect(task.ref, `${id} task cache ref`).toEqual(proof.ref);
+      expect(task.changedFiles, `${id} task cache files`).toEqual(proof.changedFiles);
+    }
+  }
   for (const claim of record.resources) {
     expect(claim.originAssignmentId, `${id} claim origin`).toMatch(/^assignment-/);
     const origin = record.assignments.find(
       (entry) => entry.assignmentId === claim.originAssignmentId,
     );
-    if (origin) expect(origin.taskId, `${id} claim origin task`).toBe(claim.taskId);
+    expect(origin, `${id} claim origin exists`).toBeDefined();
+    if (origin) {
+      expect(origin.taskId, `${id} claim origin task`).toBe(claim.taskId);
+      expect(["member", "coordinator", "reopen"], `${id} claim origin purpose`).toContain(
+        origin.purpose,
+      );
+    }
   }
   for (const decision of record.decisions) {
     if (decision.cancelIntents === null) continue;
@@ -592,6 +646,17 @@ describe("run engine fixtures against R01 schemas", () => {
           );
           expect(intent?.messageId, `${id} accepted dispatch`).toBe(assignment.messageId);
         }
+        if (assignment.state === "ended") {
+          expect(assignment.turnId, `${id} ended turn required`).not.toBeNull();
+          expect(assignment.endedAt, `${id} ended at required`).not.toBeNull();
+          expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
+        }
+        if (assignment.state === "cancelled") {
+          expect(
+            assignment.cancellation !== null || assignment.endedEventKey !== null,
+            `${id} cancelled evidence`,
+          ).toBe(true);
+        }
         if (assignment.endedEventKey !== null) {
           expect(
             ledger.eventReceipts.some(
@@ -650,12 +715,6 @@ describe("run engine fixtures against R01 schemas", () => {
         if (dispatch) dispatch.recipient = "other-agent";
       },
       (record) => {
-        const reviewer = record.assignments.find(
-          (entry) => entry.assignmentId === "assignment-t1-r1",
-        );
-        if (reviewer) reviewer.delivery = null;
-      },
-      (record) => {
         const claimEntry = record.resources[0];
         if (claimEntry) claimEntry.originAssignmentId = "assignment-t1-a1";
       },
@@ -664,11 +723,69 @@ describe("run engine fixtures against R01 schemas", () => {
           (entry) => entry.eventKey !== "agent-b1|turn-6|turn_ended",
         );
       },
+      (record) => {
+        const claimEntry = record.resources[0];
+        if (claimEntry) claimEntry.originAssignmentId = "assignment-missing";
+      },
+      (record) => {
+        const assignment = record.assignments.find(
+          (entry) => entry.assignmentId === "assignment-t1-a1",
+        );
+        if (assignment) assignment.endedEventKey = null;
+      },
+      (record) => {
+        const index = record.assignments.findIndex(
+          (entry) => entry.assignmentId === "assignment-t1-r1",
+        );
+        if (index >= 0) {
+          const current = record.assignments[index];
+          if (!current) throw new Error("missing reviewer assignment");
+          record.assignments[index] = {
+            ...current,
+            acceptedProof: null,
+            delivery: { producerAssignmentId: "assignment-missing" },
+            state: "assigned",
+            turnId: null,
+            endedAt: null,
+            endedEventKey: null,
+          };
+        }
+        const nonce = record.nonceRegistry.find(
+          (entry) => entry.assignmentId === "assignment-t1-r1",
+        );
+        if (nonce) {
+          nonce.acceptedAt = null;
+          nonce.acceptedEventKey = null;
+        }
+      },
+      (record) => {
+        const producer = record.assignments.find(
+          (entry) => entry.assignmentId === "assignment-t1-a1",
+        );
+        const reviewer = record.assignments.find(
+          (entry) => entry.assignmentId === "assignment-t1-r1",
+        );
+        if (producer && reviewer) reviewer.seatId = producer.seatId;
+      },
+      (record) => {
+        record.roster = record.roster.filter((seat) => seat.seatId !== "seat-a-smoke");
+      },
     ];
-    for (const mutate of cases) {
-      const record = structuredClone(base);
+    for (const [index, mutate] of cases.entries()) {
+      const record =
+        index === cases.length - 1
+          ? structuredClone(DEV_SMOKE_READY_LEDGER)
+          : structuredClone(base);
       mutate(record);
-      expect(() => assertAssociations("mutated", record)).toThrow();
+      const parsed = RunRecordSchema.safeParse(record);
+      expect(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues)).toBe(true);
+      let caught = false;
+      try {
+        assertAssociations("mutated", record);
+      } catch {
+        caught = true;
+      }
+      expect(caught, `validator mutation ${index}`).toBe(true);
     }
   });
 

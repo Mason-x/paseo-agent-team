@@ -36,6 +36,7 @@ export const NONCE_PROBE = "6f1c2a44-3b7e-4f0a-9a11-000000000006";
 
 export const MESSAGE_T1 = "11111111-1111-4111-8111-111111111111";
 export const MESSAGE_T2 = "22222222-2222-4222-8222-222222222222";
+export const MESSAGE_T3 = "23232323-2323-4232-8232-232323232323";
 export const MESSAGE_CANCEL = "33333333-3333-4333-8333-333333333333";
 export const MESSAGE_PROBE = "44444444-4444-4444-8444-444444444444";
 export const MESSAGE_REOPEN = "55555555-5555-4555-8555-555555555555";
@@ -433,7 +434,7 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
     },
     {
       seatId: "seat-b2",
-      tier: "B",
+      tier: "A",
       agentId: "agent-b2",
       channelId: "claude",
       duties: ["review"],
@@ -691,6 +692,15 @@ export function assignmentsForRun(runId: string) {
     acceptedProof: entry.acceptedProof === null ? null : { ...entry.acceptedProof, runId },
   }));
 }
+
+export const T3_ASSIGNMENT: RunAssignment = assignment({
+  assignmentId: "assignment-t3-a1",
+  taskId: "t3",
+  attempt: 1,
+  nonce: NONCE_T3,
+  messageId: MESSAGE_T3,
+  workspace: { id: "ws-run-rec0re-a1-t3", branch: "re-rec0rea1-t3-a1-1", baseRef: "main" },
+});
 
 /** Explicitly rebind the known nonce registrations to a fixture Run. */
 export function noncesForRun(runId: string) {

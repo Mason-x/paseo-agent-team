@@ -3,6 +3,7 @@
 import {
   ASSIGNMENT_T2,
   AT_UPDATED,
+  assignment,
   assignmentsForRun,
   claim,
   MESSAGE_T2,
@@ -29,6 +30,8 @@ export const EVIDENCE_INCOMPLETE_LEDGER: LedgerFixture = withLedger({
       state: "in_progress",
       phase: "review",
       evidenceReturns: 1,
+      ref: { kind: "git-commit", value: "b7e4d10" },
+      changedFiles: ["src/t2.ts"],
     } as RunTaskRecord,
     t3,
   ],
@@ -87,18 +90,108 @@ export const EVIDENCE_INCOMPLETE_LEDGER: LedgerFixture = withLedger({
 /** RE3.3 / Y2: the review verdict predates the current ref, so it cannot unlock done. */
 export const STALE_REVIEW_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-stl",
-  nonceRegistry: noncesForRun("run-rec0re-stl"),
-  assignments: assignmentsForRun("run-rec0re-stl"),
   revision: 20,
   tasks: [
     {
       ...t1,
       ref: { kind: "git-commit", value: "c9f5e22" },
       changedFiles: ["src/t1.ts"],
+      attempts: 2,
     } as RunTaskRecord,
     t2,
     t3,
   ],
+  assignments: [
+    ...assignmentsForRun("run-rec0re-stl"),
+    {
+      ...assignment({
+        assignmentId: "assignment-t1-a2",
+        taskId: "t1",
+        attempt: 2,
+        nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000009",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9",
+        state: "ended",
+        turnId: "turn-9",
+        endedAt: AT_UPDATED,
+      }),
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: "run-rec0re-stl",
+        taskId: "t1",
+        attempt: 2,
+        nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000009",
+        assignmentId: "assignment-t1-a2",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9",
+        status: "done" as const,
+        changedFiles: ["src/t1.ts"],
+        ref: { kind: "git-commit" as const, value: "c9f5e22" },
+        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-2", baseRef: "main" },
+        evidence: [
+          {
+            id: "five-gates",
+            command: "npm run check && npm run typecheck && npm test",
+            exitCode: 0,
+            summary: "all gates passed",
+            artifactPath: "evidence/t1-a2.log",
+            ref: { kind: "git-commit" as const, value: "c9f5e22" },
+          },
+        ],
+      },
+      endedEventKey: "agent-b1|turn-9|turn_ended",
+    },
+  ],
+  outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
+    {
+      id: "intent-t1-a2",
+      kind: "dispatch",
+      recipient: "agent-b1",
+      messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9",
+      idempotencyKey: "dispatch-t1-a2",
+      payloadHash: "d".repeat(64),
+      templateVersion: 1,
+      state: "confirmed",
+      recoverySendCount: 0,
+      createdAt: AT_UPDATED,
+      confirmedAt: AT_UPDATED,
+      localCancellation: null,
+      taskId: "t1",
+      assignmentId: "assignment-t1-a2",
+      semanticArgs: { promptBytes: 1 },
+    },
+  ],
+  nonceRegistry: [
+    ...noncesForRun("run-rec0re-stl"),
+    {
+      nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000009",
+      runId: "run-rec0re-stl",
+      taskId: "t1",
+      assignmentId: "assignment-t1-a2",
+      attempt: 2,
+      phase: "implementation",
+      agentId: "agent-b1",
+      seatId: "seat-b1",
+      issuedAt: AT_UPDATED,
+      acceptedAt: AT_UPDATED,
+      acceptedEventKey: "proof:assignment-t1-a2",
+      revokedAt: null,
+      revokeReason: null,
+    },
+  ],
+  eventReceipts: [
+    ...NORMAL_RUN_LEDGER.eventReceipts,
+    {
+      eventKey: "agent-b1|turn-9|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b1",
+      turnId: "turn-9",
+      seq: 9,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b1|turn-9|turn_ended",
+      disposition: "accepted",
+    },
+  ],
+  counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 9 },
 });
 
 const T6_SMOKE_CHECKS = {
@@ -138,7 +231,13 @@ function devSmokeLedger(
       level: "L3",
       scopes: [{ repoId: "repo-re-verify", kind: "file", path: "ui/runs.tsx", access: "write" }],
     }),
-    { state: "in_progress", phase: "smoke", currentAssignmentId: smoker },
+    {
+      state: "in_progress",
+      phase: "smoke",
+      currentAssignmentId: smoker,
+      ref,
+      changedFiles: ["ui/runs.tsx"],
+    },
   );
   const evidence = [
     {
@@ -174,6 +273,7 @@ function devSmokeLedger(
     revision: 22,
     lifecycle: "paused",
     tasks: [t1, t6, t3],
+    resources: [],
     roster: [
       ...NORMAL_RUN_LEDGER.roster,
       {
@@ -202,7 +302,7 @@ function devSmokeLedger(
       },
     ],
     assignments: [
-      ...assignmentsForRun(runId),
+      ...assignmentsForRun(runId).filter((entry) => entry.taskId !== "t2"),
       {
         ...assignmentBase,
         assignmentId: producer,
@@ -282,7 +382,7 @@ function devSmokeLedger(
       },
     ],
     outbox: [
-      ...NORMAL_RUN_LEDGER.outbox,
+      ...NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId !== "t2"),
       {
         id: "intent-t6-a1",
         kind: "dispatch",
@@ -336,7 +436,7 @@ function devSmokeLedger(
       },
     ],
     nonceRegistry: [
-      ...noncesForRun(runId),
+      ...noncesForRun(runId).filter((entry) => entry.taskId !== "t2"),
       ...[
         {
           nonce: producerNonce,
@@ -429,6 +529,8 @@ function devSmokeLedger(
       : {}),
   });
 }
+
+/** RE3.4 / Y4: devSmoke is pending, the smoke target is the real default daemon alias. */
 
 /** RE3.4 / Y4: devSmoke is pending, the smoke target is the real default daemon alias. */
 export const DEV_SMOKE_MISSING_LEDGER: LedgerFixture = devSmokeLedger("run-rec0re-smk", {
