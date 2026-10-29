@@ -7,8 +7,8 @@ import {
   PROFILE_HAIKU,
   probeIntent,
   spec,
-  T1,
-  T2,
+  t1,
+  t2,
   taskRecord,
   withLedger,
 } from "./base";
@@ -35,27 +35,27 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   revision: 21,
   tasks: [
     {
-      ...T1,
+      ...t1,
       state: "blocked",
       waitingReason: "protocol-failures-exhausted",
       protocolFailures: 2,
     } as RunTaskRecord,
     {
-      ...T2,
+      ...t2,
       state: "review",
       phase: "awaiting-rework",
       evidenceReturns: 3,
       reworkCount: 2,
     } as RunTaskRecord,
     {
-      ...taskRecord(spec("T3", "Docs"), {
+      ...taskRecord(spec("t3", "Docs"), {
         state: "in_progress",
         phase: "implementation",
         attempts: 6,
       }),
     },
   ],
-  resources: [claim({ claimId: "claim-t3", taskId: "T3", path: "docs/run-engine" })],
+  resources: [claim({ claimId: "claim-t3", taskId: "t3", path: "docs/run-engine" })],
   budgets: {
     entries: [
       {
@@ -88,6 +88,9 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
       summary: "seat-b1 reached 80% and 100% in one revision; one merged decision.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
   alerts: [
@@ -135,7 +138,7 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
       enabled: true,
     },
   ],
-  tasks: [T1],
+  tasks: [t1],
   resources: [],
   assignments: [],
   outbox: [],

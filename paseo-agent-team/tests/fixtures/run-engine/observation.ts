@@ -7,9 +7,9 @@ import {
   DECISION_D6,
   NORMAL_RUN_LEDGER,
   spec,
-  T1,
-  T2,
-  T3,
+  t1,
+  t2,
+  t3,
   taskRecord,
   withLedger,
 } from "./base";
@@ -37,9 +37,9 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-per",
   revision: 27,
   tasks: [
-    T1,
-    { ...T2, phase: "implementation", waitingReason: "permission-pending" } as RunTaskRecord,
-    T3,
+    t1,
+    { ...t2, phase: "implementation", waitingReason: "permission-pending" } as RunTaskRecord,
+    t3,
   ],
   events: [
     ...NORMAL_RUN_LEDGER.events,
@@ -47,7 +47,7 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
       seq: 8,
       kind: "permission_requested",
       at: AT_UPDATED,
-      payload: { taskId: "T2", agentId: "agent-b1", requestId: "perm-1" },
+      payload: { taskId: "t2", agentId: "agent-b1", requestId: "perm-1" },
     },
   ],
   decisions: [],
@@ -69,9 +69,9 @@ export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-irr",
   revision: 28,
   tasks: [
-    T1,
+    t1,
     taskRecord(
-      spec("T2", "Publish release", {
+      spec("t2", "Publish release", {
         irreversible: {
           kind: "push",
           target: "refs/heads/main",
@@ -81,7 +81,7 @@ export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
       }),
       { state: "ready", waitingReason: "awaiting-approval", attempts: 0 },
     ),
-    T3,
+    t3,
   ],
   resources: [],
   assignments: [],
@@ -116,16 +116,16 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
   revision: 30,
   lifecycle: "finished",
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "done",
       phase: "review",
       ref: { kind: "git-commit", value: "b7e4d10" },
       changedFiles: ["src/t2.ts"],
     } as RunTaskRecord,
     {
-      ...T3,
+      ...t3,
       state: "done",
       ref: { kind: "git-commit", value: "e1a9c33" },
       changedFiles: ["docs/run-engine/readme.md"],
@@ -146,6 +146,9 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
       summary: "Phase complete; awaiting strategic close-out.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
     {
       decisionId: DECISION_D4,
@@ -158,6 +161,9 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
       summary: "Budget increase approved before the last task.",
       createdAt: AT_CREATED,
       answeredAt: AT_UPDATED,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
 });

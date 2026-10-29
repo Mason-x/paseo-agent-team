@@ -12,9 +12,9 @@ import {
   NONCE_T2,
   PROFILE_HAIKU,
   reopenIntent,
-  T1,
-  T2,
-  T3,
+  t1,
+  t2,
+  t3,
   withLedger,
 } from "./base";
 import type { LedgerFixture, RunReopenGrant, RunTaskRecord } from "./types";
@@ -42,17 +42,17 @@ export const CLOSED_AFTER_REPORT_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-clr",
   revision: 13,
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "review",
       phase: "review",
       ref: { kind: "git-commit", value: "4c8d2e1" },
       changedFiles: ["src/t2.ts"],
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a1",
@@ -113,17 +113,17 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
   revision: 17,
   lifecycle: "paused",
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "blocked",
       phase: "implementation",
       waitingReason: "closed-while-assigned-without-report",
       ref: null,
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a1",
@@ -175,11 +175,14 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
       controlNonceDigest: "e".repeat(64),
       state: "open",
       answer: null,
-      dedupeKey: "run-rec0re-cla|D1|closed-while-assigned|T2",
-      subjectId: "T2",
+      dedupeKey: "run-rec0re-cla|D1|closed-while-assigned|t2",
+      subjectId: "t2",
       summary: "Agent closed while assigned and no report arrived; work attempt is unchanged.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
   alerts: [
@@ -199,7 +202,7 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
 export const REOPEN_STARTED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-rpn",
   revision: 18,
-  tasks: [T1, { ...T2, state: "in_progress", phase: "implementation" } as RunTaskRecord, T3],
+  tasks: [t1, { ...t2, state: "in_progress", phase: "implementation" } as RunTaskRecord, t3],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a2",

@@ -1,10 +1,10 @@
 // Corrupt and boundary inputs for the ledger reader. Nothing here is meant to parse as a record:
 // the point is that a reader must preserve the original bytes, project an error, and never treat
 // a damaged file as an empty or migrated ledger.
-import { NORMAL_RUN_LEDGER, T2 } from "./base";
+import { NORMAL_RUN_LEDGER, t2 } from "./base";
 
 const TRUNCATED_TEXT =
-  '{"schemaVersion":1,"runId":"run-rec0re-tr1","revision":3,"tasks":[{"id":"T1","status":"do';
+  '{"schemaVersion":1,"runId":"run-rec0re-tr1","revision":3,"tasks":[{"id":"t1","status":"do';
 
 /** I1 / Y15: byte-level damage. Readers must not surface half a record as valid. */
 export const CORRUPT_JSON_TEXTS: readonly { id: string; text: string; damage: string }[] = [
@@ -93,7 +93,7 @@ export const UNKNOWN_TASK_STATUS_RECORD: unknown = {
   ...NORMAL_RUN_LEDGER,
   runId: "run-rec0re-sts",
   revision: 5,
-  tasks: [{ ...T2, state: "awaiting-human" }],
+  tasks: [{ ...t2, state: "awaiting-human" }],
 };
 
 /** Diagnosis sidecar inputs: a corrupt record and the digest that names its issues file. */

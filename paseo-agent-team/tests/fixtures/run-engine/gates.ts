@@ -1,6 +1,6 @@
 // Inputs for the three gates (evidence / independent review / DEV smoke). Each ledger stops its
 // task one step before or at the gate; the expected verdict belongs to the R03/R05 cases.
-import { AT_UPDATED, claim, PROFILE_HAIKU, spec, T1, T2, T3, taskRecord, withLedger } from "./base";
+import { AT_UPDATED, claim, PROFILE_HAIKU, spec, t1, t2, t3, taskRecord, withLedger } from "./base";
 import type { LedgerFixture, RunTaskRecord } from "./types";
 
 /** RE3.2 / Y1: a done report whose evidence failed a gate; must stay in_progress. */
@@ -8,9 +8,9 @@ export const EVIDENCE_INCOMPLETE_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-evd",
   revision: 19,
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "in_progress",
       phase: "review",
       evidenceReturns: 1,
@@ -30,13 +30,13 @@ export const EVIDENCE_INCOMPLETE_LEDGER: LedgerFixture = withLedger({
             id: "coverage",
             command: "npm run test:coverage",
             exitCode: 0,
-            summary: "",
+            summary: "coverage captured",
             artifactPath: "evidence/cov.log",
           },
         ],
       },
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
   resources: [claim({ frozen: false })],
 });
@@ -47,7 +47,7 @@ export const STALE_REVIEW_LEDGER: LedgerFixture = withLedger({
   revision: 20,
   tasks: [
     {
-      ...T1,
+      ...t1,
       ref: { kind: "git-commit", value: "c9f5e22" },
       changedFiles: ["src/t1.ts"],
       reviews: [
@@ -60,8 +60,8 @@ export const STALE_REVIEW_LEDGER: LedgerFixture = withLedger({
         },
       ],
     } as RunTaskRecord,
-    T2,
-    T3,
+    t2,
+    t3,
   ],
 });
 
@@ -70,9 +70,9 @@ export const DEV_SMOKE_MISSING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-smk",
   revision: 21,
   tasks: [
-    T1,
+    t1,
     taskRecord(
-      spec("T6", "UI smoke", {
+      spec("t6", "UI smoke", {
         devSmoke: true,
         smokeChecklist: ["open runs tab", "start team", "observe one run"],
         tier: "A",
@@ -91,7 +91,7 @@ export const DEV_SMOKE_MISSING_LEDGER: LedgerFixture = withLedger({
         },
       },
     ),
-    T3,
+    t3,
   ],
 });
 
@@ -100,9 +100,9 @@ export const DEV_SMOKE_READY_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-smr",
   revision: 22,
   tasks: [
-    T1,
+    t1,
     taskRecord(
-      spec("T6", "UI smoke", {
+      spec("t6", "UI smoke", {
         devSmoke: true,
         smokeChecklist: ["open runs tab", "start team"],
         tier: "A",
@@ -124,7 +124,7 @@ export const DEV_SMOKE_READY_LEDGER: LedgerFixture = withLedger({
         },
       },
     ),
-    T3,
+    t3,
   ],
   alerts: [
     {

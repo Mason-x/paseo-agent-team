@@ -14,6 +14,7 @@ import {
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
   RUN_TASK_PHASES,
+  RunAssignmentSchema,
   RunCancellationEvidenceSchema,
   RunDecisionPointSchema,
   RunEffectIntentSchema,
@@ -25,6 +26,9 @@ import {
   RunRecordSchema,
   RunReopenGrantSchema,
   RunResourceClaimSchema,
+  RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
+  RunStoredTaskReportSchema,
   RunTaskPhaseSchema,
   RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
@@ -39,6 +43,7 @@ import {
   RUN_HISTORY_CURSOR_EXPIRED,
   RUN_READ_FAILURE_CODES,
   RunControlInputSchema,
+  RunDecisionViewSchema,
   type RunDetailView,
   RunDetailViewSchema,
   RunGetInputSchema,
@@ -62,7 +67,7 @@ function artifactRef() {
 }
 
 function taskSpec(overrides: Record<string, unknown> = {}) {
-  return {
+  const merged = {
     id: "t1",
     title: "Ship the change",
     goal: "Implement the requested change.",
@@ -83,6 +88,14 @@ function taskSpec(overrides: Record<string, unknown> = {}) {
     implementationPolicy: "default",
     architectureTaskId: null,
     ...overrides,
+  } as Record<string, unknown>;
+  return {
+    ...merged,
+    dispatchDuties: overrides.dispatchDuties ?? {
+      produce: "implement",
+      review: "review",
+      smoke: merged.devSmoke ? "smoke" : null,
+    },
   };
 }
 
@@ -120,7 +133,7 @@ function taskRecord(overrides: Record<string, unknown> = {}) {
 }
 
 function assignment(overrides: Record<string, unknown> = {}) {
-  return {
+  const merged = {
     assignmentId: ASSIGNMENT_ID,
     taskId: "t1",
     seatId: "seat-b1",
@@ -138,12 +151,22 @@ function assignment(overrides: Record<string, unknown> = {}) {
     attempt: 1,
     nonce: NONCE,
     messageId: MESSAGE_ID,
+    delivery: null,
+    acceptedProof: null,
+    endedEventKey: null,
     turnId: null,
     state: "assigned",
     createdAt: NOW,
     startedAt: null,
     endedAt: null,
     ...overrides,
+  } as Record<string, unknown>;
+  const review = merged.purpose === "reviewer" || merged.purpose === "smoker";
+  return {
+    ...merged,
+    delivery: merged.delivery ?? (review ? { producerAssignmentId: "assignment-producer" } : null),
+    acceptedProof: merged.acceptedProof ?? null,
+    endedEventKey: merged.endedEventKey ?? null,
   };
 }
 
@@ -263,6 +286,7 @@ function runRecord(overrides: Record<string, unknown> = {}) {
       {
         claimId: "claim-1",
         taskId: "t1",
+        originAssignmentId: "assignment-1",
         repoId: "repo-a",
         kind: "file",
         path: "src/a.ts",
@@ -436,6 +460,7 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
       recoverySendCount: 0,
       createdAt: NOW,
       confirmedAt: null,
+      localCancellation: null,
       taskId: "t1",
       assignmentId: ASSIGNMENT_ID,
       semanticArgs: { promptBytes: 100 },
@@ -454,6 +479,7 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
       recoverySendCount: dispatch.recoverySendCount,
       createdAt: dispatch.createdAt,
       confirmedAt: dispatch.confirmedAt,
+      localCancellation: null,
       controlAttempt: 1,
       semanticArgs: { channelId: "channel-a", controlNonce: NONCE, noBusinessWrites: true },
     };
@@ -794,6 +820,8 @@ describe("R01c decision nonce digest and frozen phase", () => {
     summary: "A decision needs a reply.",
     createdAt: NOW,
     answeredAt: null,
+    cancelIntents: null,
+    resolution: null,
   };
 
   test("a decision carries a bare 64hex control nonce digest", () => {
@@ -821,7 +849,8 @@ describe("R01c decision nonce digest and frozen phase", () => {
   test("hot/tool claims are legal enum values and conflict semantics stay out of the schema", () => {
     const base = {
       claimId: "claim-hot-1",
-      taskId: "T1",
+      taskId: "t1",
+      originAssignmentId: "assignment-1",
       repoId: "repo-1",
       path: "repo:hotspot",
       access: "write",
@@ -911,6 +940,8 @@ describe("R01f cancellation refresh and decision answer", () => {
     summary: "cancel approved",
     createdAt: NOW,
     answeredAt: NOW,
+    cancelIntents: null,
+    resolution: null,
   };
 
   test("refresh is a required typed observation; decision answers are required only when answered", () => {
@@ -1095,8 +1126,8 @@ describe("R01e spec tier consistency and escalation counters", () => {
             level: "L4",
             tier: "A",
             implementationPolicy: "a-with-s-plan",
-            architectureTaskId: "T0",
-            deps: ["T0"],
+            architectureTaskId: "t0",
+            deps: ["t0"],
           }),
         }),
       ).success,
@@ -1110,8 +1141,8 @@ describe("R01e spec tier consistency and escalation counters", () => {
           level: "L3",
           tier: "A",
           implementationPolicy: "a-with-s-plan",
-          architectureTaskId: "T0",
-          deps: ["T0"],
+          architectureTaskId: "t0",
+          deps: ["t0"],
         },
         path: ["spec", "level"],
       },
@@ -1120,8 +1151,8 @@ describe("R01e spec tier consistency and escalation counters", () => {
           level: "L4",
           tier: "B",
           implementationPolicy: "a-with-s-plan",
-          architectureTaskId: "T0",
-          deps: ["T0"],
+          architectureTaskId: "t0",
+          deps: ["t0"],
         },
         path: ["spec", "tier"],
       },
@@ -1163,8 +1194,8 @@ describe("R01e spec tier consistency and escalation counters", () => {
         level: "L4",
         tier: "A",
         implementationPolicy: "a-with-s-plan",
-        architectureTaskId: "T0",
-        deps: ["T0"],
+        architectureTaskId: "t0",
+        deps: ["t0"],
         ...overrides,
       });
     const cases: Array<{ spec: Record<string, unknown>; path: (string | number)[] }> = [
@@ -1172,7 +1203,7 @@ describe("R01e spec tier consistency and escalation counters", () => {
       { spec: plan({ architectureTaskId: "t1" }), path: ["spec", "architectureTaskId"] },
       { spec: plan({ deps: [] }), path: ["spec", "architectureTaskId"] },
       {
-        spec: taskSpec({ level: "L2", tier: "B", architectureTaskId: "T0" }),
+        spec: taskSpec({ level: "L2", tier: "B", architectureTaskId: "t0" }),
         path: ["spec", "architectureTaskId"],
       },
     ];
@@ -1430,6 +1461,236 @@ describe("F15 reuses the real hashLaunchPlan digest", () => {
         runRecord({ launch: { ...runRecord().launch, modelPlan: legacyPlan } }),
       ).success,
     ).toBe(false);
+  });
+});
+
+describe("R01g proof, compatibility, and decision shapes", () => {
+  const storedIdentity = {
+    protocolVersion: 1 as const,
+    runId: RUN_ID,
+    taskId: "t1",
+    attempt: 1,
+    nonce: NONCE,
+    assignmentId: ASSIGNMENT_ID,
+    messageId: MESSAGE_ID,
+  };
+  const storedDone = {
+    ...storedIdentity,
+    status: "done" as const,
+    changedFiles: [],
+    ref: artifactRef(),
+    workspace: { id: "ws-1", branch: "b", baseRef: "main" },
+    evidence: [evidence()],
+  };
+  const storedReview = {
+    ...storedIdentity,
+    reviewedRef: artifactRef(),
+    verdict: "可合入" as const,
+    blockers: [],
+    probes: [],
+  };
+  const storedSmoke = {
+    ...storedIdentity,
+    testedRef: artifactRef(),
+    devHost: "127.0.0.1:7777",
+    devServerId: "srv-dev",
+    devHome: "/tmp/dev-home",
+    checks: [{ id: "open", result: "pass" as const, evidencePath: "evidence/smoke.log" }],
+  };
+  const storedAssignment = assignment();
+
+  test("stored proof keeps nested unknown fields while the wire parser is strict", () => {
+    const stored = {
+      ...storedDone,
+      futureTop: { nested: true },
+      workspace: { ...storedDone.workspace, futureWorkspace: 1 },
+      evidence: [{ ...evidence(), futureEvidence: { nested: 1 } }],
+    };
+    const parsed = RunStoredTaskReportSchema.parse(stored);
+    expect(parsed.futureTop).toEqual({ nested: true });
+    expect((parsed.workspace as Record<string, unknown>).futureWorkspace).toBe(1);
+    expect(
+      ((parsed.evidence[0] as Record<string, unknown>).futureEvidence as Record<string, unknown>)
+        .nested,
+    ).toBe(1);
+    expect(RunTaskReportBlockSchema.safeParse(stored).success).toBe(false);
+  });
+
+  test("complete producer done/blocked/failed proofs are accepted and stored messageId is required", () => {
+    expect(RunStoredTaskReportSchema.parse(storedDone).status).toBe("done");
+    expect(
+      RunStoredTaskReportSchema.parse({
+        ...storedIdentity,
+        status: "blocked",
+        reasonCode: "NEED_ACCESS",
+        summary: "blocked",
+        evidence: [],
+      }).status,
+    ).toBe("blocked");
+    expect(
+      RunStoredTaskReportSchema.parse({
+        ...storedIdentity,
+        status: "failed",
+        reasonCode: "FAILED",
+        summary: "failed",
+        evidence: [],
+      }).status,
+    ).toBe("failed");
+    expect(
+      RunStoredTaskReportSchema.safeParse({ ...storedDone, messageId: undefined }).success,
+    ).toBe(false);
+    expect(
+      RunTaskReportBlockSchema.safeParse({ ...storedDone, messageId: undefined }).success,
+    ).toBe(true);
+  });
+
+  test("assignment delivery and acceptedProof are purpose-specific", () => {
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        delivery: null,
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedReview,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "smoker",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedSmoke,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: null,
+        acceptedProof: storedReview,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        acceptedProof: null,
+        endedEventKey: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  test("dispatchDuties/devSmoke, lowercase ids, and removed task mirrors are enforced", () => {
+    expect(RunTaskRecordSchema.safeParse(taskRecord()).success).toBe(true);
+    const { dispatchDuties: _duties, ...noDuties } = taskSpec();
+    expect(RunTaskRecordSchema.safeParse(taskRecord({ spec: noDuties })).success).toBe(false);
+    expect(
+      RunTaskRecordSchema.safeParse(
+        taskRecord({
+          spec: taskSpec({
+            devSmoke: true,
+            dispatchDuties: { produce: "x", review: "y", smoke: null },
+          }),
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec({ id: "T1" }) })).success,
+    ).toBe(false);
+    for (const mirror of ["report", "reviews", "smokeReport"]) {
+      expect(RunTaskRecordSchema.safeParse(taskRecord({ [mirror]: [] })).success).toBe(false);
+    }
+  });
+
+  test("superseded needs a typed no-effects resolution; DTO hides internals", () => {
+    const baseDecision = {
+      decisionId: "55555555-5555-4555-8555-555555555555",
+      category: "D1" as const,
+      controlNonceDigest: "a".repeat(64),
+      state: "open" as const,
+      dedupeKey: "cancel:t1",
+      cancelIntents: [],
+      subjectId: "t1",
+      summary: "cancel t1",
+      answer: null,
+      createdAt: NOW,
+      answeredAt: null,
+      resolution: null,
+    };
+    const resolution = {
+      reason: "no-in-flight" as const,
+      at: NOW,
+      eventSeq: 1,
+      cause: "cancel-requested" as const,
+      witness: { kind: "no-effects-cancel" as const, taskId: "t1", localIntentIds: [] },
+    };
+    const superseded = { ...baseDecision, state: "superseded" as const, resolution };
+    expect(RunDecisionPointSchema.parse(superseded).resolution).toEqual(resolution);
+    expect(RunDecisionPointSchema.safeParse({ ...superseded, resolution: null }).success).toBe(
+      false,
+    );
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...baseDecision,
+        state: "open",
+        resolution,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...superseded,
+        answer: { action: "cancel", taskIds: ["t1"], answeredAt: NOW },
+        answeredAt: NOW,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...superseded,
+        resolution: {
+          ...resolution,
+          witness: { ...resolution.witness, localIntentIds: ["b", "a"] },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({ ...baseDecision, cancelIntentId: "old" }).success,
+    ).toBe(false);
+    const dto = RunDecisionViewSchema.parse({
+      decisionId: baseDecision.decisionId,
+      category: "D1",
+      state: "superseded",
+      subjectId: "t1",
+      summary: "cancel t1",
+      createdAt: NOW,
+      answeredAction: null,
+      resolution,
+      acceptedProof: storedDone,
+    });
+    expect(dto).not.toHaveProperty("resolution");
+    expect(dto).not.toHaveProperty("acceptedProof");
   });
 });
 
