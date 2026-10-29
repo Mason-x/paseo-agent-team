@@ -8,26 +8,26 @@ import {
   NONCE_T2,
   NORMAL_RUN_LEDGER,
   POLICY,
-  T1,
-  T2,
-  T3,
+  t1,
+  t2,
+  t3,
   task,
   withLedger,
 } from "./base";
 import type { InvariantCase } from "./types";
 
 const doneWithoutReview = {
-  ...T1,
+  ...t1,
   reviews: [],
 };
 
 const readyWithUnfinishedDep = {
-  ...T3,
+  ...t3,
   state: "ready" as const,
-  deps: ["T2"],
+  deps: ["t2"],
 };
 
-const pendingHoldsClaim = claim({ claimId: "claim-t3", taskId: "T3", path: "docs/run-engine" });
+const pendingHoldsClaim = claim({ claimId: "claim-t3", taskId: "t3", path: "docs/run-engine" });
 
 const inFlight = (id: string) =>
   task(id, `In-flight ${id}`, {
@@ -38,11 +38,11 @@ const inFlight = (id: string) =>
   });
 
 const FIVE_IN_FLIGHT = [
-  inFlight("T4"),
-  inFlight("T5"),
-  inFlight("T6"),
-  inFlight("T7"),
-  inFlight("T8"),
+  inFlight("t4"),
+  inFlight("t5"),
+  inFlight("t6"),
+  inFlight("t7"),
+  inFlight("t8"),
 ];
 
 export const INVARIANT_CASES: readonly InvariantCase[] = [
@@ -61,15 +61,15 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     id: "i2-ready-with-unfinished-dep",
     invariant: "I2",
     kind: "violation",
-    ledger: withLedger({ runId: "run-rec0re-i2", tasks: [T1, T2, readyWithUnfinishedDep] }),
-    note: "T3 is ready while its dependency T2 is still in_progress.",
+    ledger: withLedger({ runId: "run-rec0re-i2", tasks: [t1, t2, readyWithUnfinishedDep] }),
+    note: "t3 is ready while its dependency t2 is still in_progress.",
   },
   {
     id: "i2-pending-with-unfinished-dep",
     invariant: "I2",
     kind: "legal",
     ledger: withLedger({ runId: "run-rec0re-i2o" }),
-    note: "T3 stays pending, which is the correct form while T2 is unfinished.",
+    note: "t3 stays pending, which is the correct form while t2 is unfinished.",
   },
   {
     id: "i3-blocked-frozen-claim",
@@ -77,7 +77,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i3o",
-      tasks: [T1, { ...T2, state: "blocked", waitingReason: "missing-seat" }, T3],
+      tasks: [t1, { ...t2, state: "blocked", waitingReason: "missing-seat" }, t3],
       resources: [claim({ frozen: true })],
     }),
     note: "blocked+frozen may keep a claim after the 10-27 revision.",
@@ -90,7 +90,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
       runId: "run-rec0re-i3x",
       resources: [claim(), pendingHoldsClaim],
     }),
-    note: "T3 is pending yet holds a write claim.",
+    note: "t3 is pending yet holds a write claim.",
   },
   {
     id: "i4-review-awaiting-does-not-count",
@@ -99,7 +99,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i4o",
       policy: { ...POLICY, configuredConcurrency: 3 },
-      tasks: [T1, { ...T2, state: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
+      tasks: [t1, { ...t2, state: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
     }),
     note: "Five in-flight with configuredConcurrency 3: effectiveLimit=max(3,5)=5, so legal.",
   },
@@ -110,7 +110,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i4x",
       policy: { ...POLICY, configuredConcurrency: 2 },
-      tasks: [T1, T2, ...FIVE_IN_FLIGHT.slice(0, 4)],
+      tasks: [t1, t2, ...FIVE_IN_FLIGHT.slice(0, 4)],
     }),
     note: "Boundary: 5 in-flight with configured 2 is legal under max(); R03 decides occupancy rules.",
   },
@@ -146,11 +146,11 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i6x",
-      tasks: [{ ...T2, reworkCount: 0 }],
+      tasks: [{ ...t2, reworkCount: 0 }],
       events: [
         ...NORMAL_RUN_LEDGER.events,
-        { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
-        { seq: 9, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
+        { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "t2" } },
+        { seq: 9, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "t2" } },
       ],
     }),
     note: "Two rework events exist while the counter says zero.",
@@ -159,8 +159,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     id: "i7-done-without-review",
     invariant: "I7",
     kind: "violation",
-    ledger: withLedger({ runId: "run-rec0re-i7x", tasks: [doneWithoutReview, T2, T3] }),
-    note: "T1 is done with no review record.",
+    ledger: withLedger({ runId: "run-rec0re-i7x", tasks: [doneWithoutReview, t2, t3] }),
+    note: "t1 is done with no review record.",
   },
   {
     id: "i7-self-review",
@@ -170,7 +170,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
       runId: "run-rec0re-i7s",
       tasks: [
         {
-          ...T1,
+          ...t1,
           reviews: [
             {
               reviewerAgentId: "agent-b1",
@@ -181,8 +181,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
             },
           ],
         },
-        T2,
-        T3,
+        t2,
+        t3,
       ],
     }),
     note: "The implementer agent/seat signed off on its own delivery.",

@@ -39,13 +39,13 @@ export const LOCK_CONFLICT_RUN_A: LedgerFixture = withLedger({
 export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
   revision: 6,
-  resources: [claim({ claimId: "claim-shared-b", taskId: "T3", path: SHARED_FILE, frozen: false })],
+  resources: [claim({ claimId: "claim-shared-b", taskId: "t3", path: SHARED_FILE, frozen: false })],
 });
 
 /** Same physical file through a Windows alias; canonicalization must converge on SHARED_FILE. */
 export const LOCK_CONFLICT_ALIASED_CLAIM = claim({
   claimId: "claim-shared-alias",
-  taskId: "T3",
+  taskId: "t3",
   path: "SRC\\Shared\\UTIL.ts",
 });
 
@@ -114,7 +114,7 @@ export const PROBE_SAME_CHANNEL_SEATS_LEDGER: LedgerFixture = withLedger({
   resources: [
     claim({
       claimId: "probe-lock",
-      taskId: "T2",
+      taskId: "t2",
       kind: "file",
       path: "probe/channel-claude",
       access: "read",

@@ -336,12 +336,12 @@ describe("run engine fixtures against R01 schemas", () => {
       if (!found) throw new Error(`missing ${id}`);
       return found as typeof found & Record<string, unknown>;
     };
-    const t1 = task("T1");
-    const t2 = task("T2");
-    const report = t1.report as Record<string, unknown>;
+    const t1 = task("t1");
+    const t2 = task("t2");
     const t1Implementation = record.assignments.find(
       (entry) => entry.assignmentId === "assignment-t1-a1",
     );
+    const report = t1Implementation?.acceptedProof as Record<string, unknown>;
     const t1Reviewer = record.assignments.find(
       (entry) => entry.assignmentId === "assignment-t1-r1",
     );
@@ -355,26 +355,26 @@ describe("run engine fixtures against R01 schemas", () => {
     const reviewerNonce = record.nonceRegistry.find(
       (entry) => entry.assignmentId === "assignment-t1-r1",
     );
-    const decision = record.decisions.find((entry) => entry.subjectId === "T2");
-    // 1-3: T1's done report is the implementation report, not a borrowed/default one.
+    const decision = record.decisions.find((entry) => entry.subjectId === "t2");
+    // 1-3: t1's done report is the implementation report, not a borrowed/default one.
     expect(t1.state).toBe("done");
     expect(report).toMatchObject({
-      taskId: "T1",
+      taskId: "t1",
       attempt: 1,
       nonce: t1Implementation?.nonce,
       assignmentId: "assignment-t1-a1",
     });
     expect(report.ref).toEqual(t1.ref);
-    // 4: T1 implementation assignment is complete.
+    // 4: t1 implementation assignment is complete.
     expect(t1Implementation).toMatchObject({
-      taskId: "T1",
+      taskId: "t1",
       agentId: "agent-b1",
       seatId: "seat-b1",
       nonce: report.nonce,
     });
     // 5-8: the reviewer has its own assignment, nonce acceptance and dispatch intent.
     expect(t1Reviewer).toMatchObject({
-      taskId: "T1",
+      taskId: "t1",
       agentId: "agent-b2",
       seatId: "seat-b2",
       purpose: "reviewer",
@@ -384,19 +384,19 @@ describe("run engine fixtures against R01 schemas", () => {
     expect(t1Reviewer?.messageId).not.toBeNull();
     expect(reviewerIntent).toMatchObject({
       kind: "dispatch",
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-r1",
       recipient: "agent-b2",
       messageId: t1Reviewer?.messageId,
-      idempotencyKey: "dispatch-T1-r1",
+      idempotencyKey: "dispatch-t1-r1",
       state: "confirmed",
     });
     expect(reviewerNonce).toMatchObject({
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-r1",
       phase: "review",
       acceptedAt: AT_UPDATED,
-      acceptedEventKey: "agent-b2|turn-8|turn_ended",
+      acceptedEventKey: "proof:assignment-t1-r1",
     });
     expect(record.eventReceipts).toContainEqual(
       expect.objectContaining({
@@ -405,16 +405,16 @@ describe("run engine fixtures against R01 schemas", () => {
         agentId: "agent-b2",
       }),
     );
-    // 9: T1 implementation dispatch intent.
+    // 9: t1 implementation dispatch intent.
     expect(t1Intent).toMatchObject({
       kind: "dispatch",
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-a1",
       recipient: "agent-b1",
       messageId: t1Implementation?.messageId,
-      idempotencyKey: "dispatch-T1-a1",
+      idempotencyKey: "dispatch-t1-a1",
     });
-    // 10-14: T2 frozen with claim; cancel source and authorization are complete.
+    // 10-14: t2 frozen with claim; cancel source and authorization are complete.
     expect(t2).toMatchObject({
       state: "blocked",
       phase: "frozen",
@@ -426,7 +426,7 @@ describe("run engine fixtures against R01 schemas", () => {
     });
     expect(cancelIntent).toMatchObject({
       kind: "wake",
-      taskId: "T2",
+      taskId: "t2",
       assignmentId: "assignment-t2-a1",
       recipient: "agent-b1",
       messageId: MESSAGE_CANCEL,
@@ -434,12 +434,77 @@ describe("run engine fixtures against R01 schemas", () => {
     });
     expect(decision).toMatchObject({
       state: "answered",
-      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
       answeredAt: AT_UPDATED,
     });
     expect(record.resources).toContainEqual(
-      expect.objectContaining({ taskId: "T2", frozen: true }),
+      expect.objectContaining({ taskId: "t2", frozen: true }),
     );
+  });
+
+  test("legal fixtures use lowercase business ids, no task mirrors, and accepted nonces", () => {
+    const lower = /^[a-z0-9][a-z0-9-]*$/;
+    for (const { id, ledger } of LEGAL_LEDGERS) {
+      for (const task of ledger.tasks) {
+        expect(task.spec.id, `${id} task id`).toMatch(lower);
+        for (const dep of task.spec.deps) expect(dep, `${id} dep`).toMatch(lower);
+        for (const mirror of ["report", "reviews", "smokeReport"]) {
+          expect(Object.hasOwn(task, mirror), `${id} task.${mirror}`).toBe(false);
+        }
+      }
+      for (const assignment of ledger.assignments) {
+        expect(assignment.taskId, `${id} assignment task`).toMatch(lower);
+        if (assignment.delivery !== null) {
+          expect(assignment.delivery.producerAssignmentId, `${id} delivery`).toMatch(lower);
+        }
+        if (assignment.acceptedProof !== null) {
+          expect(assignment.acceptedProof.taskId, `${id} proof task`).toMatch(lower);
+          const nonce = ledger.nonceRegistry.find(
+            (entry) => entry.assignmentId === assignment.assignmentId,
+          );
+          expect(nonce?.acceptedAt, `${id} accepted nonce timestamp`).not.toBeNull();
+          expect(nonce?.acceptedEventKey, `${id} accepted nonce key`).toBe(
+            `proof:${assignment.assignmentId}`,
+          );
+          const intent = ledger.outbox.find(
+            (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+          );
+          expect(intent?.messageId, `${id} accepted dispatch`).toBe(assignment.messageId);
+        }
+        if (assignment.endedEventKey !== null) {
+          expect(
+            ledger.eventReceipts.some(
+              (receipt) =>
+                receipt.eventKey === assignment.endedEventKey &&
+                receipt.kind === "turn_ended" &&
+                receipt.agentId === assignment.agentId &&
+                receipt.turnId === assignment.turnId,
+            ),
+            `${id} ended receipt ${assignment.endedEventKey}`,
+          ).toBe(true);
+        }
+      }
+      for (const claim of ledger.resources) {
+        expect(claim.taskId, `${id} claim task`).toMatch(lower);
+        expect(claim.originAssignmentId, `${id} claim origin`).toMatch(lower);
+      }
+      for (const nonce of ledger.nonceRegistry)
+        expect(nonce.taskId, `${id} nonce task`).toMatch(lower);
+      for (const intent of ledger.outbox) {
+        if ("taskId" in intent) expect(intent.taskId, `${id} intent task`).toMatch(lower);
+      }
+      for (const decision of ledger.decisions) {
+        if (decision.subjectId !== null && lower.test(decision.subjectId)) {
+          // A seat subject is also lowercase; no uppercase business task may survive.
+          expect(decision.subjectId).toBe(decision.subjectId.toLowerCase());
+        }
+        for (const taskId of decision.answer?.taskIds ?? [])
+          expect(taskId, `${id} answer task`).toMatch(lower);
+        for (const binding of decision.cancelIntents ?? []) {
+          expect(binding.assignmentId, `${id} cancel binding`).toMatch(lower);
+        }
+      }
+    }
   });
 
   test("samples never embed secrets, host paths, or the forbidden receipts directory", () => {
