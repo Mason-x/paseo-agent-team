@@ -473,29 +473,57 @@ describe("R03a delivery binding red specification", () => {
     const member = dispatch("member");
     record = next(record, member);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    const originalClaims = structuredClone(
+      record.resources.filter((entry) => entry.taskId === "t1"),
+    );
+    expect(originalClaims).toHaveLength(1);
+
     const reviewer = dispatch("reviewer");
     record = next(record, reviewer);
     record = next(record, {
       kind: "review-report",
       block: reviewReport(reviewer.assignment, REF_A, "可合入"),
     });
-    const before = record.resources
-      .filter((entry) => entry.taskId === "t1")
-      .map((entry) => entry.claimId);
-    const smoker = dispatch("smoker");
-    record = next(record, smoker);
-    expect(
-      record.resources.filter((entry) => entry.taskId === "t1").map((entry) => entry.claimId),
-    ).toEqual(before);
-    const conflicts = findLockConflicts(record, {
+
+    // Isolation snapshot for the smoke step only: after the review path has deleted the claim,
+    // restore this exact pre-review implementation claim on a structured clone. The claim was
+    // already part of a schema- and I1-I8-valid accepted report. This is a test-only input
+    // snapshot, not a product fix and not a new authorization.
+    const restored = structuredClone(record);
+    restored.resources = [
+      ...restored.resources.filter((entry) => entry.taskId !== "t1"),
+      ...structuredClone(originalClaims),
+    ];
+    valid(restored);
+    expect(restored.resources.filter((entry) => entry.taskId === "t1")).toHaveLength(1);
+    const beforeConflicts = findLockConflicts(restored, {
       taskId: "other",
       scopes: [
         { repoId: REPO_ID, kind: "file", path: "src/t1.ts", access: "write", verified: true },
       ],
     });
-    expect(conflicts.ok).toBe(true);
-    if (conflicts.ok) expect(conflicts.conflicts).toHaveLength(1);
-    expect(occupiesExecutionSlot(record, taskOf(record))).toBe(false);
+    expect(beforeConflicts.ok).toBe(true);
+    if (beforeConflicts.ok) expect(beforeConflicts.conflicts).toHaveLength(1);
+
+    const smoker = dispatch("smoker");
+    const after = next(restored, smoker);
+    const afterClaims = after.resources.filter((entry) => entry.taskId === "t1");
+    expect(afterClaims).toHaveLength(1);
+    expect(afterClaims[0]).toMatchObject({
+      claimId: originalClaims[0]?.claimId,
+      taskId: "t1",
+      access: "write",
+      frozen: false,
+    });
+    const afterConflicts = findLockConflicts(after, {
+      taskId: "other",
+      scopes: [
+        { repoId: REPO_ID, kind: "file", path: "src/t1.ts", access: "write", verified: true },
+      ],
+    });
+    expect(afterConflicts.ok).toBe(true);
+    if (afterConflicts.ok) expect(afterConflicts.conflicts).toHaveLength(1);
+    expect(occupiesExecutionSlot(after, taskOf(after))).toBe(false);
   });
 
   test("B2 reviewer dispatch attempt must equal the implementation attempt", () => {
@@ -703,6 +731,28 @@ describe("R03a delivery binding red specification", () => {
     expect(record).toEqual(before);
   });
 
+  function smokeWaitingOnSecondReviewer() {
+    let record = fresh({ smoke: true });
+    const member = dispatch("member");
+    record = next(record, member);
+    record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    const first = dispatch("reviewer", 1, { slot: 0 });
+    const second = dispatch("reviewer", 1, { slot: 1 });
+    record = next(record, first);
+    record = next(record, second);
+    record = next(record, {
+      kind: "review-report",
+      block: reviewReport(first.assignment, REF_A, "可合入"),
+    });
+    const smoker = dispatch("smoker");
+    record = next(record, smoker);
+    record = next(record, {
+      kind: "smoke-report",
+      block: smokeReport(smoker.assignment, REF_A, "pass"),
+    });
+    return { record, second };
+  }
+
   test("positive: multiple reviewers may be registered for the same delivery and a non-current reviewer can reply", () => {
     let record = fresh();
     const member = dispatch("member");
@@ -724,26 +774,14 @@ describe("R03a delivery binding red specification", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("positive: smoke pass before the last reviewer returns must not finish, and a late blocker remains valid", () => {
-    let record = fresh({ smoke: true });
-    const member = dispatch("member");
-    record = next(record, member);
-    record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-    const first = dispatch("reviewer", 1, { slot: 0 });
-    const second = dispatch("reviewer", 1, { slot: 1 });
-    record = next(record, first);
-    record = next(record, second);
-    record = next(record, {
-      kind: "review-report",
-      block: reviewReport(first.assignment, REF_A, "可合入"),
-    });
-    const smoker = dispatch("smoker");
-    record = next(record, smoker);
-    record = next(record, {
-      kind: "smoke-report",
-      block: smokeReport(smoker.assignment, REF_A, "pass"),
-    });
+  test("positive: smoke pass before the last reviewer returns must not finish", () => {
+    const { record } = smokeWaitingOnSecondReviewer();
     expect(taskOf(record).state).not.toBe("done");
+  });
+
+  test("positive: a late R2 blocker after smoke is accepted and keeps the task non-done with a quality failure", () => {
+    const { record, second } = smokeWaitingOnSecondReviewer();
+    const before = structuredClone(record);
     const late = reduceRun(
       record,
       {
@@ -752,34 +790,28 @@ describe("R03a delivery binding red specification", () => {
       } as never,
       facts,
     );
-    expect(late.ok).toBe(true);
-    if (late.ok) expect(taskOf(late.next).state).not.toBe("done");
+    expect(late.ok, JSON.stringify(late)).toBe(true);
+    if (late.ok) {
+      const task = taskOf(late.next);
+      expect(task.state).not.toBe("done");
+      expect(task.qualityFailures).toBeGreaterThan(0);
+    }
+    expect(record).toEqual(before);
   });
 
-  test("positive: the last reviewer pass recomputes the stored smoke result and may finish", () => {
-    let record = fresh({ smoke: true });
-    const member = dispatch("member");
-    record = next(record, member);
-    record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-    const first = dispatch("reviewer", 1, { slot: 0 });
-    const second = dispatch("reviewer", 1, { slot: 1 });
-    record = next(record, first);
-    record = next(record, second);
-    record = next(record, {
-      kind: "review-report",
-      block: reviewReport(first.assignment, REF_A, "可合入"),
-    });
-    const smoker = dispatch("smoker");
-    record = next(record, smoker);
-    record = next(record, {
-      kind: "smoke-report",
-      block: smokeReport(smoker.assignment, REF_A, "pass"),
-    });
-    expect(taskOf(record).state).not.toBe("done");
-    record = next(record, {
-      kind: "review-report",
-      block: reviewReport(second.assignment, REF_A, "可合入"),
-    });
-    expect(taskOf(record).state).toBe("done");
+  test("positive: the last R2 pass after smoke is accepted and recomputes the stored smoke result to done", () => {
+    const { record, second } = smokeWaitingOnSecondReviewer();
+    const before = structuredClone(record);
+    const late = reduceRun(
+      record,
+      {
+        kind: "review-report",
+        block: reviewReport(second.assignment, REF_A, "可合入"),
+      } as never,
+      facts,
+    );
+    expect(late.ok, JSON.stringify(late)).toBe(true);
+    if (late.ok) expect(taskOf(late.next).state).toBe("done");
+    expect(record).toEqual(before);
   });
 });
