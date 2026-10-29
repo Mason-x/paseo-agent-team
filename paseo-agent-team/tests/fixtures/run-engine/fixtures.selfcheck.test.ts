@@ -2,10 +2,7 @@
 // parse; corrupt/over-version/overlong samples must be rejected. No reducer behavior is asserted.
 import { describe, expect, test } from "vitest";
 import { RunTeamEngineConfigSchema } from "../../../shared/schemas/run-engine/config";
-import {
-  RunRecordSchema,
-  RunStoredTaskReportSchema,
-} from "../../../shared/schemas/run-engine/ledger";
+import { RunRecordSchema } from "../../../shared/schemas/run-engine/ledger";
 import { RunTaskReportBlockSchema } from "../../../shared/schemas/run-engine/protocol";
 import { RunGetInputSchema } from "../../../shared/schemas/run-engine/rpc";
 import {
@@ -56,7 +53,8 @@ import {
   UNKNOWN_SCHEMA_VERSION_RECORD,
   UNKNOWN_TASK_STATUS_RECORD,
 } from "./index";
-import type { LedgerFixture, RunAssignment } from "./types";
+import { collectSourceIssues, type SourceIssueKey, type SourceScenario } from "./source-closure";
+import type { LedgerFixture } from "./types";
 
 const NAMED_LEDGERS: { id: string; ledger: LedgerFixture }[] = [
   { id: "normal-ledger", ledger: NORMAL_RUN_LEDGER },
@@ -105,142 +103,166 @@ type SourceMetadata = {
   parent: string;
   candidate: string;
   expected?: { code: string; path: string };
+  expectedSource: readonly SourceIssueKey[];
 };
 
 const SOURCE_METADATA: Record<string, SourceMetadata> = {
   "normal-ledger": {
+    expectedSource: [],
     category: "source",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "t1 complete; t2 in-flight",
   },
   "outcome-unknown-ledger": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "outcome-unknown send",
   },
   "cancelling-ledger": {
+    expectedSource: [],
     category: "source-diagnostic",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "partial cancellation diagnosis",
   },
   "cancellation-authorized-frozen": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "answered D1, frozen claim",
   },
   "quiescent-cancelled-ledger": {
+    expectedSource: [],
     category: "source",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "complete 167 cancellation",
   },
   "local-never-sent-cancelled-ledger": {
+    expectedSource: [],
     category: "source",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "LocalNeverSent audit",
   },
   "blocked-ledger": {
+    expectedSource: [],
     category: "source",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "blocked+frozen claim",
   },
   "lock-conflict-run-a": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "lock pair",
     candidate: "claim conflict",
   },
   "lock-conflict-run-b": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "lock pair",
     candidate: "claim conflict",
   },
   "probe-conflict-run-a": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe pair",
     candidate: "probe conflict",
   },
   "probe-conflict-run-b": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe pair",
     candidate: "probe conflict",
   },
   "probe-same-channel-seats": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "same-channel seats",
   },
   "closed-after-report": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R05",
     parent: "NORMAL",
     candidate: "report then closed",
   },
   "closed-while-assigned": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R05",
     parent: "NORMAL",
     candidate: "closed before report",
   },
   "reopen-started": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R05",
     parent: "NORMAL",
     candidate: "new a2 after reopen",
   },
   "control-attempts": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "NORMAL",
     candidate: "control attempt budget",
   },
   "probe-eligible": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "eligible probe",
   },
   "probe-blocked-inflight-turn": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "in-flight turn",
   },
   "probe-in-flight": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "sending probe",
   },
   "probe-completed": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "completed probe",
   },
   "probe-failed": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "failed probe",
   },
   "probe-unknown": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03b",
     parent: "probe source",
     candidate: "outcome-unknown probe",
   },
   "evidence-incomplete": {
+    expectedSource: [],
     category: "gate-negative",
     consumer: "R03 evidence gate",
     parent: "NORMAL",
@@ -248,12 +270,14 @@ const SOURCE_METADATA: Record<string, SourceMetadata> = {
     expected: { code: "evidence-exit", path: "proof.evidence.five-gates.exitCode" },
   },
   "stale-review": {
+    expectedSource: [],
     category: "source",
     consumer: "R03/R05",
     parent: "NORMAL",
     candidate: "current a2 awaiting review",
   },
   "dev-smoke-missing": {
+    expectedSource: [],
     category: "gate-negative",
     consumer: "R03 DEV gate",
     parent: "DEV source",
@@ -261,24 +285,28 @@ const SOURCE_METADATA: Record<string, SourceMetadata> = {
     expected: { code: "dev-target", path: "proof.devServerId" },
   },
   "dev-smoke-ready": {
+    expectedSource: [],
     category: "source",
     consumer: "R03 DEV gate",
     parent: "DEV source",
     candidate: "registered DEV target",
   },
   "permission-pending": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R06",
     parent: "NORMAL",
     candidate: "permission pending",
   },
   "irreversible-unapproved": {
+    expectedSource: [],
     category: "recovery-control",
     consumer: "R03 approval gate",
     parent: "NORMAL",
     candidate: "irreversible pre-dispatch",
   },
   "finished-decision": {
+    expectedSource: [],
     category: "source",
     consumer: "R07",
     parent: "NORMAL",
@@ -292,173 +320,10 @@ const INVARIANT_LEDGERS: { id: string; ledger: LedgerFixture }[] = INVARIANT_CAS
   ledger: entry.ledger as LedgerFixture,
 }));
 
-const LEGAL_LEDGERS = [...NAMED_LEDGERS, ...INVARIANT_LEDGERS];
-const SOURCE_LEDGERS = [
-  ...NAMED_LEDGERS,
-  ...INVARIANT_CASES.filter((entry) => entry.kind !== "violation").map((entry) => ({
-    id: entry.id,
-    ledger: entry.ledger as LedgerFixture,
-  })),
-];
-
-class SourceIssue extends Error {
-  constructor(
-    readonly code: string,
-    readonly path: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "SourceIssue";
-  }
-}
-
-function failSource(code: string, path: string, message: string): never {
-  throw new SourceIssue(code, path, message);
-}
-
-function collectSourceIssues(action: () => void): SourceIssue[] {
-  try {
-    action();
-    return [];
-  } catch (error) {
-    if (error instanceof SourceIssue) return [error];
-    throw error;
-  }
-}
-
-function sourceCodeOf(action: () => void): string {
-  const [issue] = collectSourceIssues(action);
-  if (!issue) throw new Error("expected a SourceIssue");
-  return issue.code;
-}
-
-function evidenceSatisfied(
-  task: LedgerFixture["tasks"][number],
-  proof: NonNullable<RunAssignment["acceptedProof"]>,
-): boolean {
-  const parsed = RunStoredTaskReportSchema.safeParse(proof);
-  if (!parsed.success || parsed.data.status !== "done") return false;
-  return task.spec.evidence.every((required) => {
-    const evidence = parsed.data.evidence.find((entry) => entry.id === required.id);
-    return evidence !== undefined && evidence.exitCode === 0;
-  });
-}
-
-/** A valid current D requires a producer done report whose required evidence passed. */
-function validProducerD(record: LedgerFixture, assignment: RunAssignment): boolean {
-  if (!["member", "coordinator", "reopen"].includes(assignment.purpose)) return false;
-  const proof = assignment.acceptedProof;
-  if (proof === null) return false;
-  const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
-  return task !== undefined && evidenceSatisfied(task, proof);
-}
-
-function assertCompleteCancellation(
-  id: string,
-  record: LedgerFixture,
-  assignment: RunAssignment,
-): void {
-  const cancellation = assignment.cancellation;
-  if (!cancellation) throw new Error(`${id} complete cancellation missing evidence`);
-  if (cancellation.assignmentId !== assignment.assignmentId) {
-    failSource(
-      "cancellation-assignment",
-      "cancellation.assignmentId",
-      `${id} cancellation assignment`,
-    );
-  }
-  expect(assignment.turnId, `${id} cancellation turn`).not.toBeNull();
-  expect(assignment.endedAt, `${id} cancellation endedAt`).not.toBeNull();
-  if (assignment.turnId === null || assignment.endedAt === null) return;
-  if (cancellation.lastTurnId !== assignment.turnId) {
-    failSource("cancellation-turn", "cancellation.lastTurnId", `${id} cancellation last turn`);
-  }
-  expect(cancellation.assignmentId, `${id} cancellation own assignment`).toBe(
-    assignment.assignmentId,
-  );
-  if (cancellation.refresh.agentId !== assignment.agentId) {
-    failSource("refresh-actor", "cancellation.refresh.agentId", `${id} cancellation refresh actor`);
-  }
-  expect(cancellation.refresh.activeTurn, `${id} cancellation activeTurn`).toBe(false);
-  if (Date.parse(cancellation.refresh.observedAt) < Date.parse(assignment.endedAt)) {
-    failSource(
-      "refresh-time",
-      "cancellation.refresh.observedAt",
-      `${id} cancellation refresh time`,
-    );
-  }
-  expect(cancellation.observationSeq, `${id} cancellation watermark`).toBeLessThanOrEqual(
-    record.counters.observationSeq,
-  );
-  expect(cancellation.endedEventKey, `${id} cancellation ended key`).not.toBeNull();
-  if (
-    assignment.endedEventKey !== null &&
-    assignment.endedEventKey !== cancellation.endedEventKey
-  ) {
-    failSource(
-      "ended-key-mismatch",
-      "assignments.<id>.endedEventKey",
-      `${id} cancellation ending identity`,
-    );
-  }
-  const ended = record.eventReceipts.find(
-    (entry) =>
-      entry.eventKey === cancellation.endedEventKey &&
-      entry.kind === "turn_ended" &&
-      entry.agentId === assignment.agentId &&
-      entry.turnId === assignment.turnId &&
-      entry.receivedAt === assignment.endedAt,
-  );
-  expect(ended, `${id} cancellation ended receipt`).toBeDefined();
-  const intent = record.outbox.find((entry) => entry.id === cancellation.cancelIntentId);
-  if (!intent) {
-    failSource("cancellation-intent", "cancellation.cancelIntentId", `${id} cancellation intent`);
-  }
-  if (intent) {
-    expect(intent.kind, `${id} cancellation intent kind`).toBe("archive");
-    expect(intent.taskId, `${id} cancellation intent task`).toBe(assignment.taskId);
-    expect(intent.assignmentId, `${id} cancellation intent assignment`).toBe(
-      assignment.assignmentId,
-    );
-    expect(intent.recipient, `${id} cancellation intent recipient`).toBe(assignment.agentId);
-    expect(intent.state, `${id} cancellation intent state`).toBe("confirmed");
-    expect(intent.confirmedAt, `${id} cancellation intent confirmed`).not.toBeNull();
-  }
-  if (cancellation.receipt.kind !== "archive") {
-    failSource(
-      "cancellation-receipt",
-      "cancellation.receipt.kind",
-      `${id} cancellation receipt kind`,
-    );
-  }
-  expect(cancellation.receipt.confirmedAt, `${id} cancellation receipt confirmed`).not.toBeNull();
-  expect(cancellation.receipt.externalId, `${id} cancellation receipt external`).not.toBeNull();
-  const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
-  expect(task, `${id} cancellation task`).toBeDefined();
-  if (task?.state !== "cancelled") throw new Error(`${id} cancellation task state`);
-  const decision = record.decisions.find(
-    (entry) => entry.subjectId === task.spec.id && entry.state === "answered",
-  );
-  if (!decision) {
-    failSource("cancellation-decision", "decisions.<id>", `${id} cancellation decision`);
-  }
-  if (decision) {
-    expect(decision.dedupeKey, `${id} cancellation dedupe`).toBe(`cancel:${task.spec.id}`);
-    expect(["cancel", "assign-seat"], `${id} cancellation action`).toContain(
-      decision.answer?.action,
-    );
-    assertCancelPairs(
-      id,
-      record,
-      decision,
-      task.spec.id,
-      CANCEL_OBLIGATIONS[id] ?? [assignment.assignmentId],
-    );
-  }
-}
-
+const SCHEMA_VALID_LEDGERS = [...NAMED_LEDGERS, ...INVARIANT_LEDGERS];
 const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: string }> = {
   "i1-half-write-bytes": {
+    expectedSource: [],
     category: "shape-negative",
     consumer: "R05",
     parent: "NORMAL",
@@ -466,6 +331,7 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I1",
   },
   "i2-ready-with-unfinished-dep": {
+    expectedSource: [],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -473,18 +339,21 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I2",
   },
   "i2-pending-with-unfinished-dep": {
+    expectedSource: [],
     category: "source",
     consumer: "R03",
     parent: "NORMAL",
     candidate: "t3 correctly pending",
   },
   "i3-blocked-frozen-claim": {
+    expectedSource: [],
     category: "source",
     consumer: "R03",
     parent: "NORMAL",
     candidate: "blocked frozen claim",
   },
   "i3-pending-holds-claim": {
+    expectedSource: [],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -492,12 +361,14 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I3",
   },
   "i4-review-awaiting-does-not-count": {
+    expectedSource: [],
     category: "source",
     consumer: "R03",
     parent: "NORMAL",
     candidate: "awaiting review not slot",
   },
   "i4-capacity-over-effective": {
+    expectedSource: [],
     category: "boundary",
     consumer: "R03",
     parent: "NORMAL",
@@ -505,6 +376,7 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I4",
   },
   "i5-nonce-replayed": {
+    expectedSource: [],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -512,12 +384,14 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I5",
   },
   "i5-turn-ended-redelivered": {
+    expectedSource: [],
     category: "source",
     consumer: "R05",
     parent: "NORMAL",
     candidate: "duplicate transport receipt",
   },
   "i6-rework-count-below-events": {
+    expectedSource: [],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -525,6 +399,7 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I6",
   },
   "i7-done-without-review": {
+    expectedSource: [{ code: "done-reviewer-chain", path: "tasks.t1.reviewer" }],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -532,6 +407,9 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I7",
   },
   "i7-self-review": {
+    expectedSource: [
+      { code: "reviewer-independence", path: "assignments.assignment-t1-r1.agentId" },
+    ],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -539,12 +417,14 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I7",
   },
   "i8-assignment-without-intent": {
+    expectedSource: [
+      { code: "assignment-dispatch", path: "assignments.assignment-t2-a1.dispatch" },
+    ],
     category: "invariant-negative",
     consumer: "R03/I7",
     parent: "NORMAL",
     candidate: "assignment without dispatch",
     domainExpected: "I8",
-    expected: { code: "assignment-dispatch", path: "assignments.<id>.dispatch" },
   },
 };
 
@@ -608,420 +488,72 @@ const CANCEL_OBLIGATIONS: Readonly<Record<string, readonly string[]>> = {
   "quiescent-two": ["assignment-t2-a1", "assignment-t2-a2"],
 };
 
-function assertCancelPairs(
-  id: string,
-  record: LedgerFixture,
-  decision: LedgerFixture["decisions"][number],
-  taskId: string,
-  expectedAssignmentIds: readonly string[],
-): void {
-  const pairs = decision.cancelIntents ?? [];
-  const actualIds = pairs.map((entry) => entry.assignmentId);
-  if (JSON.stringify(actualIds) !== JSON.stringify([...expectedAssignmentIds].sort())) {
-    failSource(
-      "cancellation-pairs",
-      "decisions.<id>.cancelIntents",
-      `${id} cancellation obligation set`,
-    );
-  }
-  if (!(decision.answer?.taskIds ?? []).includes(taskId)) {
-    failSource(
-      "cancellation-answer-coverage",
-      "decisions.<id>.answer.taskIds",
-      `${id} cancellation answer coverage`,
-    );
-  }
-  for (const binding of pairs) {
-    const assignment = record.assignments.find(
-      (entry) => entry.assignmentId === binding.assignmentId,
-    );
-    const intent = record.outbox.find((entry) => entry.id === binding.intentId);
-    expect(assignment?.taskId, `${id} cancellation pair task`).toBe(taskId);
-    expect(intent, `${id} cancellation pair intent`).toBeDefined();
-    if (assignment && intent) {
-      expect(intent.kind, `${id} cancellation pair kind`).toBe("archive");
-      expect(intent.taskId, `${id} cancellation pair intent task`).toBe(taskId);
-      expect(intent.assignmentId, `${id} cancellation pair intent assignment`).toBe(
-        assignment.assignmentId,
-      );
-      expect(intent.recipient, `${id} cancellation pair recipient`).toBe(assignment.agentId);
-    }
-  }
+const ALL_SOURCE_METADATA = { ...SOURCE_METADATA, ...INVARIANT_METADATA };
+
+const SOURCE_PARENTS: Record<string, { ledger: LedgerFixture; scenarioId: string }> = {
+  ...Object.fromEntries(NAMED_LEDGERS.map(({ id, ledger }) => [id, { ledger, scenarioId: id }])),
+  ...Object.fromEntries(
+    INVARIANT_LEDGERS.map(({ id }) => [
+      id,
+      { ledger: NORMAL_RUN_LEDGER, scenarioId: "normal-ledger" },
+    ]),
+  ),
+  "quiescent-two": { ledger: QUIESCENT_CANCELLED_LEDGER, scenarioId: "quiescent-cancelled-ledger" },
+  "superseded-local": {
+    ledger: LOCAL_NEVER_SENT_CANCELLED_LEDGER,
+    scenarioId: "local-never-sent-cancelled-ledger",
+  },
+  "superseded-zero": {
+    ledger: LOCAL_NEVER_SENT_CANCELLED_LEDGER,
+    scenarioId: "local-never-sent-cancelled-ledger",
+  },
+  "superseded-fake-pair": {
+    ledger: LOCAL_NEVER_SENT_CANCELLED_LEDGER,
+    scenarioId: "local-never-sent-cancelled-ledger",
+  },
+  "superseded-missing-audit": {
+    ledger: LOCAL_NEVER_SENT_CANCELLED_LEDGER,
+    scenarioId: "local-never-sent-cancelled-ledger",
+  },
+};
+
+function sourceScenario(id: string): SourceScenario {
+  const cacheSource = CACHE_SOURCE[id];
+  if (!cacheSource) throw new Error(`missing explicit scenario: ${id}`);
+  const obligations = CANCEL_OBLIGATIONS[id];
+  return { cacheSource, cancelObligations: obligations ? { t2: obligations } : {} };
 }
 
-function isLocalNeverSent(record: LedgerFixture, assignment: RunAssignment): boolean {
-  if (
-    assignment.cancellation !== null ||
-    assignment.endedEventKey !== null ||
-    assignment.turnId !== null ||
-    assignment.endedAt !== null ||
-    assignment.acceptedProof !== null
-  ) {
-    return false;
-  }
-  const dispatches = record.outbox.filter(
-    (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
-  );
-  if (dispatches.length !== 1) return false;
-  const intent = dispatches[0];
-  if (intent?.state !== "failed" || intent.confirmedAt !== null) return false;
-  if (intent.recoverySendCount !== 0 || intent.localCancellation === null) return false;
-  if (
-    intent.taskId !== assignment.taskId ||
-    intent.recipient !== assignment.agentId ||
-    intent.messageId !== assignment.messageId
-  ) {
-    return false;
-  }
-  if (intent.localCancellation.reason !== "cancel-before-send") return false;
-  const nonce = record.nonceRegistry.find(
-    (entry) => entry.assignmentId === assignment.assignmentId,
-  );
-  if (
-    !nonce ||
-    nonce.runId !== record.runId ||
-    nonce.acceptedAt !== null ||
-    nonce.revokedAt === null ||
-    nonce.revokeReason === null
-  ) {
-    return false;
-  }
-  if (intent.localCancellation.eventSeq > record.counters.eventsThroughSeq) return false;
-  if (
-    record.events.some(
-      (event) =>
-        event.payload.taskId === assignment.taskId &&
-        (event.kind === "turn_started" || event.kind === "turn_ended"),
-    )
-  ) {
-    return false;
-  }
-  const cancelEvent = record.events.find(
-    (event) =>
-      event.seq === intent.localCancellation?.eventSeq &&
-      event.kind === intent.localCancellation.cause &&
-      event.at === intent.localCancellation.at &&
-      event.payload.taskId === assignment.taskId,
-  );
-  if (!cancelEvent) return false;
-  const audit = cancelEvent.payload.audit as
-    | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
-    | undefined;
-  if (
-    !Array.isArray(audit?.localIntentIds) ||
-    !audit.localIntentIds.includes(intent.id) ||
-    !Array.isArray(audit.supersededDecisionIds)
-  ) {
-    return false;
-  }
-  return !record.outbox.some(
-    (entry) => entry.kind === "archive" && entry.assignmentId === assignment.assignmentId,
-  );
+function issueKeys(issues: readonly SourceIssueKey[]): SourceIssueKey[] {
+  return issues
+    .map(({ code, path }) => ({ code, path }))
+    .sort((a, b) =>
+      a.code === b.code
+        ? a.path < b.path
+          ? -1
+          : a.path > b.path
+            ? 1
+            : 0
+        : a.code < b.code
+          ? -1
+          : 1,
+    );
 }
 
-/** Test-only source association checks. This is not the product I7 implementation. */
-function assertAssociations(
-  id: string,
+// Assertions belong to tests, never to collector relationship branches.
+function expectSources(
+  scenarioId: string,
   record: LedgerFixture,
-  options: { allowSelfReview?: boolean; allowMissingReviewer?: boolean } = {},
+  expected: readonly SourceIssueKey[],
 ): void {
-  for (const assignment of record.assignments) {
-    const proof = assignment.acceptedProof;
-    const nonce = record.nonceRegistry.find(
-      (entry) => entry.assignmentId === assignment.assignmentId,
-    );
-    if (proof !== null) {
-      expect(proof.runId, `${id} proof run`).toBe(record.runId);
-      expect(proof.taskId, `${id} proof task`).toBe(assignment.taskId);
-      expect(proof.attempt, `${id} proof attempt`).toBe(assignment.attempt);
-      expect(proof.assignmentId, `${id} proof assignment`).toBe(assignment.assignmentId);
-      expect(proof.nonce, `${id} proof nonce`).toBe(assignment.nonce);
-      expect(proof.messageId, `${id} proof message`).toBe(assignment.messageId);
-      if ("workspace" in proof) {
-        expect(assignment.workspace, `${id} proof workspace`).toEqual(proof.workspace);
-      }
-      expect(nonce, `${id} accepted nonce`).toBeDefined();
-      if (nonce) {
-        if (nonce.runId !== record.runId) {
-          failSource("nonce-run", `nonces.${nonce.nonce}.runId`, `${id} nonce run`);
-        }
-        expect(nonce.acceptedAt, `${id} acceptedAt`).not.toBeNull();
-        expect(nonce.acceptedEventKey, `${id} accepted key`).toBe(
-          `proof:${assignment.assignmentId}`,
-        );
-        if (nonce.acceptedAt) {
-          expect(
-            Date.parse(nonce.acceptedAt) >= Date.parse(nonce.issuedAt),
-            `${id} accept time`,
-          ).toBe(true);
-          if (nonce.revokedAt) {
-            expect(Date.parse(nonce.revokedAt) >= Date.parse(nonce.acceptedAt)).toBe(true);
-          }
-        }
-      }
-      const dispatches = record.outbox.filter(
-        (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
-      );
-      expect(dispatches, `${id} dispatch count`).toHaveLength(1);
-      const dispatch = dispatches[0];
-      if (dispatch) {
-        expect(dispatch.taskId).toBe(assignment.taskId);
-        expect(dispatch.recipient).toBe(assignment.agentId);
-        expect(dispatch.messageId).toBe(assignment.messageId);
-      }
-      if (assignment.purpose !== "reviewer" && assignment.purpose !== "smoker") {
-        expect(assignment.delivery).toBeNull();
-      }
-    } else if (nonce) {
-      if (nonce.runId !== record.runId) {
-        failSource("nonce-run", `nonces.${nonce.nonce}.runId`, `${id} unaccepted nonce run`);
-      }
-      expect(nonce.acceptedAt, `${id} unaccepted At`).toBeNull();
-      expect(nonce.acceptedEventKey, `${id} unaccepted key`).toBeNull();
-    }
-    const assignmentDispatches = record.outbox.filter(
-      (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
-    );
-    if (assignmentDispatches.length !== 1) {
-      failSource(
-        "assignment-dispatch",
-        `assignments.${assignment.assignmentId}.dispatch`,
-        `${id} assignment dispatch count`,
-      );
-    }
-    const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
-    expect(task, `${id} assignment task`).toBeDefined();
-    const seat = record.roster.find((entry) => entry.seatId === assignment.seatId);
-    expect(seat, `${id} roster seat`).toBeDefined();
-    if (seat) {
-      expect(seat.agentId, `${id} seat agent`).toBe(assignment.agentId);
-      expect(seat.tier, `${id} seat tier`).toBe(assignment.tier);
-      if (task) {
-        const duty =
-          assignment.purpose === "reviewer"
-            ? task.spec.dispatchDuties.review
-            : assignment.purpose === "smoker"
-              ? task.spec.dispatchDuties.smoke
-              : task.spec.dispatchDuties.produce;
-        expect(duty, `${id} duty`).not.toBeNull();
-        if (duty) expect(seat.duties, `${id} seat duty`).toContain(duty);
-      }
-    }
-    if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
-      expect(assignment.delivery, `${id} delivery`).not.toBeNull();
-      const producerId = assignment.delivery?.producerAssignmentId;
-      const producer = record.assignments.find((entry) => entry.assignmentId === producerId);
-      expect(producer, `${id} producer`).toBeDefined();
-      expect(producer?.taskId).toBe(assignment.taskId);
-      expect(producer?.attempt).toBe(assignment.attempt);
-      if (!["member", "coordinator", "reopen"].includes(producer?.purpose ?? "")) {
-        failSource(
-          "producer-purpose",
-          `assignments.${producerId}.purpose`,
-          `${id} producer purpose`,
-        );
-      }
-      expect(producer?.acceptedProof, `${id} producer proof`).not.toBeNull();
-      if (producer?.acceptedProof) {
-        expect("status" in producer.acceptedProof, `${id} producer report kind`).toBe(true);
-        if ("status" in producer.acceptedProof) {
-          expect(producer.acceptedProof.status, `${id} producer done`).toBe("done");
-        }
-        expect(validProducerD(record, producer), `${id} producer evidence`).toBe(true);
-      }
-      if (!options.allowSelfReview) {
-        expect(producer?.agentId, `${id} independent agent`).not.toBe(assignment.agentId);
-        expect(producer?.seatId, `${id} independent seat`).not.toBe(assignment.seatId);
-      }
-    }
-    if (assignment.cancellation) {
-      const cancelIntent = record.outbox.find(
-        (entry) => entry.id === assignment.cancellation?.cancelIntentId,
-      );
-      if (!cancelIntent) {
-        failSource(
-          "cancellation-intent",
-          "cancellation.cancelIntentId",
-          `${id} cancel evidence intent`,
-        );
-      }
-      if (cancelIntent) {
-        expect(cancelIntent.kind).toBe("archive");
-        expect(cancelIntent.taskId).toBe(assignment.taskId);
-        expect(cancelIntent.assignmentId).toBe(assignment.assignmentId);
-        expect(cancelIntent.recipient).toBe(assignment.agentId);
-      }
-    }
-    if (assignment.state === "ended") {
-      expect(assignment.turnId, `${id} ended turn required`).not.toBeNull();
-      expect(assignment.endedAt, `${id} ended at required`).not.toBeNull();
-      expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
-    }
-    if (assignment.state === "cancelled") {
-      if (assignment.cancellation !== null) {
-        assertCompleteCancellation(id, record, assignment);
-      } else if (!isLocalNeverSent(record, assignment)) {
-        failSource(
-          "local-never-sent",
-          `assignments.${assignment.assignmentId}`,
-          `${id} local never sent`,
-        );
-      }
-    }
-    if (assignment.endedEventKey !== null) {
-      expect(assignment.turnId, `${id} ended turn`).not.toBeNull();
-      expect(assignment.endedAt, `${id} ended at`).not.toBeNull();
-      const receipt = record.eventReceipts.find(
-        (entry) =>
-          entry.eventKey === assignment.endedEventKey &&
-          entry.kind === "turn_ended" &&
-          entry.agentId === assignment.agentId &&
-          entry.turnId === assignment.turnId &&
-          entry.receivedAt === assignment.endedAt,
-      );
-      expect(receipt, `${id} ended receipt`).toBeDefined();
-    }
-  }
-  for (const task of record.tasks) {
-    const cacheSource = CACHE_SOURCE[id]?.[task.spec.id] ?? null;
-    const producer =
-      cacheSource === null
-        ? null
-        : record.assignments.find((entry) => entry.assignmentId === cacheSource);
-    if (cacheSource !== null) {
-      if (!producer || producer.taskId !== task.spec.id || !validProducerD(record, producer)) {
-        failSource("cache-source", `tasks.${task.spec.id}.cacheSource`, `${id} cache producer`);
-      }
-      const proof = producer?.acceptedProof;
-      if (proof && "ref" in proof && "changedFiles" in proof) {
-        expect(task.ref, `${id} task cache ref`).toEqual(proof.ref);
-        expect(task.changedFiles, `${id} task cache files`).toEqual(proof.changedFiles);
-      }
-    } else if (task.ref !== null || task.changedFiles.length !== 0) {
-      failSource("cache-source", `tasks.${task.spec.id}.cacheSource`, `${id} task cache without D`);
-    }
-    if (task.state === "done") {
-      expect(producer, `${id} done task producer`).toBeDefined();
-      if (options.allowMissingReviewer) continue;
-      const reviewer = record.assignments.find(
-        (entry) =>
-          entry.taskId === task.spec.id &&
-          entry.purpose === "reviewer" &&
-          entry.acceptedProof !== null &&
-          "verdict" in entry.acceptedProof &&
-          entry.delivery?.producerAssignmentId === producer?.assignmentId,
-      );
-      if (!reviewer) {
-        failSource(
-          "done-reviewer-chain",
-          `tasks.${task.spec.id}.reviewer`,
-          `${id} done task reviewer chain`,
-        );
-      }
-      if (reviewer?.acceptedProof && producer?.acceptedProof) {
-        expect("reviewedRef" in reviewer.acceptedProof, `${id} done reviewer report kind`).toBe(
-          true,
-        );
-        if ("reviewedRef" in reviewer.acceptedProof && "ref" in producer.acceptedProof) {
-          expect(reviewer.acceptedProof.reviewedRef, `${id} done reviewed ref`).toEqual(
-            producer.acceptedProof.ref,
-          );
-        }
-      }
-    }
-  }
-  for (const claim of record.resources) {
-    expect(claim.originAssignmentId, `${id} claim origin`).toMatch(/^assignment-/);
-    const origin = record.assignments.find(
-      (entry) => entry.assignmentId === claim.originAssignmentId,
-    );
-    expect(origin, `${id} claim origin exists`).toBeDefined();
-    if (origin) {
-      expect(origin.taskId, `${id} claim origin task`).toBe(claim.taskId);
-      expect(["member", "coordinator", "reopen"], `${id} claim origin purpose`).toContain(
-        origin.purpose,
-      );
-    }
-  }
-  for (const decision of record.decisions) {
-    if (decision.state === "superseded") {
-      expect(decision.answer, `${id} superseded answer`).toBeNull();
-      expect(decision.answeredAt, `${id} superseded answeredAt`).toBeNull();
-      expect(decision.resolution, `${id} superseded resolution`).not.toBeNull();
-      if ((decision.cancelIntents ?? []).length !== 0) {
-        failSource("superseded-pairs", "decisions.<id>.cancelIntents", `${id} superseded pairs`);
-      }
-      const resolution = decision.resolution;
-      const task = record.tasks.find((entry) => entry.spec.id === decision.subjectId);
-      expect(task?.state, `${id} superseded task`).toBe("cancelled");
-      expect(task?.releaseDecisionId, `${id} superseded release`).not.toBe(decision.decisionId);
-      if (resolution) {
-        expect(resolution.witness.taskId, `${id} superseded witness task`).toBe(decision.subjectId);
-        expect(resolution.witness.localIntentIds, `${id} superseded local ids`).toEqual(
-          [...resolution.witness.localIntentIds].sort(),
-        );
-        const localIds = record.outbox
-          .filter(
-            (entry) =>
-              entry.kind === "dispatch" &&
-              entry.localCancellation !== null &&
-              entry.taskId === decision.subjectId,
-          )
-          .map((entry) => entry.id)
-          .sort();
-        expect(resolution.witness.localIntentIds, `${id} superseded local closure`).toEqual(
-          localIds,
-        );
-        const through = record.checkpoint?.throughSeq ?? 0;
-        if (resolution.eventSeq > through) {
-          const event = record.events.find(
-            (entry) =>
-              entry.seq === resolution.eventSeq &&
-              entry.at === resolution.at &&
-              entry.kind === resolution.cause &&
-              entry.payload.taskId === decision.subjectId,
-          );
-          if (!event) {
-            failSource(
-              "superseded-cancel-event",
-              "decisions.<id>.resolution.eventSeq",
-              `${id} superseded cancel event`,
-            );
-          }
-          if (event) {
-            const audit = event.payload.audit as
-              | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
-              | undefined;
-            expect(audit?.localIntentIds, `${id} superseded audit locals`).toEqual(
-              resolution.witness.localIntentIds,
-            );
-            expect(audit?.supersededDecisionIds, `${id} superseded audit decision`).toContain(
-              decision.decisionId,
-            );
-          }
-        }
-      }
-      continue;
-    }
-    if (decision.cancelIntents === null) continue;
-    const ids = decision.cancelIntents.map((entry) => entry.assignmentId);
-    expect(ids).toEqual([...ids].sort());
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const binding of decision.cancelIntents) {
-      const assignment = record.assignments.find(
-        (entry) => entry.assignmentId === binding.assignmentId,
-      );
-      const intent = record.outbox.find((entry) => entry.id === binding.intentId);
-      expect(assignment, `${id} cancel assignment`).toBeDefined();
-      expect(intent, `${id} cancel intent`).toBeDefined();
-      if (assignment && intent) {
-        expect(intent.kind).toBe("archive");
-        expect(intent.taskId).toBe(assignment.taskId);
-        expect(intent.assignmentId).toBe(assignment.assignmentId);
-        expect(intent.recipient).toBe(assignment.agentId);
-      }
-    }
-  }
+  const parsed = RunRecordSchema.safeParse(record);
+  expect(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues)).toBe(true);
+  const scenario = sourceScenario(scenarioId);
+  const parent = SOURCE_PARENTS[scenarioId];
+  if (!parent) throw new Error(`missing source parent: ${scenarioId}`);
+  expect(RunRecordSchema.safeParse(parent.ledger).success).toBe(true);
+  expect(collectSourceIssues(parent.ledger, sourceScenario(parent.scenarioId))).toEqual([]);
+  expect(issueKeys(collectSourceIssues(record, scenario))).toEqual(issueKeys(expected));
 }
 
 const INVALID: { id: string; value: unknown; paths: readonly string[] }[] = [
@@ -1107,50 +639,48 @@ function issuePathMismatch(
 }
 
 describe("run engine fixtures against R01 schemas", () => {
-  test("legal/boundary fixtures bind every nonce registration to their own Run", () => {
-    for (const entry of INVARIANT_CASES.filter((item) => item.kind !== "violation")) {
-      const ledger = entry.ledger as {
-        runId: string;
-        nonceRegistry: ReadonlyArray<{ runId: string }>;
-      };
-      for (const nonce of ledger.nonceRegistry) {
-        expect(nonce.runId, entry.id).toBe(ledger.runId);
-      }
-    }
+  test("B5 collects independent missing dispatch and cache issues without throwing", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.outbox = record.outbox.filter((entry) => entry.id !== "intent-t1-a1");
+    const t2 = record.tasks.find((entry) => entry.spec.id === "t2");
+    if (!t2) throw new Error("missing t2");
+    t2.ref = { kind: "git-commit", value: "9f3c1a7" };
+    t2.changedFiles = ["src/t2.ts"];
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    const collect = () => collectSourceIssues(record, sourceScenario("normal-ledger"));
+    expect(collect).not.toThrow();
+    console.log("[B5 227 compound]", JSON.stringify(collect()));
+    expect(collect().map(({ code, path }) => ({ code, path }))).toEqual([
+      { code: "assignment-dispatch", path: "assignments.assignment-t1-a1.dispatch" },
+      { code: "cache-source", path: "tasks.t2.cacheSource" },
+    ]);
   });
 
-  test("every invariant case closes its non-target source and names its target", () => {
-    const options: Record<
-      string,
-      { allowSelfReview?: boolean; allowMissingReviewer?: boolean; expected?: RegExp }
-    > = {
-      "i7-self-review": { allowSelfReview: true },
-      "i7-done-without-review": { allowMissingReviewer: true },
-      "i8-assignment-without-intent": { expected: /assignment dispatch count/ },
-    };
-    for (const entry of INVARIANT_CASES) {
-      const record = entry.ledger as LedgerFixture;
-      expect(RunRecordSchema.safeParse(record).success, `${entry.id} schema`).toBe(true);
-      const expected = options[entry.id]?.expected;
-      const doCheck = () =>
-        assertAssociations(entry.id, record, {
-          allowSelfReview: options[entry.id]?.allowSelfReview,
-          allowMissingReviewer: options[entry.id]?.allowMissingReviewer,
-        });
-      if (expected) {
-        expect(doCheck, `${entry.id} source target`).toThrow(expected);
-      } else {
-        expect(doCheck, `${entry.id} non-target source`).not.toThrow();
-      }
+  test("B5 collects two cache defects with distinct task paths", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    for (const task of record.tasks.filter((entry) => ["t2", "t3"].includes(entry.spec.id))) {
+      task.ref = { kind: "git-commit", value: "9f3c1a7" };
     }
-    const i8 = INVARIANT_CASES.find((entry) => entry.id === "i8-assignment-without-intent");
-    if (!i8) throw new Error("missing i8");
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
     expect(
-      sourceCodeOf(() =>
-        assertAssociations("i8-assignment-without-intent", i8.ledger as LedgerFixture),
-      ),
-    ).toBe("assignment-dispatch");
+      collectSourceIssues(record, sourceScenario("normal-ledger")).map(({ code, path }) => ({
+        code,
+        path,
+      })),
+    ).toEqual([
+      { code: "cache-source", path: "tasks.t2.cacheSource" },
+      { code: "cache-source", path: "tasks.t3.cacheSource" },
+    ]);
   });
+
+  test.each(SCHEMA_VALID_LEDGERS)(
+    "all schema-valid samples declare their complete source issue set: $id",
+    ({ id, ledger }) => {
+      const metadata = ALL_SOURCE_METADATA[id];
+      expect(metadata, id).toBeDefined();
+      expectSources(id, ledger, metadata.expectedSource);
+    },
+  );
 
   test("each named sample has explicit source metadata", () => {
     for (const { id } of NAMED_LEDGERS) {
@@ -1171,13 +701,13 @@ describe("run engine fixtures against R01 schemas", () => {
 
   test("legal samples parse and negative samples reject for their declared cause", () => {
     expect(NAMED_LEDGERS.length, "named ledger count").toBe(29);
-    expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(42);
+    expect(SCHEMA_VALID_LEDGERS.length, "legal ledger count").toBe(42);
     expect(INVALID.length, "illegal ledger count").toBe(8);
     expect(VALID_REPORTS.length, "legal report count").toBe(5);
     expect(INVALID_REPORTS.length, "illegal report count").toBe(1);
     expect(BOUNDARIES.length, "later-layer boundary count").toBe(2);
 
-    const rejectedLegalLedgers = LEGAL_LEDGERS.flatMap(({ id, ledger }) => {
+    const rejectedLegalLedgers = SCHEMA_VALID_LEDGERS.flatMap(({ id, ledger }) => {
       const parsed = RunRecordSchema.safeParse(ledger);
       return parsed.success ? [] : [`${id} (${rejectionDetail(parsed)})`];
     });
@@ -1213,11 +743,11 @@ describe("run engine fixtures against R01 schemas", () => {
     );
     expect(rejectedBoundaries, "schema must accept the later-layer boundaries").toEqual([]);
 
-    const legalTotal = LEGAL_LEDGERS.length + VALID_REPORTS.length;
+    const legalTotal = SCHEMA_VALID_LEDGERS.length + VALID_REPORTS.length;
     const illegalTotal = INVALID.length + INVALID_REPORTS.length;
     console.log(
       `[run-engine fixtures] legal ${legalTotal}/${legalTotal} accepted ` +
-        `(ledgers ${LEGAL_LEDGERS.length}/${LEGAL_LEDGERS.length}, reports ${VALID_REPORTS.length}/${VALID_REPORTS.length})`,
+        `(ledgers ${SCHEMA_VALID_LEDGERS.length}/${SCHEMA_VALID_LEDGERS.length}, reports ${VALID_REPORTS.length}/${VALID_REPORTS.length})`,
     );
     console.log(
       `[run-engine fixtures] illegal ${illegalTotal}/${illegalTotal} rejected at their declared paths ` +
@@ -1424,18 +954,11 @@ describe("run engine fixtures against R01 schemas", () => {
     );
   });
 
-  test("legal fixtures use lowercase business ids, no task mirrors, and accepted nonces", () => {
+  test("schema-valid fixtures use lowercase business ids and no task mirrors", () => {
     const lower = /^[a-z0-9][a-z0-9-]*$/;
-    for (const { id, ledger } of SOURCE_LEDGERS) {
-      assertAssociations(id, ledger);
+    for (const { id, ledger } of SCHEMA_VALID_LEDGERS) {
       for (const task of ledger.tasks) {
         expect(task.spec.id, `${id} task id`).toMatch(lower);
-        for (const dep of task.spec.deps) {
-          expect(
-            ledger.tasks.some((candidate) => candidate.spec.id === dep),
-            `${id} task dep ${dep}`,
-          ).toBe(true);
-        }
         for (const dep of task.spec.deps) expect(dep, `${id} dep`).toMatch(lower);
         for (const mirror of ["report", "reviews", "smokeReport"]) {
           expect(Object.hasOwn(task, mirror), `${id} task.${mirror}`).toBe(false);
@@ -1448,41 +971,6 @@ describe("run engine fixtures against R01 schemas", () => {
         }
         if (assignment.acceptedProof !== null) {
           expect(assignment.acceptedProof.taskId, `${id} proof task`).toMatch(lower);
-          const nonce = ledger.nonceRegistry.find(
-            (entry) => entry.assignmentId === assignment.assignmentId,
-          );
-          expect(nonce?.acceptedAt, `${id} accepted nonce timestamp`).not.toBeNull();
-          expect(nonce?.acceptedEventKey, `${id} accepted nonce key`).toBe(
-            `proof:${assignment.assignmentId}`,
-          );
-          const intent = ledger.outbox.find(
-            (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
-          );
-          expect(intent?.messageId, `${id} accepted dispatch`).toBe(assignment.messageId);
-        }
-        if (assignment.state === "ended") {
-          expect(assignment.turnId, `${id} ended turn required`).not.toBeNull();
-          expect(assignment.endedAt, `${id} ended at required`).not.toBeNull();
-          expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
-        }
-        if (assignment.state === "cancelled") {
-          if (assignment.cancellation !== null) {
-            assertCompleteCancellation(id, ledger, assignment);
-          } else {
-            expect(isLocalNeverSent(ledger, assignment), `${id} local never sent`).toBe(true);
-          }
-        }
-        if (assignment.endedEventKey !== null) {
-          expect(
-            ledger.eventReceipts.some(
-              (receipt) =>
-                receipt.eventKey === assignment.endedEventKey &&
-                receipt.kind === "turn_ended" &&
-                receipt.agentId === assignment.agentId &&
-                receipt.turnId === assignment.turnId,
-            ),
-            `${id} ended receipt ${assignment.endedEventKey}`,
-          ).toBe(true);
         }
       }
       for (const claim of ledger.resources) {
@@ -1520,9 +1008,12 @@ describe("run engine fixtures against R01 schemas", () => {
       externalId: null,
     };
     expect(RunRecordSchema.safeParse(none).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("receipt-none", none))).toBe(
-      "cancellation-receipt",
-    );
+    expectSources("quiescent-cancelled-ledger", none, [
+      {
+        code: "cancellation-receipt",
+        path: "assignments.assignment-t2-a1.cancellation.receipt.kind",
+      },
+    ]);
 
     const onlyEnded = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const endedAssignment = onlyEnded.assignments.find(
@@ -1532,9 +1023,9 @@ describe("run engine fixtures against R01 schemas", () => {
     endedAssignment.cancellation = null;
     endedAssignment.endedEventKey = "agent-b1|turn-7|turn_ended";
     expect(RunRecordSchema.safeParse(onlyEnded).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("only-ended", onlyEnded))).toBe(
-      "local-never-sent",
-    );
+    expectSources("quiescent-cancelled-ledger", onlyEnded, [
+      { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+    ]);
 
     const wrongActor = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongActorAssignment = wrongActor.assignments.find(
@@ -1543,9 +1034,12 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongActorAssignment?.cancellation) throw new Error("missing cancellation");
     wrongActorAssignment.cancellation.assignmentId = "assignment-other";
     expect(RunRecordSchema.safeParse(wrongActor).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("wrong-actor", wrongActor))).toBe(
-      "cancellation-assignment",
-    );
+    expectSources("quiescent-cancelled-ledger", wrongActor, [
+      {
+        code: "cancellation-assignment",
+        path: "assignments.assignment-t2-a1.cancellation.assignmentId",
+      },
+    ]);
 
     const wrongTime = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongTimeAssignment = wrongTime.assignments.find(
@@ -1554,7 +1048,12 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongTimeAssignment?.cancellation) throw new Error("missing cancellation");
     wrongTimeAssignment.cancellation.refresh.observedAt = "2026-10-27T12:34:55.000Z";
     expect(RunRecordSchema.safeParse(wrongTime).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("wrong-time", wrongTime))).toBe("refresh-time");
+    expectSources("quiescent-cancelled-ledger", wrongTime, [
+      {
+        code: "refresh-time",
+        path: "assignments.assignment-t2-a1.cancellation.refresh.observedAt",
+      },
+    ]);
 
     const wrongIntent = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongIntentAssignment = wrongIntent.assignments.find(
@@ -1563,9 +1062,12 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongIntentAssignment?.cancellation) throw new Error("missing cancellation");
     wrongIntentAssignment.cancellation.cancelIntentId = "intent-missing";
     expect(RunRecordSchema.safeParse(wrongIntent).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("wrong-intent", wrongIntent))).toBe(
-      "cancellation-intent",
-    );
+    expectSources("quiescent-cancelled-ledger", wrongIntent, [
+      {
+        code: "cancellation-intent",
+        path: "assignments.assignment-t2-a1.cancellation.cancelIntentId",
+      },
+    ]);
 
     const unauthorized = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const unauthorizedDecision = unauthorized.decisions.find((entry) => entry.subjectId === "t2");
@@ -1574,9 +1076,9 @@ describe("run engine fixtures against R01 schemas", () => {
     unauthorizedDecision.answer = null;
     unauthorizedDecision.answeredAt = null;
     expect(RunRecordSchema.safeParse(unauthorized).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("unauthorized", unauthorized))).toBe(
-      "cancellation-decision",
-    );
+    expectSources("quiescent-cancelled-ledger", unauthorized, [
+      { code: "cancellation-decision", path: "tasks.t2.cancellationDecision" },
+    ]);
 
     const missingTaskCoverage = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const coverageDecision = missingTaskCoverage.decisions.find(
@@ -1585,9 +1087,12 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!coverageDecision?.answer) throw new Error("missing answer");
     coverageDecision.answer.taskIds = [];
     expect(RunRecordSchema.safeParse(missingTaskCoverage).success).toBe(true);
-    expect(
-      sourceCodeOf(() => assertAssociations("missing-task-coverage", missingTaskCoverage)),
-    ).toBe("cancellation-answer-coverage");
+    expectSources("quiescent-cancelled-ledger", missingTaskCoverage, [
+      {
+        code: "cancellation-answer-coverage",
+        path: "decisions.66666666-6666-4666-8666-666666666666.answer.taskIds",
+      },
+    ]);
   });
 
   test("T175 delivery producer must be a valid producer done proof", () => {
@@ -1598,9 +1103,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!smoker) throw new Error("missing smoker");
     smoker.delivery = { producerAssignmentId: "assignment-t6-r1" };
     expect(RunRecordSchema.safeParse(reviewAsProducer).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("review-as-producer", reviewAsProducer))).toBe(
-      "producer-purpose",
-    );
+    expectSources("dev-smoke-ready", reviewAsProducer, [
+      { code: "producer-purpose", path: "assignments.assignment-t6-r1.purpose" },
+    ]);
   });
 
   test("T175 task cache is null/[] without a valid current D", () => {
@@ -1610,9 +1115,9 @@ describe("run engine fixtures against R01 schemas", () => {
     t2Task.ref = { kind: "git-commit", value: "9f3c1a7" };
     t2Task.changedFiles = ["src/t2.ts"];
     expect(RunRecordSchema.safeParse(cachedWithoutD).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("cache-without-d", cachedWithoutD))).toBe(
-      "cache-source",
-    );
+    expectSources("normal-ledger", cachedWithoutD, [
+      { code: "cache-source", path: "tasks.t2.cacheSource" },
+    ]);
   });
 
   test("C1/C8 refresh actor and own ended-key identity", () => {
@@ -1623,9 +1128,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongRefreshAssignment?.cancellation) throw new Error("missing cancellation");
     wrongRefreshAssignment.cancellation.refresh.agentId = "agent-wrong";
     expect(RunRecordSchema.safeParse(wrongRefresh).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("wrong-refresh-actor", wrongRefresh))).toBe(
-      "refresh-actor",
-    );
+    expectSources("quiescent-cancelled-ledger", wrongRefresh, [
+      { code: "refresh-actor", path: "assignments.assignment-t2-a1.cancellation.refresh.agentId" },
+    ]);
 
     const matchingKey = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const matchingAssignment = matchingKey.assignments.find(
@@ -1634,7 +1139,7 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!matchingAssignment?.cancellation) throw new Error("missing cancellation");
     matchingAssignment.endedEventKey = matchingAssignment.cancellation.endedEventKey;
     expect(RunRecordSchema.safeParse(matchingKey).success).toBe(true);
-    expect(() => assertAssociations("matching-ended-key", matchingKey)).not.toThrow();
+    expectSources("quiescent-cancelled-ledger", matchingKey, []);
 
     const conflictingKey = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const conflictingAssignment = conflictingKey.assignments.find(
@@ -1643,9 +1148,10 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!conflictingAssignment?.cancellation) throw new Error("missing cancellation");
     conflictingAssignment.endedEventKey = "agent-b1|turn-6|turn_ended";
     expect(RunRecordSchema.safeParse(conflictingKey).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("conflicting-ended-key", conflictingKey))).toBe(
-      "ended-key-mismatch",
-    );
+    expectSources("quiescent-cancelled-ledger", conflictingKey, [
+      { code: "ended-key-mismatch", path: "assignments.assignment-t2-a1.endedEventKey" },
+      { code: "ended-receipt", path: "assignments.assignment-t2-a1.endedEventKey" },
+    ]);
   });
 
   test("C2 cancel pairs exact closure", () => {
@@ -1654,9 +1160,12 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!missingDecision) throw new Error("missing decision");
     missingDecision.cancelIntents = [];
     expect(RunRecordSchema.safeParse(missing).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("missing-pair", missing))).toBe(
-      "cancellation-pairs",
-    );
+    expectSources("quiescent-cancelled-ledger", missing, [
+      {
+        code: "cancellation-pairs",
+        path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents",
+      },
+    ]);
 
     const extra = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const extraDecision = extra.decisions.find((entry) => entry.subjectId === "t2");
@@ -1679,9 +1188,16 @@ describe("run engine fixtures against R01 schemas", () => {
       ...(extraDecision.cancelIntents ?? []),
     ];
     expect(RunRecordSchema.safeParse(extra).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("extra-cross-task-pair", extra))).toBe(
-      "cancellation-pairs",
-    );
+    expectSources("quiescent-cancelled-ledger", extra, [
+      {
+        code: "cancellation-pairs",
+        path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents",
+      },
+      {
+        code: "cancellation-pair-task",
+        path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents.assignment-t1-a1.assignmentId",
+      },
+    ]);
   });
 
   test("C2 two-actor exact closure and extra same-task pair", () => {
@@ -1747,7 +1263,7 @@ describe("run engine fixtures against R01 schemas", () => {
     ];
     if (twoDecision.answer) twoDecision.answer.taskIds = ["t1", "t2"];
     expect(RunRecordSchema.safeParse(two).success).toBe(true);
-    expect(() => assertAssociations("quiescent-two", two)).not.toThrow();
+    expectSources("quiescent-two", two, []);
 
     const extra = structuredClone(two);
     const third = {
@@ -1795,9 +1311,12 @@ describe("run engine fixtures against R01 schemas", () => {
       { assignmentId: "assignment-t2-a3", intentId: "intent-cancel-t2-extra" },
     ];
     expect(RunRecordSchema.safeParse(extra).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("quiescent-two", extra))).toBe(
-      "cancellation-pairs",
-    );
+    expectSources("quiescent-two", extra, [
+      {
+        code: "cancellation-pairs",
+        path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents",
+      },
+    ]);
   });
 
   test("C4 LocalNeverSent requires exactly one failed dispatch", () => {
@@ -1816,9 +1335,10 @@ describe("run engine fixtures against R01 schemas", () => {
         }),
       );
       expect(RunRecordSchema.safeParse(local).success).toBe(true);
-      expect(sourceCodeOf(() => assertAssociations(`local-extra-${state}`, local))).toBe(
-        "assignment-dispatch",
-      );
+      expectSources("local-never-sent-cancelled-ledger", local, [
+        { code: "assignment-dispatch", path: "assignments.assignment-t2-a1.dispatch" },
+        { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+      ]);
     }
   });
 
@@ -1830,7 +1350,10 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongNonce) throw new Error("missing nonce");
     wrongNonce.runId = "run-other-z9";
     expect(RunRecordSchema.safeParse(wrongRun).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("local-wrong-run", wrongRun))).toBe("nonce-run");
+    expectSources("local-never-sent-cancelled-ledger", wrongRun, [
+      { code: "nonce-run", path: "nonceRegistry.6f1c2a44-3b7e-4f0a-9a11-000000000002.runId" },
+      { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+    ]);
 
     const turn = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
     turn.events.push({
@@ -1840,14 +1363,18 @@ describe("run engine fixtures against R01 schemas", () => {
       payload: { taskId: "t2", turnId: "turn-7" },
     });
     expect(RunRecordSchema.safeParse(turn).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("local-turn", turn))).toBe("local-never-sent");
+    expectSources("local-never-sent-cancelled-ledger", turn, [
+      { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+    ]);
 
     const audit = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
     const cancelEvent = audit.events.find((entry) => entry.seq === 8);
     if (!cancelEvent) throw new Error("missing cancel event");
     cancelEvent.payload.audit = { localIntentIds: [], supersededDecisionIds: [] };
     expect(RunRecordSchema.safeParse(audit).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("local-audit", audit))).toBe("local-never-sent");
+    expectSources("local-never-sent-cancelled-ledger", audit, [
+      { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+    ]);
 
     const notRevoked = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
     const nonce = notRevoked.nonceRegistry.find(
@@ -1857,9 +1384,9 @@ describe("run engine fixtures against R01 schemas", () => {
     nonce.revokedAt = null;
     nonce.revokeReason = null;
     expect(RunRecordSchema.safeParse(notRevoked).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("local-not-revoked", notRevoked))).toBe(
-      "local-never-sent",
-    );
+    expectSources("local-never-sent-cancelled-ledger", notRevoked, [
+      { code: "local-never-sent", path: "assignments.assignment-t2-a1" },
+    ]);
   });
 
   test("C6 superseded no-effects resolution and empty-pair branch close", () => {
@@ -1899,7 +1426,7 @@ describe("run engine fixtures against R01 schemas", () => {
       createdAt: AT_UPDATED,
     });
     expect(RunRecordSchema.safeParse(withAssignment).success).toBe(true);
-    expect(() => assertAssociations("superseded-local", withAssignment)).not.toThrow();
+    expectSources("superseded-local", withAssignment, []);
 
     const zero = structuredClone(withAssignment);
     zero.assignments = zero.assignments.filter((entry) => entry.taskId !== "t2");
@@ -1912,32 +1439,49 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!zeroEvent) throw new Error("missing event");
     zeroEvent.payload.audit = { localIntentIds: [], supersededDecisionIds: [decisionId] };
     expect(RunRecordSchema.safeParse(zero).success).toBe(true);
-    expect(() => assertAssociations("superseded-zero", zero)).not.toThrow();
+    expectSources("superseded-zero", zero, []);
 
     const fakeAuth = structuredClone(withAssignment);
     const fakeDecision = fakeAuth.decisions[fakeAuth.decisions.length - 1];
     if (!fakeDecision) throw new Error("missing decision");
     fakeDecision.cancelIntents = [{ assignmentId: "assignment-t2-a1", intentId: localIntent.id }];
     expect(RunRecordSchema.safeParse(fakeAuth).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("superseded-fake-pair", fakeAuth))).toBe(
-      "superseded-pairs",
-    );
+    expectSources("superseded-fake-pair", fakeAuth, [
+      {
+        code: "superseded-pairs",
+        path: "decisions.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.cancelIntents",
+      },
+    ]);
 
     const missingAudit = structuredClone(zero);
     missingAudit.events = missingAudit.events.filter((entry) => entry.seq !== 8);
     expect(RunRecordSchema.safeParse(missingAudit).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("superseded-missing-audit", missingAudit))).toBe(
-      "superseded-cancel-event",
-    );
+    expectSources("superseded-missing-audit", missingAudit, [
+      {
+        code: "superseded-cancel-event",
+        path: "decisions.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.resolution.eventSeq",
+      },
+    ]);
+
+    const compressed = structuredClone(missingAudit);
+    compressed.checkpoint = {
+      throughSeq: 8,
+      historyDigest: "a".repeat(64),
+      counters: structuredClone(compressed.counters),
+      acceptedNonceDigests: [],
+      terminalAssignmentIds: [],
+    };
+    // The existing source rule permits an already compressed event prefix; no store is run here.
+    expectSources("superseded-zero", compressed, []);
   });
 
   test("done tasks keep their producer and reviewer proof chain", () => {
     const broken = structuredClone(CANCELLING_LEDGER);
     broken.assignments = broken.assignments.filter((entry) => entry.taskId !== "t1");
     expect(RunRecordSchema.safeParse(broken).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("done-without-chain", broken))).toBe(
-      "cache-source",
-    );
+    expectSources("cancelling-ledger", broken, [
+      { code: "cache-source", path: "tasks.t1.cacheSource" },
+    ]);
 
     const reviewerOnly = structuredClone(CANCELLING_LEDGER);
     reviewerOnly.assignments = reviewerOnly.assignments.filter(
@@ -1948,38 +1492,9 @@ describe("run engine fixtures against R01 schemas", () => {
     );
     reviewerOnly.outbox = reviewerOnly.outbox.filter((entry) => entry.id !== "intent-t1-r1");
     expect(RunRecordSchema.safeParse(reviewerOnly).success).toBe(true);
-    expect(sourceCodeOf(() => assertAssociations("done-without-reviewer", reviewerOnly))).toBe(
-      "done-reviewer-chain",
-    );
-  });
-
-  test("i7 negatives retain source closure except their declared target", () => {
-    const selfReview = INVARIANT_CASES.find((entry) => entry.id === "i7-self-review")?.ledger;
-    if (!selfReview) throw new Error("missing self-review");
-    expect(RunRecordSchema.safeParse(selfReview).success).toBe(true);
-    expect(() =>
-      assertAssociations("i7-self-review", selfReview as LedgerFixture, {
-        allowSelfReview: true,
-      }),
-    ).not.toThrow();
-
-    const noReview = INVARIANT_CASES.find((entry) => entry.id === "i7-done-without-review")?.ledger;
-    if (!noReview) throw new Error("missing done-without-review");
-    expect(RunRecordSchema.safeParse(noReview).success).toBe(true);
-    expect(() =>
-      assertAssociations("i7-done-without-review", noReview as LedgerFixture, {
-        allowMissingReviewer: true,
-      }),
-    ).not.toThrow();
-
-    const rework = INVARIANT_CASES.find(
-      (entry) => entry.id === "i6-rework-count-below-events",
-    )?.ledger;
-    if (!rework) throw new Error("missing i6");
-    expect(RunRecordSchema.safeParse(rework).success).toBe(true);
-    expect(() =>
-      assertAssociations("i6-rework-count-below-events", rework as LedgerFixture),
-    ).not.toThrow();
+    expectSources("cancelling-ledger", reviewerOnly, [
+      { code: "done-reviewer-chain", path: "tasks.t1.reviewer" },
+    ]);
   });
 
   test("association validator catches single-field source breakage", () => {
@@ -2060,27 +1575,48 @@ describe("run engine fixtures against R01 schemas", () => {
         record.roster = record.roster.filter((seat) => seat.seatId !== "seat-a-smoke");
       },
     ];
+    const expectations: readonly (readonly SourceIssueKey[])[] = [
+      [{ code: "proof-identity", path: "assignments.assignment-t1-a1.acceptedProof.assignmentId" }],
+      [
+        {
+          code: "nonce-accepted-key",
+          path: "nonceRegistry.6f1c2a44-3b7e-4f0a-9a11-000000000001.acceptedEventKey",
+        },
+      ],
+      [{ code: "dispatch-binding", path: "outbox.intent-t1-a1.recipient" }],
+      [{ code: "claim-origin-task", path: "resources.claim-t2.originAssignmentId" }],
+      [{ code: "ended-receipt", path: "assignments.assignment-t1-a1.endedEventKey" }],
+      [{ code: "claim-origin", path: "resources.claim-t2.originAssignmentId" }],
+      [{ code: "ended-key", path: "assignments.assignment-t1-a1.endedEventKey" }],
+      [
+        {
+          code: "delivery-producer",
+          path: "assignments.assignment-t1-r1.delivery.producerAssignmentId",
+        },
+        { code: "done-reviewer-chain", path: "tasks.t1.reviewer" },
+      ],
+      [
+        { code: "seat-agent", path: "assignments.assignment-t1-r1.agentId" },
+        { code: "seat-tier", path: "assignments.assignment-t1-r1.tier" },
+        { code: "seat-duty", path: "roster.seat-b1.duties" },
+        { code: "reviewer-independence", path: "assignments.assignment-t1-r1.seatId" },
+      ],
+      [{ code: "assignment-seat", path: "assignments.assignment-t6-s1.seatId" }],
+    ];
+    expect(expectations.length).toBe(cases.length);
     for (const [index, mutate] of cases.entries()) {
-      const record =
-        index === cases.length - 1
-          ? structuredClone(DEV_SMOKE_READY_LEDGER)
-          : structuredClone(base);
+      const scenarioId = index === cases.length - 1 ? "dev-smoke-ready" : "normal-ledger";
+      const record = structuredClone(index === cases.length - 1 ? DEV_SMOKE_READY_LEDGER : base);
       mutate(record);
-      const parsed = RunRecordSchema.safeParse(record);
-      expect(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues)).toBe(true);
-      let caught = false;
-      try {
-        assertAssociations("mutated", record);
-      } catch {
-        caught = true;
-      }
-      expect(caught, `validator mutation ${index}`).toBe(true);
+      const expected = expectations[index];
+      if (!expected) throw new Error(`missing source expectation ${index}`);
+      expectSources(scenarioId, record, expected);
     }
   });
 
   test("samples never embed secrets, host paths, or the forbidden receipts directory", () => {
     const serialized = JSON.stringify([
-      ...LEGAL_LEDGERS.map((entry) => entry.ledger),
+      ...SCHEMA_VALID_LEDGERS.map((entry) => entry.ledger),
       VALID_REPORTS,
     ]);
     for (const forbidden of [
