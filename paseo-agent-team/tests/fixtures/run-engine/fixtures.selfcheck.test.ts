@@ -6,6 +6,7 @@ import { RunRecordSchema } from "../../../shared/schemas/run-engine/ledger";
 import { RunTaskReportBlockSchema } from "../../../shared/schemas/run-engine/protocol";
 import { RunGetInputSchema } from "../../../shared/schemas/run-engine/rpc";
 import {
+  AT_UPDATED,
   BLOCKED_LEDGER,
   buildOversizedLedger,
   CANCELLATION_AUTHORIZED_FROZEN_LEDGER,
@@ -25,6 +26,7 @@ import {
   IRREVERSIBLE_UNAPPROVED_LEDGER,
   LOCK_CONFLICT_RUN_A,
   LOCK_CONFLICT_RUN_B,
+  MESSAGE_CANCEL,
   NON_ASSIGNEE_REPORT,
   NORMAL_RUN_LEDGER,
   OUTCOME_UNKNOWN_LEDGER,
@@ -325,6 +327,119 @@ describe("run engine fixtures against R01 schemas", () => {
     for (const group of Object.values(groups)) {
       expect(group.ids.length, "manifest id list").toBe(group.count);
     }
+  });
+
+  test("authorized cancellation seed keeps its 14 source/status links", () => {
+    const record = RunRecordSchema.parse(CANCELLATION_AUTHORIZED_FROZEN_LEDGER);
+    const task = (id: string) => {
+      const found = record.tasks.find((entry) => entry.spec.id === id);
+      if (!found) throw new Error(`missing ${id}`);
+      return found as typeof found & Record<string, unknown>;
+    };
+    const t1 = task("T1");
+    const t2 = task("T2");
+    const report = t1.report as Record<string, unknown>;
+    const t1Implementation = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t1-a1",
+    );
+    const t1Reviewer = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t1-r1",
+    );
+    const t2Assignment = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    const t1Intent = record.outbox.find((entry) => entry.id === "intent-t1-a1");
+    const reviewerIntent = record.outbox.find((entry) => entry.id === "intent-t1-r1");
+    const evidence = t2Assignment?.cancellation;
+    const cancelIntent = record.outbox.find((entry) => entry.id === evidence?.cancelIntentId);
+    const reviewerNonce = record.nonceRegistry.find(
+      (entry) => entry.assignmentId === "assignment-t1-r1",
+    );
+    const decision = record.decisions.find((entry) => entry.subjectId === "T2");
+    // 1-3: T1's done report is the implementation report, not a borrowed/default one.
+    expect(t1.state).toBe("done");
+    expect(report).toMatchObject({
+      taskId: "T1",
+      attempt: 1,
+      nonce: t1Implementation?.nonce,
+      assignmentId: "assignment-t1-a1",
+    });
+    expect(report.ref).toEqual(t1.ref);
+    // 4: T1 implementation assignment is complete.
+    expect(t1Implementation).toMatchObject({
+      taskId: "T1",
+      agentId: "agent-b1",
+      seatId: "seat-b1",
+      nonce: report.nonce,
+    });
+    // 5-8: the reviewer has its own assignment, nonce acceptance and dispatch intent.
+    expect(t1Reviewer).toMatchObject({
+      taskId: "T1",
+      agentId: "agent-b2",
+      seatId: "seat-b2",
+      purpose: "reviewer",
+      tier: "A",
+      nonce: reviewerNonce?.nonce,
+    });
+    expect(t1Reviewer?.messageId).not.toBeNull();
+    expect(reviewerIntent).toMatchObject({
+      kind: "dispatch",
+      taskId: "T1",
+      assignmentId: "assignment-t1-r1",
+      recipient: "agent-b2",
+      messageId: t1Reviewer?.messageId,
+      idempotencyKey: "dispatch-T1-r1",
+      state: "confirmed",
+    });
+    expect(reviewerNonce).toMatchObject({
+      taskId: "T1",
+      assignmentId: "assignment-t1-r1",
+      phase: "review",
+      acceptedAt: AT_UPDATED,
+      acceptedEventKey: "agent-b2|turn-8|turn_ended",
+    });
+    expect(record.eventReceipts).toContainEqual(
+      expect.objectContaining({
+        eventKey: "agent-b2|turn-8|turn_ended",
+        turnId: "turn-8",
+        agentId: "agent-b2",
+      }),
+    );
+    // 9: T1 implementation dispatch intent.
+    expect(t1Intent).toMatchObject({
+      kind: "dispatch",
+      taskId: "T1",
+      assignmentId: "assignment-t1-a1",
+      recipient: "agent-b1",
+      messageId: t1Implementation?.messageId,
+      idempotencyKey: "dispatch-T1-a1",
+    });
+    // 10-14: T2 frozen with claim; cancel source and authorization are complete.
+    expect(t2).toMatchObject({
+      state: "blocked",
+      phase: "frozen",
+      frozenClaimId: "claim-t2",
+    });
+    expect(t2Assignment?.cancellation).toMatchObject({
+      cancelIntentId: "intent-cancel-t2",
+      receipt: { kind: "archive", confirmedAt: AT_UPDATED, externalId: "archive-1" },
+    });
+    expect(cancelIntent).toMatchObject({
+      kind: "wake",
+      taskId: "T2",
+      assignmentId: "assignment-t2-a1",
+      recipient: "agent-b1",
+      messageId: MESSAGE_CANCEL,
+      state: "confirmed",
+    });
+    expect(decision).toMatchObject({
+      state: "answered",
+      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      answeredAt: AT_UPDATED,
+    });
+    expect(record.resources).toContainEqual(
+      expect.objectContaining({ taskId: "T2", frozen: true }),
+    );
   });
 
   test("samples never embed secrets, host paths, or the forbidden receipts directory", () => {

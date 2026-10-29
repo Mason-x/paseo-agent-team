@@ -29,6 +29,7 @@ import {
 import type { LedgerFixture, RunEffectIntent, RunTaskRecord } from "./types";
 
 const T1_REVIEW_NONCE = "6f1c2a44-3b7e-4f0a-9a11-000000000004";
+const MESSAGE_T1_REVIEW = "66666666-6666-4666-8666-666666666668";
 
 /** RE1.11 / Y21: host answered `agent_request_outcome_unknown`; intent is terminal, no retry loop. */
 export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
@@ -194,6 +195,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-caf",
   revision: 12,
   lifecycle: "paused",
+  counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8 },
   tasks: [
     {
       ...T1,
@@ -255,7 +257,10 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       tier: "A",
       family: "codex",
       nonce: T1_REVIEW_NONCE,
-      messageId: null,
+      messageId: MESSAGE_T1_REVIEW,
+      state: "ended",
+      turnId: "turn-8",
+      endedAt: AT_UPDATED,
       workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
     }),
     assignment({
@@ -274,6 +279,18 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       taskId: "T1",
       assignmentId: "assignment-t1-a1",
       messageId: MESSAGE_T1,
+      idempotencyKey: "dispatch-T1-a1",
+    }),
+    dispatchIntent({
+      id: "intent-t1-r1",
+      kind: "dispatch",
+      taskId: "T1",
+      assignmentId: "assignment-t1-r1",
+      recipient: "agent-b2",
+      messageId: MESSAGE_T1_REVIEW,
+      idempotencyKey: "dispatch-T1-r1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
     }),
     dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
     dispatchIntent({
@@ -288,11 +305,49 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       confirmedAt: AT_UPDATED,
     }),
   ],
+  eventReceipts: [
+    ...NORMAL_RUN_LEDGER.eventReceipts,
+    {
+      eventKey: "agent-b2|turn-8|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b2",
+      turnId: "turn-8",
+      seq: 8,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b2|turn-8|turn_ended",
+      disposition: "accepted",
+    },
+  ],
   nonceRegistry: [
     ...NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({
       ...entry,
       runId: "run-rec0re-caf",
+      ...(entry.assignmentId === "assignment-t1-r1"
+        ? {
+            acceptedAt: AT_UPDATED,
+            acceptedEventKey: "agent-b2|turn-8|turn_ended",
+          }
+        : {}),
     })),
+    ...(NORMAL_RUN_LEDGER.nonceRegistry.some((entry) => entry.assignmentId === "assignment-t1-r1")
+      ? []
+      : [
+          {
+            nonce: T1_REVIEW_NONCE,
+            runId: "run-rec0re-caf",
+            taskId: "T1",
+            assignmentId: "assignment-t1-r1",
+            attempt: 1,
+            phase: "review" as const,
+            agentId: "agent-b2",
+            seatId: "seat-b2",
+            issuedAt: AT_UPDATED,
+            acceptedAt: AT_UPDATED,
+            acceptedEventKey: "agent-b2|turn-8|turn_ended",
+            revokedAt: null,
+            revokeReason: null,
+          },
+        ]),
   ],
   decisions: [
     {
