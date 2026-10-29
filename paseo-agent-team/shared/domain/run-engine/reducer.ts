@@ -11,14 +11,18 @@ import {
   checkReviewGate,
   checkSmokeGate,
   normalizeContainedPath,
+  reviewEligible,
 } from "./gates";
 import {
   checkLedgerInvariants,
   occupiesExecutionSlot,
   type RunInvariantViolation,
 } from "./invariants";
+import { nextQualityFailure } from "./scheduler";
 import { executionTier, reviewRequirement } from "./tier";
 import {
+  dispatchIntentMatches,
+  RUN_COUNTER_EVENTS,
   type RunReducerEvent,
   type RunStoredReview,
   type RunTaskWithEvidence,
@@ -41,7 +45,12 @@ export type ReduceResult =
   | { ok: true; next: RunRecord; effects: readonly RunEffect[] }
   | ReduceRejection;
 
-export type ReduceFacts = { now: string; newId: (kind: string) => string };
+export type ReduceFacts = {
+  now: string;
+  newId: (kind: string) => string;
+  /** R05 supplies a precomputed digest for each newly opened quality decision; never hash here. */
+  newDecisionNonceDigest?: (category: "D3" | "D4", taskId: string) => string;
+};
 
 function reject(
   code: ReduceRejection["code"],
@@ -106,6 +115,22 @@ function appendEvent(next: RunRecord, event: RunReducerEvent, facts: ReduceFacts
     payload: { ...event },
   });
   next.updatedAt = facts.now;
+}
+
+function appendCounterEvent(
+  next: RunRecord,
+  task: RunTaskRecord,
+  counter: keyof typeof RUN_COUNTER_EVENTS,
+  facts: ReduceFacts,
+): void {
+  const seq = next.counters.eventsThroughSeq + 1;
+  next.counters.eventsThroughSeq = seq;
+  next.events.push({
+    seq,
+    kind: RUN_COUNTER_EVENTS[counter],
+    at: facts.now,
+    payload: { taskId: task.spec.id, count: task[counter] },
+  });
 }
 
 function releaseClaims(next: RunRecord, taskId: string): void {
@@ -201,6 +226,7 @@ function quiescent(record: RunRecord, taskId: string): boolean {
     (cancelIntent.kind !== "wake" && cancelIntent.kind !== "archive") ||
     cancelIntent.taskId !== taskId ||
     cancelIntent.assignmentId !== assignment.assignmentId ||
+    cancelIntent.recipient !== assignment.agentId ||
     (cancelIntent.state !== "sending" &&
       cancelIntent.state !== "confirmed" &&
       cancelIntent.state !== "outcome-unknown")
@@ -289,18 +315,72 @@ function completeTask(next: RunRecord, task: RunTaskWithEvidence): void {
   releaseClaims(next, task.spec.id);
 }
 
-function afterGateFailure(next: RunRecord, task: RunTaskWithEvidence, reason: string): void {
+function afterGateFailure(
+  next: RunRecord,
+  task: RunTaskWithEvidence,
+  reason: string,
+  facts: ReduceFacts,
+): ReduceRejection | null {
   task.qualityFailures += 1;
+  appendCounterEvent(next, task, "qualityFailures", facts);
   task.waitingReason = reason;
+  const tier = executionTier(task);
+  const plan = nextQualityFailure(task, next.policy);
+  if (plan.kind === "blocked") {
+    const digest = facts.newDecisionNonceDigest?.(plan.decision, task.spec.id);
+    if (!validControlNonceDigest(digest)) {
+      return reject(
+        "RUN_EVENT_INVALID",
+        ["facts", "newDecisionNonceDigest"],
+        "missing-control-nonce-digest",
+      );
+    }
+    task.state = plan.decision === "D3" ? "failed" : "blocked";
+    task.phase = plan.decision === "D3" ? undefined : "frozen";
+    task.waitingReason = plan.reason;
+    for (const claim of next.resources) {
+      if (claim.taskId !== task.spec.id) continue;
+      claim.frozen = true;
+      task.frozenClaimId ??= claim.claimId;
+    }
+    for (const nonce of next.nonceRegistry) {
+      if (nonce.taskId !== task.spec.id || nonce.revokedAt !== null) continue;
+      nonce.revokedAt = facts.now;
+      nonce.revokeReason = plan.reason;
+    }
+    next.decisions.push({
+      decisionId: facts.newId("decision"),
+      category: plan.decision,
+      controlNonceDigest: digest,
+      state: "open",
+      dedupeKey: `quality:${task.spec.id}:${task.qualityFailures}:${plan.decision}`,
+      subjectId: task.spec.id,
+      summary: `${plan.decision}: ${plan.reason}`,
+      createdAt: facts.now,
+      answeredAt: null,
+    });
+    return null;
+  }
+  if (plan.kind === "escalate") {
+    task.escalations.push({
+      fromTier: tier,
+      toTier: plan.nextTier,
+      atAttempt: task.attempts,
+      qualityFailures: task.qualityFailures,
+      at: facts.now,
+    });
+  }
   const active = next.tasks.filter((entry) => occupiesExecutionSlot(next, entry)).length;
   if (active < next.policy.configuredConcurrency) {
     task.state = "rework";
     task.reworkCount += 1;
+    appendCounterEvent(next, task, "reworkCount", facts);
     task.phase = undefined;
   } else {
     task.state = "review";
     task.phase = "awaiting-rework";
   }
+  return null;
 }
 
 function newTask(spec: RunTaskSpec, facts: ReduceFacts): RunTaskRecord {
@@ -473,6 +553,7 @@ function applyEvent(
         return reject("RUN_INVALID_TRANSITION", ["tasks", event.taskId, "state"], "capacity");
       }
       if (
+        !dispatchIntentMatches(event.assignment, event.intent) ||
         next.assignments.some((entry) => entry.assignmentId === event.assignment.assignmentId) ||
         next.nonceRegistry.some((entry) => entry.nonce === event.nonce.nonce) ||
         next.outbox.some((entry) => entry.id === event.intent.id) ||
@@ -586,6 +667,10 @@ function applyEvent(
         task.waitingReason = null;
         task.currentAssignmentId = event.assignment.assignmentId;
       } else {
+        if (awaitingRework) {
+          task.reworkCount += 1;
+          appendCounterEvent(next, task, "reworkCount", facts);
+        }
         task.attempts = event.assignment.attempt;
         task.state = "assigned";
         task.phase = "implementation";
@@ -696,6 +781,7 @@ function applyEvent(
       const gate = checkEvidenceGate(next, task);
       if (!gate.ok) {
         task.evidenceReturns += 1;
+        appendCounterEvent(next, task, "evidenceReturns", facts);
         task.waitingReason = String(gate.issues[0]?.params.reason ?? "evidence");
         return null;
       }
@@ -733,9 +819,12 @@ function applyEvent(
           String(evidence.issues[0]?.params.reason ?? "evidence"),
         );
       }
-      reviewNonce.acceptedAt = facts.now;
-      reviewNonce.acceptedEventKey = `${block.taskId}|${block.attempt}|${block.nonce}`;
-      appendReview(task, block, next);
+      reviewNonce.acceptedAt ??= facts.now;
+      reviewNonce.acceptedEventKey ??= `${block.taskId}|${block.attempt}|${block.nonce}`;
+      const storedReview = appendReview(task, block, next);
+      if (!reviewEligible(next, task, storedReview)) {
+        return reject("RUN_EVENT_INVALID", ["review-report", block.taskId], "no-valid-review");
+      }
       const gate = checkReviewGate(next, task);
       if (!gate.ok) {
         if (block.verdict === "可合入") {
@@ -749,8 +838,12 @@ function applyEvent(
           task.waitingReason = String(gate.issues[0]?.params.reason ?? "blocked-review");
           return null;
         }
-        afterGateFailure(next, task, String(gate.issues[0]?.params.reason ?? "review"));
-        return null;
+        return afterGateFailure(
+          next,
+          task,
+          String(gate.issues[0]?.params.reason ?? "review"),
+          facts,
+        );
       }
       if (task.spec.devSmoke) {
         task.phase = "smoke";
@@ -789,15 +882,19 @@ function applyEvent(
           String(evidence.issues[0]?.params.reason ?? "evidence"),
         );
       }
-      smokeNonce.acceptedAt = facts.now;
-      smokeNonce.acceptedEventKey = `${block.taskId}|${block.attempt}|${block.nonce}`;
+      smokeNonce.acceptedAt ??= facts.now;
+      smokeNonce.acceptedEventKey ??= `${block.taskId}|${block.attempt}|${block.nonce}`;
       task.smokeReport = block;
       const review = checkReviewGate(next, task);
       const smoke = checkSmokeGate(next, task);
       const failed = !review.ok ? review : !smoke.ok ? smoke : null;
       if (failed) {
-        afterGateFailure(next, task, String(failed.issues[0]?.params.reason ?? "smoke"));
-        return null;
+        return afterGateFailure(
+          next,
+          task,
+          String(failed.issues[0]?.params.reason ?? "smoke"),
+          facts,
+        );
       }
       completeTask(next, task);
       recomputeReady(next);
@@ -995,6 +1092,10 @@ function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts)
   const next = structuredClone(record);
   const applied = applyEvent(next, event, facts);
   if (applied) return applied;
+  // Keep event-specific refusal diagnostics, but never commit a draft that repairs a corrupt
+  // source ledger (notably a rolled-back attempt counter).
+  const existing = validateExisting(record);
+  if (existing) return existing;
   next.updatedAt = facts.now;
   appendEvent(next, event, facts);
   const parsed = RunRecordSchema.safeParse(next);

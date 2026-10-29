@@ -42,6 +42,34 @@ export type RunDispatchEvent = {
   claims?: readonly RunRecord["resources"][number][];
 };
 
+/** Derived ledger facts are not public reducer commands. */
+export const RUN_COUNTER_EVENTS = {
+  reworkCount: "rework_started",
+  qualityFailures: "quality_failed",
+  evidenceReturns: "evidence_returned",
+} as const;
+
+export function assignmentPhase(
+  assignment: Pick<RunAssignment, "purpose">,
+): "implementation" | "review" | "smoke" {
+  return assignment.purpose === "reviewer"
+    ? "review"
+    : assignment.purpose === "smoker"
+      ? "smoke"
+      : "implementation";
+}
+
+/** All assignment purposes are delivered by dispatch; archive/wake/reopen are separate effects. */
+export function dispatchIntentMatches(assignment: RunAssignment, intent: RunEffectIntent): boolean {
+  return (
+    intent.kind === "dispatch" &&
+    intent.assignmentId === assignment.assignmentId &&
+    intent.taskId === assignment.taskId &&
+    intent.messageId === assignment.messageId &&
+    intent.recipient === assignment.agentId
+  );
+}
+
 /**
  * The complete reducer event vocabulary. Forged gate results (`review-passed`, `force-done`) are
  * deliberately absent: the reducer consumes raw protocol blocks and runs the gates itself.

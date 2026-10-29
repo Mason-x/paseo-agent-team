@@ -1,10 +1,7 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
-import {
-  checkEvidenceGate,
-  checkReviewGate,
-  checkSmokeGate,
-  normalizeContainedPath,
-} from "./gates";
+import { checkEvidenceGate, checkReviewGate, checkSmokeGate, storedGateIssues } from "./gates";
+import { lockConflicts, normalizeLogicalPath } from "./locks";
+import { assignmentPhase, dispatchIntentMatches, RUN_COUNTER_EVENTS } from "./transitions";
 
 export type RunInvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
 
@@ -127,20 +124,7 @@ function claimConflicts(
   a: RunRecord["resources"][number],
   b: RunRecord["resources"][number],
 ): boolean {
-  if (a.taskId === b.taskId || a.repoId !== b.repoId) return false;
-  if (a.kind === "hot" || a.kind === "tool" || b.kind === "hot" || b.kind === "tool") {
-    return a.kind === b.kind && a.path === b.path;
-  }
-  if (a.access === "read" && b.access === "read") return false;
-  const left = normalizeContainedPath(a.path);
-  const right = normalizeContainedPath(b.path);
-  if (left === null || right === null) return false;
-  if (a.kind === "file" && b.kind === "file") return left === right;
-  if (a.kind === "directory" && b.kind === "directory") {
-    return left === right || right.startsWith(`${left}/`) || left.startsWith(`${right}/`);
-  }
-  if (a.kind === "directory") return right === left || right.startsWith(`${left}/`);
-  return left === right || left.startsWith(`${right}/`);
+  return a.taskId !== b.taskId && lockConflicts(a, b) !== "none";
 }
 
 function checkI3(record: RunRecord): RunInvariantViolation[] {
@@ -169,7 +153,7 @@ function checkI3(record: RunRecord): RunInvariantViolation[] {
       issues.push(violation("I3", ["tasks", task.spec.id, "phase"], "blocked-frozen-phase"));
     }
     if (claim.kind === "file" || claim.kind === "directory") {
-      if (normalizeContainedPath(claim.path) === null) {
+      if (!normalizeLogicalPath(claim.path).ok) {
         issues.push(violation("I3", ["resources", index, "path"], "invalid-path"));
       }
     }
@@ -238,7 +222,7 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
       issues.push(violation("I5", ["nonceRegistry", index, "nonce"], "replayed-nonce"));
     }
     nonces.add(entry.nonce);
-    if (!tasks.has(entry.taskId)) {
+    if (!tasks.has(entry.taskId) || entry.runId !== record.runId) {
       issues.push(violation("I5", ["nonceRegistry", index], "nonce-binding"));
     }
     const assignment = record.assignments.find(
@@ -246,7 +230,9 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
     );
     if (
       assignment &&
-      (assignment.taskId !== entry.taskId ||
+      (assignment.nonce !== entry.nonce ||
+        entry.phase !== assignmentPhase(assignment) ||
+        assignment.taskId !== entry.taskId ||
         assignment.attempt !== entry.attempt ||
         assignment.agentId !== entry.agentId ||
         assignment.seatId !== entry.seatId)
@@ -257,6 +243,7 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
     if (
       entry.revokedAt !== null &&
       task &&
+      task.currentAssignmentId === entry.assignmentId &&
       (task.state === "assigned" || task.state === "in_progress" || task.state === "review")
     ) {
       issues.push(violation("I5", ["nonceRegistry", index], "revoked-nonce-active"));
@@ -265,6 +252,11 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
   for (const [index, assignment] of record.assignments.entries()) {
     if (!nonces.has(assignment.nonce)) {
       issues.push(violation("I5", ["assignments", index, "nonce"], "unregistered-nonce"));
+    } else if (!record.nonceRegistry.some((entry) => entry.nonce === assignment.nonce &&
+      entry.runId === record.runId && entry.taskId === assignment.taskId &&
+      entry.assignmentId === assignment.assignmentId && entry.attempt === assignment.attempt &&
+      entry.phase === assignmentPhase(assignment) && entry.agentId === assignment.agentId && entry.seatId === assignment.seatId)) {
+      issues.push(violation("I5", ["assignments", index, "nonce"], "nonce-binding"));
     }
   }
   return issues;
@@ -272,17 +264,52 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
 
 function checkI6(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
+  for (const counter of ["observationSeq", "probeAttempts", "reopenAttempts"] as const) {
+    const baseline = record.checkpoint?.counters[counter] ?? 0;
+    if (record.counters[counter] < baseline) {
+      issues.push(violation("I6", ["counters", counter], "behind-checkpoint", { count: baseline }));
+    }
+  }
+  const receiptSeq = record.eventReceipts.reduce((highest, receipt) => Math.max(highest, receipt.seq), 0);
+  if (record.counters.observationSeq < receiptSeq) {
+    issues.push(violation("I6", ["counters", "observationSeq"], "behind-receipts", { count: receiptSeq }));
+  }
   const reworkEvents = new Map<string, number>();
   const dispatches = new Map<string, number>();
   for (const event of record.events) {
     const taskId = typeof event.payload.taskId === "string" ? event.payload.taskId : undefined;
     if (taskId === undefined) continue;
     if (event.kind === "rework_started") {
-      reworkEvents.set(taskId, (reworkEvents.get(taskId) ?? 0) + 1);
+      const count =
+        typeof event.payload.count === "number"
+          ? event.payload.count
+          : (reworkEvents.get(taskId) ?? 0) + 1;
+      reworkEvents.set(taskId, Math.max(reworkEvents.get(taskId) ?? 0, count));
     }
     if (event.kind === "task-dispatched") {
+      const actor = event.payload.assignment;
+      if (actor !== null && typeof actor === "object" && !Array.isArray(actor)) {
+        const entry = actor as Record<string, unknown>;
+        if (entry.purpose === "reviewer" || entry.purpose === "smoker") continue;
+        if (typeof entry.attempt === "number") {
+          dispatches.set(taskId, Math.max(dispatches.get(taskId) ?? 0, entry.attempt));
+          continue;
+        }
+      }
+      // Older dispatch facts did not carry an assignment. New facts always do.
       dispatches.set(taskId, (dispatches.get(taskId) ?? 0) + 1);
     }
+  }
+  for (const assignment of record.assignments) {
+    if (assignmentPhase(assignment) !== "implementation") continue;
+    dispatches.set(
+      assignment.taskId,
+      Math.max(dispatches.get(assignment.taskId) ?? 0, assignment.attempt),
+    );
+  }
+  for (const nonce of record.nonceRegistry) {
+    if (nonce.phase !== "implementation") continue;
+    dispatches.set(nonce.taskId, Math.max(dispatches.get(nonce.taskId) ?? 0, nonce.attempt));
   }
   for (const task of record.tasks) {
     const reworks = reworkEvents.get(task.spec.id) ?? 0;
@@ -301,6 +328,23 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
         }),
       );
     }
+    for (const [counter, kind] of Object.entries(RUN_COUNTER_EVENTS)) {
+      if (counter === "reworkCount") continue;
+      const expected = record.events.reduce(
+        (minimum, event) =>
+          event.kind === kind &&
+          event.payload.taskId === task.spec.id &&
+          typeof event.payload.count === "number"
+            ? Math.max(minimum, event.payload.count)
+            : minimum,
+        0,
+      );
+      const actual = task[counter as keyof typeof RUN_COUNTER_EVENTS];
+      if (actual < expected)
+        issues.push(
+          violation("I6", ["tasks", task.spec.id, counter], "behind-events", { count: expected }),
+        );
+    }
   }
   return issues;
 }
@@ -308,6 +352,13 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
 function checkI7(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const task of record.tasks) {
+    const malformed = storedGateIssues(task);
+    if (malformed.length > 0) {
+      issues.push(
+        ...malformed.map((issue) => violation("I7", issue.path, String(issue.params.reason))),
+      );
+      continue;
+    }
     const extension = task as RunRecord["tasks"][number] & Record<string, unknown>;
     if (
       extension.report !== undefined &&
@@ -353,20 +404,24 @@ function checkI8(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const [index, assignment] of record.assignments.entries()) {
     if (assignment.messageId === null) continue;
-    const matches = record.outbox.filter(
-      (intent) =>
-        intent.kind !== "probe" &&
-        intent.assignmentId === assignment.assignmentId &&
-        intent.taskId === assignment.taskId &&
-        intent.messageId === assignment.messageId &&
-        intent.recipient === assignment.agentId,
-    );
+    const matches = record.outbox.filter((intent) => dispatchIntentMatches(assignment, intent));
     if (matches.length !== 1) {
       issues.push(
         violation("I8", ["assignments", index], "assignment-without-intent", {
           taskId: assignment.taskId,
         }),
       );
+    }
+  }
+  for (const [index, decision] of record.decisions.entries()) {
+    if (decision.state === "answered" || !decision.dedupeKey.startsWith("cancel:") || typeof decision.cancelIntentId !== "string") continue;
+    const intent = record.outbox.find((entry) => entry.id === decision.cancelIntentId);
+    const assignment = intent && intent.kind !== "probe"
+      ? record.assignments.find((entry) => entry.assignmentId === intent.assignmentId) : undefined;
+    if (!intent || (intent.kind !== "archive" && intent.kind !== "wake") || !assignment ||
+      intent.taskId !== decision.subjectId || assignment.taskId !== decision.subjectId ||
+      intent.recipient !== assignment.agentId) {
+      issues.push(violation("I8", ["decisions", index, "cancelIntentId"], "cancel-intent-binding"));
     }
   }
   return issues;

@@ -1,4 +1,15 @@
-import type { RunRecord, RunTaskRecord } from "../../schemas/run-engine/ledger";
+import {
+  RunArtifactRefSchema,
+  RunEvidenceSchema,
+  type RunRecord,
+  type RunTaskRecord,
+  RunWorkspaceSchema,
+} from "../../schemas/run-engine/ledger";
+import {
+  RunReviewReportBlockSchema,
+  RunSmokeReportBlockSchema,
+} from "../../schemas/run-engine/protocol";
+import { normalizeLogicalPath, scopeCovers } from "./locks";
 import { reviewRequirement } from "./tier";
 import { type RunStoredReview, type RunTaskWithEvidence, taskById } from "./transitions";
 
@@ -20,44 +31,28 @@ function fail(
   return { ok: false, issues: [{ gate, path, params: { reason } }] };
 }
 
-function artifactKey(ref: unknown): string {
-  return JSON.stringify(ref);
+function artifactKey(ref: unknown): string | null {
+  const parsed = RunArtifactRefSchema.safeParse(ref);
+  if (!parsed.success) return null;
+  const value = parsed.data;
+  return JSON.stringify(
+    value.kind === "git-commit"
+      ? [value.kind, value.value]
+      : [value.kind, value.value, value.baseCommit, value.patchPath],
+  );
 }
 
-/** R03b-compatible lexical path normalization; realpath/short-name stays in R05. */
+/** Compatibility view of the shared lexical rule; realpath/short-name stays in R05. */
 export function normalizeContainedPath(value: string): string | null {
-  const raw = value.replaceAll("\\", "/");
-  if (raw.length === 0) return null;
-  if (raw.startsWith("//") || raw.startsWith("/")) return null;
-  if (/^[A-Za-z]:/u.test(raw)) return null;
-  if (raw.includes(":")) return null;
-  if (raw.includes("*") || raw.includes("?")) return null;
-  for (const char of raw) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f || '<>"|'.includes(char)) return null;
-  }
-  const segments: string[] = [];
-  for (const part of raw.split("/")) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") {
-      if (segments.length === 0) return null;
-      segments.pop();
-      continue;
-    }
-    if (part.endsWith(".") || part.endsWith(" ")) return null;
-    const base = part.split(".")[0]?.toUpperCase() ?? "";
-    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(base)) return null;
-    segments.push(part);
-  }
-  if (segments.length === 0) return null;
-  return segments.join("/").normalize("NFC").toLowerCase().normalize("NFC");
+  const normalized = normalizeLogicalPath(value);
+  return normalized.ok ? normalized.caseFolded : null;
 }
 
 function withinRoot(root: string, path: string): boolean {
   const base = normalizeContainedPath(root);
   const target = normalizeContainedPath(path);
   if (base === null || target === null) return false;
-  return target === base || target.startsWith(`${base}/`);
+  return scopeCovers({ path: base }, { path: target });
 }
 
 /** Everyone who implemented this task, by agent id and seat id. */
@@ -81,6 +76,72 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Stored reports predate full protocol envelopes in some ledgers. Validate the facts actually
+// consumed by the gates using R01's nested schemas, without inventing protocol identity fields.
+const storedReviewSchema = RunReviewReportBlockSchema.pick({
+  reviewedRef: true,
+  verdict: true,
+  blockers: true,
+}).passthrough();
+const storedSmokeSchema = RunSmokeReportBlockSchema.pick({
+  testedRef: true,
+  checks: true,
+  devHost: true,
+  devServerId: true,
+  devHome: true,
+}).passthrough();
+
+export function storedGateIssues(task: RunTaskRecord): GateIssue[] {
+  const issues: GateIssue[] = [];
+  const invalid = (gate: GateIssue["gate"], field: string): void => {
+    issues.push({
+      gate,
+      path: ["tasks", task.spec.id, field],
+      params: { reason: `invalid-${field}-extension` },
+    });
+  };
+  const report = task.report;
+  if (report !== undefined) {
+    if (!isRecord(report) || !["done", "blocked", "failed"].includes(String(report.status))) {
+      invalid("evidence", "report");
+    } else if (
+      report.status === "done" &&
+      (!Array.isArray(report.changedFiles) ||
+        !report.changedFiles.every((file) => typeof file === "string") ||
+        !Array.isArray(report.evidence) ||
+        !report.evidence.every((entry) => RunEvidenceSchema.safeParse(entry).success) ||
+        !RunArtifactRefSchema.safeParse(report.ref).success ||
+        (report.workspace !== undefined && !RunWorkspaceSchema.safeParse(report.workspace).success))
+    ) {
+      invalid("evidence", "report");
+    }
+  }
+  const reviews = task.reviews;
+  if (
+    reviews !== undefined &&
+    (!Array.isArray(reviews) ||
+      !reviews.every(
+        (review) =>
+          isRecord(review) &&
+          storedReviewSchema.safeParse(review).success &&
+          typeof review.reviewerAgentId === "string" &&
+          review.reviewerAgentId.length > 0 &&
+          typeof review.reviewerSeatId === "string" &&
+          review.reviewerSeatId.length > 0 &&
+          (review.assignmentId === undefined ||
+            (typeof review.assignmentId === "string" && review.assignmentId.length > 0)) &&
+          (review.phase === undefined || review.phase === "review" || review.phase === "smoke") &&
+          (review.probes === undefined ||
+            RunReviewReportBlockSchema.shape.probes.safeParse(review.probes).success),
+      ))
+  )
+    invalid("review", "reviews");
+  if (task.smokeReport !== undefined && !storedSmokeSchema.safeParse(task.smokeReport).success) {
+    invalid("smoke", "smokeReport");
+  }
+  return issues;
+}
+
 function isIndependent(review: RunStoredReview, actors: ReadonlySet<string>): boolean {
   return !actors.has(review.reviewerAgentId) && !actors.has(review.reviewerSeatId);
 }
@@ -95,16 +156,16 @@ function reviewAssignment(
   taskId: string,
   review: RunStoredReview,
 ): RunRecord["assignments"][number] | undefined {
-  const byId =
-    review.assignmentId === undefined
-      ? undefined
-      : record.assignments.find(
-          (entry) =>
-            entry.assignmentId === review.assignmentId &&
-            entry.taskId === taskId &&
-            entry.purpose === "reviewer",
-        );
-  if (byId) return byId;
+  if (review.assignmentId !== undefined) {
+    return record.assignments.find(
+      (entry) =>
+        entry.assignmentId === review.assignmentId &&
+        entry.taskId === taskId &&
+        entry.purpose === "reviewer" &&
+        entry.agentId === review.reviewerAgentId &&
+        entry.seatId === review.reviewerSeatId,
+    );
+  }
   return record.assignments.find(
     (entry) =>
       entry.taskId === taskId &&
@@ -154,8 +215,24 @@ function inWriteScope(task: RunTaskRecord, file: string): boolean {
   );
 }
 
+/** A report must prove one actor, assignment, qualification and current artifact together. */
+export function reviewEligible(
+  record: RunRecord,
+  task: RunTaskRecord,
+  review: RunStoredReview,
+): boolean {
+  return (
+    artifactKey(review.reviewedRef) !== null &&
+    artifactKey(review.reviewedRef) === artifactKey(task.ref) &&
+    isIndependent(review, implementationActors(record, task.spec.id)) &&
+    reviewerQualified(record, task, review)
+  );
+}
+
 /** RE3.2: a done report is evidence only when every contract requirement has a matching item. */
 export function checkEvidenceGate(record: RunRecord, taskValue: RunTaskRecord): GateResult {
+  const invalid = storedGateIssues(taskValue).filter((issue) => issue.gate === "evidence");
+  if (invalid.length > 0) return { ok: false, issues: invalid };
   const task = taskValue as RunTaskWithEvidence;
   const report = task.report;
   if (report === undefined) {
@@ -265,19 +342,20 @@ export function checkEvidenceGate(record: RunRecord, taskValue: RunTaskRecord): 
 
 /** RE3.3: accept only an independent, non-blocking review of the current artifact. */
 export function checkReviewGate(record: RunRecord, taskValue: RunTaskRecord): GateResult {
+  const invalid = storedGateIssues(taskValue).filter((issue) => issue.gate === "review");
+  if (invalid.length > 0) return { ok: false, issues: invalid };
   const task = taskValue as RunTaskWithEvidence;
   if (task.ref === null) return fail("review", ["tasks", task.spec.id, "ref"], "missing-ref");
   if (task.reviews !== undefined && !Array.isArray(task.reviews)) {
     return fail("review", ["tasks", task.spec.id, "reviews"], "invalid-reviews");
   }
-  const actors = implementationActors(record, task.spec.id);
   const reviews = task.reviews ?? [];
   const current = reviews.filter((review) => {
     if (!isRecord(review)) return false;
     if (typeof review.reviewerAgentId !== "string" || review.reviewerAgentId === "") return false;
     if (typeof review.reviewerSeatId !== "string" || review.reviewerSeatId === "") return false;
     if (artifactKey(review.reviewedRef) !== artifactKey(task.ref)) return false;
-    return isIndependent(review, actors) && reviewerQualified(record, task, review);
+    return reviewEligible(record, task, review);
   });
   if (
     current.some(
@@ -385,30 +463,26 @@ function ipv6Loopback(value: string): boolean {
   );
 }
 
-function canonicalDevHost(value: string): string {
+function canonicalDevHost(value: string): string | null {
   let raw = value.trim().toLowerCase();
   raw = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//u, "");
-  raw = raw.replace(/^.*@/u, "");
   raw = raw.split(/[/?#]/u)[0] ?? raw;
-  let host = raw;
-  let rawPort = "";
-  const bracketed = /^\[([^\]]+)\](?::([^/]+))?$/u.exec(raw);
-  if (bracketed) {
-    host = bracketed[1] ?? "";
-    rawPort = bracketed[2] ?? "";
-  } else if (raw.includes(":")) {
-    const index = raw.lastIndexOf(":");
-    host = raw.slice(0, index);
-    rawPort = raw.slice(index + 1);
-    if (host.includes(":")) {
-      host = raw;
-      rawPort = "";
-    }
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${raw}`);
+  } catch {
+    return null;
   }
-  host = host.replace(/\.$/u, "");
-  const port = rawPort === "" ? "6767" : String(Number(rawPort));
+  const host = parsed.hostname.replace(/^\[|\]$/gu, "").replace(/\.$/u, "");
+  // URL canonicalizes IPv4 aliases (including octal) and numeric ports. Preserve an explicit
+  // port 80, which URL omits as the default for our parsing scheme; absent ports mean Paseo 6767.
+  const explicitPort = /:(\d+)$/u.exec(raw)?.[1];
+  const port = parsed.port || (explicitPort === undefined ? "6767" : String(Number(explicitPort)));
   const loopback =
-    host === "localhost" || (host.includes(":") ? ipv6Loopback(host) : ipv4Loopback(host));
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "ip6-localhost" ||
+    (host.includes(":") ? ipv6Loopback(host) : ipv4Loopback(host));
   return `${loopback ? "loopback" : host}:${port}`;
 }
 
@@ -420,6 +494,8 @@ function defaultDevHost(value: string): boolean {
 export function checkSmokeGate(record: RunRecord, taskValue: RunTaskRecord): GateResult {
   const task = taskValue as RunTaskWithEvidence;
   if (!task.spec.devSmoke) return OK;
+  const invalid = storedGateIssues(taskValue).filter((issue) => issue.gate === "smoke");
+  if (invalid.length > 0) return { ok: false, issues: invalid };
   const report = task.smokeReport;
   if (!isRecord(report)) {
     return fail("smoke", ["tasks", task.spec.id, "smokeReport"], "invalid-report");
@@ -453,6 +529,8 @@ export function checkSmokeGate(record: RunRecord, taskValue: RunTaskRecord): Gat
   const target = record.policy.devTargets.find((entry) => entry.serverId === report.devServerId);
   if (!target) return fail("smoke", ["tasks", task.spec.id, "devServerId"], "not-registered");
   if (
+    canonicalDevHost(report.devHost) === null ||
+    canonicalDevHost(target.host) === null ||
     defaultDevHost(report.devHost) ||
     canonicalDevHost(report.devHost) !== canonicalDevHost(target.host) ||
     normalizedAnyPath(report.devHome) !== normalizedAnyPath(target.home) ||
