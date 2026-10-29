@@ -77,7 +77,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i3o",
-      tasks: [T1, { ...T2, state: "blocked", waitingReason: "missing-seat" }, T3],
+      tasks: [T1, { ...T2, state: "blocked", phase: "frozen", waitingReason: "missing-seat" }, T3],
       resources: [claim({ frozen: true })],
     }),
     note: "blocked+frozen may keep a claim after the 10-27 revision.",
@@ -95,24 +95,24 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
   {
     id: "i4-review-awaiting-does-not-count",
     invariant: "I4",
-    kind: "legal",
+    kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i4o",
       policy: { ...POLICY, configuredConcurrency: 3 },
       tasks: [T1, { ...T2, state: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
     }),
-    note: "Five in-flight with configuredConcurrency 3: effectiveLimit=max(3,5)=5, so legal.",
+    note: "Five in-flight exceeds configuredConcurrency 3 plus zero frozen slots; review itself is not counted.",
   },
   {
     id: "i4-capacity-over-effective",
     invariant: "I4",
-    kind: "boundary",
+    kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i4x",
-      policy: { ...POLICY, configuredConcurrency: 2 },
+      policy: { ...POLICY, configuredConcurrency: 5 },
       tasks: [T1, T2, ...FIVE_IN_FLIGHT.slice(0, 4)],
     }),
-    note: "Boundary: 5 in-flight with configured 2 is legal under max(); R03 decides occupancy rules.",
+    note: "Five in-flight at configured concurrency five; the legal capacity edge.",
   },
   {
     id: "i5-nonce-replayed",
@@ -146,12 +146,13 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i6x",
-      tasks: [{ ...T2, reworkCount: 0 }],
+      tasks: [T1, { ...T2, reworkCount: 0 }, T3],
       events: [
         ...NORMAL_RUN_LEDGER.events,
         { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
         { seq: 9, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "T2" } },
       ],
+      counters: { ...NORMAL_RUN_LEDGER.counters, eventsThroughSeq: 9 },
     }),
     note: "Two rework events exist while the counter says zero.",
   },
