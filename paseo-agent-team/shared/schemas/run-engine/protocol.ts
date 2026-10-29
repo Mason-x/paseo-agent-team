@@ -72,7 +72,22 @@ const BudgetRequestShape = {
   requestedLimit: z.number().int().min(0).max(1024),
   reason: z.string().min(1).max(600),
 };
-export const RunBudgetRequestSchema = z.strictObject(BudgetRequestShape);
+function refineBudgetSubject(
+  value: { scope: "seat" | "task-attempts" | "strategic-turns"; subjectId: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.scope === "task-attempts" && !RunTaskIdSchema.safeParse(value.subjectId).success) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["subjectId"],
+      message: "task-attempts subjectId must be a lowercase business TaskId",
+    });
+  }
+}
+
+export const RunBudgetRequestSchema = z
+  .strictObject(BudgetRequestShape)
+  .superRefine(refineBudgetSubject);
 export type RunBudgetRequest = z.infer<typeof RunBudgetRequestSchema>;
 
 const TASK_DAG_MAX_TASKS = 64;
@@ -172,49 +187,53 @@ export const RUN_DECISION_ACTIONS = [
   "resume-seat",
   "reject",
 ] as const;
-export const RunDecisionActionSchema = z.discriminatedUnion("action", [
-  z.strictObject({
-    action: z.literal("replan"),
-    nextDagRevision: z.number().int().min(1),
-  }),
-  z.strictObject({
-    action: z.literal("assign-seat"),
-    taskId: z.string().min(1).max(64),
-    seatId: RunIdRefSchema,
-  }),
-  z.strictObject({
-    action: z.literal("increase-budget"),
-    scope: z.enum(["seat", "task-attempts", "strategic-turns"]),
-    subjectId: RunIdRefSchema,
-    delta: z.number().int().min(1).max(1024),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("retry"),
-    taskId: z.string().min(1).max(64),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("cancel"),
-    taskIds: z.array(z.string().min(1).max(64)).min(1).max(64),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("defer-channel"),
-    channelId: z.string().min(1).max(128),
-    until: z.string().datetime(),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("resume-seat"),
-    seatId: RunIdRefSchema,
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("reject"),
-    reason: z.string().min(1).max(600),
-  }),
-]);
+export const RunDecisionActionSchema = z
+  .discriminatedUnion("action", [
+    z.strictObject({
+      action: z.literal("replan"),
+      nextDagRevision: z.number().int().min(1),
+    }),
+    z.strictObject({
+      action: z.literal("assign-seat"),
+      taskId: RunTaskIdSchema,
+      seatId: RunIdRefSchema,
+    }),
+    z.strictObject({
+      action: z.literal("increase-budget"),
+      scope: z.enum(["seat", "task-attempts", "strategic-turns"]),
+      subjectId: RunIdRefSchema,
+      delta: z.number().int().min(1).max(1024),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("retry"),
+      taskId: RunTaskIdSchema,
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("cancel"),
+      taskIds: z.array(RunTaskIdSchema).min(1).max(64),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("defer-channel"),
+      channelId: z.string().min(1).max(128),
+      until: z.string().datetime(),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("resume-seat"),
+      seatId: RunIdRefSchema,
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("reject"),
+      reason: z.string().min(1).max(600),
+    }),
+  ])
+  .superRefine((action, ctx) => {
+    if (action.action === "increase-budget") refineBudgetSubject(action, ctx);
+  });
 export type RunDecisionAction = z.infer<typeof RunDecisionActionSchema>;
 
 export const RunDecisionBlockSchema = z.strictObject({
