@@ -204,44 +204,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   lifecycle: "paused",
   counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8 },
   tasks: [
-    {
-      ...t1,
-      report: {
-        protocolVersion: 1,
-        runId: "run-rec0re-caf",
-        taskId: "t1",
-        attempt: 1,
-        nonce: NONCE_T1,
-        assignmentId: "assignment-t1-a1",
-        status: "done",
-        changedFiles: ["src/t1.ts"],
-        ref: { kind: "git-commit", value: "9f3c1a7" },
-        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
-        evidence: [
-          {
-            id: "five-gates",
-            command: "npm run check && npm run typecheck && npm test",
-            exitCode: 0,
-            summary: "all gates passed",
-            artifactPath: "evidence/t1.log",
-            ref: { kind: "git-commit", value: "9f3c1a7" },
-            isolation: {
-              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
-              outsideRealHome: true,
-            },
-          },
-        ],
-      },
-      reviews: [
-        {
-          reviewerAgentId: "agent-b2",
-          reviewerSeatId: "seat-b2",
-          verdict: "可合入",
-          reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
-          blockers: [],
-        },
-      ],
-    } as RunTaskRecord,
+    t1,
     {
       ...t2,
       state: "blocked",
@@ -262,7 +225,35 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       state: "ended",
       turnId: "turn-6",
       endedAt: AT_UPDATED,
+      endedEventKey: "agent-b1|turn-6|turn_ended",
       workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: "run-rec0re-caf",
+        taskId: "t1",
+        attempt: 1,
+        nonce: NONCE_T1,
+        assignmentId: "assignment-t1-a1",
+        messageId: MESSAGE_T1,
+        status: "done",
+        changedFiles: ["src/t1.ts"],
+        ref: { kind: "git-commit", value: "9f3c1a7" },
+        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+        evidence: [
+          {
+            id: "five-gates",
+            command: "npm run check && npm run typecheck && npm test",
+            exitCode: 0,
+            summary: "all gates passed",
+            artifactPath: "evidence/t1.log",
+            ref: { kind: "git-commit", value: "9f3c1a7" },
+            isolation: {
+              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
+              outsideRealHome: true,
+            },
+          },
+        ],
+      },
     }),
     assignment({
       assignmentId: "assignment-t1-r1",
@@ -274,9 +265,24 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       family: "codex",
       nonce: T1_REVIEW_NONCE,
       messageId: MESSAGE_T1_REVIEW,
+      delivery: { producerAssignmentId: "assignment-t1-a1" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: "run-rec0re-caf",
+        taskId: "t1",
+        attempt: 1,
+        nonce: T1_REVIEW_NONCE,
+        assignmentId: "assignment-t1-r1",
+        messageId: MESSAGE_T1_REVIEW,
+        reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
+        verdict: "可合入",
+        blockers: [],
+        probes: [],
+      },
       state: "ended",
       turnId: "turn-8",
       endedAt: AT_UPDATED,
+      endedEventKey: "agent-b2|turn-8|turn_ended",
       workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
     }),
     assignment({
@@ -339,11 +345,10 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       ...entry,
       runId: "run-rec0re-caf",
       ...(entry.assignmentId === "assignment-t1-r1"
-        ? {
-            acceptedAt: AT_UPDATED,
-            acceptedEventKey: "agent-b2|turn-8|turn_ended",
-          }
-        : {}),
+        ? { acceptedAt: AT_UPDATED, acceptedEventKey: "proof:assignment-t1-r1" }
+        : entry.assignmentId === "assignment-t1-a1"
+          ? { acceptedAt: AT_UPDATED, acceptedEventKey: "proof:assignment-t1-a1" }
+          : {}),
     })),
     ...(NORMAL_RUN_LEDGER.nonceRegistry.some((entry) => entry.assignmentId === "assignment-t1-r1")
       ? []
@@ -377,8 +382,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       summary: "Operator approved cancellation; release still requires quiescence evidence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
-
-      cancelIntents: null,
+      cancelIntents: [{ assignmentId: "assignment-t2-a1", intentId: INTENT_CANCEL }],
       resolution: null,
     },
   ],
