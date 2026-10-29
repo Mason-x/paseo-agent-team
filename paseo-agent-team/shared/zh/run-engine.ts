@@ -117,6 +117,8 @@ export const runEngineZh = {
     confirmed: (n: number) => `确认 ${n}`,
     observed: (n: number) => `观察回合 ${n}`,
     limit: (n: number) => `上限 ${n}`,
+    ratio: (value: number | null) =>
+      value === null ? "比例 n/a" : `比例 ${Math.round(value * 100)}%`,
     exhausted: "已用尽",
     na: "n/a",
   },
@@ -163,6 +165,7 @@ export const runEngineZh = {
   needsYou: {
     decisions: (n: number) => `${n} 个决策点等待回应`,
     blockedTasks: (n: number) => `${n} 个任务阻塞或失败`,
+    permissions: (n: number) => `${n} 个任务等待权限处理`,
     criticalAlerts: (n: number) => `${n} 条严重告警未处理`,
     pausedChannels: (n: number) => `${n} 个渠道暂停`,
     overCapacity: "并发占用超出配置",

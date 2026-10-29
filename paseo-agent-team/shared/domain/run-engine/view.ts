@@ -16,7 +16,7 @@ import { runEngineZh as zh } from "../../zh/run-engine";
 
 export const MAX_DAG_NODES = 64;
 
-const ZERO_WIDTH = new Set([0x200b, 0x2060, 0xfeff]);
+const ZERO_WIDTH = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0xfeff]);
 
 /** Strip controls, bidi/zero-width marks, fold whitespace, cut by code point. */
 export function displayText(value: unknown, max: number, fallback = ""): string {
@@ -54,6 +54,7 @@ export type EngineFailureKind = "missing" | "corrupt" | "unknown-version" | "pro
 
 export type EngineState =
   | { kind: "ready"; run: RunDetailView; history: RunHistoryPage; notices: string[] }
+  /** W01 handoff: the caller must keep the last ready state for the same host/run; this view never caches or fakes one. */
   | { kind: "unchanged"; revision: number }
   | { kind: "failure"; failure: EngineFailureKind; detail: string | null }
   | { kind: "refresh-plugin" };
@@ -109,6 +110,7 @@ export type DagNodeView = {
 export type DagLayout = {
   mode: "columns" | "list";
   layers: { layer: number; title: string; nodes: DagNodeView[] }[];
+  /** Model-only dependency edges (166); the read-only UI expresses dependencies as text. */
   edges: { from: string; to: string }[];
   anomalies: number;
   truncated: { shown: number; total: number } | null;
@@ -134,8 +136,8 @@ export function dagLayout(dag: RunDetailView["dag"], mode: "columns" | "list"): 
     }
     const view: DagNodeView = {
       taskId: textOf(node.taskId, 64),
-      title: displayText(node.title, 120, node.taskId),
-      state: node.state,
+      title: displayText(node.title, 120, textOf(node.taskId, 64)),
+      state: textOf(node.state, 32),
       deps,
       depsLabel:
         deps.length === 0 ? zh.noDeps : zh.dependsOn(deps.map((id) => textOf(id, 64)).join("、")),
@@ -252,8 +254,10 @@ export type TaskRowView = {
 export function taskRow(task: RunTaskView, context: TaskContext): TaskRowView {
   const chain =
     task.escalations.length === 0
-      ? task.currentTier
-      : [task.tier, ...task.escalations.map((entry) => entry.toTier)].join("→");
+      ? textOf(task.currentTier, 16)
+      : [task.tier, ...task.escalations.map((entry) => entry.toTier)]
+          .map((tier) => textOf(tier, 16))
+          .join("→");
   const latest = context.history
     .filter((entry) => entry.taskId === task.taskId)
     .reduce<RunHistoryEntryView | null>(
@@ -263,9 +267,9 @@ export function taskRow(task: RunTaskView, context: TaskContext): TaskRowView {
   const assignee = task.assignee;
   return {
     taskId: textOf(task.taskId, 64),
-    title: displayText(task.title, 120, task.taskId),
+    title: displayText(task.title, 120, textOf(task.taskId, 64)),
     badge: taskBadge(task.state, task.phase, task.frozen),
-    tierLine: zh.taskRow.tier(chain, task.level),
+    tierLine: zh.taskRow.tier(chain, textOf(task.level, 16)),
     assignee:
       assignee === null
         ? zh.taskRow.noAssignee
@@ -280,7 +284,7 @@ export function taskRow(task: RunTaskView, context: TaskContext): TaskRowView {
       zh.taskRow.qualityFailures(task.qualityFailures, layerFailures(task)),
     ],
     escalations: task.escalations.map((entry) =>
-      zh.taskRow.escalated(entry.fromTier, entry.toTier, entry.atAttempt),
+      zh.taskRow.escalated(textOf(entry.fromTier, 16), textOf(entry.toTier, 16), entry.atAttempt),
     ),
     waiting: task.waitingReason === null ? null : displayText(task.waitingReason, 200),
     blocked: blockedLabel(task.blockedBy, context),
@@ -319,7 +323,7 @@ export function lockView(run: Pick<RunDetailView, "locks" | "tasks" | "capacity"
   for (const lock of run.locks) {
     const group = groups.get(lock.taskId) ?? {
       taskId: textOf(lock.taskId, 64),
-      title: displayText(titleOf.get(lock.taskId), 120, lock.taskId),
+      title: displayText(titleOf.get(lock.taskId), 120, textOf(lock.taskId, 64)),
       claims: [],
       waiters: [],
     };
@@ -504,6 +508,12 @@ export function needsYou(
   if (openDecisions > 0) urgent.push(zh.needsYou.decisions(openDecisions));
   const stuck = run.tasks.filter((task) => task.state === "blocked" || task.state === "failed");
   if (stuck.length > 0) urgent.push(zh.needsYou.blockedTasks(stuck.length));
+  const permissions = run.tasks.filter(
+    (task) =>
+      (task.state === "assigned" || task.state === "in_progress") &&
+      task.blockedBy?.kind === "permission",
+  ).length;
+  if (permissions > 0) urgent.push(zh.needsYou.permissions(permissions));
   const critical = run.alerts.filter((a) => a.state === "open" && a.severity === "critical");
   if (critical.length > 0) urgent.push(zh.needsYou.criticalAlerts(critical.length));
   if (run.lifecycle === "paused") waiting.push(zh.needsYou.paused);
@@ -536,7 +546,9 @@ function eventLabel(kind: string, summary: string): string {
  */
 export function historyRows(pages: readonly RunHistoryPage[]): HistoryRowView[] {
   const bySeq = new Map<number, RunHistoryEntryView>();
-  for (const page of pages) for (const entry of page.events) bySeq.set(entry.seq, entry);
+  for (const page of pages) {
+    for (const entry of page.events) if (!bySeq.has(entry.seq)) bySeq.set(entry.seq, entry);
+  }
   return [...bySeq.values()]
     .sort((left, right) => right.seq - left.seq)
     .map((entry) => {

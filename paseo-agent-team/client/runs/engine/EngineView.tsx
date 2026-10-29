@@ -16,7 +16,11 @@ import { EngineStatus } from "./EngineStatus";
 export type EngineViewProps = {
   theme: PluginTheme;
   layout: Pick<PluginLayout, "compact">;
-  /** `null` while the first `run.get` is in flight. */
+  /**
+   * `null` while the first `run.get` is in flight. W01 must retain the last ready state for the
+   * same host/run when the response is `unchanged`; passing `unchanged` here intentionally renders
+   * nothing, and this component never caches or fabricates a ready view.
+   */
   state: EngineState | null;
   /** Older history pages already loaded by the caller, newest page first. */
   older?: readonly RunHistoryPage[];
@@ -264,6 +268,7 @@ function BudgetPanel({ theme, model }: { theme: PluginTheme; model: EngineModel 
               <Muted theme={theme}>
                 {[row.reserved, row.confirmed, row.observed, row.limit].join(" · ")}
               </Muted>
+              <Muted theme={theme}>{zh.budgets.ratio(row.ratio)}</Muted>
             </View>
           ))}
     </Section>

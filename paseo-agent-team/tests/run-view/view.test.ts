@@ -132,6 +132,7 @@ describe("displayText", () => {
   test("strips controls, bidi and zero-width marks, folds whitespace", () => {
     expect(displayText("a\nb‮c​d\u0007e⁦f", 50)).toBe("a bcd ef");
     expect(displayText("  x   y  ", 50)).toBe("x y");
+    expect(displayText("a\u200cb\u200dc", 50)).toBe("abc");
     expect(displayText("‏؜", 50, "fb")).toBe("fb");
   });
 
@@ -460,6 +461,59 @@ describe("taskRow and blockedLabel", () => {
     expect(row.waiting).toBeNull();
     expect(row.tierLine).toBe("L1 · 当前层 B");
   });
+
+  test("state, level and every escalation tier are cleaned for display", () => {
+    const dirty = task("T1", {
+      state: "RUN\u202eNING",
+      level: "L\u202e2",
+      tier: "B\u202e",
+      currentTier: "B",
+      escalations: [
+        { fromTier: "B\u202e", toTier: "A\u202e", atAttempt: 2, qualityFailures: 1, at: AT },
+      ],
+    });
+    const row = taskRow(dirty, base);
+    expect(row.badge.label).toBe("RUNNING");
+    expect(row.tierLine).toBe("L2 · 当前层 B→A");
+    expect(row.escalations).toEqual(["第 2 次尝试后升层 B→A"]);
+    const layout = dagLayout(
+      {
+        revision: 1,
+        tasks: [{ taskId: "T1", title: "x", layer: 0, deps: [], state: "RUN\u202eNING" }],
+      },
+      "columns",
+    );
+    expect(layout.layers[0]?.nodes[0]?.state).toBe("RUNNING");
+  });
+
+  test("blank titles fall back to a cleaned task id in rows, DAG and lock groups", () => {
+    const blank = task("T\u202e", { title: " " });
+    expect(taskRow(blank, base).title).toBe("T");
+    const layout = dagLayout(
+      {
+        revision: 1,
+        tasks: [{ taskId: "T\u202e", title: " ", layer: 0, deps: [], state: "ready" }],
+      },
+      "columns",
+    );
+    expect(layout.layers[0]?.nodes[0]?.title).toBe("T");
+    const locks = lockView({
+      locks: [
+        {
+          claimId: "c1",
+          taskId: "T\u202e",
+          repoId: "r",
+          kind: "file",
+          path: "a.ts",
+          access: "write",
+          frozen: false,
+        },
+      ],
+      tasks: [],
+      capacity: { configuredLimit: 1, effectiveLimit: 1, inUse: 0 },
+    });
+    expect(locks.groups[0]?.title).toBe("T");
+  });
 });
 
 describe("lockView", () => {
@@ -700,6 +754,19 @@ describe("needsYou", () => {
     );
   });
 
+  test("a pending permission on an assigned or in-progress task needs you", () => {
+    const permission = { kind: "permission" as const, ref: "agent-b1" };
+    for (const state of ["assigned", "in_progress"] as const) {
+      expect(needsYou({ ...base, tasks: [task("T1", { state, blockedBy: permission })] })).toEqual({
+        level: "needs-you",
+        reasons: ["1 个任务等待权限处理"],
+      });
+    }
+    expect(
+      needsYou({ ...base, tasks: [task("T1", { state: "ready", blockedBy: permission })] }),
+    ).toEqual({ level: "ok", reasons: [] });
+  });
+
   test("a blocked or failed task needs you", () => {
     expect(needsYou({ ...base, tasks: [task("T1", { state: "blocked" })] }).level).toBe(
       "needs-you",
@@ -787,6 +854,21 @@ describe("historyRows", () => {
 
   test("no pages, no rows", () => {
     expect(historyRows([])).toEqual([]);
+  });
+
+  test("a newer page wins a conflicting duplicate seq", () => {
+    const rows = historyRows([
+      {
+        events: [{ seq: 5, kind: "vendor-x", at: AT, taskId: null, summary: "NEW-5" }],
+        nextCursor: null,
+      },
+      {
+        events: [{ seq: 5, kind: "vendor-x", at: AT, taskId: null, summary: "OLD-5" }],
+        nextCursor: null,
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.label).toBe("NEW-5");
   });
 });
 

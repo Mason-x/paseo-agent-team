@@ -184,6 +184,59 @@ describe("EngineView mounted rendering", () => {
       )?.(),
     );
     expect(textNodes(view.root).join("\n")).toContain("尝试 0");
+    const collapse = button(view.root, "收起 T1");
+    expect(collapse).toBeDefined();
+    await renderer.act(async () => (collapse?.props.onPress as (() => void) | undefined)?.());
+    expect(textNodes(view.root).join("\n")).not.toContain("尝试 0");
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("header needs-you badge reports a pending permission", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          tasks: [
+            task("T1", {
+              state: "in_progress",
+              blockedBy: { kind: "permission", ref: "agent-b1" },
+            }),
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(zh.level.needsYou);
+    expect(text).toContain("1 个任务等待权限处理");
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("zero-width joiners never reach Text", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          team: {
+            id: "t",
+            name: "A\u200cB\u200dC",
+            rawMode: "m",
+            modeContract: 2,
+            plannerVersion: 2,
+          },
+          tasks: [task("T1", { title: "T\u200c1\u200dX" })],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("ABC");
+    expect(text).toContain("T1X");
+    expect(text).not.toContain("\u200c");
+    expect(text).not.toContain("\u200d");
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("unchanged is a W01 handoff and renders neither a fake ready nor a failure card", async () => {
+    const view = await mount({ kind: "unchanged", revision: 4 });
+    expect(view.root.findAll((node) => node.type === "Text")).toHaveLength(0);
+    expect(view.root.findAll((node) => node.type === "Pressable")).toHaveLength(0);
     await renderer.act(async () => view.unmount());
   });
 
@@ -255,5 +308,58 @@ describe("EngineView mounted rendering", () => {
     expect(textNodes(view.root).join("\n")).not.toContain(zh.readOnly);
     expect(view.root.findAll((node) => node.type === "Pressable").length).toBeGreaterThan(0);
     await renderer.act(async () => view.unmount());
+  });
+
+  test("budget rows show a read-only ratio and n/a without merging the three counts", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          budgets: [
+            {
+              scope: "seat",
+              subjectId: "seat-1",
+              limit: 4,
+              reserved: 2,
+              confirmed: 0,
+              observedTurns: 0,
+            },
+            {
+              scope: "group",
+              subjectId: "g",
+              limit: 0,
+              reserved: 0,
+              confirmed: 0,
+              observedTurns: 0,
+            },
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("预扣 2 · 确认 0 · 观察回合 0 · 上限 4");
+    expect(text).toContain("比例 50%");
+    expect(text).toContain("比例 n/a");
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("history renders newest first across older pages and disables paging while loading", async () => {
+    const view = await mount(ready(runView(), page([5, 6], "head")), {
+      older: [page([3, 4], "tail")],
+    });
+    const text = textNodes(view.root).join("\n");
+    const six = text.indexOf("#6");
+    const five = text.indexOf("#5");
+    const four = text.indexOf("#4");
+    const three = text.indexOf("#3");
+    expect(six).toBeGreaterThanOrEqual(0);
+    expect(six).toBeLessThan(five);
+    expect(five).toBeLessThan(four);
+    expect(four).toBeLessThan(three);
+    expect(button(view.root, "加载更早")?.props.disabled).toBe(false);
+    await renderer.act(async () => view.unmount());
+
+    const loading = await mount(ready(), { loadingOlder: true });
+    expect(button(loading.root, "加载更早")?.props.disabled).toBe(true);
+    await renderer.act(async () => loading.unmount());
   });
 });
