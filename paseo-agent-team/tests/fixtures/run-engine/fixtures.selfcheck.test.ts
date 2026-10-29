@@ -354,11 +354,19 @@ function assertCompleteCancellation(
 ): void {
   const cancellation = assignment.cancellation;
   if (!cancellation) throw new Error(`${id} complete cancellation missing evidence`);
-  expect(cancellation.assignmentId, `${id} cancellation assignment`).toBe(assignment.assignmentId);
+  if (cancellation.assignmentId !== assignment.assignmentId) {
+    failSource(
+      "cancellation-assignment",
+      "cancellation.assignmentId",
+      `${id} cancellation assignment`,
+    );
+  }
   expect(assignment.turnId, `${id} cancellation turn`).not.toBeNull();
   expect(assignment.endedAt, `${id} cancellation endedAt`).not.toBeNull();
   if (assignment.turnId === null || assignment.endedAt === null) return;
-  expect(cancellation.lastTurnId, `${id} cancellation last turn`).toBe(assignment.turnId);
+  if (cancellation.lastTurnId !== assignment.turnId) {
+    failSource("cancellation-turn", "cancellation.lastTurnId", `${id} cancellation last turn`);
+  }
   expect(cancellation.assignmentId, `${id} cancellation own assignment`).toBe(
     assignment.assignmentId,
   );
@@ -366,10 +374,13 @@ function assertCompleteCancellation(
     failSource("refresh-actor", "cancellation.refresh.agentId", `${id} cancellation refresh actor`);
   }
   expect(cancellation.refresh.activeTurn, `${id} cancellation activeTurn`).toBe(false);
-  expect(
-    Date.parse(cancellation.refresh.observedAt) >= Date.parse(assignment.endedAt),
-    `${id} cancellation refresh time`,
-  ).toBe(true);
+  if (Date.parse(cancellation.refresh.observedAt) < Date.parse(assignment.endedAt)) {
+    failSource(
+      "refresh-time",
+      "cancellation.refresh.observedAt",
+      `${id} cancellation refresh time`,
+    );
+  }
   expect(cancellation.observationSeq, `${id} cancellation watermark`).toBeLessThanOrEqual(
     record.counters.observationSeq,
   );
@@ -394,7 +405,9 @@ function assertCompleteCancellation(
   );
   expect(ended, `${id} cancellation ended receipt`).toBeDefined();
   const intent = record.outbox.find((entry) => entry.id === cancellation.cancelIntentId);
-  expect(intent, `${id} cancellation intent`).toBeDefined();
+  if (!intent) {
+    failSource("cancellation-intent", "cancellation.cancelIntentId", `${id} cancellation intent`);
+  }
   if (intent) {
     expect(intent.kind, `${id} cancellation intent kind`).toBe("archive");
     expect(intent.taskId, `${id} cancellation intent task`).toBe(assignment.taskId);
@@ -405,7 +418,13 @@ function assertCompleteCancellation(
     expect(intent.state, `${id} cancellation intent state`).toBe("confirmed");
     expect(intent.confirmedAt, `${id} cancellation intent confirmed`).not.toBeNull();
   }
-  expect(cancellation.receipt.kind, `${id} cancellation receipt kind`).toBe("archive");
+  if (cancellation.receipt.kind !== "archive") {
+    failSource(
+      "cancellation-receipt",
+      "cancellation.receipt.kind",
+      `${id} cancellation receipt kind`,
+    );
+  }
   expect(cancellation.receipt.confirmedAt, `${id} cancellation receipt confirmed`).not.toBeNull();
   expect(cancellation.receipt.externalId, `${id} cancellation receipt external`).not.toBeNull();
   const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
@@ -414,7 +433,9 @@ function assertCompleteCancellation(
   const decision = record.decisions.find(
     (entry) => entry.subjectId === task.spec.id && entry.state === "answered",
   );
-  expect(decision, `${id} cancellation decision`).toBeDefined();
+  if (!decision) {
+    failSource("cancellation-decision", "decisions.<id>", `${id} cancellation decision`);
+  }
   if (decision) {
     expect(decision.dedupeKey, `${id} cancellation dedupe`).toBe(`cancel:${task.spec.id}`);
     expect(["cancel", "assign-seat"], `${id} cancellation action`).toContain(
@@ -597,7 +618,13 @@ function assertCancelPairs(
       `${id} cancellation obligation set`,
     );
   }
-  expect(decision.answer?.taskIds, `${id} cancellation answer coverage`).toContain(taskId);
+  if (!(decision.answer?.taskIds ?? []).includes(taskId)) {
+    failSource(
+      "cancellation-answer-coverage",
+      "decisions.<id>.answer.taskIds",
+      `${id} cancellation answer coverage`,
+    );
+  }
   for (const binding of pairs) {
     const assignment = record.assignments.find(
       (entry) => entry.assignmentId === binding.assignmentId,
@@ -805,7 +832,13 @@ function assertAssociations(
       const cancelIntent = record.outbox.find(
         (entry) => entry.id === assignment.cancellation?.cancelIntentId,
       );
-      expect(cancelIntent, `${id} cancel evidence intent`).toBeDefined();
+      if (!cancelIntent) {
+        failSource(
+          "cancellation-intent",
+          "cancellation.cancelIntentId",
+          `${id} cancel evidence intent`,
+        );
+      }
       if (cancelIntent) {
         expect(cancelIntent.kind).toBe("archive");
         expect(cancelIntent.taskId).toBe(assignment.taskId);
@@ -909,7 +942,9 @@ function assertAssociations(
       expect(decision.answer, `${id} superseded answer`).toBeNull();
       expect(decision.answeredAt, `${id} superseded answeredAt`).toBeNull();
       expect(decision.resolution, `${id} superseded resolution`).not.toBeNull();
-      expect(decision.cancelIntents, `${id} superseded pairs`).toEqual([]);
+      if ((decision.cancelIntents ?? []).length !== 0) {
+        failSource("superseded-pairs", "decisions.<id>.cancelIntents", `${id} superseded pairs`);
+      }
       const resolution = decision.resolution;
       const task = record.tasks.find((entry) => entry.spec.id === decision.subjectId);
       expect(task?.state, `${id} superseded task`).toBe("cancelled");
@@ -1479,7 +1514,9 @@ describe("run engine fixtures against R01 schemas", () => {
       externalId: null,
     };
     expect(RunRecordSchema.safeParse(none).success).toBe(true);
-    expect(() => assertAssociations("receipt-none", none)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("receipt-none", none))).toBe(
+      "cancellation-receipt",
+    );
 
     const onlyEnded = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const endedAssignment = onlyEnded.assignments.find(
@@ -1489,7 +1526,9 @@ describe("run engine fixtures against R01 schemas", () => {
     endedAssignment.cancellation = null;
     endedAssignment.endedEventKey = "agent-b1|turn-7|turn_ended";
     expect(RunRecordSchema.safeParse(onlyEnded).success).toBe(true);
-    expect(() => assertAssociations("only-ended", onlyEnded)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("only-ended", onlyEnded))).toBe(
+      "local-never-sent",
+    );
 
     const wrongActor = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongActorAssignment = wrongActor.assignments.find(
@@ -1498,7 +1537,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongActorAssignment?.cancellation) throw new Error("missing cancellation");
     wrongActorAssignment.cancellation.assignmentId = "assignment-other";
     expect(RunRecordSchema.safeParse(wrongActor).success).toBe(true);
-    expect(() => assertAssociations("wrong-actor", wrongActor)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("wrong-actor", wrongActor))).toBe(
+      "cancellation-assignment",
+    );
 
     const wrongTime = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongTimeAssignment = wrongTime.assignments.find(
@@ -1507,7 +1548,7 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongTimeAssignment?.cancellation) throw new Error("missing cancellation");
     wrongTimeAssignment.cancellation.refresh.observedAt = "2026-10-27T12:34:55.000Z";
     expect(RunRecordSchema.safeParse(wrongTime).success).toBe(true);
-    expect(() => assertAssociations("wrong-time", wrongTime)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("wrong-time", wrongTime))).toBe("refresh-time");
 
     const wrongIntent = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const wrongIntentAssignment = wrongIntent.assignments.find(
@@ -1516,7 +1557,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongIntentAssignment?.cancellation) throw new Error("missing cancellation");
     wrongIntentAssignment.cancellation.cancelIntentId = "intent-missing";
     expect(RunRecordSchema.safeParse(wrongIntent).success).toBe(true);
-    expect(() => assertAssociations("wrong-intent", wrongIntent)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("wrong-intent", wrongIntent))).toBe(
+      "cancellation-intent",
+    );
 
     const unauthorized = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const unauthorizedDecision = unauthorized.decisions.find((entry) => entry.subjectId === "t2");
@@ -1525,7 +1568,9 @@ describe("run engine fixtures against R01 schemas", () => {
     unauthorizedDecision.answer = null;
     unauthorizedDecision.answeredAt = null;
     expect(RunRecordSchema.safeParse(unauthorized).success).toBe(true);
-    expect(() => assertAssociations("unauthorized", unauthorized)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("unauthorized", unauthorized))).toBe(
+      "cancellation-decision",
+    );
 
     const missingTaskCoverage = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const coverageDecision = missingTaskCoverage.decisions.find(
@@ -1534,7 +1579,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!coverageDecision?.answer) throw new Error("missing answer");
     coverageDecision.answer.taskIds = [];
     expect(RunRecordSchema.safeParse(missingTaskCoverage).success).toBe(true);
-    expect(() => assertAssociations("missing-task-coverage", missingTaskCoverage)).toThrow();
+    expect(
+      sourceCodeOf(() => assertAssociations("missing-task-coverage", missingTaskCoverage)),
+    ).toBe("cancellation-answer-coverage");
   });
 
   test("T175 delivery producer must be a valid producer done proof", () => {
@@ -1742,7 +1789,9 @@ describe("run engine fixtures against R01 schemas", () => {
       { assignmentId: "assignment-t2-a3", intentId: "intent-cancel-t2-extra" },
     ];
     expect(RunRecordSchema.safeParse(extra).success).toBe(true);
-    expect(() => assertAssociations("quiescent-two", extra)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("quiescent-two", extra))).toBe(
+      "cancellation-pairs",
+    );
   });
 
   test("C4 LocalNeverSent requires exactly one failed dispatch", () => {
@@ -1864,7 +1913,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!fakeDecision) throw new Error("missing decision");
     fakeDecision.cancelIntents = [{ assignmentId: "assignment-t2-a1", intentId: localIntent.id }];
     expect(RunRecordSchema.safeParse(fakeAuth).success).toBe(true);
-    expect(() => assertAssociations("superseded-fake-pair", fakeAuth)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("superseded-fake-pair", fakeAuth))).toBe(
+      "superseded-pairs",
+    );
 
     const missingAudit = structuredClone(zero);
     missingAudit.events = missingAudit.events.filter((entry) => entry.seq !== 8);
@@ -1878,7 +1929,9 @@ describe("run engine fixtures against R01 schemas", () => {
     const broken = structuredClone(CANCELLING_LEDGER);
     broken.assignments = broken.assignments.filter((entry) => entry.taskId !== "t1");
     expect(RunRecordSchema.safeParse(broken).success).toBe(true);
-    expect(() => assertAssociations("done-without-chain", broken)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("done-without-chain", broken))).toBe(
+      "cache-source",
+    );
 
     const reviewerOnly = structuredClone(CANCELLING_LEDGER);
     reviewerOnly.assignments = reviewerOnly.assignments.filter(
