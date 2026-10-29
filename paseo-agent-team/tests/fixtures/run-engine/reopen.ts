@@ -174,6 +174,7 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "e".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-cla|D1|closed-while-assigned|T2",
       subjectId: "T2",
       summary: "Agent closed while assigned and no report arrived; work attempt is unchanged.",

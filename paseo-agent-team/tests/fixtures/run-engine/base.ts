@@ -336,7 +336,12 @@ export const QUIESCENT_CANCELLATION: RunCancellationEvidence = {
   assignmentId: ASSIGNMENT_T2,
   lastTurnId: "turn-7",
   endedEventKey: "agent-b1|turn-7|turn_ended",
-  refreshObservedAt: AT_UPDATED,
+  refresh: {
+    agentId: "agent-b1",
+    status: "idle",
+    activeTurn: false,
+    observedAt: AT_UPDATED,
+  },
   observationSeq: 7,
   cancelIntentId: INTENT_CANCEL,
   receipt: { kind: "archive", confirmedAt: AT_UPDATED, externalId: "archive-1" },
@@ -558,7 +563,16 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
 
 /** Copy the normal ledger with top-level overrides; nested arrays are replaced, not merged. */
 export function withLedger(overrides: Partial<RunRecord> & Record<string, unknown>): RunRecord {
-  return { ...NORMAL_RUN_LEDGER, ...overrides };
+  const next = { ...NORMAL_RUN_LEDGER, ...overrides };
+  // A rebased sample belongs to its own Run: inherited nonce registrations must not keep the
+  // NORMAL runId (strict I5 run binding). Explicit nonceRegistry overrides stay intentional.
+  if (typeof overrides.runId === "string" && overrides.nonceRegistry === undefined) {
+    next.nonceRegistry = next.nonceRegistry.map((entry) => ({
+      ...entry,
+      runId: overrides.runId as string,
+    }));
+  }
+  return next;
 }
 
 export const POLICY = policy();
