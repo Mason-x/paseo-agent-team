@@ -171,7 +171,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i6x",
       nonceRegistry: noncesForRun("run-rec0re-i6x"),
-      tasks: [{ ...t2, reworkCount: 0 }],
+      tasks: [t1, { ...t2, reworkCount: 0 }, t3],
       events: [
         ...NORMAL_RUN_LEDGER.events,
         { seq: 8, kind: "rework_started", at: AT_UPDATED, payload: { taskId: "t2" } },
@@ -184,8 +184,18 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     id: "i7-done-without-review",
     invariant: "I7",
     kind: "violation",
-    ledger: withLedger({ runId: "run-rec0re-i7x", tasks: [doneWithoutReview, t2, t3] }),
-    note: "t1 is done with no review record.",
+    ledger: withLedger({
+      runId: "run-rec0re-i7x",
+      nonceRegistry: noncesForRun("run-rec0re-i7x").filter(
+        (entry) => entry.assignmentId !== "assignment-t1-r1",
+      ),
+      assignments: assignmentsForRun("run-rec0re-i7x").filter(
+        (entry) => entry.assignmentId !== "assignment-t1-r1",
+      ),
+      outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.id !== "intent-t1-r1"),
+      tasks: [doneWithoutReview, t2, t3],
+    }),
+    note: "t1 is done with its reviewer altogether removed.",
   },
   {
     id: "i7-self-review",
@@ -194,16 +204,14 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i7s",
       nonceRegistry: noncesForRun("run-rec0re-i7s"),
-      assignments: assignmentsForRun("run-rec0re-i7s"),
-      tasks: [
-        {
-          ...t1,
-        },
-        t2,
-        t3,
-      ],
+      assignments: assignmentsForRun("run-rec0re-i7s").map((entry) =>
+        entry.assignmentId === "assignment-t1-r1"
+          ? { ...entry, agentId: "agent-b1", seatId: "seat-b1" }
+          : entry,
+      ),
+      tasks: [t1, t2, t3],
     }),
-    note: "The implementer agent/seat signed off on its own delivery.",
+    note: "The reviewer assignment uses the producer's own agent/seat.",
   },
   {
     id: "i8-assignment-without-intent",

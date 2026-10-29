@@ -41,25 +41,21 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   lifecycle: "paused",
   tasks: [t1, { ...t2, state: "blocked", waitingReason: "outcome-unknown" } as RunTaskRecord, t3],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "assigned",
-      turnId: null,
-    }),
-  ],
-  outbox: [
-    dispatchIntent({
-      id: INTENT_T2,
-      messageId: MESSAGE_T2,
-      state: "outcome-unknown",
-      recoverySendCount: 1,
-      confirmedAt: null,
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-unk").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? { ...entry, state: "assigned", turnId: null }
+      : entry,
+  ),
+  outbox: NORMAL_RUN_LEDGER.outbox.map((entry) =>
+    entry.id === INTENT_T2
+      ? {
+          ...entry,
+          state: "outcome-unknown" as const,
+          recoverySendCount: 1,
+          confirmedAt: null,
+        }
+      : entry,
+  ),
   decisions: [
     {
       decisionId: DECISION_D1,
@@ -106,19 +102,18 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "in_progress",
-      turnId: "turn-7",
-      cancellation: PARTIAL_CANCELLATION,
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-cnl").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "in_progress",
+          turnId: "turn-7",
+          cancellation: PARTIAL_CANCELLATION,
+        }
+      : entry,
+  ),
   outbox: [
-    dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2 }),
+    ...NORMAL_RUN_LEDGER.outbox,
     {
       id: INTENT_CANCEL,
       kind: "archive",
@@ -167,20 +162,19 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "cancelled",
-      turnId: "turn-7",
-      endedAt: AT_UPDATED,
-      cancellation: QUIESCENT_CANCELLATION,
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-qsc").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "cancelled",
+          turnId: "turn-7",
+          endedAt: AT_UPDATED,
+          cancellation: QUIESCENT_CANCELLATION,
+        }
+      : entry,
+  ),
   outbox: [
-    dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
+    ...NORMAL_RUN_LEDGER.outbox,
     dispatchIntent({
       id: INTENT_CANCEL,
       kind: "archive",
@@ -200,16 +194,65 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
       controlNonceDigest: "d".repeat(64),
       state: "answered",
       answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
-      dedupeKey: "run-rec0re-qsc|D1|quiescent|t2",
+      dedupeKey: "cancel:t2",
       subjectId: "t2",
       summary: "Operator approved cancellation after quiescence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
-
-      cancelIntents: null,
+      cancelIntents: [{ assignmentId: "assignment-t2-a1", intentId: INTENT_CANCEL }],
       resolution: null,
     },
   ],
+});
+
+/** 194 LocalNeverSent: a prepared dispatch failed locally before any send; no archive/167 is invented. */
+export const LOCAL_NEVER_SENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
+  runId: "run-rec0re-lns",
+  revision: 13,
+  lifecycle: "paused",
+  tasks: [
+    t1,
+    {
+      ...t2,
+      state: "cancelled",
+      phase: undefined,
+      waitingReason: null,
+      releaseDecisionId: null,
+    } as RunTaskRecord,
+    t3,
+  ],
+  resources: [],
+  assignments: assignmentsForRun("run-rec0re-lns").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "cancelled",
+          turnId: null,
+          startedAt: null,
+          endedAt: null,
+          endedEventKey: null,
+          cancellation: null,
+          acceptedProof: null,
+          delivery: null,
+        }
+      : entry,
+  ),
+  outbox: NORMAL_RUN_LEDGER.outbox.map((entry) =>
+    entry.id === INTENT_T2
+      ? {
+          ...entry,
+          state: "failed" as const,
+          recoverySendCount: 0,
+          confirmedAt: null,
+          localCancellation: {
+            reason: "cancel-before-send" as const,
+            at: AT_UPDATED,
+            eventSeq: 7,
+            cause: "cancel-requested" as const,
+          },
+        }
+      : entry,
+  ),
 });
 
 /**
@@ -345,19 +388,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       confirmedAt: AT_UPDATED,
     }),
   ],
-  eventReceipts: [
-    ...NORMAL_RUN_LEDGER.eventReceipts,
-    {
-      eventKey: "agent-b2|turn-8|turn_ended",
-      kind: "turn_ended",
-      agentId: "agent-b2",
-      turnId: "turn-8",
-      seq: 8,
-      receivedAt: AT_UPDATED,
-      dedupeKey: "agent-b2|turn-8|turn_ended",
-      disposition: "accepted",
-    },
-  ],
+  eventReceipts: [...NORMAL_RUN_LEDGER.eventReceipts],
   nonceRegistry: [
     ...NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({
       ...entry,
@@ -424,15 +455,11 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "assigned",
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-blk").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? { ...entry, state: "assigned", turnId: null }
+      : entry,
+  ),
   decisions: [
     {
       decisionId: DECISION_D1,

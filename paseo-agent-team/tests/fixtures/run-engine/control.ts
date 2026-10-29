@@ -145,7 +145,7 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
     },
     {
       seatId: "seat-b2",
-      tier: "B",
+      tier: "A",
       agentId: "agent-b2",
       channelId: "claude",
       duties: ["review"],
@@ -154,9 +154,9 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
   ],
   tasks: [t1],
   resources: [],
-  assignments: [],
-  outbox: [],
-  eventReceipts: [],
+  assignments: assignmentsForRun("run-rec0re-pbe").filter((entry) => entry.taskId === "t1"),
+  outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId === "t1"),
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts,
   counters: { observationSeq: 0, eventsThroughSeq: 0, probeAttempts: 0, reopenAttempts: 0 },
   decisions: [],
 });

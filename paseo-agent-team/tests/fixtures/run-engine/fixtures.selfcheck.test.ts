@@ -2,7 +2,10 @@
 // parse; corrupt/over-version/overlong samples must be rejected. No reducer behavior is asserted.
 import { describe, expect, test } from "vitest";
 import { RunTeamEngineConfigSchema } from "../../../shared/schemas/run-engine/config";
-import { RunRecordSchema } from "../../../shared/schemas/run-engine/ledger";
+import {
+  RunRecordSchema,
+  RunStoredTaskReportSchema,
+} from "../../../shared/schemas/run-engine/ledger";
 import { RunTaskReportBlockSchema } from "../../../shared/schemas/run-engine/protocol";
 import { RunGetInputSchema } from "../../../shared/schemas/run-engine/rpc";
 import {
@@ -24,6 +27,7 @@ import {
   FINISHED_DECISION_LEDGER,
   INVARIANT_CASES,
   IRREVERSIBLE_UNAPPROVED_LEDGER,
+  LOCAL_NEVER_SENT_CANCELLED_LEDGER,
   LOCK_CONFLICT_RUN_A,
   LOCK_CONFLICT_RUN_B,
   MESSAGE_CANCEL,
@@ -51,7 +55,7 @@ import {
   UNKNOWN_SCHEMA_VERSION_RECORD,
   UNKNOWN_TASK_STATUS_RECORD,
 } from "./index";
-import type { LedgerFixture } from "./types";
+import type { LedgerFixture, RunAssignment } from "./types";
 
 const NAMED_LEDGERS: { id: string; ledger: LedgerFixture }[] = [
   { id: "normal-ledger", ledger: NORMAL_RUN_LEDGER },
@@ -59,6 +63,7 @@ const NAMED_LEDGERS: { id: string; ledger: LedgerFixture }[] = [
   { id: "cancelling-ledger", ledger: CANCELLING_LEDGER },
   { id: "cancellation-authorized-frozen", ledger: CANCELLATION_AUTHORIZED_FROZEN_LEDGER },
   { id: "quiescent-cancelled-ledger", ledger: QUIESCENT_CANCELLED_LEDGER },
+  { id: "local-never-sent-cancelled-ledger", ledger: LOCAL_NEVER_SENT_CANCELLED_LEDGER },
   { id: "blocked-ledger", ledger: BLOCKED_LEDGER },
   { id: "lock-conflict-run-a", ledger: LOCK_CONFLICT_RUN_A },
   { id: "lock-conflict-run-b", ledger: LOCK_CONFLICT_RUN_B },
@@ -98,6 +103,125 @@ const SOURCE_LEDGERS = [
     ledger: entry.ledger as LedgerFixture,
   })),
 ];
+
+function evidenceSatisfied(
+  task: LedgerFixture["tasks"][number],
+  proof: NonNullable<RunAssignment["acceptedProof"]>,
+): boolean {
+  const parsed = RunStoredTaskReportSchema.safeParse(proof);
+  if (!parsed.success || parsed.data.status !== "done") return false;
+  return task.spec.evidence.every((required) => {
+    const evidence = parsed.data.evidence.find((entry) => entry.id === required.id);
+    return evidence !== undefined && evidence.exitCode === 0;
+  });
+}
+
+/** A valid current D requires a producer done report whose required evidence passed. */
+function validProducerD(record: LedgerFixture, assignment: RunAssignment): boolean {
+  if (!["member", "coordinator", "reopen"].includes(assignment.purpose)) return false;
+  const proof = assignment.acceptedProof;
+  if (proof === null) return false;
+  const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
+  return task !== undefined && evidenceSatisfied(task, proof);
+}
+
+function assertCompleteCancellation(
+  id: string,
+  record: LedgerFixture,
+  assignment: RunAssignment,
+): void {
+  const cancellation = assignment.cancellation;
+  if (!cancellation) throw new Error(`${id} complete cancellation missing evidence`);
+  expect(cancellation.assignmentId, `${id} cancellation assignment`).toBe(assignment.assignmentId);
+  expect(assignment.turnId, `${id} cancellation turn`).not.toBeNull();
+  expect(assignment.endedAt, `${id} cancellation endedAt`).not.toBeNull();
+  if (assignment.turnId === null || assignment.endedAt === null) return;
+  expect(cancellation.lastTurnId, `${id} cancellation last turn`).toBe(assignment.turnId);
+  expect(cancellation.assignmentId, `${id} cancellation own assignment`).toBe(
+    assignment.assignmentId,
+  );
+  expect(cancellation.refresh.activeTurn, `${id} cancellation activeTurn`).toBe(false);
+  expect(
+    Date.parse(cancellation.refresh.observedAt) >= Date.parse(assignment.endedAt),
+    `${id} cancellation refresh time`,
+  ).toBe(true);
+  expect(cancellation.observationSeq, `${id} cancellation watermark`).toBeLessThanOrEqual(
+    record.counters.observationSeq,
+  );
+  expect(cancellation.endedEventKey, `${id} cancellation ended key`).not.toBeNull();
+  const ended = record.eventReceipts.find(
+    (entry) =>
+      entry.eventKey === cancellation.endedEventKey &&
+      entry.kind === "turn_ended" &&
+      entry.agentId === assignment.agentId &&
+      entry.turnId === assignment.turnId &&
+      entry.receivedAt === assignment.endedAt,
+  );
+  expect(ended, `${id} cancellation ended receipt`).toBeDefined();
+  const intent = record.outbox.find((entry) => entry.id === cancellation.cancelIntentId);
+  expect(intent, `${id} cancellation intent`).toBeDefined();
+  if (intent) {
+    expect(intent.kind, `${id} cancellation intent kind`).toBe("archive");
+    expect(intent.taskId, `${id} cancellation intent task`).toBe(assignment.taskId);
+    expect(intent.assignmentId, `${id} cancellation intent assignment`).toBe(
+      assignment.assignmentId,
+    );
+    expect(intent.recipient, `${id} cancellation intent recipient`).toBe(assignment.agentId);
+    expect(intent.state, `${id} cancellation intent state`).toBe("confirmed");
+    expect(intent.confirmedAt, `${id} cancellation intent confirmed`).not.toBeNull();
+  }
+  expect(cancellation.receipt.kind, `${id} cancellation receipt kind`).toBe("archive");
+  expect(cancellation.receipt.confirmedAt, `${id} cancellation receipt confirmed`).not.toBeNull();
+  expect(cancellation.receipt.externalId, `${id} cancellation receipt external`).not.toBeNull();
+  const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
+  expect(task, `${id} cancellation task`).toBeDefined();
+  if (task?.state !== "cancelled") throw new Error(`${id} cancellation task state`);
+  const decision = record.decisions.find(
+    (entry) => entry.subjectId === task.spec.id && entry.state === "answered",
+  );
+  expect(decision, `${id} cancellation decision`).toBeDefined();
+  if (decision) {
+    expect(decision.dedupeKey, `${id} cancellation dedupe`).toBe(`cancel:${task.spec.id}`);
+    expect(["cancel", "assign-seat"], `${id} cancellation action`).toContain(
+      decision.answer?.action,
+    );
+    expect(decision.answer?.taskIds, `${id} cancellation task coverage`).toContain(task.spec.id);
+    expect(decision.cancelIntents, `${id} cancellation pairs`).not.toBeNull();
+    expect(decision.cancelIntents ?? [], `${id} cancellation pair`).toContainEqual({
+      assignmentId: assignment.assignmentId,
+      intentId: cancellation.cancelIntentId,
+    });
+  }
+}
+
+function isLocalNeverSent(record: LedgerFixture, assignment: RunAssignment): boolean {
+  if (
+    assignment.cancellation !== null ||
+    assignment.endedEventKey !== null ||
+    assignment.turnId !== null ||
+    assignment.endedAt !== null ||
+    assignment.acceptedProof !== null
+  ) {
+    return false;
+  }
+  const intent = record.outbox.find(
+    (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+  );
+  if (intent?.state !== "failed" || intent.confirmedAt !== null) return false;
+  if (intent.recoverySendCount !== 0 || intent.localCancellation === null) return false;
+  if (
+    intent.taskId !== assignment.taskId ||
+    intent.recipient !== assignment.agentId ||
+    intent.messageId !== assignment.messageId
+  ) {
+    return false;
+  }
+  if (intent.localCancellation.reason !== "cancel-before-send") return false;
+  if (intent.localCancellation.eventSeq > record.counters.eventsThroughSeq) return false;
+  return !record.outbox.some(
+    (entry) => entry.kind === "archive" && entry.assignmentId === assignment.assignmentId,
+  );
+}
 
 /** Test-only source association checks. This is not the product I7 implementation. */
 function assertAssociations(id: string, record: LedgerFixture): void {
@@ -171,9 +295,16 @@ function assertAssociations(id: string, record: LedgerFixture): void {
       expect(producer, `${id} producer`).toBeDefined();
       expect(producer?.taskId).toBe(assignment.taskId);
       expect(producer?.attempt).toBe(assignment.attempt);
-      expect(producer?.acceptedProof).not.toBeNull();
-      if (producer?.acceptedProof && "status" in producer.acceptedProof) {
-        expect(producer.acceptedProof.status).toBe("done");
+      expect(["member", "coordinator", "reopen"], `${id} producer purpose`).toContain(
+        producer?.purpose,
+      );
+      expect(producer?.acceptedProof, `${id} producer proof`).not.toBeNull();
+      if (producer?.acceptedProof) {
+        expect("status" in producer.acceptedProof, `${id} producer report kind`).toBe(true);
+        if ("status" in producer.acceptedProof) {
+          expect(producer.acceptedProof.status, `${id} producer done`).toBe("done");
+        }
+        expect(validProducerD(record, producer), `${id} producer evidence`).toBe(true);
       }
       expect(producer?.agentId, `${id} independent agent`).not.toBe(assignment.agentId);
       expect(producer?.seatId, `${id} independent seat`).not.toBe(assignment.seatId);
@@ -196,10 +327,11 @@ function assertAssociations(id: string, record: LedgerFixture): void {
       expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
     }
     if (assignment.state === "cancelled") {
-      expect(
-        assignment.cancellation !== null || assignment.endedEventKey !== null,
-        `${id} cancelled evidence`,
-      ).toBe(true);
+      if (assignment.cancellation !== null) {
+        assertCompleteCancellation(id, record, assignment);
+      } else {
+        expect(isLocalNeverSent(record, assignment), `${id} local never sent`).toBe(true);
+      }
     }
     if (assignment.endedEventKey !== null) {
       expect(assignment.turnId, `${id} ended turn`).not.toBeNull();
@@ -217,18 +349,23 @@ function assertAssociations(id: string, record: LedgerFixture): void {
   }
   for (const task of record.tasks) {
     const producers = record.assignments.filter(
-      (entry) =>
-        entry.taskId === task.spec.id &&
-        ["member", "coordinator", "reopen"].includes(entry.purpose) &&
-        entry.acceptedProof !== null &&
-        "status" in entry.acceptedProof &&
-        entry.acceptedProof.status === "done",
+      (entry) => entry.taskId === task.spec.id && validProducerD(record, entry),
     );
     producers.sort((a, b) => b.attempt - a.attempt);
     const proof = producers[0]?.acceptedProof;
     if (proof && "ref" in proof && "changedFiles" in proof) {
       expect(task.ref, `${id} task cache ref`).toEqual(proof.ref);
       expect(task.changedFiles, `${id} task cache files`).toEqual(proof.changedFiles);
+    } else {
+      expect(task.ref, `${id} task cache ref without D`).toBeNull();
+      expect(task.changedFiles, `${id} task cache files without D`).toEqual([]);
+    }
+    if (task.state === "done") {
+      const producers = record.assignments.filter((entry) => validProducerD(record, entry));
+      expect(
+        producers.some((entry) => entry.taskId === task.spec.id),
+        `${id} done task producer`,
+      ).toBe(true);
     }
   }
   for (const claim of record.resources) {
@@ -362,8 +499,8 @@ describe("run engine fixtures against R01 schemas", () => {
   });
 
   test("legal samples parse and negative samples reject for their declared cause", () => {
-    expect(NAMED_LEDGERS.length, "named ledger count").toBe(28);
-    expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(41);
+    expect(NAMED_LEDGERS.length, "named ledger count").toBe(29);
+    expect(LEGAL_LEDGERS.length, "legal ledger count").toBe(42);
     expect(INVALID.length, "illegal ledger count").toBe(8);
     expect(VALID_REPORTS.length, "legal report count").toBe(5);
     expect(INVALID_REPORTS.length, "illegal report count").toBe(1);
@@ -490,7 +627,7 @@ describe("run engine fixtures against R01 schemas", () => {
 
   test("the manifest counts match the exported samples", () => {
     const groups = RUN_ENGINE_FIXTURE_MANIFEST.groups;
-    expect(groups.ledgers.count).toBe(8);
+    expect(groups.ledgers.count).toBe(9);
     expect(groups.corrupt.count).toBe(
       CORRUPT_JSON_TEXTS.length + CORRUPT_MISSING_FIELDS.length + 2,
     );
@@ -652,10 +789,11 @@ describe("run engine fixtures against R01 schemas", () => {
           expect(assignment.endedEventKey, `${id} ended key required`).not.toBeNull();
         }
         if (assignment.state === "cancelled") {
-          expect(
-            assignment.cancellation !== null || assignment.endedEventKey !== null,
-            `${id} cancelled evidence`,
-          ).toBe(true);
+          if (assignment.cancellation !== null) {
+            assertCompleteCancellation(id, ledger, assignment);
+          } else {
+            expect(isLocalNeverSent(ledger, assignment), `${id} local never sent`).toBe(true);
+          }
         }
         if (assignment.endedEventKey !== null) {
           expect(
@@ -691,6 +829,104 @@ describe("run engine fixtures against R01 schemas", () => {
         }
       }
     }
+  });
+
+  test("T175 cancelled receipt must be a complete 167 proof", () => {
+    const none = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const noneAssignment = none.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!noneAssignment?.cancellation) throw new Error("missing cancellation");
+    noneAssignment.cancellation.receipt = {
+      kind: "none",
+      confirmedAt: null,
+      externalId: null,
+    };
+    expect(RunRecordSchema.safeParse(none).success).toBe(true);
+    expect(() => assertAssociations("receipt-none", none)).toThrow();
+
+    const onlyEnded = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const endedAssignment = onlyEnded.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!endedAssignment) throw new Error("missing assignment");
+    endedAssignment.cancellation = null;
+    endedAssignment.endedEventKey = "agent-b1|turn-7|turn_ended";
+    expect(RunRecordSchema.safeParse(onlyEnded).success).toBe(true);
+    expect(() => assertAssociations("only-ended", onlyEnded)).toThrow();
+
+    const wrongActor = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const wrongActorAssignment = wrongActor.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!wrongActorAssignment?.cancellation) throw new Error("missing cancellation");
+    wrongActorAssignment.cancellation.assignmentId = "assignment-other";
+    expect(RunRecordSchema.safeParse(wrongActor).success).toBe(true);
+    expect(() => assertAssociations("wrong-actor", wrongActor)).toThrow();
+
+    const wrongTime = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const wrongTimeAssignment = wrongTime.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!wrongTimeAssignment?.cancellation) throw new Error("missing cancellation");
+    wrongTimeAssignment.cancellation.refresh.observedAt = "2026-10-27T12:34:55.000Z";
+    expect(RunRecordSchema.safeParse(wrongTime).success).toBe(true);
+    expect(() => assertAssociations("wrong-time", wrongTime)).toThrow();
+
+    const wrongIntent = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const wrongIntentAssignment = wrongIntent.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!wrongIntentAssignment?.cancellation) throw new Error("missing cancellation");
+    wrongIntentAssignment.cancellation.cancelIntentId = "intent-missing";
+    expect(RunRecordSchema.safeParse(wrongIntent).success).toBe(true);
+    expect(() => assertAssociations("wrong-intent", wrongIntent)).toThrow();
+
+    const unauthorized = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const unauthorizedDecision = unauthorized.decisions.find((entry) => entry.subjectId === "t2");
+    if (!unauthorizedDecision) throw new Error("missing decision");
+    unauthorizedDecision.state = "open";
+    unauthorizedDecision.answer = null;
+    unauthorizedDecision.answeredAt = null;
+    expect(RunRecordSchema.safeParse(unauthorized).success).toBe(true);
+    expect(() => assertAssociations("unauthorized", unauthorized)).toThrow();
+
+    const missingTaskCoverage = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const coverageDecision = missingTaskCoverage.decisions.find(
+      (entry) => entry.subjectId === "t2",
+    );
+    if (!coverageDecision?.answer) throw new Error("missing answer");
+    coverageDecision.answer.taskIds = [];
+    expect(RunRecordSchema.safeParse(missingTaskCoverage).success).toBe(true);
+    expect(() => assertAssociations("missing-task-coverage", missingTaskCoverage)).toThrow();
+  });
+
+  test("T175 delivery producer must be a valid producer done proof", () => {
+    const reviewAsProducer = structuredClone(DEV_SMOKE_READY_LEDGER);
+    const smoker = reviewAsProducer.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t6-s1",
+    );
+    if (!smoker) throw new Error("missing smoker");
+    smoker.delivery = { producerAssignmentId: "assignment-t6-r1" };
+    expect(RunRecordSchema.safeParse(reviewAsProducer).success).toBe(true);
+    expect(() => assertAssociations("review-as-producer", reviewAsProducer)).toThrow();
+  });
+
+  test("T175 task cache is null/[] without a valid current D", () => {
+    const cachedWithoutD = structuredClone(NORMAL_RUN_LEDGER);
+    const t2Task = cachedWithoutD.tasks.find((entry) => entry.spec.id === "t2");
+    if (!t2Task) throw new Error("missing t2");
+    t2Task.ref = { kind: "git-commit", value: "9f3c1a7" };
+    t2Task.changedFiles = ["src/t2.ts"];
+    expect(RunRecordSchema.safeParse(cachedWithoutD).success).toBe(true);
+    expect(() => assertAssociations("cache-without-d", cachedWithoutD)).toThrow();
+  });
+
+  test("done tasks keep their producer and reviewer proof chain", () => {
+    const broken = structuredClone(CANCELLING_LEDGER);
+    broken.assignments = broken.assignments.filter((entry) => entry.taskId !== "t1");
+    expect(RunRecordSchema.safeParse(broken).success).toBe(true);
+    expect(() => assertAssociations("done-without-chain", broken)).toThrow();
   });
 
   test("association validator catches single-field source breakage", () => {
