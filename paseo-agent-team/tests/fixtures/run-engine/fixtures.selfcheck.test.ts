@@ -316,14 +316,20 @@ function failSource(code: string, path: string, message: string): never {
   throw new SourceIssue(code, path, message);
 }
 
-function sourceCodeOf(action: () => void): string {
+function collectSourceIssues(action: () => void): SourceIssue[] {
   try {
     action();
+    return [];
   } catch (error) {
-    if (error instanceof SourceIssue) return error.code;
+    if (error instanceof SourceIssue) return [error];
     throw error;
   }
-  throw new Error("expected a SourceIssue");
+}
+
+function sourceCodeOf(action: () => void): string {
+  const [issue] = collectSourceIssues(action);
+  if (!issue) throw new Error("expected a SourceIssue");
+  return issue.code;
 }
 
 function evidenceSatisfied(
