@@ -96,7 +96,8 @@ type SourceCategory =
   | "invariant-negative"
   | "recovery-control"
   | "shape-negative"
-  | "source-diagnostic";
+  | "source-diagnostic"
+  | "boundary";
 
 type SourceMetadata = {
   category: SourceCategory;
@@ -300,6 +301,31 @@ const SOURCE_LEDGERS = [
   })),
 ];
 
+class SourceIssue extends Error {
+  constructor(
+    readonly code: string,
+    readonly path: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SourceIssue";
+  }
+}
+
+function failSource(code: string, path: string, message: string): never {
+  throw new SourceIssue(code, path, message);
+}
+
+function sourceCodeOf(action: () => void): string {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof SourceIssue) return error.code;
+    throw error;
+  }
+  throw new Error("expected a SourceIssue");
+}
+
 function evidenceSatisfied(
   task: LedgerFixture["tasks"][number],
   proof: NonNullable<RunAssignment["acceptedProof"]>,
@@ -336,7 +362,9 @@ function assertCompleteCancellation(
   expect(cancellation.assignmentId, `${id} cancellation own assignment`).toBe(
     assignment.assignmentId,
   );
-  expect(cancellation.refresh.agentId, `${id} cancellation refresh actor`).toBe(assignment.agentId);
+  if (cancellation.refresh.agentId !== assignment.agentId) {
+    failSource("refresh-actor", "cancellation.refresh.agentId", `${id} cancellation refresh actor`);
+  }
   expect(cancellation.refresh.activeTurn, `${id} cancellation activeTurn`).toBe(false);
   expect(
     Date.parse(cancellation.refresh.observedAt) >= Date.parse(assignment.endedAt),
@@ -346,9 +374,14 @@ function assertCompleteCancellation(
     record.counters.observationSeq,
   );
   expect(cancellation.endedEventKey, `${id} cancellation ended key`).not.toBeNull();
-  if (assignment.endedEventKey !== null) {
-    expect(assignment.endedEventKey, `${id} cancellation ending identity`).toBe(
-      cancellation.endedEventKey,
+  if (
+    assignment.endedEventKey !== null &&
+    assignment.endedEventKey !== cancellation.endedEventKey
+  ) {
+    failSource(
+      "ended-key-mismatch",
+      "assignments.<id>.endedEventKey",
+      `${id} cancellation ending identity`,
     );
   }
   const ended = record.eventReceipts.find(
@@ -397,6 +430,152 @@ function assertCompleteCancellation(
   }
 }
 
+const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: string }> = {
+  "i1-half-write-bytes": {
+    category: "shape-negative",
+    consumer: "R05",
+    parent: "NORMAL",
+    candidate: "tmp bytes",
+    domainExpected: "I1",
+  },
+  "i2-ready-with-unfinished-dep": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "t3 ready with t2 unfinished",
+    domainExpected: "I2",
+  },
+  "i2-pending-with-unfinished-dep": {
+    category: "source",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "t3 correctly pending",
+  },
+  "i3-blocked-frozen-claim": {
+    category: "source",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "blocked frozen claim",
+  },
+  "i3-pending-holds-claim": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "pending task holds claim",
+    domainExpected: "I3",
+  },
+  "i4-review-awaiting-does-not-count": {
+    category: "source",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "awaiting review not slot",
+  },
+  "i4-capacity-over-effective": {
+    category: "boundary",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "capacity boundary",
+    domainExpected: "I4",
+  },
+  "i5-nonce-replayed": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "duplicate nonce",
+    domainExpected: "I5",
+  },
+  "i5-turn-ended-redelivered": {
+    category: "source",
+    consumer: "R05",
+    parent: "NORMAL",
+    candidate: "duplicate transport receipt",
+  },
+  "i6-rework-count-below-events": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "count marker below events",
+    domainExpected: "I6",
+  },
+  "i7-done-without-review": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "producer chain only",
+    domainExpected: "I7",
+  },
+  "i7-self-review": {
+    category: "invariant-negative",
+    consumer: "R03",
+    parent: "NORMAL",
+    candidate: "same actor self review",
+    domainExpected: "I7",
+  },
+  "i8-assignment-without-intent": {
+    category: "invariant-negative",
+    consumer: "R03/I7",
+    parent: "NORMAL",
+    candidate: "assignment without dispatch",
+    domainExpected: "I8",
+    expected: { code: "assignment-dispatch", path: "assignments.<id>.dispatch" },
+  },
+};
+
+const CACHE_SOURCE: Readonly<Record<string, Readonly<Record<string, string | null>>>> = {
+  "normal-ledger": { t1: "assignment-t1-a1" },
+  "outcome-unknown-ledger": { t1: "assignment-t1-a1" },
+  "cancelling-ledger": { t1: "assignment-t1-a1" },
+  "cancellation-authorized-frozen": { t1: "assignment-t1-a1" },
+  "quiescent-cancelled-ledger": { t1: "assignment-t1-a1" },
+  "local-never-sent-cancelled-ledger": { t1: "assignment-t1-a1" },
+  "blocked-ledger": { t1: "assignment-t1-a1" },
+  "lock-conflict-run-a": { t1: "assignment-t1-a1" },
+  "lock-conflict-run-b": { t1: "assignment-t1-a1" },
+  "probe-conflict-run-a": { t1: "assignment-t1-a1" },
+  "probe-conflict-run-b": { t1: "assignment-t1-a1" },
+  "probe-same-channel-seats": { t1: "assignment-t1-a1" },
+  "closed-after-report": { t1: "assignment-t1-a1", t2: "assignment-t2-a1" },
+  "closed-while-assigned": { t1: "assignment-t1-a1" },
+  "reopen-started": { t1: "assignment-t1-a1" },
+  "control-attempts": { t1: "assignment-t1-a1" },
+  "probe-eligible": { t1: "assignment-t1-a1" },
+  "probe-blocked-inflight-turn": { t1: "assignment-t1-a1" },
+  "probe-in-flight": { t1: "assignment-t1-a1" },
+  "probe-completed": { t1: "assignment-t1-a1" },
+  "probe-failed": { t1: "assignment-t1-a1" },
+  "probe-unknown": { t1: "assignment-t1-a1" },
+  "evidence-incomplete": { t1: "assignment-t1-a1" },
+  "stale-review": { t1: "assignment-t1-a2" },
+  "dev-smoke-missing": { t1: "assignment-t1-a1", t6: "assignment-t6-a1" },
+  "dev-smoke-ready": { t1: "assignment-t1-a1", t6: "assignment-t6-a1" },
+  "permission-pending": { t1: "assignment-t1-a1" },
+  "irreversible-unapproved": { t1: "assignment-t1-a1" },
+  "finished-decision": { t1: "assignment-t1-a1" },
+  "quiescent-two": { t1: "assignment-t1-a1" },
+  "matching-ended-key": { t1: "assignment-t1-a1" },
+  "superseded-local": { t1: "assignment-t1-a1" },
+  "superseded-zero": { t1: "assignment-t1-a1" },
+  "superseded-missing-audit": { t1: "assignment-t1-a1" },
+  "superseded-fake-pair": { t1: "assignment-t1-a1" },
+  "i2-pending-with-unfinished-dep": { t1: "assignment-t1-a1" },
+  "i3-blocked-frozen-claim": { t1: "assignment-t1-a1" },
+  "i4-review-awaiting-does-not-count": { t1: "assignment-t1-a1" },
+  "i4-capacity-over-effective": { t1: "assignment-t1-a1" },
+  "i5-turn-ended-redelivered": { t1: "assignment-t1-a1" },
+  "i7-self-review": { t1: "assignment-t1-a1" },
+  "i1-half-write-bytes": { t1: "assignment-t1-a1" },
+  "i2-ready-with-unfinished-dep": { t1: "assignment-t1-a1" },
+  "i7-done-without-review": { t1: "assignment-t1-a1" },
+  "i8-assignment-without-intent": { t1: "assignment-t1-a1" },
+  "i5-nonce-replayed": { t1: "assignment-t1-a1" },
+  "i3-pending-holds-claim": { t1: "assignment-t1-a1" },
+  i6: { t1: "assignment-t1-a1" },
+  "i6-rework-count-below-events": { t1: "assignment-t1-a1" },
+  "cache-without-d": { t1: "assignment-t1-a1" },
+  "done-without-reviewer": { t1: "assignment-t1-a1" },
+  "done-without-chain": { t1: "assignment-t1-a1" },
+};
+
 const CANCEL_OBLIGATIONS: Readonly<Record<string, readonly string[]>> = {
   "quiescent-cancelled-ledger": ["assignment-t2-a1"],
   "quiescent-two": ["assignment-t2-a1", "assignment-t2-a2"],
@@ -410,10 +589,14 @@ function assertCancelPairs(
   expectedAssignmentIds: readonly string[],
 ): void {
   const pairs = decision.cancelIntents ?? [];
-  expect(
-    pairs.map((entry) => entry.assignmentId),
-    `${id} cancellation obligation set`,
-  ).toEqual([...expectedAssignmentIds].sort());
+  const actualIds = pairs.map((entry) => entry.assignmentId);
+  if (JSON.stringify(actualIds) !== JSON.stringify([...expectedAssignmentIds].sort())) {
+    failSource(
+      "cancellation-pairs",
+      "decisions.<id>.cancelIntents",
+      `${id} cancellation obligation set`,
+    );
+  }
   expect(decision.answer?.taskIds, `${id} cancellation answer coverage`).toContain(taskId);
   for (const binding of pairs) {
     const assignment = record.assignments.find(
@@ -458,6 +641,18 @@ function isLocalNeverSent(record: LedgerFixture, assignment: RunAssignment): boo
     return false;
   }
   if (intent.localCancellation.reason !== "cancel-before-send") return false;
+  const nonce = record.nonceRegistry.find(
+    (entry) => entry.assignmentId === assignment.assignmentId,
+  );
+  if (
+    !nonce ||
+    nonce.runId !== record.runId ||
+    nonce.acceptedAt !== null ||
+    nonce.revokedAt === null ||
+    nonce.revokeReason === null
+  ) {
+    return false;
+  }
   if (intent.localCancellation.eventSeq > record.counters.eventsThroughSeq) return false;
   if (
     record.events.some(
@@ -514,7 +709,9 @@ function assertAssociations(
       }
       expect(nonce, `${id} accepted nonce`).toBeDefined();
       if (nonce) {
-        expect(nonce.runId, `${id} nonce run`).toBe(record.runId);
+        if (nonce.runId !== record.runId) {
+          failSource("nonce-run", `nonces.${nonce.nonce}.runId`, `${id} nonce run`);
+        }
         expect(nonce.acceptedAt, `${id} acceptedAt`).not.toBeNull();
         expect(nonce.acceptedEventKey, `${id} accepted key`).toBe(
           `proof:${assignment.assignmentId}`,
@@ -543,9 +740,21 @@ function assertAssociations(
         expect(assignment.delivery).toBeNull();
       }
     } else if (nonce) {
-      expect(nonce.runId, `${id} unaccepted nonce run`).toBe(record.runId);
+      if (nonce.runId !== record.runId) {
+        failSource("nonce-run", `nonces.${nonce.nonce}.runId`, `${id} unaccepted nonce run`);
+      }
       expect(nonce.acceptedAt, `${id} unaccepted At`).toBeNull();
       expect(nonce.acceptedEventKey, `${id} unaccepted key`).toBeNull();
+    }
+    const assignmentDispatches = record.outbox.filter(
+      (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+    );
+    if (assignmentDispatches.length !== 1) {
+      failSource(
+        "assignment-dispatch",
+        `assignments.${assignment.assignmentId}.dispatch`,
+        `${id} assignment dispatch count`,
+      );
     }
     const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
     expect(task, `${id} assignment task`).toBeDefined();
@@ -572,9 +781,13 @@ function assertAssociations(
       expect(producer, `${id} producer`).toBeDefined();
       expect(producer?.taskId).toBe(assignment.taskId);
       expect(producer?.attempt).toBe(assignment.attempt);
-      expect(["member", "coordinator", "reopen"], `${id} producer purpose`).toContain(
-        producer?.purpose,
-      );
+      if (!["member", "coordinator", "reopen"].includes(producer?.purpose ?? "")) {
+        failSource(
+          "producer-purpose",
+          `assignments.${producerId}.purpose`,
+          `${id} producer purpose`,
+        );
+      }
       expect(producer?.acceptedProof, `${id} producer proof`).not.toBeNull();
       if (producer?.acceptedProof) {
         expect("status" in producer.acceptedProof, `${id} producer report kind`).toBe(true);
@@ -608,8 +821,12 @@ function assertAssociations(
     if (assignment.state === "cancelled") {
       if (assignment.cancellation !== null) {
         assertCompleteCancellation(id, record, assignment);
-      } else {
-        expect(isLocalNeverSent(record, assignment), `${id} local never sent`).toBe(true);
+      } else if (!isLocalNeverSent(record, assignment)) {
+        failSource(
+          "local-never-sent",
+          `assignments.${assignment.assignmentId}`,
+          `${id} local never sent`,
+        );
       }
     }
     if (assignment.endedEventKey !== null) {
@@ -627,23 +844,24 @@ function assertAssociations(
     }
   }
   for (const task of record.tasks) {
-    const producers = record.assignments.filter(
-      (entry) => entry.taskId === task.spec.id && validProducerD(record, entry),
-    );
-    producers.sort((a, b) => b.attempt - a.attempt);
-    const proof = producers[0]?.acceptedProof;
-    if (proof && "ref" in proof && "changedFiles" in proof) {
-      expect(task.ref, `${id} task cache ref`).toEqual(proof.ref);
-      expect(task.changedFiles, `${id} task cache files`).toEqual(proof.changedFiles);
-    } else {
-      expect(task.ref, `${id} task cache ref without D`).toBeNull();
-      expect(task.changedFiles, `${id} task cache files without D`).toEqual([]);
+    const cacheSource = CACHE_SOURCE[id]?.[task.spec.id] ?? null;
+    const producer =
+      cacheSource === null
+        ? null
+        : record.assignments.find((entry) => entry.assignmentId === cacheSource);
+    if (cacheSource !== null) {
+      if (!producer || producer.taskId !== task.spec.id || !validProducerD(record, producer)) {
+        failSource("cache-source", `tasks.${task.spec.id}.cacheSource`, `${id} cache producer`);
+      }
+      const proof = producer?.acceptedProof;
+      if (proof && "ref" in proof && "changedFiles" in proof) {
+        expect(task.ref, `${id} task cache ref`).toEqual(proof.ref);
+        expect(task.changedFiles, `${id} task cache files`).toEqual(proof.changedFiles);
+      }
+    } else if (task.ref !== null || task.changedFiles.length !== 0) {
+      failSource("cache-source", `tasks.${task.spec.id}.cacheSource`, `${id} task cache without D`);
     }
     if (task.state === "done") {
-      const producers = record.assignments.filter((entry) => validProducerD(record, entry));
-      const producer = producers
-        .filter((entry) => entry.taskId === task.spec.id)
-        .sort((a, b) => b.attempt - a.attempt)[0];
       expect(producer, `${id} done task producer`).toBeDefined();
       if (options.allowMissingReviewer) continue;
       const reviewer = record.assignments.find(
@@ -654,7 +872,13 @@ function assertAssociations(
           "verdict" in entry.acceptedProof &&
           entry.delivery?.producerAssignmentId === producer?.assignmentId,
       );
-      expect(reviewer, `${id} done task reviewer chain`).toBeDefined();
+      if (!reviewer) {
+        failSource(
+          "done-reviewer-chain",
+          `tasks.${task.spec.id}.reviewer`,
+          `${id} done task reviewer chain`,
+        );
+      }
       if (reviewer?.acceptedProof && producer?.acceptedProof) {
         expect("reviewedRef" in reviewer.acceptedProof, `${id} done reviewer report kind`).toBe(
           true,
@@ -707,23 +931,33 @@ function assertAssociations(
         expect(resolution.witness.localIntentIds, `${id} superseded local closure`).toEqual(
           localIds,
         );
-        const event = record.events.find(
-          (entry) =>
-            entry.seq === resolution.eventSeq &&
-            entry.at === resolution.at &&
-            entry.kind === resolution.cause &&
-            entry.payload.taskId === decision.subjectId,
-        );
-        if (event) {
-          const audit = event.payload.audit as
-            | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
-            | undefined;
-          expect(audit?.localIntentIds, `${id} superseded audit locals`).toEqual(
-            resolution.witness.localIntentIds,
+        const through = record.checkpoint?.throughSeq ?? 0;
+        if (resolution.eventSeq > through) {
+          const event = record.events.find(
+            (entry) =>
+              entry.seq === resolution.eventSeq &&
+              entry.at === resolution.at &&
+              entry.kind === resolution.cause &&
+              entry.payload.taskId === decision.subjectId,
           );
-          expect(audit?.supersededDecisionIds, `${id} superseded audit decision`).toContain(
-            decision.decisionId,
-          );
+          if (!event) {
+            failSource(
+              "superseded-cancel-event",
+              "decisions.<id>.resolution.eventSeq",
+              `${id} superseded cancel event`,
+            );
+          }
+          if (event) {
+            const audit = event.payload.audit as
+              | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
+              | undefined;
+            expect(audit?.localIntentIds, `${id} superseded audit locals`).toEqual(
+              resolution.witness.localIntentIds,
+            );
+            expect(audit?.supersededDecisionIds, `${id} superseded audit decision`).toContain(
+              decision.decisionId,
+            );
+          }
         }
       }
       continue;
@@ -844,9 +1078,45 @@ describe("run engine fixtures against R01 schemas", () => {
     }
   });
 
+  test("every invariant case closes its non-target source and names its target", () => {
+    const options: Record<
+      string,
+      { allowSelfReview?: boolean; allowMissingReviewer?: boolean; expected?: RegExp }
+    > = {
+      "i7-self-review": { allowSelfReview: true },
+      "i7-done-without-review": { allowMissingReviewer: true },
+      "i8-assignment-without-intent": { expected: /assignment dispatch count/ },
+    };
+    for (const entry of INVARIANT_CASES) {
+      const record = entry.ledger as LedgerFixture;
+      expect(RunRecordSchema.safeParse(record).success, `${entry.id} schema`).toBe(true);
+      const expected = options[entry.id]?.expected;
+      const doCheck = () =>
+        assertAssociations(entry.id, record, {
+          allowSelfReview: options[entry.id]?.allowSelfReview,
+          allowMissingReviewer: options[entry.id]?.allowMissingReviewer,
+        });
+      if (expected) {
+        expect(doCheck, `${entry.id} source target`).toThrow(expected);
+      } else {
+        expect(doCheck, `${entry.id} non-target source`).not.toThrow();
+      }
+    }
+    const i8 = INVARIANT_CASES.find((entry) => entry.id === "i8-assignment-without-intent");
+    if (!i8) throw new Error("missing i8");
+    expect(
+      sourceCodeOf(() =>
+        assertAssociations("i8-assignment-without-intent", i8.ledger as LedgerFixture),
+      ),
+    ).toBe("assignment-dispatch");
+  });
+
   test("each named sample has explicit source metadata", () => {
     for (const { id } of NAMED_LEDGERS) {
       expect(SOURCE_METADATA[id], `${id} metadata`).toBeDefined();
+    }
+    for (const entry of INVARIANT_CASES) {
+      expect(INVARIANT_METADATA[entry.id], `${entry.id} invariant metadata`).toBeDefined();
     }
     for (const [id, metadata] of Object.entries(SOURCE_METADATA)) {
       expect(metadata.consumer, `${id} consumer`).not.toBe("");
@@ -1275,7 +1545,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!smoker) throw new Error("missing smoker");
     smoker.delivery = { producerAssignmentId: "assignment-t6-r1" };
     expect(RunRecordSchema.safeParse(reviewAsProducer).success).toBe(true);
-    expect(() => assertAssociations("review-as-producer", reviewAsProducer)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("review-as-producer", reviewAsProducer))).toBe(
+      "producer-purpose",
+    );
   });
 
   test("T175 task cache is null/[] without a valid current D", () => {
@@ -1285,7 +1557,9 @@ describe("run engine fixtures against R01 schemas", () => {
     t2Task.ref = { kind: "git-commit", value: "9f3c1a7" };
     t2Task.changedFiles = ["src/t2.ts"];
     expect(RunRecordSchema.safeParse(cachedWithoutD).success).toBe(true);
-    expect(() => assertAssociations("cache-without-d", cachedWithoutD)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("cache-without-d", cachedWithoutD))).toBe(
+      "cache-source",
+    );
   });
 
   test("C1/C8 refresh actor and own ended-key identity", () => {
@@ -1296,7 +1570,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongRefreshAssignment?.cancellation) throw new Error("missing cancellation");
     wrongRefreshAssignment.cancellation.refresh.agentId = "agent-wrong";
     expect(RunRecordSchema.safeParse(wrongRefresh).success).toBe(true);
-    expect(() => assertAssociations("wrong-refresh-actor", wrongRefresh)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("wrong-refresh-actor", wrongRefresh))).toBe(
+      "refresh-actor",
+    );
 
     const matchingKey = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const matchingAssignment = matchingKey.assignments.find(
@@ -1314,7 +1590,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!conflictingAssignment?.cancellation) throw new Error("missing cancellation");
     conflictingAssignment.endedEventKey = "agent-b1|turn-6|turn_ended";
     expect(RunRecordSchema.safeParse(conflictingKey).success).toBe(true);
-    expect(() => assertAssociations("conflicting-ended-key", conflictingKey)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("conflicting-ended-key", conflictingKey))).toBe(
+      "ended-key-mismatch",
+    );
   });
 
   test("C2 cancel pairs exact closure", () => {
@@ -1323,7 +1601,9 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!missingDecision) throw new Error("missing decision");
     missingDecision.cancelIntents = [];
     expect(RunRecordSchema.safeParse(missing).success).toBe(true);
-    expect(() => assertAssociations("missing-pair", missing)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("missing-pair", missing))).toBe(
+      "cancellation-pairs",
+    );
 
     const extra = structuredClone(QUIESCENT_CANCELLED_LEDGER);
     const extraDecision = extra.decisions.find((entry) => entry.subjectId === "t2");
@@ -1346,7 +1626,9 @@ describe("run engine fixtures against R01 schemas", () => {
       ...(extraDecision.cancelIntents ?? []),
     ];
     expect(RunRecordSchema.safeParse(extra).success).toBe(true);
-    expect(() => assertAssociations("extra-cross-task-pair", extra)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("extra-cross-task-pair", extra))).toBe(
+      "cancellation-pairs",
+    );
   });
 
   test("C2 two-actor exact closure and extra same-task pair", () => {
@@ -1372,6 +1654,16 @@ describe("run engine fixtures against R01 schemas", () => {
     };
     two.assignments.push(second);
     two.outbox.push(
+      dispatchIntent({
+        id: "intent-t2-a2",
+        taskId: "t2",
+        assignmentId: "assignment-t2-a2",
+        recipient: "agent-b1",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
+        idempotencyKey: "dispatch-t2-a2",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
       dispatchIntent({
         id: "intent-cancel-t2-b",
         kind: "archive",
@@ -1422,6 +1714,16 @@ describe("run engine fixtures against R01 schemas", () => {
     extra.assignments.push(third);
     extra.outbox.push(
       dispatchIntent({
+        id: "intent-t2-a3",
+        taskId: "t2",
+        assignmentId: "assignment-t2-a3",
+        recipient: "agent-b1",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
+        idempotencyKey: "dispatch-t2-a3",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+      dispatchIntent({
         id: "intent-cancel-t2-extra",
         kind: "archive",
         taskId: "t2",
@@ -1459,7 +1761,9 @@ describe("run engine fixtures against R01 schemas", () => {
         }),
       );
       expect(RunRecordSchema.safeParse(local).success).toBe(true);
-      expect(() => assertAssociations(`local-extra-${state}`, local)).toThrow();
+      expect(sourceCodeOf(() => assertAssociations(`local-extra-${state}`, local))).toBe(
+        "assignment-dispatch",
+      );
     }
   });
 
@@ -1471,7 +1775,7 @@ describe("run engine fixtures against R01 schemas", () => {
     if (!wrongNonce) throw new Error("missing nonce");
     wrongNonce.runId = "run-other-z9";
     expect(RunRecordSchema.safeParse(wrongRun).success).toBe(true);
-    expect(() => assertAssociations("local-wrong-run", wrongRun)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("local-wrong-run", wrongRun))).toBe("nonce-run");
 
     const turn = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
     turn.events.push({
@@ -1481,14 +1785,26 @@ describe("run engine fixtures against R01 schemas", () => {
       payload: { taskId: "t2", turnId: "turn-7" },
     });
     expect(RunRecordSchema.safeParse(turn).success).toBe(true);
-    expect(() => assertAssociations("local-turn", turn)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("local-turn", turn))).toBe("local-never-sent");
 
     const audit = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
     const cancelEvent = audit.events.find((entry) => entry.seq === 8);
     if (!cancelEvent) throw new Error("missing cancel event");
     cancelEvent.payload.audit = { localIntentIds: [], supersededDecisionIds: [] };
     expect(RunRecordSchema.safeParse(audit).success).toBe(true);
-    expect(() => assertAssociations("local-audit", audit)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("local-audit", audit))).toBe("local-never-sent");
+
+    const notRevoked = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+    const nonce = notRevoked.nonceRegistry.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!nonce) throw new Error("missing nonce");
+    nonce.revokedAt = null;
+    nonce.revokeReason = null;
+    expect(RunRecordSchema.safeParse(notRevoked).success).toBe(true);
+    expect(sourceCodeOf(() => assertAssociations("local-not-revoked", notRevoked))).toBe(
+      "local-never-sent",
+    );
   });
 
   test("C6 superseded no-effects resolution and empty-pair branch close", () => {
@@ -1549,6 +1865,13 @@ describe("run engine fixtures against R01 schemas", () => {
     fakeDecision.cancelIntents = [{ assignmentId: "assignment-t2-a1", intentId: localIntent.id }];
     expect(RunRecordSchema.safeParse(fakeAuth).success).toBe(true);
     expect(() => assertAssociations("superseded-fake-pair", fakeAuth)).toThrow();
+
+    const missingAudit = structuredClone(zero);
+    missingAudit.events = missingAudit.events.filter((entry) => entry.seq !== 8);
+    expect(RunRecordSchema.safeParse(missingAudit).success).toBe(true);
+    expect(sourceCodeOf(() => assertAssociations("superseded-missing-audit", missingAudit))).toBe(
+      "superseded-cancel-event",
+    );
   });
 
   test("done tasks keep their producer and reviewer proof chain", () => {
@@ -1566,7 +1889,9 @@ describe("run engine fixtures against R01 schemas", () => {
     );
     reviewerOnly.outbox = reviewerOnly.outbox.filter((entry) => entry.id !== "intent-t1-r1");
     expect(RunRecordSchema.safeParse(reviewerOnly).success).toBe(true);
-    expect(() => assertAssociations("done-without-reviewer", reviewerOnly)).toThrow();
+    expect(sourceCodeOf(() => assertAssociations("done-without-reviewer", reviewerOnly))).toBe(
+      "done-reviewer-chain",
+    );
   });
 
   test("i7 negatives retain source closure except their declared target", () => {
@@ -1593,7 +1918,9 @@ describe("run engine fixtures against R01 schemas", () => {
     )?.ledger;
     if (!rework) throw new Error("missing i6");
     expect(RunRecordSchema.safeParse(rework).success).toBe(true);
-    expect(() => assertAssociations("i6", rework as LedgerFixture)).not.toThrow();
+    expect(() =>
+      assertAssociations("i6-rework-count-below-events", rework as LedgerFixture),
+    ).not.toThrow();
   });
 
   test("association validator catches single-field source breakage", () => {

@@ -5,6 +5,7 @@ import {
   AT_UPDATED,
   assignmentsForRun,
   claim,
+  dispatchIntent,
   NORMAL_RUN_LEDGER,
   noncesForRun,
   PROFILE_HAIKU,
@@ -46,6 +47,18 @@ export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
   nonceRegistry: noncesForRun("run-rec0re-lkb"),
   assignments: [...assignmentsForRun("run-rec0re-lkb"), T3_ASSIGNMENT],
+  outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
+    dispatchIntent({
+      id: "intent-t3-a1",
+      taskId: "t3",
+      assignmentId: "assignment-t3-a1",
+      messageId: T3_ASSIGNMENT.messageId,
+      idempotencyKey: "dispatch-t3-a1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  ],
   revision: 6,
   resources: [
     claim({

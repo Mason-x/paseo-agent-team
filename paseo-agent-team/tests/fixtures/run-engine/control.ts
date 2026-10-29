@@ -5,6 +5,7 @@ import {
   assignmentsForRun,
   claim,
   DECISION_D4,
+  dispatchIntent,
   NORMAL_RUN_LEDGER,
   noncesForRun,
   PROFILE_HAIKU,
@@ -38,6 +39,18 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-ctl",
   nonceRegistry: noncesForRun("run-rec0re-ctl"),
   assignments: [...assignmentsForRun("run-rec0re-ctl"), T3_ASSIGNMENT],
+  outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
+    dispatchIntent({
+      id: "intent-t3-a1",
+      taskId: "t3",
+      assignmentId: "assignment-t3-a1",
+      messageId: T3_ASSIGNMENT.messageId,
+      idempotencyKey: "dispatch-t3-a1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  ],
   revision: 21,
   tasks: [
     {
