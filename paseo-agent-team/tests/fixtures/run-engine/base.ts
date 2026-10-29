@@ -684,9 +684,22 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   },
 };
 
+/** Explicitly rebind the known base assignments/proof run id to a fixture Run. */
+export function assignmentsForRun(runId: string) {
+  return NORMAL_RUN_LEDGER.assignments.map((entry) => ({
+    ...entry,
+    acceptedProof: entry.acceptedProof === null ? null : { ...entry.acceptedProof, runId },
+  }));
+}
+
+/** Explicitly rebind the known nonce registrations to a fixture Run. */
+export function noncesForRun(runId: string) {
+  return NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({ ...entry, runId }));
+}
+
 /** Copy the normal ledger with explicit top-level overrides; no legacy-key migration or inference. */
 export function withLedger(overrides: Partial<RunRecord> & Record<string, unknown>): RunRecord {
-  return { ...NORMAL_RUN_LEDGER, ...overrides };
+  return structuredClone({ ...NORMAL_RUN_LEDGER, ...overrides });
 }
 
 export const POLICY = policy();

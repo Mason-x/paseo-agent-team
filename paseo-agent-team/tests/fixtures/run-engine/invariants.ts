@@ -4,9 +4,11 @@
 import {
   AT_UPDATED,
   assignment,
+  assignmentsForRun,
   claim,
   NONCE_T2,
   NORMAL_RUN_LEDGER,
+  noncesForRun,
   POLICY,
   t1,
   t2,
@@ -18,7 +20,6 @@ import type { InvariantCase } from "./types";
 
 const doneWithoutReview = {
   ...t1,
-  reviews: [],
 };
 
 const readyWithUnfinishedDep = {
@@ -27,7 +28,12 @@ const readyWithUnfinishedDep = {
   deps: ["t2"],
 };
 
-const pendingHoldsClaim = claim({ claimId: "claim-t3", taskId: "t3", path: "docs/run-engine" });
+const pendingHoldsClaim = claim({
+  claimId: "claim-t3",
+  taskId: "t3",
+  originAssignmentId: "assignment-t3-a1",
+  path: "docs/run-engine",
+});
 
 const inFlight = (id: string) =>
   task(id, `In-flight ${id}`, {
@@ -61,14 +67,23 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     id: "i2-ready-with-unfinished-dep",
     invariant: "I2",
     kind: "violation",
-    ledger: withLedger({ runId: "run-rec0re-i2", tasks: [t1, t2, readyWithUnfinishedDep] }),
+    ledger: withLedger({
+      runId: "run-rec0re-i2",
+      nonceRegistry: noncesForRun("run-rec0re-i2"),
+      assignments: assignmentsForRun("run-rec0re-i2"),
+      tasks: [t1, t2, readyWithUnfinishedDep],
+    }),
     note: "t3 is ready while its dependency t2 is still in_progress.",
   },
   {
     id: "i2-pending-with-unfinished-dep",
     invariant: "I2",
     kind: "legal",
-    ledger: withLedger({ runId: "run-rec0re-i2o" }),
+    ledger: withLedger({
+      runId: "run-rec0re-i2o",
+      nonceRegistry: noncesForRun("run-rec0re-i2o"),
+      assignments: assignmentsForRun("run-rec0re-i2o"),
+    }),
     note: "t3 stays pending, which is the correct form while t2 is unfinished.",
   },
   {
@@ -77,6 +92,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i3o",
+      nonceRegistry: noncesForRun("run-rec0re-i3o"),
+      assignments: assignmentsForRun("run-rec0re-i3o"),
       tasks: [t1, { ...t2, state: "blocked", waitingReason: "missing-seat" }, t3],
       resources: [claim({ frozen: true })],
     }),
@@ -88,6 +105,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i3x",
+      nonceRegistry: noncesForRun("run-rec0re-i3x"),
       resources: [claim(), pendingHoldsClaim],
     }),
     note: "t3 is pending yet holds a write claim.",
@@ -98,6 +116,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i4o",
+      nonceRegistry: noncesForRun("run-rec0re-i4o"),
+      assignments: assignmentsForRun("run-rec0re-i4o"),
       policy: { ...POLICY, configuredConcurrency: 3 },
       tasks: [t1, { ...t2, state: "review", phase: "awaiting-rework" }, ...FIVE_IN_FLIGHT],
     }),
@@ -109,6 +129,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "boundary",
     ledger: withLedger({
       runId: "run-rec0re-i4x",
+      nonceRegistry: noncesForRun("run-rec0re-i4x"),
+      assignments: assignmentsForRun("run-rec0re-i4x"),
       policy: { ...POLICY, configuredConcurrency: 2 },
       tasks: [t1, t2, ...FIVE_IN_FLIGHT.slice(0, 4)],
     }),
@@ -133,6 +155,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "legal",
     ledger: withLedger({
       runId: "run-rec0re-i5o",
+      nonceRegistry: noncesForRun("run-rec0re-i5o"),
+      assignments: assignmentsForRun("run-rec0re-i5o"),
       eventReceipts: [
         ...NORMAL_RUN_LEDGER.eventReceipts,
         { ...NORMAL_RUN_LEDGER.eventReceipts[0], receivedAt: AT_UPDATED },
@@ -146,6 +170,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i6x",
+      nonceRegistry: noncesForRun("run-rec0re-i6x"),
       tasks: [{ ...t2, reworkCount: 0 }],
       events: [
         ...NORMAL_RUN_LEDGER.events,
@@ -168,18 +193,11 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i7s",
+      nonceRegistry: noncesForRun("run-rec0re-i7s"),
+      assignments: assignmentsForRun("run-rec0re-i7s"),
       tasks: [
         {
           ...t1,
-          reviews: [
-            {
-              reviewerAgentId: "agent-b1",
-              reviewerSeatId: "seat-b1",
-              verdict: "可合入",
-              reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
-              blockers: [],
-            },
-          ],
         },
         t2,
         t3,
@@ -193,6 +211,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i8x",
+      nonceRegistry: noncesForRun("run-rec0re-i8x"),
       assignments: [assignment({ nonce: NONCE_T2 })],
       outbox: [],
     }),

@@ -91,6 +91,126 @@ const INVARIANT_LEDGERS: { id: string; ledger: LedgerFixture }[] = INVARIANT_CAS
 }));
 
 const LEGAL_LEDGERS = [...NAMED_LEDGERS, ...INVARIANT_LEDGERS];
+const SOURCE_LEDGERS = [
+  ...NAMED_LEDGERS,
+  ...INVARIANT_CASES.filter((entry) => entry.kind !== "violation").map((entry) => ({
+    id: entry.id,
+    ledger: entry.ledger as LedgerFixture,
+  })),
+];
+
+/** Test-only source association checks. This is not the product I7 implementation. */
+function assertAssociations(id: string, record: LedgerFixture): void {
+  for (const assignment of record.assignments) {
+    const proof = assignment.acceptedProof;
+    const nonce = record.nonceRegistry.find(
+      (entry) => entry.assignmentId === assignment.assignmentId,
+    );
+    if (proof !== null) {
+      expect(proof.runId, `${id} proof run`).toBe(record.runId);
+      expect(proof.taskId, `${id} proof task`).toBe(assignment.taskId);
+      expect(proof.attempt, `${id} proof attempt`).toBe(assignment.attempt);
+      expect(proof.assignmentId, `${id} proof assignment`).toBe(assignment.assignmentId);
+      expect(proof.nonce, `${id} proof nonce`).toBe(assignment.nonce);
+      expect(proof.messageId, `${id} proof message`).toBe(assignment.messageId);
+      expect(nonce, `${id} accepted nonce`).toBeDefined();
+      if (nonce) {
+        expect(nonce.acceptedAt, `${id} acceptedAt`).not.toBeNull();
+        expect(nonce.acceptedEventKey, `${id} accepted key`).toBe(
+          `proof:${assignment.assignmentId}`,
+        );
+        if (nonce.acceptedAt) {
+          expect(
+            Date.parse(nonce.acceptedAt) >= Date.parse(nonce.issuedAt),
+            `${id} accept time`,
+          ).toBe(true);
+          if (nonce.revokedAt) {
+            expect(Date.parse(nonce.revokedAt) >= Date.parse(nonce.acceptedAt)).toBe(true);
+          }
+        }
+      }
+      const dispatches = record.outbox.filter(
+        (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+      );
+      expect(dispatches, `${id} dispatch count`).toHaveLength(1);
+      const dispatch = dispatches[0];
+      if (dispatch) {
+        expect(dispatch.taskId).toBe(assignment.taskId);
+        expect(dispatch.recipient).toBe(assignment.agentId);
+        expect(dispatch.messageId).toBe(assignment.messageId);
+      }
+      if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
+        expect(assignment.delivery, `${id} delivery`).not.toBeNull();
+        const producerId = assignment.delivery?.producerAssignmentId;
+        const producer = record.assignments.find((entry) => entry.assignmentId === producerId);
+        expect(producer, `${id} producer`).toBeDefined();
+        expect(producer?.taskId).toBe(assignment.taskId);
+        expect(producer?.attempt).toBe(assignment.attempt);
+        expect(producer?.acceptedProof).not.toBeNull();
+        if (producer?.acceptedProof && "status" in producer.acceptedProof) {
+          expect(producer.acceptedProof.status).toBe("done");
+        }
+      } else {
+        expect(assignment.delivery).toBeNull();
+      }
+    } else if (nonce) {
+      expect(nonce.acceptedAt, `${id} unaccepted At`).toBeNull();
+      expect(nonce.acceptedEventKey, `${id} unaccepted key`).toBeNull();
+    }
+    if (assignment.cancellation) {
+      const cancelIntent = record.outbox.find(
+        (entry) => entry.id === assignment.cancellation?.cancelIntentId,
+      );
+      expect(cancelIntent, `${id} cancel evidence intent`).toBeDefined();
+      if (cancelIntent) {
+        expect(cancelIntent.kind).toBe("archive");
+        expect(cancelIntent.taskId).toBe(assignment.taskId);
+        expect(cancelIntent.assignmentId).toBe(assignment.assignmentId);
+        expect(cancelIntent.recipient).toBe(assignment.agentId);
+      }
+    }
+    if (assignment.endedEventKey !== null) {
+      expect(assignment.turnId, `${id} ended turn`).not.toBeNull();
+      expect(assignment.endedAt, `${id} ended at`).not.toBeNull();
+      const receipt = record.eventReceipts.find(
+        (entry) =>
+          entry.eventKey === assignment.endedEventKey &&
+          entry.kind === "turn_ended" &&
+          entry.agentId === assignment.agentId &&
+          entry.turnId === assignment.turnId &&
+          entry.receivedAt === assignment.endedAt,
+      );
+      expect(receipt, `${id} ended receipt`).toBeDefined();
+    }
+  }
+  for (const claim of record.resources) {
+    expect(claim.originAssignmentId, `${id} claim origin`).toMatch(/^assignment-/);
+    const origin = record.assignments.find(
+      (entry) => entry.assignmentId === claim.originAssignmentId,
+    );
+    if (origin) expect(origin.taskId, `${id} claim origin task`).toBe(claim.taskId);
+  }
+  for (const decision of record.decisions) {
+    if (decision.cancelIntents === null) continue;
+    const ids = decision.cancelIntents.map((entry) => entry.assignmentId);
+    expect(ids).toEqual([...ids].sort());
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const binding of decision.cancelIntents) {
+      const assignment = record.assignments.find(
+        (entry) => entry.assignmentId === binding.assignmentId,
+      );
+      const intent = record.outbox.find((entry) => entry.id === binding.intentId);
+      expect(assignment, `${id} cancel assignment`).toBeDefined();
+      expect(intent, `${id} cancel intent`).toBeDefined();
+      if (assignment && intent) {
+        expect(intent.kind).toBe("archive");
+        expect(intent.taskId).toBe(assignment.taskId);
+        expect(intent.assignmentId).toBe(assignment.assignmentId);
+        expect(intent.recipient).toBe(assignment.agentId);
+      }
+    }
+  }
+}
 
 const INVALID: { id: string; value: unknown; paths: readonly string[] }[] = [
   {
@@ -425,7 +545,7 @@ describe("run engine fixtures against R01 schemas", () => {
       receipt: { kind: "archive", confirmedAt: AT_UPDATED, externalId: "archive-1" },
     });
     expect(cancelIntent).toMatchObject({
-      kind: "wake",
+      kind: "archive",
       taskId: "t2",
       assignmentId: "assignment-t2-a1",
       recipient: "agent-b1",
@@ -444,7 +564,8 @@ describe("run engine fixtures against R01 schemas", () => {
 
   test("legal fixtures use lowercase business ids, no task mirrors, and accepted nonces", () => {
     const lower = /^[a-z0-9][a-z0-9-]*$/;
-    for (const { id, ledger } of LEGAL_LEDGERS) {
+    for (const { id, ledger } of SOURCE_LEDGERS) {
+      assertAssociations(id, ledger);
       for (const task of ledger.tasks) {
         expect(task.spec.id, `${id} task id`).toMatch(lower);
         for (const dep of task.spec.deps) expect(dep, `${id} dep`).toMatch(lower);
@@ -504,6 +625,50 @@ describe("run engine fixtures against R01 schemas", () => {
           expect(binding.assignmentId, `${id} cancel binding`).toMatch(lower);
         }
       }
+    }
+  });
+
+  test("association validator catches single-field source breakage", () => {
+    const base = NORMAL_RUN_LEDGER;
+    const cases: Array<(record: LedgerFixture) => void> = [
+      (record) => {
+        const assignment = record.assignments.find(
+          (entry) => entry.assignmentId === "assignment-t1-a1",
+        );
+        if (assignment?.acceptedProof) {
+          (assignment.acceptedProof as Record<string, unknown>).assignmentId = "other";
+        }
+      },
+      (record) => {
+        const nonce = record.nonceRegistry.find(
+          (entry) => entry.assignmentId === "assignment-t1-a1",
+        );
+        if (nonce) nonce.acceptedEventKey = null;
+      },
+      (record) => {
+        const dispatch = record.outbox.find((entry) => entry.id === "intent-t1-a1");
+        if (dispatch) dispatch.recipient = "other-agent";
+      },
+      (record) => {
+        const reviewer = record.assignments.find(
+          (entry) => entry.assignmentId === "assignment-t1-r1",
+        );
+        if (reviewer) reviewer.delivery = null;
+      },
+      (record) => {
+        const claimEntry = record.resources[0];
+        if (claimEntry) claimEntry.originAssignmentId = "assignment-t1-a1";
+      },
+      (record) => {
+        record.eventReceipts = record.eventReceipts.filter(
+          (entry) => entry.eventKey !== "agent-b1|turn-6|turn_ended",
+        );
+      },
+    ];
+    for (const mutate of cases) {
+      const record = structuredClone(base);
+      mutate(record);
+      expect(() => assertAssociations("mutated", record)).toThrow();
     }
   });
 

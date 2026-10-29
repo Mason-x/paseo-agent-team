@@ -4,6 +4,7 @@ import {
   AT_CREATED,
   AT_UPDATED,
   assignment,
+  assignmentsForRun,
   claim,
   DECISION_D1,
   DIGEST_D,
@@ -17,6 +18,7 @@ import {
   NONCE_T1,
   NONCE_T2,
   NORMAL_RUN_LEDGER,
+  noncesForRun,
   PARTIAL_CANCELLATION,
   QUIESCENT_CANCELLATION,
   spec,
@@ -34,6 +36,7 @@ const MESSAGE_T1_REVIEW = "66666666-6666-4666-8666-666666666668";
 /** RE1.11 / Y21: host answered `agent_request_outcome_unknown`; intent is terminal, no retry loop. */
 export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-unk",
+  nonceRegistry: noncesForRun("run-rec0re-unk"),
   revision: 9,
   lifecycle: "paused",
   tasks: [t1, { ...t2, state: "blocked", waitingReason: "outcome-unknown" } as RunTaskRecord, t3],
@@ -90,6 +93,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
 /** RE1.10 / Y18: cancel requested; turn ended and host idle, but the cancel receipt is unconfirmed. */
 export const CANCELLING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-cnl",
+  nonceRegistry: noncesForRun("run-rec0re-cnl"),
   revision: 11,
   tasks: [
     t1,
@@ -117,7 +121,7 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
     dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2 }),
     {
       id: INTENT_CANCEL,
-      kind: "wake",
+      kind: "archive",
       recipient: "agent-b1",
       messageId: MESSAGE_CANCEL,
       idempotencyKey: "cancel-t2-1",
@@ -149,6 +153,7 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
 /** RE1.10 positive form: all three conditions hold, so the release may proceed (claim reclaimed). */
 export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-qsc",
+  nonceRegistry: noncesForRun("run-rec0re-qsc"),
   revision: 12,
   tasks: [
     t1,
@@ -174,7 +179,20 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
       cancellation: QUIESCENT_CANCELLATION,
     }),
   ],
-  outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  outbox: [
+    dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
+    dispatchIntent({
+      id: INTENT_CANCEL,
+      kind: "archive",
+      taskId: "t2",
+      assignmentId: "assignment-t2-a1",
+      recipient: "agent-b1",
+      messageId: MESSAGE_CANCEL,
+      idempotencyKey: "cancel-t2-1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  ],
   decisions: [
     {
       decisionId: DECISION_D1,
@@ -317,7 +335,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
     dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
     dispatchIntent({
       id: INTENT_CANCEL,
-      kind: "wake",
+      kind: "archive",
       taskId: "t2",
       assignmentId: "assignment-t2-a1",
       recipient: "agent-b1",
@@ -391,6 +409,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
 /** RE1.8 / I3: a blocked task keeps a frozen claim; releasing it would need an explicit decision. */
 export const BLOCKED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-blk",
+  nonceRegistry: noncesForRun("run-rec0re-blk"),
   revision: 8,
   lifecycle: "paused",
   tasks: [
@@ -473,6 +492,8 @@ export function buildOversizedLedger(): LedgerFixture {
 /** RE1.7 / RE2.8: overlong fields; the schema rejects this record (input for rejection cases). */
 export const OVERLONG_FIELDS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-lng",
+  nonceRegistry: noncesForRun("run-rec0re-lng"),
+  assignments: assignmentsForRun("run-rec0re-lng"),
   revision: 4,
   tasks: [
     taskRecord(

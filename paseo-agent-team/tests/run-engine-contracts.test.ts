@@ -33,6 +33,8 @@ import {
   RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
 import {
+  RunBudgetRequestSchema,
+  RunDecisionActionSchema,
   RunDecisionBlockSchema,
   RunReviewReportBlockSchema,
   RunSmokeReportBlockSchema,
@@ -723,6 +725,97 @@ describe("protocol blocks are strict and identity-bound", () => {
       }).success,
     ).toBe(true);
     expect(RunTaskReportBlockSchema.safeParse({ ...done, attempt: 0 }).success).toBe(false);
+  });
+
+  test("decision and budget TaskIds are lowercase while seat/strategic refs stay free", () => {
+    const invalidTaskIds = ["T1", "", "a".repeat(65), "t 1", "t/1"];
+    for (const taskId of invalidTaskIds) {
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "assign-seat", taskId, seatId: "seat-a" })
+          .success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "retry", taskId, reason: "x" }).success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: [taskId], reason: "x" })
+          .success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({
+          action: "increase-budget",
+          scope: "task-attempts",
+          subjectId: taskId,
+          delta: 1,
+          reason: "x",
+        }).success,
+      ).toBe(false);
+      expect(
+        RunBudgetRequestSchema.safeParse({
+          scope: "task-attempts",
+          subjectId: taskId,
+          requestedLimit: 1,
+          reason: "x",
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "assign-seat", taskId: "t1", seatId: "seat-a" })
+        .success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "retry", taskId: "t1", reason: "x" }).success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: ["t1", "t2"], reason: "x" })
+        .success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: ["t1", "T2"], reason: "x" })
+        .success,
+    ).toBe(false);
+    expect(
+      RunDecisionActionSchema.safeParse({
+        action: "increase-budget",
+        scope: "task-attempts",
+        subjectId: "t1",
+        delta: 1,
+        reason: "x",
+      }).success,
+    ).toBe(true);
+    for (const scope of ["seat", "strategic-turns"] as const) {
+      expect(
+        RunDecisionActionSchema.safeParse({
+          action: "increase-budget",
+          scope,
+          subjectId: "Seat-A",
+          delta: 1,
+          reason: "x",
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      RunTaskDagBlockSchema.safeParse({
+        ...controlIdentity,
+        dagRevision: 2,
+        expectedDagRevision: 1,
+        tasks: [taskSpec()],
+        cancelTaskIds: ["T1"],
+        budgetRequests: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunTaskDagBlockSchema.safeParse({
+        ...controlIdentity,
+        dagRevision: 2,
+        expectedDagRevision: 1,
+        tasks: [taskSpec()],
+        cancelTaskIds: ["t1"],
+        budgetRequests: [
+          { scope: "task-attempts", subjectId: "T1", requestedLimit: 1, reason: "x" },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   test("review and smoke reports use their fixed vocabularies", () => {
@@ -1623,6 +1716,20 @@ describe("R01g proof, compatibility, and decision shapes", () => {
     for (const mirror of ["report", "reviews", "smokeReport"]) {
       expect(RunTaskRecordSchema.safeParse(taskRecord({ [mirror]: [] })).success).toBe(false);
     }
+  });
+
+  test("missing evidence, reviewedRef, DEV fields, and uppercase stored TaskIds stay invalid", () => {
+    expect(RunStoredTaskReportSchema.safeParse({ ...storedDone, evidence: [] }).success).toBe(
+      false,
+    );
+    const { reviewedRef: _reviewedRef, ...reviewWithoutRef } = storedReview;
+    expect(RunStoredReviewSchema.safeParse(reviewWithoutRef).success).toBe(false);
+    expect(
+      RunStoredSmokeReportSchema.safeParse({ ...storedSmoke, devHost: undefined }).success,
+    ).toBe(false);
+    expect(RunStoredTaskReportSchema.safeParse({ ...storedDone, taskId: "T9" }).success).toBe(
+      false,
+    );
   });
 
   test("superseded needs a typed no-effects resolution; DTO hides internals", () => {

@@ -3,7 +3,10 @@
 import {
   AT_CREATED,
   AT_UPDATED,
+  assignmentsForRun,
   claim,
+  NORMAL_RUN_LEDGER,
+  noncesForRun,
   PROFILE_HAIKU,
   probeIntent,
   REPO_ID,
@@ -32,14 +35,26 @@ function pausedChannel(until: string | null): ChannelFixture {
 /** RE4.3 / Y7: two Runs declare the same canonical write scope. */
 export const LOCK_CONFLICT_RUN_A: LedgerFixture = withLedger({
   runId: "run-rec0re-lka",
+  nonceRegistry: noncesForRun("run-rec0re-lka"),
+  assignments: assignmentsForRun("run-rec0re-lka"),
   revision: 5,
   resources: [claim({ claimId: "claim-shared-a", path: SHARED_FILE, frozen: false })],
 });
 
 export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
+  nonceRegistry: noncesForRun("run-rec0re-lkb"),
+  assignments: assignmentsForRun("run-rec0re-lkb"),
   revision: 6,
-  resources: [claim({ claimId: "claim-shared-b", taskId: "t3", path: SHARED_FILE, frozen: false })],
+  resources: [
+    claim({
+      claimId: "claim-shared-b",
+      taskId: "t3",
+      originAssignmentId: "assignment-t3-a1",
+      path: SHARED_FILE,
+      frozen: false,
+    }),
+  ],
 });
 
 /** Same physical file through a Windows alias; canonicalization must converge on SHARED_FILE. */
@@ -76,10 +91,13 @@ export const STALE_ROOT_LOCK = {
 /** RE5.5 / Y19: both Runs reach the same recovery window for one channel. */
 export const PROBE_CONFLICT_RUN_A: LedgerFixture = withLedger({
   runId: "run-rec0re-prba",
+  nonceRegistry: noncesForRun("run-rec0re-prba"),
+  assignments: assignmentsForRun("run-rec0re-prba"),
   revision: 14,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-a",
       messageId: "99999999-9999-4999-8999-999999999999",
@@ -92,10 +110,13 @@ export const PROBE_CONFLICT_RUN_A: LedgerFixture = withLedger({
 
 export const PROBE_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-prbb",
+  nonceRegistry: noncesForRun("run-rec0re-prbb"),
+  assignments: assignmentsForRun("run-rec0re-prbb"),
   revision: 15,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:31:00.000Z")],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-b",
       messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -108,6 +129,8 @@ export const PROBE_CONFLICT_RUN_B: LedgerFixture = withLedger({
 /** Same Run, same channel, two seats: one probe, then the whole channel stays paused together. */
 export const PROBE_SAME_CHANNEL_SEATS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-prbs",
+  nonceRegistry: noncesForRun("run-rec0re-prbs"),
+  assignments: assignmentsForRun("run-rec0re-prbs"),
   revision: 16,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
@@ -137,6 +160,8 @@ export const PROBE_SAME_CHANNEL_SEATS_LEDGER: LedgerFixture = withLedger({
 /** RE1.14: a corrupt Run may still hold unknown resources, so new grants freeze repo-wide. */
 export const CORRUPT_RESOURCE_HOLDER = {
   runId: "run-rec0re-bad",
+  nonceRegistry: noncesForRun("run-rec0re-bad"),
+  assignments: assignmentsForRun("run-rec0re-bad"),
   readable: false,
   digest: "e".repeat(64),
   knownClaims: [claim({ claimId: "claim-bad", path: SHARED_FILE })],

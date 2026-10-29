@@ -3,9 +3,11 @@
 import {
   AT_CREATED,
   AT_UPDATED,
+  assignmentsForRun,
   DECISION_D4,
   DECISION_D6,
   NORMAL_RUN_LEDGER,
+  noncesForRun,
   spec,
   t1,
   t2,
@@ -35,6 +37,8 @@ export const EVENT_STORM_50: readonly {
 /** RE6.6 / Y14: a permission prompt arrived while an intent was in flight; freeze, never answer. */
 export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-per",
+  nonceRegistry: noncesForRun("run-rec0re-per"),
+  assignments: assignmentsForRun("run-rec0re-per"),
   revision: 27,
   tasks: [
     t1,
@@ -67,6 +71,7 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
 /** RE6.6 / Y14: irreversible work waiting for an approval record; it must not be dispatched. */
 export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-irr",
+  nonceRegistry: noncesForRun("run-rec0re-irr"),
   revision: 28,
   tasks: [
     t1,
@@ -104,6 +109,8 @@ export const EXTERNAL_ACTIVITY_CASE = {
 /** RE1.9 / Y17: a Run started before the engine was enabled has labels but no ledger. */
 export const LEGACY_RUN_WITHOUT_LEDGER = {
   runId: "run-legacy-0001",
+  nonceRegistry: noncesForRun("run-legacy-0001"),
+  assignments: assignmentsForRun("run-legacy-0001"),
   hasLedger: false,
   displaySource: "labels",
   engineAdoption: "none",
@@ -113,6 +120,7 @@ export const LEGACY_RUN_WITHOUT_LEDGER = {
 /** RE6.1 / Y13: the DAG finished; the only open decision is the end-of-phase D6. */
 export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-fin",
+  nonceRegistry: noncesForRun("run-rec0re-fin"),
   revision: 30,
   lifecycle: "finished",
   tasks: [

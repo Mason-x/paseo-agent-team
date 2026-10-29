@@ -10,6 +10,7 @@ import {
   MESSAGE_REOPEN,
   MESSAGE_T2,
   NONCE_T2,
+  noncesForRun,
   PROFILE_HAIKU,
   reopenIntent,
   t1,
@@ -40,6 +41,7 @@ const GRANT_CONSUMED: RunReopenGrant = {
 /** RE4.10 / Y20: report already received, then the agent closes. Review must continue. */
 export const CLOSED_AFTER_REPORT_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-clr",
+  nonceRegistry: noncesForRun("run-rec0re-clr"),
   revision: 13,
   tasks: [
     t1,
@@ -110,6 +112,7 @@ export const CLOSED_AFTER_REPORT_LEDGER: LedgerFixture = withLedger({
 /** RE4.10 / Y20: assigned but closed before any report. Blocked + D1, attempts unchanged. */
 export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-cla",
+  nonceRegistry: noncesForRun("run-rec0re-cla"),
   revision: 17,
   lifecycle: "paused",
   tasks: [
@@ -201,6 +204,7 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
 /** RE4.10 success shape: the reopen intent is followed by a correlated turn_started. */
 export const REOPEN_STARTED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-rpn",
+  nonceRegistry: noncesForRun("run-rec0re-rpn"),
   revision: 18,
   tasks: [t1, { ...t2, state: "in_progress", phase: "implementation" } as RunTaskRecord, t3],
   assignments: [
