@@ -22,6 +22,7 @@ import {
   CORRUPT_RECORD_WITH_DIGEST,
   DEV_SMOKE_MISSING_LEDGER,
   DEV_SMOKE_READY_LEDGER,
+  dispatchIntent,
   EMPTY_EVIDENCE_REPORT,
   EVIDENCE_INCOMPLETE_LEDGER,
   FINISHED_DECISION_LEDGER,
@@ -89,6 +90,201 @@ const NAMED_LEDGERS: { id: string; ledger: LedgerFixture }[] = [
   { id: "finished-decision", ledger: FINISHED_DECISION_LEDGER },
 ];
 
+type SourceCategory =
+  | "source"
+  | "gate-negative"
+  | "invariant-negative"
+  | "recovery-control"
+  | "shape-negative"
+  | "source-diagnostic";
+
+type SourceMetadata = {
+  category: SourceCategory;
+  consumer: string;
+  parent: string;
+  candidate: string;
+  expected?: { code: string; path: string };
+};
+
+const SOURCE_METADATA: Record<string, SourceMetadata> = {
+  "normal-ledger": {
+    category: "source",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "t1 complete; t2 in-flight",
+  },
+  "outcome-unknown-ledger": {
+    category: "recovery-control",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "outcome-unknown send",
+  },
+  "cancelling-ledger": {
+    category: "source-diagnostic",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "partial cancellation diagnosis",
+  },
+  "cancellation-authorized-frozen": {
+    category: "recovery-control",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "answered D1, frozen claim",
+  },
+  "quiescent-cancelled-ledger": {
+    category: "source",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "complete 167 cancellation",
+  },
+  "local-never-sent-cancelled-ledger": {
+    category: "source",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "LocalNeverSent audit",
+  },
+  "blocked-ledger": {
+    category: "source",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "blocked+frozen claim",
+  },
+  "lock-conflict-run-a": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "lock pair",
+    candidate: "claim conflict",
+  },
+  "lock-conflict-run-b": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "lock pair",
+    candidate: "claim conflict",
+  },
+  "probe-conflict-run-a": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe pair",
+    candidate: "probe conflict",
+  },
+  "probe-conflict-run-b": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe pair",
+    candidate: "probe conflict",
+  },
+  "probe-same-channel-seats": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "same-channel seats",
+  },
+  "closed-after-report": {
+    category: "recovery-control",
+    consumer: "R05",
+    parent: "NORMAL",
+    candidate: "report then closed",
+  },
+  "closed-while-assigned": {
+    category: "recovery-control",
+    consumer: "R05",
+    parent: "NORMAL",
+    candidate: "closed before report",
+  },
+  "reopen-started": {
+    category: "recovery-control",
+    consumer: "R05",
+    parent: "NORMAL",
+    candidate: "new a2 after reopen",
+  },
+  "control-attempts": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "NORMAL",
+    candidate: "control attempt budget",
+  },
+  "probe-eligible": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "eligible probe",
+  },
+  "probe-blocked-inflight-turn": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "in-flight turn",
+  },
+  "probe-in-flight": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "sending probe",
+  },
+  "probe-completed": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "completed probe",
+  },
+  "probe-failed": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "failed probe",
+  },
+  "probe-unknown": {
+    category: "recovery-control",
+    consumer: "R03b",
+    parent: "probe source",
+    candidate: "outcome-unknown probe",
+  },
+  "evidence-incomplete": {
+    category: "gate-negative",
+    consumer: "R03 evidence gate",
+    parent: "NORMAL",
+    candidate: "done proof exitCode=1",
+    expected: { code: "evidence-exit", path: "proof.evidence.five-gates.exitCode" },
+  },
+  "stale-review": {
+    category: "source",
+    consumer: "R03/R05",
+    parent: "NORMAL",
+    candidate: "current a2 awaiting review",
+  },
+  "dev-smoke-missing": {
+    category: "gate-negative",
+    consumer: "R03 DEV gate",
+    parent: "DEV source",
+    candidate: "default DEV target",
+    expected: { code: "dev-target", path: "proof.devServerId" },
+  },
+  "dev-smoke-ready": {
+    category: "source",
+    consumer: "R03 DEV gate",
+    parent: "DEV source",
+    candidate: "registered DEV target",
+  },
+  "permission-pending": {
+    category: "recovery-control",
+    consumer: "R06",
+    parent: "NORMAL",
+    candidate: "permission pending",
+  },
+  "irreversible-unapproved": {
+    category: "recovery-control",
+    consumer: "R03 approval gate",
+    parent: "NORMAL",
+    candidate: "irreversible pre-dispatch",
+  },
+  "finished-decision": {
+    category: "source",
+    consumer: "R07",
+    parent: "NORMAL",
+    candidate: "finished D6/D4 read projection",
+  },
+};
+
 // Invariant cases are complete records too: schema validity is separate from invariant validity.
 const INVARIANT_LEDGERS: { id: string; ledger: LedgerFixture }[] = INVARIANT_CASES.map((entry) => ({
   id: entry.id,
@@ -140,6 +336,7 @@ function assertCompleteCancellation(
   expect(cancellation.assignmentId, `${id} cancellation own assignment`).toBe(
     assignment.assignmentId,
   );
+  expect(cancellation.refresh.agentId, `${id} cancellation refresh actor`).toBe(assignment.agentId);
   expect(cancellation.refresh.activeTurn, `${id} cancellation activeTurn`).toBe(false);
   expect(
     Date.parse(cancellation.refresh.observedAt) >= Date.parse(assignment.endedAt),
@@ -149,6 +346,11 @@ function assertCompleteCancellation(
     record.counters.observationSeq,
   );
   expect(cancellation.endedEventKey, `${id} cancellation ended key`).not.toBeNull();
+  if (assignment.endedEventKey !== null) {
+    expect(assignment.endedEventKey, `${id} cancellation ending identity`).toBe(
+      cancellation.endedEventKey,
+    );
+  }
   const ended = record.eventReceipts.find(
     (entry) =>
       entry.eventKey === cancellation.endedEventKey &&
@@ -185,12 +387,49 @@ function assertCompleteCancellation(
     expect(["cancel", "assign-seat"], `${id} cancellation action`).toContain(
       decision.answer?.action,
     );
-    expect(decision.answer?.taskIds, `${id} cancellation task coverage`).toContain(task.spec.id);
-    expect(decision.cancelIntents, `${id} cancellation pairs`).not.toBeNull();
-    expect(decision.cancelIntents ?? [], `${id} cancellation pair`).toContainEqual({
-      assignmentId: assignment.assignmentId,
-      intentId: cancellation.cancelIntentId,
-    });
+    assertCancelPairs(
+      id,
+      record,
+      decision,
+      task.spec.id,
+      CANCEL_OBLIGATIONS[id] ?? [assignment.assignmentId],
+    );
+  }
+}
+
+const CANCEL_OBLIGATIONS: Readonly<Record<string, readonly string[]>> = {
+  "quiescent-cancelled-ledger": ["assignment-t2-a1"],
+  "quiescent-two": ["assignment-t2-a1", "assignment-t2-a2"],
+};
+
+function assertCancelPairs(
+  id: string,
+  record: LedgerFixture,
+  decision: LedgerFixture["decisions"][number],
+  taskId: string,
+  expectedAssignmentIds: readonly string[],
+): void {
+  const pairs = decision.cancelIntents ?? [];
+  expect(
+    pairs.map((entry) => entry.assignmentId),
+    `${id} cancellation obligation set`,
+  ).toEqual([...expectedAssignmentIds].sort());
+  expect(decision.answer?.taskIds, `${id} cancellation answer coverage`).toContain(taskId);
+  for (const binding of pairs) {
+    const assignment = record.assignments.find(
+      (entry) => entry.assignmentId === binding.assignmentId,
+    );
+    const intent = record.outbox.find((entry) => entry.id === binding.intentId);
+    expect(assignment?.taskId, `${id} cancellation pair task`).toBe(taskId);
+    expect(intent, `${id} cancellation pair intent`).toBeDefined();
+    if (assignment && intent) {
+      expect(intent.kind, `${id} cancellation pair kind`).toBe("archive");
+      expect(intent.taskId, `${id} cancellation pair intent task`).toBe(taskId);
+      expect(intent.assignmentId, `${id} cancellation pair intent assignment`).toBe(
+        assignment.assignmentId,
+      );
+      expect(intent.recipient, `${id} cancellation pair recipient`).toBe(assignment.agentId);
+    }
   }
 }
 
@@ -204,9 +443,11 @@ function isLocalNeverSent(record: LedgerFixture, assignment: RunAssignment): boo
   ) {
     return false;
   }
-  const intent = record.outbox.find(
+  const dispatches = record.outbox.filter(
     (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
   );
+  if (dispatches.length !== 1) return false;
+  const intent = dispatches[0];
   if (intent?.state !== "failed" || intent.confirmedAt !== null) return false;
   if (intent.recoverySendCount !== 0 || intent.localCancellation === null) return false;
   if (
@@ -218,13 +459,44 @@ function isLocalNeverSent(record: LedgerFixture, assignment: RunAssignment): boo
   }
   if (intent.localCancellation.reason !== "cancel-before-send") return false;
   if (intent.localCancellation.eventSeq > record.counters.eventsThroughSeq) return false;
+  if (
+    record.events.some(
+      (event) =>
+        event.payload.taskId === assignment.taskId &&
+        (event.kind === "turn_started" || event.kind === "turn_ended"),
+    )
+  ) {
+    return false;
+  }
+  const cancelEvent = record.events.find(
+    (event) =>
+      event.seq === intent.localCancellation?.eventSeq &&
+      event.kind === intent.localCancellation.cause &&
+      event.at === intent.localCancellation.at &&
+      event.payload.taskId === assignment.taskId,
+  );
+  if (!cancelEvent) return false;
+  const audit = cancelEvent.payload.audit as
+    | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
+    | undefined;
+  if (
+    !Array.isArray(audit?.localIntentIds) ||
+    !audit.localIntentIds.includes(intent.id) ||
+    !Array.isArray(audit.supersededDecisionIds)
+  ) {
+    return false;
+  }
   return !record.outbox.some(
     (entry) => entry.kind === "archive" && entry.assignmentId === assignment.assignmentId,
   );
 }
 
 /** Test-only source association checks. This is not the product I7 implementation. */
-function assertAssociations(id: string, record: LedgerFixture): void {
+function assertAssociations(
+  id: string,
+  record: LedgerFixture,
+  options: { allowSelfReview?: boolean; allowMissingReviewer?: boolean } = {},
+): void {
   for (const assignment of record.assignments) {
     const proof = assignment.acceptedProof;
     const nonce = record.nonceRegistry.find(
@@ -237,8 +509,12 @@ function assertAssociations(id: string, record: LedgerFixture): void {
       expect(proof.assignmentId, `${id} proof assignment`).toBe(assignment.assignmentId);
       expect(proof.nonce, `${id} proof nonce`).toBe(assignment.nonce);
       expect(proof.messageId, `${id} proof message`).toBe(assignment.messageId);
+      if ("workspace" in proof) {
+        expect(assignment.workspace, `${id} proof workspace`).toEqual(proof.workspace);
+      }
       expect(nonce, `${id} accepted nonce`).toBeDefined();
       if (nonce) {
+        expect(nonce.runId, `${id} nonce run`).toBe(record.runId);
         expect(nonce.acceptedAt, `${id} acceptedAt`).not.toBeNull();
         expect(nonce.acceptedEventKey, `${id} accepted key`).toBe(
           `proof:${assignment.assignmentId}`,
@@ -267,6 +543,7 @@ function assertAssociations(id: string, record: LedgerFixture): void {
         expect(assignment.delivery).toBeNull();
       }
     } else if (nonce) {
+      expect(nonce.runId, `${id} unaccepted nonce run`).toBe(record.runId);
       expect(nonce.acceptedAt, `${id} unaccepted At`).toBeNull();
       expect(nonce.acceptedEventKey, `${id} unaccepted key`).toBeNull();
     }
@@ -306,8 +583,10 @@ function assertAssociations(id: string, record: LedgerFixture): void {
         }
         expect(validProducerD(record, producer), `${id} producer evidence`).toBe(true);
       }
-      expect(producer?.agentId, `${id} independent agent`).not.toBe(assignment.agentId);
-      expect(producer?.seatId, `${id} independent seat`).not.toBe(assignment.seatId);
+      if (!options.allowSelfReview) {
+        expect(producer?.agentId, `${id} independent agent`).not.toBe(assignment.agentId);
+        expect(producer?.seatId, `${id} independent seat`).not.toBe(assignment.seatId);
+      }
     }
     if (assignment.cancellation) {
       const cancelIntent = record.outbox.find(
@@ -362,10 +641,30 @@ function assertAssociations(id: string, record: LedgerFixture): void {
     }
     if (task.state === "done") {
       const producers = record.assignments.filter((entry) => validProducerD(record, entry));
-      expect(
-        producers.some((entry) => entry.taskId === task.spec.id),
-        `${id} done task producer`,
-      ).toBe(true);
+      const producer = producers
+        .filter((entry) => entry.taskId === task.spec.id)
+        .sort((a, b) => b.attempt - a.attempt)[0];
+      expect(producer, `${id} done task producer`).toBeDefined();
+      if (options.allowMissingReviewer) continue;
+      const reviewer = record.assignments.find(
+        (entry) =>
+          entry.taskId === task.spec.id &&
+          entry.purpose === "reviewer" &&
+          entry.acceptedProof !== null &&
+          "verdict" in entry.acceptedProof &&
+          entry.delivery?.producerAssignmentId === producer?.assignmentId,
+      );
+      expect(reviewer, `${id} done task reviewer chain`).toBeDefined();
+      if (reviewer?.acceptedProof && producer?.acceptedProof) {
+        expect("reviewedRef" in reviewer.acceptedProof, `${id} done reviewer report kind`).toBe(
+          true,
+        );
+        if ("reviewedRef" in reviewer.acceptedProof && "ref" in producer.acceptedProof) {
+          expect(reviewer.acceptedProof.reviewedRef, `${id} done reviewed ref`).toEqual(
+            producer.acceptedProof.ref,
+          );
+        }
+      }
     }
   }
   for (const claim of record.resources) {
@@ -382,6 +681,53 @@ function assertAssociations(id: string, record: LedgerFixture): void {
     }
   }
   for (const decision of record.decisions) {
+    if (decision.state === "superseded") {
+      expect(decision.answer, `${id} superseded answer`).toBeNull();
+      expect(decision.answeredAt, `${id} superseded answeredAt`).toBeNull();
+      expect(decision.resolution, `${id} superseded resolution`).not.toBeNull();
+      expect(decision.cancelIntents, `${id} superseded pairs`).toEqual([]);
+      const resolution = decision.resolution;
+      const task = record.tasks.find((entry) => entry.spec.id === decision.subjectId);
+      expect(task?.state, `${id} superseded task`).toBe("cancelled");
+      expect(task?.releaseDecisionId, `${id} superseded release`).not.toBe(decision.decisionId);
+      if (resolution) {
+        expect(resolution.witness.taskId, `${id} superseded witness task`).toBe(decision.subjectId);
+        expect(resolution.witness.localIntentIds, `${id} superseded local ids`).toEqual(
+          [...resolution.witness.localIntentIds].sort(),
+        );
+        const localIds = record.outbox
+          .filter(
+            (entry) =>
+              entry.kind === "dispatch" &&
+              entry.localCancellation !== null &&
+              entry.taskId === decision.subjectId,
+          )
+          .map((entry) => entry.id)
+          .sort();
+        expect(resolution.witness.localIntentIds, `${id} superseded local closure`).toEqual(
+          localIds,
+        );
+        const event = record.events.find(
+          (entry) =>
+            entry.seq === resolution.eventSeq &&
+            entry.at === resolution.at &&
+            entry.kind === resolution.cause &&
+            entry.payload.taskId === decision.subjectId,
+        );
+        if (event) {
+          const audit = event.payload.audit as
+            | { localIntentIds?: unknown; supersededDecisionIds?: unknown }
+            | undefined;
+          expect(audit?.localIntentIds, `${id} superseded audit locals`).toEqual(
+            resolution.witness.localIntentIds,
+          );
+          expect(audit?.supersededDecisionIds, `${id} superseded audit decision`).toContain(
+            decision.decisionId,
+          );
+        }
+      }
+      continue;
+    }
     if (decision.cancelIntents === null) continue;
     const ids = decision.cancelIntents.map((entry) => entry.assignmentId);
     expect(ids).toEqual([...ids].sort());
@@ -494,6 +840,20 @@ describe("run engine fixtures against R01 schemas", () => {
       };
       for (const nonce of ledger.nonceRegistry) {
         expect(nonce.runId, entry.id).toBe(ledger.runId);
+      }
+    }
+  });
+
+  test("each named sample has explicit source metadata", () => {
+    for (const { id } of NAMED_LEDGERS) {
+      expect(SOURCE_METADATA[id], `${id} metadata`).toBeDefined();
+    }
+    for (const [id, metadata] of Object.entries(SOURCE_METADATA)) {
+      expect(metadata.consumer, `${id} consumer`).not.toBe("");
+      expect(metadata.parent, `${id} parent`).not.toBe("");
+      expect(metadata.candidate, `${id} candidate`).not.toBe("");
+      if (metadata.category === "gate-negative") {
+        expect(metadata.expected, `${id} gate issue`).toBeDefined();
       }
     }
   });
@@ -759,6 +1119,12 @@ describe("run engine fixtures against R01 schemas", () => {
       assertAssociations(id, ledger);
       for (const task of ledger.tasks) {
         expect(task.spec.id, `${id} task id`).toMatch(lower);
+        for (const dep of task.spec.deps) {
+          expect(
+            ledger.tasks.some((candidate) => candidate.spec.id === dep),
+            `${id} task dep ${dep}`,
+          ).toBe(true);
+        }
         for (const dep of task.spec.deps) expect(dep, `${id} dep`).toMatch(lower);
         for (const mirror of ["report", "reviews", "smokeReport"]) {
           expect(Object.hasOwn(task, mirror), `${id} task.${mirror}`).toBe(false);
@@ -922,11 +1288,312 @@ describe("run engine fixtures against R01 schemas", () => {
     expect(() => assertAssociations("cache-without-d", cachedWithoutD)).toThrow();
   });
 
+  test("C1/C8 refresh actor and own ended-key identity", () => {
+    const wrongRefresh = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const wrongRefreshAssignment = wrongRefresh.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!wrongRefreshAssignment?.cancellation) throw new Error("missing cancellation");
+    wrongRefreshAssignment.cancellation.refresh.agentId = "agent-wrong";
+    expect(RunRecordSchema.safeParse(wrongRefresh).success).toBe(true);
+    expect(() => assertAssociations("wrong-refresh-actor", wrongRefresh)).toThrow();
+
+    const matchingKey = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const matchingAssignment = matchingKey.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!matchingAssignment?.cancellation) throw new Error("missing cancellation");
+    matchingAssignment.endedEventKey = matchingAssignment.cancellation.endedEventKey;
+    expect(RunRecordSchema.safeParse(matchingKey).success).toBe(true);
+    expect(() => assertAssociations("matching-ended-key", matchingKey)).not.toThrow();
+
+    const conflictingKey = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const conflictingAssignment = conflictingKey.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!conflictingAssignment?.cancellation) throw new Error("missing cancellation");
+    conflictingAssignment.endedEventKey = "agent-b1|turn-6|turn_ended";
+    expect(RunRecordSchema.safeParse(conflictingKey).success).toBe(true);
+    expect(() => assertAssociations("conflicting-ended-key", conflictingKey)).toThrow();
+  });
+
+  test("C2 cancel pairs exact closure", () => {
+    const missing = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const missingDecision = missing.decisions.find((entry) => entry.subjectId === "t2");
+    if (!missingDecision) throw new Error("missing decision");
+    missingDecision.cancelIntents = [];
+    expect(RunRecordSchema.safeParse(missing).success).toBe(true);
+    expect(() => assertAssociations("missing-pair", missing)).toThrow();
+
+    const extra = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const extraDecision = extra.decisions.find((entry) => entry.subjectId === "t2");
+    if (!extraDecision) throw new Error("missing decision");
+    extra.outbox.push(
+      dispatchIntent({
+        id: "intent-t1-extra",
+        kind: "archive",
+        taskId: "t1",
+        assignmentId: "assignment-t1-a1",
+        recipient: "agent-b1",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9",
+        idempotencyKey: "cancel-t1-extra",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+    );
+    extraDecision.cancelIntents = [
+      { assignmentId: "assignment-t1-a1", intentId: "intent-t1-extra" },
+      ...(extraDecision.cancelIntents ?? []),
+    ];
+    expect(RunRecordSchema.safeParse(extra).success).toBe(true);
+    expect(() => assertAssociations("extra-cross-task-pair", extra)).toThrow();
+  });
+
+  test("C2 two-actor exact closure and extra same-task pair", () => {
+    const two = structuredClone(QUIESCENT_CANCELLED_LEDGER);
+    const first = two.assignments.find((entry) => entry.assignmentId === "assignment-t2-a1");
+    const firstIntent = two.outbox.find((entry) => entry.id === "intent-cancel-t2");
+    if (!first?.cancellation || !firstIntent) throw new Error("missing first cancellation");
+    const second = {
+      ...first,
+      assignmentId: "assignment-t2-a2",
+      nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000031",
+      messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
+      turnId: "turn-7b",
+      endedAt: AT_UPDATED,
+      endedEventKey: null,
+      cancellation: {
+        ...first.cancellation,
+        assignmentId: "assignment-t2-a2",
+        lastTurnId: "turn-7b",
+        endedEventKey: "agent-b1|turn-7b|turn_ended",
+        cancelIntentId: "intent-cancel-t2-b",
+      },
+    };
+    two.assignments.push(second);
+    two.outbox.push(
+      dispatchIntent({
+        id: "intent-cancel-t2-b",
+        kind: "archive",
+        taskId: "t2",
+        assignmentId: "assignment-t2-a2",
+        recipient: "agent-b1",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
+        idempotencyKey: "cancel-t2-b",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+    );
+    two.eventReceipts.push({
+      eventKey: "agent-b1|turn-7b|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b1",
+      turnId: "turn-7b",
+      seq: 8,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b1|turn-7b|turn_ended",
+      disposition: "accepted",
+    });
+    const twoDecision = two.decisions.find((entry) => entry.subjectId === "t2");
+    if (!twoDecision) throw new Error("missing decision");
+    twoDecision.cancelIntents = [
+      { assignmentId: "assignment-t2-a1", intentId: "intent-cancel-t2" },
+      { assignmentId: "assignment-t2-a2", intentId: "intent-cancel-t2-b" },
+    ];
+    if (twoDecision.answer) twoDecision.answer.taskIds = ["t1", "t2"];
+    expect(RunRecordSchema.safeParse(two).success).toBe(true);
+    expect(() => assertAssociations("quiescent-two", two)).not.toThrow();
+
+    const extra = structuredClone(two);
+    const third = {
+      ...first,
+      assignmentId: "assignment-t2-a3",
+      nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000032",
+      messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
+      state: "assigned" as const,
+      turnId: null,
+      startedAt: null,
+      endedAt: null,
+      endedEventKey: null,
+      cancellation: null,
+      acceptedProof: null,
+      delivery: null,
+    };
+    extra.assignments.push(third);
+    extra.outbox.push(
+      dispatchIntent({
+        id: "intent-cancel-t2-extra",
+        kind: "archive",
+        taskId: "t2",
+        assignmentId: "assignment-t2-a3",
+        recipient: "agent-b1",
+        messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7",
+        idempotencyKey: "cancel-t2-extra",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+    );
+    const extraDecision = extra.decisions.find((entry) => entry.subjectId === "t2");
+    if (!extraDecision) throw new Error("missing decision");
+    extraDecision.cancelIntents = [
+      ...(extraDecision.cancelIntents ?? []),
+      { assignmentId: "assignment-t2-a3", intentId: "intent-cancel-t2-extra" },
+    ];
+    expect(RunRecordSchema.safeParse(extra).success).toBe(true);
+    expect(() => assertAssociations("quiescent-two", extra)).toThrow();
+  });
+
+  test("C4 LocalNeverSent requires exactly one failed dispatch", () => {
+    for (const state of ["confirmed", "sending", "outcome-unknown"] as const) {
+      const local = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+      local.outbox.push(
+        dispatchIntent({
+          id: `intent-t2-extra-${state}`,
+          taskId: "t2",
+          assignmentId: "assignment-t2-a1",
+          recipient: "agent-b1",
+          messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8",
+          idempotencyKey: `dispatch-t2-extra-${state}`,
+          state,
+          confirmedAt: state === "confirmed" ? AT_UPDATED : null,
+        }),
+      );
+      expect(RunRecordSchema.safeParse(local).success).toBe(true);
+      expect(() => assertAssociations(`local-extra-${state}`, local)).toThrow();
+    }
+  });
+
+  test("C7 LocalNeverSent run, turn, and cancel-audit closure", () => {
+    const wrongRun = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+    const wrongNonce = wrongRun.nonceRegistry.find(
+      (entry) => entry.assignmentId === "assignment-t2-a1",
+    );
+    if (!wrongNonce) throw new Error("missing nonce");
+    wrongNonce.runId = "run-other-z9";
+    expect(RunRecordSchema.safeParse(wrongRun).success).toBe(true);
+    expect(() => assertAssociations("local-wrong-run", wrongRun)).toThrow();
+
+    const turn = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+    turn.events.push({
+      seq: 9,
+      kind: "turn_started",
+      at: AT_UPDATED,
+      payload: { taskId: "t2", turnId: "turn-7" },
+    });
+    expect(RunRecordSchema.safeParse(turn).success).toBe(true);
+    expect(() => assertAssociations("local-turn", turn)).toThrow();
+
+    const audit = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+    const cancelEvent = audit.events.find((entry) => entry.seq === 8);
+    if (!cancelEvent) throw new Error("missing cancel event");
+    cancelEvent.payload.audit = { localIntentIds: [], supersededDecisionIds: [] };
+    expect(RunRecordSchema.safeParse(audit).success).toBe(true);
+    expect(() => assertAssociations("local-audit", audit)).toThrow();
+  });
+
+  test("C6 superseded no-effects resolution and empty-pair branch close", () => {
+    const decisionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const withAssignment = structuredClone(LOCAL_NEVER_SENT_CANCELLED_LEDGER);
+    const task = withAssignment.tasks.find((entry) => entry.spec.id === "t2");
+    const localIntent = withAssignment.outbox.find(
+      (entry) => entry.kind === "dispatch" && entry.localCancellation !== null,
+    );
+    if (!task || !localIntent) throw new Error("missing local closure");
+    task.releaseDecisionId = null;
+    const event = withAssignment.events.find((entry) => entry.seq === 8);
+    if (!event) throw new Error("missing cancel event");
+    event.payload.audit = { localIntentIds: [localIntent.id], supersededDecisionIds: [decisionId] };
+    withAssignment.decisions.push({
+      decisionId,
+      category: "D1",
+      controlNonceDigest: "b".repeat(64),
+      state: "superseded",
+      dedupeKey: "cancel:t2",
+      subjectId: "t2",
+      summary: "No effects remained; administrative close.",
+      answer: null,
+      answeredAt: null,
+      cancelIntents: [],
+      resolution: {
+        reason: "no-in-flight",
+        at: AT_UPDATED,
+        eventSeq: 8,
+        cause: "cancel-requested",
+        witness: {
+          kind: "no-effects-cancel",
+          taskId: "t2",
+          localIntentIds: [localIntent.id],
+        },
+      },
+      createdAt: AT_UPDATED,
+    });
+    expect(RunRecordSchema.safeParse(withAssignment).success).toBe(true);
+    expect(() => assertAssociations("superseded-local", withAssignment)).not.toThrow();
+
+    const zero = structuredClone(withAssignment);
+    zero.assignments = zero.assignments.filter((entry) => entry.taskId !== "t2");
+    zero.outbox = zero.outbox.filter((entry) => entry.taskId !== "t2");
+    zero.nonceRegistry = zero.nonceRegistry.filter((entry) => entry.taskId !== "t2");
+    const zeroDecision = zero.decisions[zero.decisions.length - 1];
+    if (!zeroDecision?.resolution) throw new Error("missing resolution");
+    zeroDecision.resolution.witness.localIntentIds = [];
+    const zeroEvent = zero.events.find((entry) => entry.seq === 8);
+    if (!zeroEvent) throw new Error("missing event");
+    zeroEvent.payload.audit = { localIntentIds: [], supersededDecisionIds: [decisionId] };
+    expect(RunRecordSchema.safeParse(zero).success).toBe(true);
+    expect(() => assertAssociations("superseded-zero", zero)).not.toThrow();
+
+    const fakeAuth = structuredClone(withAssignment);
+    const fakeDecision = fakeAuth.decisions[fakeAuth.decisions.length - 1];
+    if (!fakeDecision) throw new Error("missing decision");
+    fakeDecision.cancelIntents = [{ assignmentId: "assignment-t2-a1", intentId: localIntent.id }];
+    expect(RunRecordSchema.safeParse(fakeAuth).success).toBe(true);
+    expect(() => assertAssociations("superseded-fake-pair", fakeAuth)).toThrow();
+  });
+
   test("done tasks keep their producer and reviewer proof chain", () => {
     const broken = structuredClone(CANCELLING_LEDGER);
     broken.assignments = broken.assignments.filter((entry) => entry.taskId !== "t1");
     expect(RunRecordSchema.safeParse(broken).success).toBe(true);
     expect(() => assertAssociations("done-without-chain", broken)).toThrow();
+
+    const reviewerOnly = structuredClone(CANCELLING_LEDGER);
+    reviewerOnly.assignments = reviewerOnly.assignments.filter(
+      (entry) => entry.assignmentId !== "assignment-t1-r1",
+    );
+    reviewerOnly.nonceRegistry = reviewerOnly.nonceRegistry.filter(
+      (entry) => entry.assignmentId !== "assignment-t1-r1",
+    );
+    reviewerOnly.outbox = reviewerOnly.outbox.filter((entry) => entry.id !== "intent-t1-r1");
+    expect(RunRecordSchema.safeParse(reviewerOnly).success).toBe(true);
+    expect(() => assertAssociations("done-without-reviewer", reviewerOnly)).toThrow();
+  });
+
+  test("i7 negatives retain source closure except their declared target", () => {
+    const selfReview = INVARIANT_CASES.find((entry) => entry.id === "i7-self-review")?.ledger;
+    if (!selfReview) throw new Error("missing self-review");
+    expect(RunRecordSchema.safeParse(selfReview).success).toBe(true);
+    expect(() =>
+      assertAssociations("i7-self-review", selfReview as LedgerFixture, {
+        allowSelfReview: true,
+      }),
+    ).not.toThrow();
+
+    const noReview = INVARIANT_CASES.find((entry) => entry.id === "i7-done-without-review")?.ledger;
+    if (!noReview) throw new Error("missing done-without-review");
+    expect(RunRecordSchema.safeParse(noReview).success).toBe(true);
+    expect(() =>
+      assertAssociations("i7-done-without-review", noReview as LedgerFixture, {
+        allowMissingReviewer: true,
+      }),
+    ).not.toThrow();
+
+    const rework = INVARIANT_CASES.find(
+      (entry) => entry.id === "i6-rework-count-below-events",
+    )?.ledger;
+    if (!rework) throw new Error("missing i6");
+    expect(RunRecordSchema.safeParse(rework).success).toBe(true);
+    expect(() => assertAssociations("i6", rework as LedgerFixture)).not.toThrow();
   });
 
   test("association validator catches single-field source breakage", () => {

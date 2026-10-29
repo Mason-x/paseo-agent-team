@@ -122,7 +122,7 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
 /** RE5.5 / Y19 input: the recovery window has passed and no probe is in flight anywhere. */
 export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbe",
-  nonceRegistry: noncesForRun("run-rec0re-pbe"),
+  nonceRegistry: noncesForRun("run-rec0re-pbe").filter((entry) => entry.taskId === "t1"),
   revision: 22,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],

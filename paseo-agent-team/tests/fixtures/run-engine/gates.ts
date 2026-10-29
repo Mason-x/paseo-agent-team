@@ -94,6 +94,9 @@ export const STALE_REVIEW_LEDGER: LedgerFixture = withLedger({
   tasks: [
     {
       ...t1,
+      state: "review",
+      phase: "review",
+      currentAssignmentId: "assignment-t1-a2",
       ref: { kind: "git-commit", value: "c9f5e22" },
       changedFiles: ["src/t1.ts"],
       attempts: 2,
@@ -113,6 +116,11 @@ export const STALE_REVIEW_LEDGER: LedgerFixture = withLedger({
         state: "ended",
         turnId: "turn-9",
         endedAt: AT_UPDATED,
+        workspace: {
+          id: "ws-run-rec0re-a1-t1",
+          branch: "re-rec0rea1-t1-a1-2",
+          baseRef: "main",
+        },
       }),
       acceptedProof: {
         protocolVersion: 1,
@@ -272,7 +280,7 @@ function devSmokeLedger(
     runId,
     revision: 22,
     lifecycle: "paused",
-    tasks: [t1, t6, t3],
+    tasks: [t1, t6, { ...t3, spec: { ...t3.spec, deps: ["t6"] } } as RunTaskRecord],
     resources: [],
     roster: [
       ...NORMAL_RUN_LEDGER.roster,

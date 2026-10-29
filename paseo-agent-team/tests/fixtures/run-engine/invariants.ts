@@ -3,10 +3,8 @@
 // single invariant. Expected verdicts live in run-engine-matrix.md, not in this data.
 import {
   AT_UPDATED,
-  assignment,
   assignmentsForRun,
   claim,
-  NONCE_T2,
   NORMAL_RUN_LEDGER,
   noncesForRun,
   POLICY,
@@ -171,6 +169,7 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i6x",
       nonceRegistry: noncesForRun("run-rec0re-i6x"),
+      assignments: assignmentsForRun("run-rec0re-i6x"),
       tasks: [t1, { ...t2, reworkCount: 0 }, t3],
       events: [
         ...NORMAL_RUN_LEDGER.events,
@@ -203,15 +202,51 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i7s",
-      nonceRegistry: noncesForRun("run-rec0re-i7s"),
-      assignments: assignmentsForRun("run-rec0re-i7s").map((entry) =>
+      nonceRegistry: noncesForRun("run-rec0re-i7s").map((entry) =>
         entry.assignmentId === "assignment-t1-r1"
-          ? { ...entry, agentId: "agent-b1", seatId: "seat-b1" }
+          ? { ...entry, agentId: "agent-b1", seatId: "seat-a-review-b1" }
           : entry,
       ),
+      assignments: assignmentsForRun("run-rec0re-i7s").map((entry) =>
+        entry.assignmentId === "assignment-t1-r1"
+          ? {
+              ...entry,
+              agentId: "agent-b1",
+              seatId: "seat-a-review-b1",
+              endedEventKey: "agent-b1|turn-8|turn_ended",
+            }
+          : entry,
+      ),
+      outbox: NORMAL_RUN_LEDGER.outbox.map((entry) =>
+        entry.id === "intent-t1-r1" ? { ...entry, recipient: "agent-b1" } : entry,
+      ),
+      roster: [
+        ...NORMAL_RUN_LEDGER.roster,
+        {
+          seatId: "seat-a-review-b1",
+          tier: "A",
+          agentId: "agent-b1",
+          channelId: "claude",
+          duties: ["review"],
+          enabled: true,
+        },
+      ],
+      eventReceipts: [
+        ...NORMAL_RUN_LEDGER.eventReceipts,
+        {
+          eventKey: "agent-b1|turn-8|turn_ended",
+          kind: "turn_ended",
+          agentId: "agent-b1",
+          turnId: "turn-8",
+          seq: 8,
+          receivedAt: AT_UPDATED,
+          dedupeKey: "agent-b1|turn-8|turn_ended",
+          disposition: "accepted",
+        },
+      ],
       tasks: [t1, t2, t3],
     }),
-    note: "The reviewer assignment uses the producer's own agent/seat.",
+    note: "The reviewer uses the producer's own agent on a different legal A review seat.",
   },
   {
     id: "i8-assignment-without-intent",
@@ -220,8 +255,8 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     ledger: withLedger({
       runId: "run-rec0re-i8x",
       nonceRegistry: noncesForRun("run-rec0re-i8x"),
-      assignments: [assignment({ nonce: NONCE_T2 })],
-      outbox: [],
+      assignments: assignmentsForRun("run-rec0re-i8x"),
+      outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId !== "t2"),
     }),
     note: "An assignment messageId exists with no preceding send intent.",
   },

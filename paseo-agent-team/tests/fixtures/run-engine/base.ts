@@ -456,6 +456,7 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
       startedAt: AT_CREATED,
       endedAt: AT_UPDATED,
       endedEventKey: "agent-b1|turn-6|turn_ended",
+      workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
       acceptedProof: {
         protocolVersion: 1,
         runId: RUN_ID,

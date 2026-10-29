@@ -22,6 +22,9 @@ import {
 } from "./base";
 import type { LedgerFixture, RunReopenGrant, RunTaskRecord } from "./types";
 
+const REOPEN_A2_NONCE = "6f1c2a44-3b7e-4f0a-9a11-000000000041";
+const REOPEN_A2_MESSAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
+
 const GRANT_ISSUED: RunReopenGrant = {
   grantId: "reopen-grant-t2",
   seatId: "seat-b1",
@@ -225,20 +228,29 @@ export const CLOSED_WHILE_ASSIGNED_LEDGER: LedgerFixture = withLedger({
 /** RE4.10 success shape: the reopen intent is followed by a correlated turn_started. */
 export const REOPEN_STARTED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-rpn",
-  nonceRegistry: noncesForRun("run-rec0re-rpn"),
   revision: 18,
-  tasks: [t1, { ...t2, state: "in_progress", phase: "implementation" } as RunTaskRecord, t3],
+  tasks: [
+    t1,
+    {
+      ...t2,
+      state: "in_progress",
+      phase: "implementation",
+      currentAssignmentId: "assignment-t2-a2",
+    } as RunTaskRecord,
+    t3,
+  ],
   resources: [claim({ originAssignmentId: "assignment-t2-a2" })],
   assignments: [
     ...assignmentsForRun("run-rec0re-rpn").filter((entry) => entry.taskId !== "t2"),
     assignment({
       assignmentId: "assignment-t2-a2",
       attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
+      nonce: REOPEN_A2_NONCE,
+      messageId: REOPEN_A2_MESSAGE,
       state: "in_progress",
       turnId: "turn-9",
       startedAt: AT_UPDATED,
+      workspace: { id: "ws-run-rec0re-a1-t2", branch: "re-rec0rea1-t2-a2-1", baseRef: "main" },
       reopenGrantId: GRANT_CONSUMED.grantId,
     }),
   ],
@@ -249,11 +261,29 @@ export const REOPEN_STARTED_LEDGER: LedgerFixture = withLedger({
     dispatchIntent({
       id: "intent-t2-a2",
       assignmentId: "assignment-t2-a2",
-      messageId: MESSAGE_T2,
+      messageId: REOPEN_A2_MESSAGE,
       idempotencyKey: "dispatch-t2-a2",
       state: "confirmed",
       confirmedAt: AT_UPDATED,
     }),
+  ],
+  nonceRegistry: [
+    ...noncesForRun("run-rec0re-rpn").filter((entry) => entry.taskId === "t1"),
+    {
+      nonce: REOPEN_A2_NONCE,
+      runId: "run-rec0re-rpn",
+      taskId: "t2",
+      assignmentId: "assignment-t2-a2",
+      attempt: 1,
+      phase: "implementation",
+      agentId: "agent-b1",
+      seatId: "seat-b1",
+      issuedAt: AT_UPDATED,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    },
   ],
   counters: { observationSeq: 9, eventsThroughSeq: 7, probeAttempts: 0, reopenAttempts: 1 },
   eventReceipts: [

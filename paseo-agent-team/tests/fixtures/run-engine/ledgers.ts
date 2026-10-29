@@ -247,12 +247,41 @@ export const LOCAL_NEVER_SENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
           localCancellation: {
             reason: "cancel-before-send" as const,
             at: AT_UPDATED,
-            eventSeq: 7,
+            eventSeq: 8,
             cause: "cancel-requested" as const,
           },
         }
       : entry,
   ),
+  nonceRegistry: noncesForRun("run-rec0re-lns").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          acceptedAt: null,
+          acceptedEventKey: null,
+          revokedAt: AT_UPDATED,
+          revokeReason: "cancel-before-send",
+        }
+      : entry,
+  ),
+  events: [
+    ...NORMAL_RUN_LEDGER.events.filter(
+      (entry) => !(entry.payload.taskId === "t2" && String(entry.kind).startsWith("turn_")),
+    ),
+    {
+      seq: 8,
+      kind: "cancel-requested",
+      at: AT_UPDATED,
+      payload: {
+        taskId: "t2",
+        audit: { localIntentIds: [INTENT_T2], supersededDecisionIds: [] },
+      },
+    },
+  ],
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts.filter(
+    (entry) => entry.eventKey !== "agent-b1|turn-7|turn_ended",
+  ),
+  counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8, eventsThroughSeq: 8 },
 });
 
 /**
