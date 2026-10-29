@@ -9,9 +9,12 @@ import {
   DIGEST_D,
   dispatchIntent,
   INTENT_CANCEL,
+  INTENT_T1,
   INTENT_T2,
   MESSAGE_CANCEL,
+  MESSAGE_T1,
   MESSAGE_T2,
+  NONCE_T1,
   NONCE_T2,
   NORMAL_RUN_LEDGER,
   PARTIAL_CANCELLATION,
@@ -24,6 +27,8 @@ import {
   withLedger,
 } from "./base";
 import type { LedgerFixture, RunEffectIntent, RunTaskRecord } from "./types";
+
+const T1_REVIEW_NONCE = "6f1c2a44-3b7e-4f0a-9a11-000000000004";
 
 /** RE1.11 / Y21: host answered `agent_request_outcome_unknown`; intent is terminal, no retry loop. */
 export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
@@ -142,7 +147,13 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
   revision: 12,
   tasks: [
     T1,
-    { ...T2, state: "cancelled", waitingReason: "cancelled-by-operator" } as RunTaskRecord,
+    {
+      ...T2,
+      state: "cancelled",
+      phase: undefined,
+      waitingReason: "cancelled-by-operator",
+      releaseDecisionId: DECISION_D1,
+    } as RunTaskRecord,
     T3,
   ],
   resources: [],
@@ -184,7 +195,35 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   revision: 12,
   lifecycle: "paused",
   tasks: [
-    T1,
+    {
+      ...T1,
+      report: {
+        protocolVersion: 1,
+        runId: "run-rec0re-caf",
+        taskId: "T1",
+        attempt: 1,
+        nonce: NONCE_T1,
+        assignmentId: "assignment-t1-a1",
+        status: "done",
+        changedFiles: ["src/t1.ts"],
+        ref: { kind: "git-commit", value: "9f3c1a7" },
+        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+        evidence: [
+          {
+            id: "five-gates",
+            command: "npm run check && npm run typecheck && npm test",
+            exitCode: 0,
+            summary: "all gates passed",
+            artifactPath: "evidence/t1.log",
+            ref: { kind: "git-commit", value: "9f3c1a7" },
+            isolation: {
+              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
+              outsideRealHome: true,
+            },
+          },
+        ],
+      },
+    } as RunTaskRecord,
     {
       ...T2,
       state: "blocked",
@@ -197,6 +236,29 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   resources: [claim({ frozen: true, taskId: "T2" })],
   assignments: [
     assignment({
+      assignmentId: "assignment-t1-a1",
+      taskId: "T1",
+      attempt: 1,
+      nonce: NONCE_T1,
+      messageId: MESSAGE_T1,
+      state: "ended",
+      turnId: "turn-6",
+      endedAt: AT_UPDATED,
+      workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+    }),
+    assignment({
+      assignmentId: "assignment-t1-r1",
+      taskId: "T1",
+      seatId: "seat-b2",
+      agentId: "agent-b2",
+      purpose: "reviewer",
+      tier: "A",
+      family: "codex",
+      nonce: T1_REVIEW_NONCE,
+      messageId: null,
+      workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+    }),
+    assignment({
       assignmentId: "assignment-t2-a1",
       attempt: 1,
       nonce: NONCE_T2,
@@ -206,7 +268,32 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       cancellation: QUIESCENT_CANCELLATION,
     }),
   ],
-  outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  outbox: [
+    dispatchIntent({
+      id: INTENT_T1,
+      taskId: "T1",
+      assignmentId: "assignment-t1-a1",
+      messageId: MESSAGE_T1,
+    }),
+    dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
+    dispatchIntent({
+      id: INTENT_CANCEL,
+      kind: "wake",
+      taskId: "T2",
+      assignmentId: "assignment-t2-a1",
+      recipient: "agent-b1",
+      messageId: MESSAGE_CANCEL,
+      idempotencyKey: "cancel-T2-1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  ],
+  nonceRegistry: [
+    ...NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({
+      ...entry,
+      runId: "run-rec0re-caf",
+    })),
+  ],
   decisions: [
     {
       decisionId: DECISION_D1,
