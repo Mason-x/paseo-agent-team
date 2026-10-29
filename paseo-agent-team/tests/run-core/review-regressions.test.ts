@@ -73,6 +73,7 @@ function decision(category: WakeCategory, subjectId: string | null) {
     category,
     subjectId,
     state: "open" as const,
+    answer: null,
     dedupeKey: "review-decision",
     controlNonceDigest: "a".repeat(64),
     summary: "SECRET_WORKER_TEXT nonce payload",

@@ -17,6 +17,7 @@ function decision(category: "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7" = "D1
     category,
     controlNonceDigest: "a".repeat(64),
     state: "open" as const,
+    answer: null,
     dedupeKey: "seed",
     subjectId: "subject-1",
     summary: "WORKER TEXT nonce payload must not leak",

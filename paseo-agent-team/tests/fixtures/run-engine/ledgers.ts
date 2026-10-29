@@ -57,6 +57,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "c".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-unk|D1|outcome-unknown|intent-t2-a1",
       subjectId: "T2",
       summary: "Send outcome unknown after one recovery attempt; frozen for a human decision.",
@@ -158,6 +159,68 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
     }),
   ],
   outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  decisions: [
+    {
+      decisionId: DECISION_D1,
+      category: "D1",
+      controlNonceDigest: "d".repeat(64),
+      state: "answered",
+      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      dedupeKey: "run-rec0re-qsc|D1|quiescent|T2",
+      subjectId: "T2",
+      summary: "Operator approved cancellation after quiescence.",
+      createdAt: AT_UPDATED,
+      answeredAt: AT_UPDATED,
+    },
+  ],
+});
+
+/**
+ * 167 ③: cancellation authorization is already answered, but no release has run yet. This is the
+ * seed R03a consumes with `cancellation-checked`; the task stays blocked+frozen with its claim.
+ */
+export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
+  runId: "run-rec0re-caf",
+  revision: 12,
+  lifecycle: "paused",
+  tasks: [
+    T1,
+    {
+      ...T2,
+      state: "blocked",
+      phase: "frozen",
+      waitingReason: "cancelled-by-operator",
+      frozenClaimId: "claim-t2",
+    } as RunTaskRecord,
+    T3,
+  ],
+  resources: [claim({ frozen: true, taskId: "T2" })],
+  assignments: [
+    assignment({
+      assignmentId: "assignment-t2-a1",
+      attempt: 1,
+      nonce: NONCE_T2,
+      messageId: MESSAGE_T2,
+      state: "assigned",
+      turnId: "turn-7",
+      cancellation: QUIESCENT_CANCELLATION,
+    }),
+  ],
+  outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
+  decisions: [
+    {
+      decisionId: DECISION_D1,
+      category: "D1",
+      controlNonceDigest: "e".repeat(64),
+      state: "answered",
+      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+      dedupeKey: "cancel:T2",
+      subjectId: "T2",
+      summary: "Operator approved cancellation; release still requires quiescence evidence.",
+      createdAt: AT_UPDATED,
+      answeredAt: AT_UPDATED,
+    },
+  ],
 });
 
 /** RE1.8 / I3: a blocked task keeps a frozen claim; releasing it would need an explicit decision. */
@@ -192,6 +255,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "f".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-blk|D1|missing-seat|T2",
       subjectId: "T2",
       summary: "No qualified A seat for T2; the frozen claim is retained.",

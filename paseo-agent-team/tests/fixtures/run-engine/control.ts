@@ -82,6 +82,7 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
       category: "D4",
       controlNonceDigest: "b".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-ctl|D4|seat-b1|budget-100",
       subjectId: "seat-b1",
       summary: "seat-b1 reached 80% and 100% in one revision; one merged decision.",
