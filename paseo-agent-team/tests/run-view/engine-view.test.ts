@@ -214,6 +214,46 @@ describe("EngineView mounted rendering", () => {
     await renderer.act(async () => view.unmount());
   });
 
+  test("header needs-you badge reports review and rework permission without claiming a unique actor", async () => {
+    for (const state of ["review", "rework"] as const) {
+      const view = await mount(
+        ready(
+          runView({
+            tasks: [
+              task("T1", {
+                state,
+                blockedBy: { kind: "permission", ref: "agent-b1" },
+              }),
+            ],
+          }),
+        ),
+      );
+      const text = textNodes(view.root).join("\n");
+      expect(text).toContain(zh.level.needsYou);
+      expect(text).toContain("1 个任务等待权限处理");
+      expect(text).not.toContain("唯一");
+      await renderer.act(async () => view.unmount());
+    }
+  });
+
+  test("ready plus permission does not raise needs-you on mount", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          tasks: [
+            task("T1", {
+              state: "ready",
+              blockedBy: { kind: "permission", ref: "agent-b1" },
+            }),
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).not.toContain("1 个任务等待权限处理");
+    await renderer.act(async () => view.unmount());
+  });
+
   test("zero-width joiners never reach Text", async () => {
     const view = await mount(
       ready(
