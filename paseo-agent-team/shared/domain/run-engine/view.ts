@@ -44,6 +44,13 @@ function textOf(value: string, max: number): string {
   return displayText(value, max, "—");
 }
 
+/** Known copy only from an own string property; prototype names and functions fall through. */
+function ownText(map: Readonly<Record<string, unknown>>, key: string): string | undefined {
+  if (!Object.hasOwn(map, key)) return undefined;
+  const value = map[key];
+  return typeof value === "string" ? value : undefined;
+}
+
 function compareCode(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -78,12 +85,8 @@ export function engineGetState(raw: unknown): EngineState {
   if (output.status === "ready") {
     const notices: string[] = [];
     for (const issue of output.issues) {
-      const text =
-        issue.code in zh.notices
-          ? zh.notices[issue.code as keyof typeof zh.notices]
-          : zh.notices.unknown(displayText(issue.code, 64, "?"));
       const line =
-        typeof text === "string" ? text : zh.notices.unknown(displayText(issue.code, 64));
+        ownText(zh.notices, issue.code) ?? zh.notices.unknown(displayText(issue.code, 64, "?"));
       if (!notices.includes(line)) notices.push(line);
     }
     return { kind: "ready", run: output.run, history: output.history, notices };
@@ -599,7 +602,7 @@ export function buildEngineModel(
   };
   return {
     runId: textOf(run.runId, 96),
-    lifecycle: zh.lifecycle[run.lifecycle] ?? textOf(run.lifecycle, 32),
+    lifecycle: ownText(zh.lifecycle, run.lifecycle) ?? textOf(run.lifecycle, 32),
     teamName: displayText(run.team.name, 80, ""),
     needs: needsYou(run),
     dag: dagLayout(run.dag, compact ? "list" : "columns"),

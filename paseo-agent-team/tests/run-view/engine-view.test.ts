@@ -13,7 +13,11 @@ vi.mock("@getpaseo/plugin/client/react-native", () => ({
 }));
 
 import { EngineView } from "../../client/runs/engine/EngineView";
-import { type EngineState, engineGetState } from "../../shared/domain/run-engine/view";
+import {
+  buildEngineModel,
+  type EngineState,
+  engineGetState,
+} from "../../shared/domain/run-engine/view";
 import type {
   RunDetailView,
   RunHistoryPage,
@@ -238,6 +242,25 @@ describe("EngineView mounted rendering", () => {
     expect(view.root.findAll((node) => node.type === "Text")).toHaveLength(0);
     expect(view.root.findAll((node) => node.type === "Pressable")).toHaveLength(0);
     await renderer.act(async () => view.unmount());
+  });
+
+  test("schema-valid lifecycle names stay strings through the model and real mount", async () => {
+    const cases = [
+      ["active", "运行中"],
+      ["hibernating", "hibernating"],
+      ["__proto__", "__proto__"],
+      ["constructor", "constructor"],
+      ["toString", "toString"],
+    ] as const;
+    for (const [lifecycle, expected] of cases) {
+      const state = ready(runView({ lifecycle }));
+      if (state.kind !== "ready") throw new Error("expected ready");
+      const model = buildEngineModel(state, [], false);
+      expect(typeof model.lifecycle).toBe("string");
+      const view = await mount(state);
+      expect(textNodes(view.root).join("\n")).toContain(expected);
+      await renderer.act(async () => view.unmount());
+    }
   });
 
   test("loads older by cursor and refresh works from failure states", async () => {
