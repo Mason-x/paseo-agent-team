@@ -194,7 +194,7 @@ export const RunBudgetViewSchema = z.object({
 export const RunDecisionViewSchema = z.object({
   decisionId: z.string().uuid(),
   category: Text(2),
-  state: z.enum(["open", "answered", "waiting-human"]),
+  state: z.enum(["open", "answered", "waiting-human", "superseded"]),
   subjectId: RunIdRefSchema.nullable(),
   summary: Text(4096),
   createdAt: z.string().datetime(),
