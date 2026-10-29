@@ -1,5 +1,38 @@
 import { z } from "zod";
 import { RoleTierSchema, TaskKindSchema } from "../team-mode";
+import {
+  DiffRefShape,
+  GitCommitRefShape,
+  ReportBlockerShape,
+  ReportCheckShape,
+  ReportCoverageShape,
+  ReportEvidenceFields,
+  ReportIdentityShape,
+  ReportIsolationShape,
+  ReportWorkspaceShape,
+  RunDigestSchema,
+  RunDispatchDutiesShape,
+  RunIdRefSchema,
+  RunIdSchema,
+  RunNonceSchema,
+  RunPathSchema,
+  RunSeqSchema,
+  RunTaskIdSchema,
+  RunTimeSchema,
+} from "./proof-shapes";
+
+export {
+  DiffRefShape,
+  GitCommitRefShape,
+  RunDigestSchema,
+  RunIdRefSchema,
+  RunIdSchema,
+  RunNonceSchema,
+  RunPathSchema,
+  RunSeqSchema,
+  RunTaskIdSchema,
+  RunTimeSchema,
+} from "./proof-shapes";
 
 /**
  * Persisted Run Engine ledger (contract only; the store lives in server/run-engine).
@@ -27,23 +60,12 @@ export const RUN_MAX_TASKS = 64;
 export const RUN_SOFT_BYTES = 7 * 1024 * 1024;
 export const RUN_HARD_BYTES = 8 * 1024 * 1024;
 
-export const RunIdSchema = z
-  .string()
-  .max(96)
-  .regex(/^run-[a-z0-9]+-[a-z0-9]+$/);
-export const RunDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
-
 /** The ledger header digest as written by AtomicJsonCodec: "" on revision 1, then sha256:<64>. */
 export const RunHeaderDigestSchema = z.union([
   z.literal(""),
   z.string().regex(/^sha256:[a-f0-9]{64}$/),
 ]);
-export const RunNonceSchema = z.string().uuid();
-export const RunTimeSchema = z.string().datetime();
-export const RunIdRefSchema = z.string().min(1).max(128);
-export const RunPathSchema = z.string().min(1).max(512);
 export const RunRevisionSchema = z.number().int().nonnegative();
-export const RunSeqSchema = z.number().int().nonnegative();
 
 export const RUN_TASK_STATES = [
   "pending",
@@ -114,17 +136,6 @@ export const RUN_ASSIGNMENT_STATES = [
 export const RunAssignmentStateSchema = z.enum(RUN_ASSIGNMENT_STATES);
 
 /** Artifact identity of a delivery (05 §3). A diff hash is never a git ref. */
-export const GitCommitRefShape = {
-  kind: z.literal("git-commit"),
-  value: z.string().min(1).max(128),
-};
-export const DiffRefShape = {
-  kind: z.literal("diff-sha256"),
-  value: RunDigestSchema,
-  baseCommit: z.string().min(1).max(128),
-  patchPath: RunPathSchema,
-};
-
 export const RunArtifactRefSchema = z.discriminatedUnion("kind", [
   z.object(GitCommitRefShape).passthrough(),
   z.object(DiffRefShape).passthrough(),
@@ -157,13 +168,17 @@ export const RunIrreversibleSpecShape = {
 };
 export const RunIrreversibleSpecSchema = z.object(RunIrreversibleSpecShape).passthrough();
 
+/** Stored dispatch duties; the protocol overrides the nested object with strictObject. */
+export const RunDispatchDutiesSchema = z.object(RunDispatchDutiesShape).passthrough();
+export type RunDispatchDuties = z.infer<typeof RunDispatchDutiesSchema>;
+
 /** Stored task definition. The protocol's strict TaskSpec reuses this exact shape. */
 export const RunTaskSpecShape = {
-  id: z.string().min(1).max(64),
+  id: RunTaskIdSchema,
   title: z.string().min(1).max(120),
   goal: z.string().min(1).max(2000),
   group: z.string().min(1).max(64),
-  deps: z.array(z.string().min(1).max(64)).max(RUN_MAX_TASKS),
+  deps: z.array(RunTaskIdSchema).max(RUN_MAX_TASKS),
   level: RunLevelSchema,
   tier: RunTierSchema,
   execution: z.enum(["write", "read"]),
@@ -175,7 +190,8 @@ export const RunTaskSpecShape = {
   irreversible: RunIrreversibleSpecSchema.nullable(),
   reviewPolicy: z.literal("required"),
   implementationPolicy: z.enum(["default", "a-with-s-plan"]),
-  architectureTaskId: z.string().min(1).max(64).nullable(),
+  architectureTaskId: RunTaskIdSchema.nullable(),
+  dispatchDuties: RunDispatchDutiesSchema,
 };
 type TaskSpecRefineInput = {
   id: string;
@@ -184,10 +200,26 @@ type TaskSpecRefineInput = {
   deps: readonly string[];
   implementationPolicy: "default" | "a-with-s-plan";
   architectureTaskId: string | null;
+  devSmoke: boolean;
+  dispatchDuties: { produce: string; review: string; smoke: string | null };
 };
 
 /** Shared by the stored task spec and the strict protocol DAG task spec. */
 export function refineTaskSpec(spec: TaskSpecRefineInput, ctx: z.RefinementCtx): void {
+  if (spec.devSmoke && spec.dispatchDuties.smoke === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["dispatchDuties", "smoke"],
+      message: "devSmoke requires a smoke duty",
+    });
+  }
+  if (!spec.devSmoke && spec.dispatchDuties.smoke !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["dispatchDuties", "smoke"],
+      message: "a non-devSmoke task must not declare a smoke duty",
+    });
+  }
   const expected =
     spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
   if (spec.implementationPolicy === "a-with-s-plan") {
@@ -250,32 +282,93 @@ export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 
 /** Evidence summary (05 §3): bounded, redacted, path-only; secrets never enter the ledger. */
 export const RunEvidenceShape = {
-  id: z.string().min(1).max(64),
-  command: z.string().min(1).max(2000).nullable(),
-  exitCode: z.number().int(),
-  summary: z.string().min(1).max(600),
-  artifactPath: RunPathSchema,
+  ...ReportEvidenceFields,
   ref: RunArtifactRefSchema,
-  coverage: z
-    .object({ lines: z.number().min(0).max(100), functions: z.number().min(0).max(100) })
-    .passthrough()
-    .optional(),
-  isolation: z
-    .object({ homePath: RunPathSchema, outsideRealHome: z.boolean() })
-    .passthrough()
-    .optional(),
+  coverage: z.object(ReportCoverageShape).passthrough().optional(),
+  isolation: z.object(ReportIsolationShape).passthrough().optional(),
 };
 export const RunEvidenceSchema = z.object(RunEvidenceShape).passthrough();
 export type RunEvidence = z.infer<typeof RunEvidenceSchema>;
 
-export const RunWorkspaceSchema = z
+export const RunWorkspaceSchema = z.object(ReportWorkspaceShape).passthrough();
+export type RunWorkspace = z.infer<typeof RunWorkspaceSchema>;
+
+const StoredArtifactRefSchema = z.discriminatedUnion("kind", [
+  z.object(GitCommitRefShape).passthrough(),
+  z.object(DiffRefShape).passthrough(),
+]);
+const StoredReportWorkspaceSchema = z.object(ReportWorkspaceShape).passthrough();
+const StoredReportEvidenceSchema = z
   .object({
-    id: RunIdRefSchema,
-    branch: z.string().min(1).max(256),
-    baseRef: z.string().min(1).max(256),
+    ...ReportEvidenceFields,
+    ref: StoredArtifactRefSchema,
+    coverage: z.object(ReportCoverageShape).passthrough().optional(),
+    isolation: z.object(ReportIsolationShape).passthrough().optional(),
   })
   .passthrough();
-export type RunWorkspace = z.infer<typeof RunWorkspaceSchema>;
+const StoredReportBlockerSchema = z.object(ReportBlockerShape).passthrough();
+const StoredReportCheckSchema = z.object(ReportCheckShape).passthrough();
+const StoredReportIdentityShape = {
+  ...ReportIdentityShape,
+  messageId: z.string().uuid(),
+};
+
+/** Canonical accepted producer report. Evidence qualification is a core gate, not schema. */
+export const RunStoredTaskReportSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      ...StoredReportIdentityShape,
+      status: z.literal("done"),
+      changedFiles: z.array(RunPathSchema).max(512),
+      ref: StoredArtifactRefSchema,
+      workspace: StoredReportWorkspaceSchema,
+      evidence: z.array(StoredReportEvidenceSchema).min(1).max(64),
+    })
+    .passthrough(),
+  z
+    .object({
+      ...StoredReportIdentityShape,
+      status: z.enum(["blocked", "failed"]),
+      reasonCode: z.string().min(1).max(64),
+      summary: z.string().min(1).max(1000),
+      evidence: z.array(StoredReportEvidenceSchema).max(64),
+    })
+    .passthrough(),
+]);
+export type RunStoredTaskReport = z.infer<typeof RunStoredTaskReportSchema>;
+
+export const RunStoredReviewSchema = z
+  .object({
+    ...StoredReportIdentityShape,
+    reviewedRef: StoredArtifactRefSchema,
+    verdict: z.enum(["可合入", "修改后合入", "不可合入"]),
+    blockers: z.array(StoredReportBlockerSchema).max(40),
+    probes: z.array(StoredReportEvidenceSchema).max(64),
+  })
+  .passthrough();
+export type RunStoredReview = z.infer<typeof RunStoredReviewSchema>;
+
+export const RunStoredSmokeReportSchema = z
+  .object({
+    ...StoredReportIdentityShape,
+    testedRef: StoredArtifactRefSchema,
+    devHost: z.string().min(1).max(256),
+    devServerId: z.string().min(1).max(128),
+    devHome: RunPathSchema,
+    checks: z.array(StoredReportCheckSchema).min(1).max(64),
+  })
+  .passthrough();
+export type RunStoredSmokeReport = z.infer<typeof RunStoredSmokeReportSchema>;
+
+export const RunAcceptedProofSchema = z.union([
+  RunStoredTaskReportSchema,
+  RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
+]);
+export type RunAcceptedProof = z.infer<typeof RunAcceptedProofSchema>;
+
+export const RunDeliverySchema = z.object({ producerAssignmentId: RunIdRefSchema }).passthrough();
+export type RunDelivery = z.infer<typeof RunDeliverySchema>;
 
 /**
  * Static-quiescence evidence (05 §4 B1). It records what was observed; it does not decide.
@@ -350,7 +443,7 @@ export type RunReopenGrant = z.infer<typeof RunReopenGrantSchema>;
 export const RunAssignmentSchema = z
   .object({
     assignmentId: RunIdRefSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
     seatId: RunIdRefSchema,
     agentId: RunIdRefSchema,
     profileId: RunIdRefSchema,
@@ -365,7 +458,10 @@ export const RunAssignmentSchema = z
     workspace: RunWorkspaceSchema.nullable(),
     attempt: z.number().int().min(1),
     nonce: RunNonceSchema,
-    messageId: z.string().uuid().nullable(),
+    messageId: z.string().uuid(),
+    delivery: RunDeliverySchema.nullable(),
+    acceptedProof: RunAcceptedProofSchema.nullable(),
+    endedEventKey: z.string().min(1).max(256).nullable(),
     turnId: z.string().min(1).max(128).nullable(),
     state: RunAssignmentStateSchema,
     createdAt: RunTimeSchema,
@@ -376,14 +472,67 @@ export const RunAssignmentSchema = z
     reopenOfAssignmentId: RunIdRefSchema.nullable().optional(),
     supersededByAssignmentId: RunIdRefSchema.nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((assignment, ctx) => {
+    const producer =
+      assignment.purpose === "member" ||
+      assignment.purpose === "coordinator" ||
+      assignment.purpose === "reopen";
+    const review = assignment.purpose === "reviewer";
+    const smoke = assignment.purpose === "smoker";
+    if ((review || smoke) && assignment.delivery === null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "reviewer/smoker must bind a producer delivery",
+        path: ["delivery"],
+      });
+    }
+    if (!review && !smoke && assignment.delivery !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "only reviewer/smoker may bind a producer delivery",
+        path: ["delivery"],
+      });
+    }
+    if (review && assignment.acceptedProof !== null) {
+      if (!RunStoredReviewSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "reviewer acceptedProof must be a review report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (smoke && assignment.acceptedProof !== null) {
+      if (!RunStoredSmokeReportSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "smoker acceptedProof must be a smoke report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (producer && assignment.acceptedProof !== null) {
+      if (!RunStoredTaskReportSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "producer acceptedProof must be a task report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (!producer && assignment.acceptedProof !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "control assignments cannot carry acceptedProof",
+        path: ["acceptedProof"],
+      });
+    }
+  });
 export type RunAssignment = z.infer<typeof RunAssignmentSchema>;
 
 export const RunNonceEntrySchema = z
   .object({
     nonce: RunNonceSchema,
     runId: RunIdSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
     assignmentId: RunIdRefSchema.nullable(),
     attempt: z.number().int().min(1),
     phase: RunTaskPhaseSchema,
@@ -482,7 +631,8 @@ export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
 export const RunResourceClaimSchema = z
   .object({
     claimId: RunIdRefSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
+    originAssignmentId: RunIdRefSchema,
     repoId: z.string().min(1).max(256),
     kind: z.enum(["file", "directory", "hot", "tool"]),
     path: RunPathSchema,
@@ -524,30 +674,143 @@ export const RUN_DECISION_ANSWER_ACTIONS = [
 ] as const;
 export const RunDecisionAnswerActionSchema = z.enum(RUN_DECISION_ANSWER_ACTIONS);
 
+export const RUN_CANCELLATION_CAUSES = [
+  "cancel-requested",
+  "dag-revised",
+  "run-cancelled",
+] as const;
+export const RunLocalCancellationSchema = z
+  .object({
+    reason: z.literal("cancel-before-send"),
+    at: RunTimeSchema,
+    eventSeq: RunSeqSchema,
+    cause: z.enum(RUN_CANCELLATION_CAUSES),
+  })
+  .passthrough();
+export type RunLocalCancellation = z.infer<typeof RunLocalCancellationSchema>;
+
+export const RunDecisionBindingSchema = z
+  .object({
+    assignmentId: RunIdRefSchema,
+    intentId: RunIdRefSchema,
+  })
+  .passthrough();
+export type RunDecisionBinding = z.infer<typeof RunDecisionBindingSchema>;
+
+const canonicallySorted = (values: readonly string[]) =>
+  values.every((value, index) => index === 0 || values[index - 1] < value);
+
+export const RunNoEffectsWitnessSchema = z
+  .object({
+    kind: z.literal("no-effects-cancel"),
+    taskId: RunTaskIdSchema,
+    localIntentIds: z.array(RunIdRefSchema).max(4096),
+  })
+  .passthrough()
+  .superRefine((witness, ctx) => {
+    if (!canonicallySorted(witness.localIntentIds)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["localIntentIds"],
+        message: "localIntentIds must be sorted and unique",
+      });
+    }
+  });
+export type RunNoEffectsWitness = z.infer<typeof RunNoEffectsWitnessSchema>;
+
+export const RunResolutionSchema = z
+  .object({
+    reason: z.literal("no-in-flight"),
+    at: RunTimeSchema,
+    eventSeq: RunSeqSchema,
+    cause: z.enum(RUN_CANCELLATION_CAUSES),
+    witness: RunNoEffectsWitnessSchema,
+  })
+  .passthrough();
+export type RunResolution = z.infer<typeof RunResolutionSchema>;
+
 export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
     category: z.enum(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]),
     /** SHA-256 of the engine-generated control nonce (bare 64hex); never the nonce itself. */
     controlNonceDigest: RunDigestSchema,
-    state: z.enum(["open", "answered", "waiting-human"]),
+    state: z.enum(["open", "answered", "waiting-human", "superseded"]),
     dedupeKey: z.string().min(1).max(256),
+    cancelIntents: z.array(RunDecisionBindingSchema).max(4096).nullable(),
     subjectId: RunIdRefSchema.nullable(),
     summary: z.string().min(1).max(4096),
     /** The answer survives checkpoint compression; required exactly when state=answered. */
     answer: z
       .object({
         action: RunDecisionAnswerActionSchema,
-        taskIds: z.array(z.string().min(1).max(64)).max(64),
+        taskIds: z.array(RunTaskIdSchema).max(64),
         answeredAt: RunTimeSchema,
       })
       .passthrough()
       .nullable(),
     createdAt: RunTimeSchema,
     answeredAt: RunTimeSchema.nullable(),
+    resolution: RunResolutionSchema.nullable(),
   })
   .passthrough()
   .superRefine((decision, ctx) => {
+    if (Object.hasOwn(decision, "cancelIntentId")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntentId"],
+        message: "cancelIntentId is superseded by cancelIntents",
+      });
+    }
+    const cancelDecision =
+      decision.category === "D1" &&
+      decision.subjectId !== null &&
+      decision.dedupeKey === `cancel:${decision.subjectId}`;
+    if (cancelDecision && decision.cancelIntents === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntents"],
+        message: "a D1 cancel decision must carry cancelIntents",
+      });
+    }
+    if (!cancelDecision && decision.cancelIntents !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntents"],
+        message: "cancelIntents is only valid on a D1 cancel decision",
+      });
+    }
+    if (decision.cancelIntents !== null) {
+      const ids = decision.cancelIntents.map((binding) => binding.assignmentId);
+      if (!canonicallySorted(ids)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cancelIntents"],
+          message: "cancelIntents must be sorted by unique assignmentId",
+        });
+      }
+    }
+    if (decision.state === "superseded") {
+      if (!cancelDecision || decision.resolution === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["resolution"],
+          message: "superseded requires a D1 cancel resolution",
+        });
+      } else if (Date.parse(decision.resolution.at) < Date.parse(decision.createdAt)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["resolution", "at"],
+          message: "resolution.at must not predate createdAt",
+        });
+      }
+    } else if (decision.resolution !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["resolution"],
+        message: "resolution is only valid on superseded decisions",
+      });
+    }
     if (decision.state === "answered") {
       if (decision.answer === null) {
         ctx.addIssue({
@@ -762,6 +1025,15 @@ export const RunTaskRecordSchema = z
   })
   .passthrough()
   .superRefine((task, ctx) => {
+    for (const key of ["report", "reviews", "smokeReport"] as const) {
+      if (Object.hasOwn(task, key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is no longer a task mirror; acceptedProof is the only authority`,
+        });
+      }
+    }
     if (task.phase === "frozen" && task.state !== "blocked") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -855,6 +1127,7 @@ const IntentBaseShape = {
   recoverySendCount: z.number().int().nonnegative().max(1),
   createdAt: RunTimeSchema,
   confirmedAt: RunTimeSchema.nullable(),
+  localCancellation: RunLocalCancellationSchema.nullable(),
 };
 
 export const RunEffectIntentSchema = z
@@ -863,7 +1136,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("dispatch"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema,
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -872,7 +1145,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("create-agent"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -881,7 +1154,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("create-workspace"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -890,7 +1163,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("wake"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -899,7 +1172,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("archive"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -908,7 +1181,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("reopen"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         controlAttempt: z.number().int().min(1),
         semanticArgs: z.record(z.string(), z.unknown()),
@@ -930,6 +1203,13 @@ export const RunEffectIntentSchema = z
       .passthrough(),
   ])
   .superRefine((intent, ctx) => {
+    if (intent.localCancellation !== null && intent.state !== "failed") {
+      ctx.addIssue({
+        code: "custom",
+        message: "localCancellation is only valid on a failed intent",
+        path: ["localCancellation"],
+      });
+    }
     // Branch exclusivity is semantic, not a "future field": a business intent must not fake a
     // control counter, and a probe must not smuggle a task scope.
     const isControl = intent.kind === "probe" || intent.kind === "reopen";

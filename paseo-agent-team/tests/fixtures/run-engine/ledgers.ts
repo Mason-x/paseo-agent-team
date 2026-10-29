@@ -20,9 +20,9 @@ import {
   PARTIAL_CANCELLATION,
   QUIESCENT_CANCELLATION,
   spec,
-  T1,
-  T2,
-  T3,
+  t1,
+  t2,
+  t3,
   taskRecord,
   withLedger,
 } from "./base";
@@ -36,8 +36,8 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-unk",
   revision: 9,
   lifecycle: "paused",
-  tasks: [T1, { ...T2, state: "blocked", waitingReason: "outcome-unknown" } as RunTaskRecord, T3],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  tasks: [t1, { ...t2, state: "blocked", waitingReason: "outcome-unknown" } as RunTaskRecord, t3],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a1",
@@ -65,10 +65,13 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
       state: "open",
       answer: null,
       dedupeKey: "run-rec0re-unk|D1|outcome-unknown|intent-t2-a1",
-      subjectId: "T2",
+      subjectId: "t2",
       summary: "Send outcome unknown after one recovery attempt; frozen for a human decision.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
   alerts: [
@@ -89,16 +92,16 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-cnl",
   revision: 11,
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "in_progress",
       phase: "implementation",
       waitingReason: "cancel-pending",
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a1",
@@ -117,14 +120,15 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
       kind: "wake",
       recipient: "agent-b1",
       messageId: MESSAGE_CANCEL,
-      idempotencyKey: "cancel-T2-1",
+      idempotencyKey: "cancel-t2-1",
       payloadHash: DIGEST_D,
       templateVersion: 1,
       state: "sending",
       recoverySendCount: 0,
       createdAt: AT_UPDATED,
       confirmedAt: null,
-      taskId: "T2",
+      localCancellation: null,
+      taskId: "t2",
       assignmentId: "assignment-t2-a1",
       semanticArgs: { reason: "cancel", requestId: "cancel-t2-1" },
     } satisfies RunEffectIntent,
@@ -147,15 +151,15 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-qsc",
   revision: 12,
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "cancelled",
       phase: undefined,
       waitingReason: "cancelled-by-operator",
       releaseDecisionId: DECISION_D1,
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
   resources: [],
   assignments: [
@@ -177,12 +181,15 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "d".repeat(64),
       state: "answered",
-      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
-      dedupeKey: "run-rec0re-qsc|D1|quiescent|T2",
-      subjectId: "T2",
+      answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
+      dedupeKey: "run-rec0re-qsc|D1|quiescent|t2",
+      subjectId: "t2",
       summary: "Operator approved cancellation after quiescence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
 });
@@ -198,11 +205,11 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8 },
   tasks: [
     {
-      ...T1,
+      ...t1,
       report: {
         protocolVersion: 1,
         runId: "run-rec0re-caf",
-        taskId: "T1",
+        taskId: "t1",
         attempt: 1,
         nonce: NONCE_T1,
         assignmentId: "assignment-t1-a1",
@@ -225,21 +232,30 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
           },
         ],
       },
+      reviews: [
+        {
+          reviewerAgentId: "agent-b2",
+          reviewerSeatId: "seat-b2",
+          verdict: "可合入",
+          reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
+          blockers: [],
+        },
+      ],
     } as RunTaskRecord,
     {
-      ...T2,
+      ...t2,
       state: "blocked",
       phase: "frozen",
       waitingReason: "cancelled-by-operator",
       frozenClaimId: "claim-t2",
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t1-a1",
-      taskId: "T1",
+      taskId: "t1",
       attempt: 1,
       nonce: NONCE_T1,
       messageId: MESSAGE_T1,
@@ -250,7 +266,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
     }),
     assignment({
       assignmentId: "assignment-t1-r1",
-      taskId: "T1",
+      taskId: "t1",
       seatId: "seat-b2",
       agentId: "agent-b2",
       purpose: "reviewer",
@@ -276,19 +292,19 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   outbox: [
     dispatchIntent({
       id: INTENT_T1,
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-a1",
       messageId: MESSAGE_T1,
-      idempotencyKey: "dispatch-T1-a1",
+      idempotencyKey: "dispatch-t1-a1",
     }),
     dispatchIntent({
       id: "intent-t1-r1",
       kind: "dispatch",
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-r1",
       recipient: "agent-b2",
       messageId: MESSAGE_T1_REVIEW,
-      idempotencyKey: "dispatch-T1-r1",
+      idempotencyKey: "dispatch-t1-r1",
       state: "confirmed",
       confirmedAt: AT_UPDATED,
     }),
@@ -296,11 +312,11 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
     dispatchIntent({
       id: INTENT_CANCEL,
       kind: "wake",
-      taskId: "T2",
+      taskId: "t2",
       assignmentId: "assignment-t2-a1",
       recipient: "agent-b1",
       messageId: MESSAGE_CANCEL,
-      idempotencyKey: "cancel-T2-1",
+      idempotencyKey: "cancel-t2-1",
       state: "confirmed",
       confirmedAt: AT_UPDATED,
     }),
@@ -335,7 +351,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
           {
             nonce: T1_REVIEW_NONCE,
             runId: "run-rec0re-caf",
-            taskId: "T1",
+            taskId: "t1",
             assignmentId: "assignment-t1-r1",
             attempt: 1,
             phase: "review" as const,
@@ -355,12 +371,15 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       category: "D1",
       controlNonceDigest: "e".repeat(64),
       state: "answered",
-      answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
-      dedupeKey: "cancel:T2",
-      subjectId: "T2",
+      answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
+      dedupeKey: "cancel:t2",
+      subjectId: "t2",
       summary: "Operator approved cancellation; release still requires quiescence evidence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
 });
@@ -371,17 +390,17 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
   revision: 8,
   lifecycle: "paused",
   tasks: [
-    T1,
+    t1,
     {
-      ...T2,
+      ...t2,
       state: "blocked",
       phase: "frozen",
       waitingReason: "missing-seat",
       frozenClaimId: "claim-t2",
     } as RunTaskRecord,
-    T3,
+    t3,
   ],
-  resources: [claim({ frozen: true, taskId: "T2" })],
+  resources: [claim({ frozen: true, taskId: "t2" })],
   assignments: [
     assignment({
       assignmentId: "assignment-t2-a1",
@@ -398,11 +417,14 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
       controlNonceDigest: "f".repeat(64),
       state: "open",
       answer: null,
-      dedupeKey: "run-rec0re-blk|D1|missing-seat|T2",
-      subjectId: "T2",
-      summary: "No qualified A seat for T2; the frozen claim is retained.",
+      dedupeKey: "run-rec0re-blk|D1|missing-seat|t2",
+      subjectId: "t2",
+      summary: "No qualified A seat for t2; the frozen claim is retained.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
   alerts: [
@@ -410,7 +432,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
       alertId: "alert-missing-seat",
       state: "open",
       severity: "warning",
-      summary: "T2 waits for a qualified seat; its frozen claim is retained.",
+      summary: "t2 waits for a qualified seat; its frozen claim is retained.",
       createdAt: AT_UPDATED,
       acknowledgedAt: null,
       resolvedAt: null,
@@ -450,7 +472,7 @@ export const OVERLONG_FIELDS_LEDGER: LedgerFixture = withLedger({
   revision: 4,
   tasks: [
     taskRecord(
-      spec("T1", `T${"i".repeat(120)}`, {
+      spec("t1", `T${"i".repeat(120)}`, {
         goal: `g${"o".repeat(2000)}`,
         acceptance: ["a".repeat(501)],
         scopes: [
@@ -464,7 +486,7 @@ export const OVERLONG_FIELDS_LEDGER: LedgerFixture = withLedger({
       }),
       { state: "done" },
     ),
-    T2,
-    T3,
+    t2,
+    t3,
   ],
 });
