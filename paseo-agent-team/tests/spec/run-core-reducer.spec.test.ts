@@ -293,7 +293,7 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
 });
 
 describe("R03a cancellation: two stages, quiescence, and terminal paths", () => {
-  test("a never-started assignment can be cancelled with a fresh archive receipt", () => {
+  test("a dispatched assignment without turn end or authorization stays frozen", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     const task = taskOf(record, "T2");
     task.state = "assigned";
@@ -322,7 +322,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     if (!frozen.ok) return;
     const decisionId = frozen.next.decisions[0]?.decisionId;
     if (!decisionId) throw new Error("decision");
-    const released = reduceRun(
+    const held = reduceRun(
       frozen.next,
       {
         kind: "cancellation-checked",
@@ -338,8 +338,17 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       },
       facts,
     );
-    expect(released.ok).toBe(true);
-    if (released.ok) expect(taskOf(released.next, "T2").state).toBe("cancelled");
+    // The dispatch intent exists, but there is no matching turn_ended and the D1 is still open:
+    // an archive receipt alone cannot authorize release.
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+    expect(taskOf(held.next, "T2")).toMatchObject({
+      state: "blocked",
+      phase: "frozen",
+      waitingReason: "cancel-not-quiescent",
+    });
+    expect(held.next.resources[0]?.frozen).toBe(true);
+    expect(held.next.decisions[0]?.state).toBe("open");
   });
 
   test("an in-flight task stays frozen when a later turn starts after the end", () => {
