@@ -1021,7 +1021,9 @@ function applyEvent(
         ? assignmentOf(next, task.currentAssignmentId)
         : undefined;
       const evidence = RunCancellationEvidenceSchema.safeParse(event.evidence);
-      if (assignment && evidence.success) assignment.cancellation = evidence.data;
+      // A newer non-quiescent observation invalidates earlier proof; never let a later
+      // run/DAG cancellation reuse an older idle observation after this check failed.
+      if (assignment) assignment.cancellation = evidence.success ? evidence.data : null;
       if (!evidence.success || !releaseAuthorizedCancellation(next, event.taskId, facts)) {
         freezeTask(next, event.taskId, "cancel-not-quiescent", facts, decision.controlNonceDigest);
         return null;

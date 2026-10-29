@@ -192,6 +192,12 @@ describe("167 cancellation proof and authorization", () => {
       },
     ],
     [
+      "wrong ended key",
+      (c) => {
+        c.evidence.endedEventKey = "not-the-recorded-key";
+      },
+    ],
+    [
       "missing ended receipt",
       (c) => {
         c.record.eventReceipts = [];
@@ -286,6 +292,25 @@ describe("167 cancellation proof and authorization", () => {
     expect(
       result.assignments.find((entry) => entry.assignmentId === c.assignment.assignmentId)
         ?.cancellation,
-    ).toEqual(c.assignment.cancellation);
+    ).toBeNull();
+  });
+
+  test("a new active refresh invalidates an older idle proof before another cancellation event", () => {
+    const c = cancellation();
+    c.assignment.cancellation = structuredClone(c.evidence);
+    c.event.evidence = {
+      ...c.evidence,
+      refresh: { ...c.evidence.refresh, activeTurn: true },
+    } as unknown as RunCancellationEvidence;
+    const pending = accepted(reduceRun(c.record, c.event, facts));
+    const result = accepted(
+      reduceRun(
+        pending,
+        { kind: "run-cancelled", reason: "cancel", controlNonceDigest: "9".repeat(64) },
+        facts,
+      ),
+    );
+    expect(result.resources).toEqual(c.record.resources);
+    expect(result.tasks.find((entry) => entry.spec.id === "T2")?.state).toBe("blocked");
   });
 });
