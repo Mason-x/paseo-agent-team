@@ -18,7 +18,10 @@ import type {
   RunSeatSnapshot,
   RunTaskRecord,
 } from "../../shared/schemas/run-engine/ledger";
-import { RunRecordSchema } from "../../shared/schemas/run-engine/ledger";
+import {
+  RunRecordSchema,
+  RunStoredSmokeReportSchema,
+} from "../../shared/schemas/run-engine/ledger";
 import {
   RunReviewReportBlockSchema,
   RunSmokeReportBlockSchema,
@@ -52,12 +55,6 @@ function uuid(): string {
 
 type Purpose = "member" | "reviewer" | "smoker";
 type ResourceClaim = RunRecord["resources"][number];
-type TaskWithEvidence = RunTaskRecord & {
-  report?: ReturnType<typeof RunTaskReportBlockSchema.parse>;
-  reviews?: Array<ReturnType<typeof RunReviewReportBlockSchema.parse>>;
-  smokeReport?: ReturnType<typeof RunSmokeReportBlockSchema.parse>;
-};
-
 const roster: RunSeatSnapshot[] = [
   {
     seatId: "seat-b1",
@@ -93,10 +90,10 @@ const roster: RunSeatSnapshot[] = [
   },
 ];
 
-function taskOf(record: RunRecord, id = "t1"): TaskWithEvidence {
+function taskOf(record: RunRecord, id = "t1"): RunTaskRecord {
   const found = record.tasks.find((entry) => entry.spec.id === id);
   if (!found) throw new Error(`missing task ${id}`);
-  return found as TaskWithEvidence;
+  return found;
 }
 
 function taskSpec(id = "t1", smoke = false) {
@@ -120,11 +117,9 @@ function fresh(options: { smoke?: boolean; secondTask?: boolean } = {}): RunReco
   record.dagRevision = 1;
   record.lifecycle = "active";
   record.roster = roster;
-  record.tasks = [
-    taskRecord(taskSpec("t1", options.smoke ?? false), { state: "ready" }) as TaskWithEvidence,
-  ];
+  record.tasks = [taskRecord(taskSpec("t1", options.smoke ?? false), { state: "ready" })];
   if (options.secondTask) {
-    record.tasks.push(taskRecord(taskSpec("t2"), { state: "pending" }) as TaskWithEvidence);
+    record.tasks.push(taskRecord(taskSpec("t2"), { state: "pending" }));
   }
   record.resources = [];
   record.assignments = [];
@@ -146,22 +141,10 @@ function valid(record: RunRecord): RunRecord {
   return record;
 }
 
-function canonicalSchemaAvailable(record: RunRecord): boolean {
-  return !record.tasks.some((task) =>
-    ["report", "reviews", "smokeReport"].some((key) => Object.hasOwn(task, key)),
-  );
-}
-
-function parseIfCanonical(record: RunRecord): void {
-  // WIP dependency: 9527 still writes task mirrors. Once the core writes assignment.acceptedProof,
-  // this becomes an unconditional RunRecordSchema.parse and the I2 mutations target that proof.
-  if (canonicalSchemaAvailable(record)) RunRecordSchema.parse(record);
-}
-
-function smokeProof(record: RunRecord, assignmentId: string): Record<string, unknown> | undefined {
+function smokeProof(record: RunRecord, assignmentId: string) {
   const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
-  if (assignment?.acceptedProof) return assignment.acceptedProof as Record<string, unknown>;
-  return taskOf(record).smokeReport as Record<string, unknown> | undefined;
+  const parsed = RunStoredSmokeReportSchema.safeParse(assignment?.acceptedProof);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function next(record: RunRecord, event: unknown): RunRecord {
@@ -169,9 +152,7 @@ function next(record: RunRecord, event: unknown): RunRecord {
   const result = reduceRun(record, event as never, facts);
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) throw new Error(JSON.stringify(result));
-  // WIP dependency: the frozen R01g schema forbids the task mirrors that the current 9527
-  // reducer still emits. Validate the legal input; post-result schema validation returns when
-  // the core writes assignment.acceptedProof / ended facts. Behavior assertions stay below.
+  valid(result.next);
   return result.next;
 }
 
@@ -204,7 +185,15 @@ function actor(purpose: Purpose, attempt: number, slot = 0) {
   };
 }
 
-function makeAssignment(purpose: Purpose, attempt: number, slot = 0): RunAssignment {
+function makeAssignment(
+  purpose: Purpose,
+  attempt: number,
+  slot: number,
+  producerAssignmentId: string | undefined,
+): RunAssignment {
+  if (purpose !== "member" && producerAssignmentId === undefined) {
+    throw new Error(`explicit producer assignment required for ${purpose}`);
+  }
   const who = actor(purpose, attempt, slot);
   return {
     assignmentId: `assignment-${purpose}-${attempt}-${slot}-${++serial}`,
@@ -224,7 +213,8 @@ function makeAssignment(purpose: Purpose, attempt: number, slot = 0): RunAssignm
     attempt,
     nonce: uuid(),
     messageId: uuid(),
-    delivery: purpose === "member" ? null : { producerAssignmentId: "assignment-t1-a1" },
+    delivery:
+      purpose === "member" ? null : { producerAssignmentId: producerAssignmentId as string },
     acceptedProof: null,
     endedEventKey: null,
     turnId: null,
@@ -276,10 +266,14 @@ function makeIntent(assignment: RunAssignment): RunEffectIntent {
 function dispatch(
   purpose: Purpose,
   attempt = 1,
-  options: { slot?: number; claims?: ResourceClaim[] } = {},
+  options: {
+    slot?: number;
+    claims?: ResourceClaim[];
+    producerAssignmentId?: string;
+  } = {},
 ) {
   const slot = options.slot ?? 0;
-  const assignment = makeAssignment(purpose, attempt, slot);
+  const assignment = makeAssignment(purpose, attempt, slot, options.producerAssignmentId);
   const nonce = makeNonce(assignment);
   const sequence = ++serial;
   const claims =
@@ -289,6 +283,7 @@ function dispatch(
           claim({
             claimId: `claim-${sequence}`,
             taskId: "t1",
+            originAssignmentId: assignment.assignmentId,
             repoId: REPO_ID,
             path: "src/t1.ts",
             access: "write",
@@ -297,6 +292,7 @@ function dispatch(
           }),
         ]
       : []);
+  for (const claimEntry of claims) claimEntry.originAssignmentId = assignment.assignmentId;
   return {
     kind: "task-dispatched" as const,
     taskId: "t1",
@@ -393,7 +389,13 @@ function reworkClaims(record: RunRecord): ResourceClaim[] {
 function reviewFlow() {
   const member = dispatch("member");
   const seeded = report(member);
-  return { record: seeded, reviewer: dispatch("reviewer") };
+  return {
+    record: seeded,
+    member,
+    reviewer: dispatch("reviewer", 1, {
+      producerAssignmentId: member.assignment.assignmentId,
+    }),
+  };
 }
 
 function reworkFlow() {
@@ -418,14 +420,18 @@ function smokeRework(ref: string) {
   const member = dispatch("member");
   record = next(record, member);
   record = next(record, { kind: "task-report", block: doneReport(member.assignment, REF_A) });
-  const firstReviewer = dispatch("reviewer");
+  const firstReviewer = dispatch("reviewer", 1, {
+    producerAssignmentId: member.assignment.assignmentId,
+  });
   record = next(record, firstReviewer);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(firstReviewer.assignment, REF_A, "可合入"),
   });
   expect(taskOf(record).phase).toBe("smoke");
-  const firstSmoker = dispatch("smoker");
+  const firstSmoker = dispatch("smoker", 1, {
+    producerAssignmentId: member.assignment.assignmentId,
+  });
   record = next(record, firstSmoker);
   record = next(record, {
     kind: "smoke-report",
@@ -439,7 +445,9 @@ function smokeRework(ref: string) {
     kind: "task-report",
     block: doneReport(secondMember.assignment, ref),
   });
-  const secondReviewer = dispatch("reviewer", 2);
+  const secondReviewer = dispatch("reviewer", 2, {
+    producerAssignmentId: secondMember.assignment.assignmentId,
+  });
   record = next(record, secondReviewer);
   record = next(record, {
     kind: "review-report",
@@ -454,19 +462,24 @@ function smokeDoneFlow() {
   const member = dispatch("member");
   record = next(record, member);
   record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-  const reviewer = dispatch("reviewer");
+  const reviewer = dispatch("reviewer", 1, {
+    producerAssignmentId: member.assignment.assignmentId,
+  });
   record = next(record, reviewer);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(reviewer.assignment, REF_A, "可合入"),
   });
-  const smoker = dispatch("smoker");
+  const smoker = dispatch("smoker", 1, {
+    producerAssignmentId: member.assignment.assignmentId,
+  });
   record = next(record, smoker);
   record = next(record, {
     kind: "smoke-report",
     block: smokeReport(smoker.assignment, REF_A, "pass"),
   });
   expect(taskOf(record).state).toBe("done");
+  expect(smokeProof(record, smoker.assignment.assignmentId)).toBeDefined();
   return { record, smoker };
 }
 
@@ -502,7 +515,9 @@ describe("R03a delivery binding red specification", () => {
     );
     expect(originalClaims).toHaveLength(1);
 
-    const reviewer = dispatch("reviewer");
+    const reviewer = dispatch("reviewer", 1, {
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     record = next(record, reviewer);
     record = next(record, {
       kind: "review-report",
@@ -529,7 +544,9 @@ describe("R03a delivery binding red specification", () => {
     expect(beforeConflicts.ok).toBe(true);
     if (beforeConflicts.ok) expect(beforeConflicts.conflicts).toHaveLength(1);
 
-    const smoker = dispatch("smoker");
+    const smoker = dispatch("smoker", 1, {
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     const after = next(restored, smoker);
     const afterClaims = after.resources.filter((entry) => entry.taskId === "t1");
     expect(afterClaims).toHaveLength(1);
@@ -556,7 +573,13 @@ describe("R03a delivery binding red specification", () => {
     record = next(record, member);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
     const before = structuredClone(record);
-    const result = reduceRun(record, dispatch("reviewer", 2) as never, facts);
+    const result = reduceRun(
+      record,
+      dispatch("reviewer", 2, {
+        producerAssignmentId: member.assignment.assignmentId,
+      }) as never,
+      facts,
+    );
     expect(result.ok).toBe(false);
     expect(record).toEqual(before);
   });
@@ -626,7 +649,9 @@ describe("R03a delivery binding red specification", () => {
     const member = dispatch("member");
     record = next(record, member);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-    const reviewer = dispatch("reviewer");
+    const reviewer = dispatch("reviewer", 1, {
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     record = next(record, reviewer);
     record = next(record, {
       kind: "review-report",
@@ -667,13 +692,13 @@ describe("R03a delivery binding red specification", () => {
     mutated.assignments = mutated.assignments.filter(
       (entry) => entry.assignmentId !== smoker.assignment.assignmentId,
     );
-    parseIfCanonical(mutated);
+    RunRecordSchema.parse(mutated);
     const report = checkLedgerInvariants(mutated);
     expect(report.ok, JSON.stringify(report)).toBe(false);
     if (!report.ok) expect(report.violations.some((entry) => entry.invariant === "I7")).toBe(true);
   });
 
-  test("I2 changed smoker purpose is an I7 violation", () => {
+  test("I2 changed smoker purpose is rejected by purpose-proof schema", () => {
     const { record, smoker } = smokeDoneFlow();
     const mutated = structuredClone(record) as RunRecord;
     const assignment = mutated.assignments.find(
@@ -686,16 +711,17 @@ describe("R03a delivery binding red specification", () => {
     );
     if (!nonce) throw new Error("missing smoker nonce");
     nonce.phase = "review";
-    parseIfCanonical(mutated);
-    const report = checkLedgerInvariants(mutated);
-    expect(report.ok, JSON.stringify(report)).toBe(false);
-    if (!report.ok) expect(report.violations.some((entry) => entry.invariant === "I7")).toBe(true);
+    const parsed = RunRecordSchema.safeParse(mutated);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.path.at(-1) === "acceptedProof")).toBe(true);
+    }
   });
 
   test("I2 smoker assignment moved to another task is an I7 violation", () => {
     const { record, smoker } = smokeDoneFlow();
     const mutated = structuredClone(record) as RunRecord;
-    mutated.tasks.push(taskRecord(taskSpec("t2"), { state: "pending" }) as TaskWithEvidence);
+    mutated.tasks.push(taskRecord(taskSpec("t2"), { state: "pending" }));
     const assignment = mutated.assignments.find(
       (entry) => entry.assignmentId === smoker.assignment.assignmentId,
     );
@@ -710,7 +736,7 @@ describe("R03a delivery binding red specification", () => {
     );
     if (!intent) throw new Error("missing smoker intent");
     intent.taskId = "t2";
-    parseIfCanonical(mutated);
+    RunRecordSchema.parse(mutated);
     const report = checkLedgerInvariants(mutated);
     expect(report.ok, JSON.stringify(report)).toBe(false);
     if (!report.ok) expect(report.violations.some((entry) => entry.invariant === "I7")).toBe(true);
@@ -722,7 +748,7 @@ describe("R03a delivery binding red specification", () => {
     const proof = smokeProof(mutated, smoker.assignment.assignmentId);
     if (!proof) throw new Error("missing smoke proof");
     proof.nonce = uuid();
-    parseIfCanonical(mutated);
+    RunRecordSchema.parse(mutated);
     const report = checkLedgerInvariants(mutated);
     expect(report.ok, JSON.stringify(report)).toBe(false);
     if (!report.ok) expect(report.violations.some((entry) => entry.invariant === "I7")).toBe(true);
@@ -734,7 +760,7 @@ describe("R03a delivery binding red specification", () => {
     const proof = smokeProof(mutated, smoker.assignment.assignmentId);
     if (!proof) throw new Error("missing smoke proof");
     proof.attempt = 2;
-    parseIfCanonical(mutated);
+    RunRecordSchema.parse(mutated);
     const report = checkLedgerInvariants(mutated);
     expect(report.ok, JSON.stringify(report)).toBe(false);
     if (!report.ok) expect(report.violations.some((entry) => entry.invariant === "I7")).toBe(true);
@@ -760,15 +786,29 @@ describe("R03a delivery binding red specification", () => {
     const member = dispatch("member");
     record = next(record, member);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-    const first = dispatch("reviewer", 1, { slot: 0 });
-    const second = dispatch("reviewer", 1, { slot: 1 });
+    const first = dispatch("reviewer", 1, {
+      slot: 0,
+      producerAssignmentId: member.assignment.assignmentId,
+    });
+    const second = dispatch("reviewer", 1, {
+      slot: 1,
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     record = next(record, first);
     record = next(record, second);
+    record = next(record, {
+      kind: "turn-started",
+      assignmentId: second.assignment.assignmentId,
+      agentId: second.assignment.agentId,
+      turnId: "turn-r2",
+    });
     record = next(record, {
       kind: "review-report",
       block: reviewReport(first.assignment, REF_A, "可合入"),
     });
-    const smoker = dispatch("smoker");
+    const smoker = dispatch("smoker", 1, {
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     record = next(record, smoker);
     record = next(record, {
       kind: "smoke-report",
@@ -782,8 +822,14 @@ describe("R03a delivery binding red specification", () => {
     const member = dispatch("member");
     record = next(record, member);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
-    const first = dispatch("reviewer", 1, { slot: 0 });
-    const second = dispatch("reviewer", 1, { slot: 1 });
+    const first = dispatch("reviewer", 1, {
+      slot: 0,
+      producerAssignmentId: member.assignment.assignmentId,
+    });
+    const second = dispatch("reviewer", 1, {
+      slot: 1,
+      producerAssignmentId: member.assignment.assignmentId,
+    });
     record = next(record, first);
     record = next(record, second);
     expect(taskOf(record).currentAssignmentId).toBe(second.assignment.assignmentId);
@@ -827,6 +873,8 @@ describe("R03a delivery binding red specification", () => {
     const { record, second, smoker } = smokeWaitingOnSecondReviewer();
     const before = structuredClone(record);
     const smokeBefore = smokeProof(record, smoker.assignment.assignmentId);
+    expect(smokeBefore).toBeDefined();
+    expect(smokeBefore?.checks.every((check) => check.result === "pass")).toBe(true);
     const late = reduceRun(
       record,
       {
@@ -837,12 +885,38 @@ describe("R03a delivery binding red specification", () => {
     );
     expect(late.ok, JSON.stringify(late)).toBe(true);
     if (late.ok) {
-      expect(taskOf(late.next).state).toBe("done");
+      const afterPass = taskOf(late.next);
+      // R2 was started but has not ended; a pass is accepted and must not fabricate done.
+      expect(afterPass.state).not.toBe("done");
       expect(smokeProof(late.next, smoker.assignment.assignmentId)).toEqual(smokeBefore);
-      expect(taskOf(late.next).qualityFailures).toBe(0);
+      expect(afterPass.qualityFailures).toBe(0);
       const reviewers = late.next.assignments.filter((entry) => entry.purpose === "reviewer");
       expect(reviewers.length).toBeGreaterThanOrEqual(2);
       expect(reviewers.every((entry) => entry.acceptedProof !== null)).toBe(true);
+
+      const endedEventKey = "agent-a2|turn-r2|turn_ended";
+      const withReceipt = structuredClone(late.next);
+      withReceipt.eventReceipts.push({
+        eventKey: endedEventKey,
+        kind: "turn_ended",
+        agentId: second.assignment.agentId,
+        turnId: "turn-r2",
+        seq: withReceipt.counters.observationSeq + 1,
+        receivedAt: AT_UPDATED,
+        dedupeKey: endedEventKey,
+        disposition: "accepted",
+      });
+      const ended = reduceRun(
+        withReceipt,
+        {
+          kind: "turn-ended",
+          assignmentId: second.assignment.assignmentId,
+          endedEventKey,
+        },
+        facts,
+      );
+      expect(ended.ok, JSON.stringify(ended)).toBe(true);
+      if (ended.ok) expect(taskOf(ended.next).state).toBe("done");
     }
     expect(record).toEqual(before);
   });
