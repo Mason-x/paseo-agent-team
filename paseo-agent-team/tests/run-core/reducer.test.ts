@@ -11,6 +11,7 @@ import {
   ASSIGNMENT_T2,
   AT_UPDATED,
   assignment,
+  CANCELLATION_AUTHORIZED_FROZEN_LEDGER,
   claim,
   DECISION_D1,
   dispatchIntent,
@@ -227,6 +228,7 @@ describe("reduceRun", () => {
           summary: "decision",
           createdAt: AT_UPDATED,
           answeredAt: null,
+          answer: null,
         },
       ];
       const result = reduceRun(
@@ -292,8 +294,9 @@ describe("reduceRun", () => {
     }
   });
 
-  test("cancel releases only after the explicit quiescence check", () => {
+  test("cancel releases only after explicit authorization and the quiescence check", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
+    record.decisions = structuredClone(CANCELLATION_AUTHORIZED_FROZEN_LEDGER.decisions);
     record.outbox.push(
       dispatchIntent({
         id: INTENT_CANCEL,
@@ -480,6 +483,9 @@ describe("reduceRun", () => {
     task.state = "ready";
     task.attempts = 0;
     task.currentAssignmentId = null;
+    record.assignments = record.assignments.filter((entry) => entry.taskId !== "T2");
+    record.nonceRegistry = record.nonceRegistry.filter((entry) => entry.taskId !== "T2");
+    record.outbox = record.outbox.filter((entry) => entry.taskId !== "T2");
     const nextAssignment = assignment({
       assignmentId: "assignment-t2-new",
       nonce,
@@ -535,8 +541,27 @@ describe("reduceRun", () => {
     expect(started.ok).toBe(true);
     if (!started.ok) return;
     expect(taskOf(started.next, "T2").state).toBe("in_progress");
-    const ended = reduceRun(
+    const observed = reduceRun(
       started.next,
+      {
+        kind: "observation-recorded",
+        receipt: {
+          eventKey: "agent-b1|turn-new|turn_ended",
+          kind: "turn_ended",
+          agentId: "agent-b1",
+          turnId: "turn-new",
+          seq: 0,
+          receivedAt: AT_UPDATED,
+          dedupeKey: "agent-b1|turn-new|turn_ended",
+          disposition: "accepted",
+        },
+      },
+      facts,
+    );
+    expect(observed.ok).toBe(true);
+    if (!observed.ok) return;
+    const ended = reduceRun(
+      observed.next,
       {
         kind: "turn-ended",
         assignmentId: "assignment-t2-new",
@@ -1113,7 +1138,7 @@ describe("reduceRun", () => {
     if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("blocked");
   });
 
-  test("a never-started assignment can be cancelled after a confirmed receipt", () => {
+  test("a never-started assignment stays frozen without a matching ended turn", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     record.outbox.push(
       dispatchIntent({
@@ -1146,7 +1171,6 @@ describe("reduceRun", () => {
       lastTurnId: null,
       endedEventKey: null,
       observationSeq: 7,
-      refreshObservedAt: AT_UPDATED,
     };
     const checked = reduceRun(
       frozen.next,
@@ -1154,7 +1178,7 @@ describe("reduceRun", () => {
       facts,
     );
     expect(checked.ok).toBe(true);
-    if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("cancelled");
+    if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("blocked");
   });
 
   test("dag-revised cancels an unstarted pending task without D1", () => {
@@ -1434,7 +1458,10 @@ describe("reduceRun", () => {
     record.outbox = [];
     record.assignments = [];
     record.nonceRegistry = [];
-    expect(reduceRun(record, { kind: "run-finished" }, facts).ok).toBe(false);
+    expect(reduceRun(record, { kind: "run-finished" }, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "run-not-finished", claims: record.resources.length },
+    });
     record.resources = [];
     record.decisions = [
       {
@@ -1447,6 +1474,7 @@ describe("reduceRun", () => {
         summary: "unresolved",
         createdAt: AT_UPDATED,
         answeredAt: null,
+        answer: null,
       },
     ];
     expect(reduceRun(record, { kind: "run-finished" }, facts).ok).toBe(false);

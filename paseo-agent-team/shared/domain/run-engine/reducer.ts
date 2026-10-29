@@ -1,5 +1,6 @@
 import {
   RUN_EVENT_RECEIPT_KINDS,
+  RunCancellationEvidenceSchema,
   type RunRecord,
   RunRecordSchema,
   type RunTaskRecord,
@@ -26,6 +27,7 @@ import {
   type RunReducerEvent,
   type RunStoredReview,
   type RunTaskWithEvidence,
+  sameStoredValue,
   taskById,
 } from "./transitions";
 
@@ -142,11 +144,6 @@ function releaseClaims(next: RunRecord, taskId: string): void {
 function markCancelled(next: RunRecord, taskId: string, reason: string, facts: ReduceFacts): void {
   const task = taskOf(next, taskId);
   if (!task) return;
-  for (const decision of next.decisions) {
-    if (decision.dedupeKey !== `cancel:${taskId}` || decision.state !== "open") continue;
-    decision.state = "answered";
-    decision.answeredAt = facts.now;
-  }
   const assignment = task.currentAssignmentId
     ? assignmentOf(next, task.currentAssignmentId)
     : undefined;
@@ -203,6 +200,7 @@ function freezeTask(
       summary: `Cancellation of ${taskId} needs explicit quiescence confirmation.`,
       createdAt: facts.now,
       answeredAt: null,
+      answer: null,
       ...(cancelIntentId === undefined ? {} : { cancelIntentId }),
     });
   }
@@ -216,7 +214,18 @@ function quiescent(record: RunRecord, taskId: string): boolean {
   const evidence = assignment?.cancellation;
   if (!assignment || !evidence) return false;
   if (evidence.assignmentId !== assignment.assignmentId) return false;
-  if (evidence.receipt.kind === "none" || evidence.receipt.confirmedAt === null) return false;
+  if (
+    evidence.receipt.kind !== "archive" ||
+    evidence.receipt.confirmedAt === null ||
+    !evidence.receipt.externalId
+  )
+    return false;
+  if (
+    evidence.refresh.agentId !== assignment.agentId ||
+    evidence.refresh.activeTurn !== false ||
+    !["idle", "closed", "missing"].includes(evidence.refresh.status)
+  )
+    return false;
   if (evidence.observationSeq === 0 || evidence.observationSeq > record.counters.observationSeq) {
     return false;
   }
@@ -233,20 +242,6 @@ function quiescent(record: RunRecord, taskId: string): boolean {
   ) {
     return false;
   }
-  const startedOrEnded =
-    assignment.turnId !== null || evidence.lastTurnId !== null || evidence.endedEventKey !== null;
-  if (!startedOrEnded) {
-    // A never-started assignment has no turn to end. Require a fresh observation and no
-    // started-turn receipt for this agent after the assignment was created.
-    if (Date.parse(evidence.refreshObservedAt) < Date.parse(assignment.createdAt)) return false;
-    const started = record.eventReceipts.some(
-      (receipt) =>
-        receipt.kind === "turn_started" &&
-        receipt.agentId === assignment.agentId &&
-        Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt),
-    );
-    return !started;
-  }
   if (assignment.turnId === null || evidence.lastTurnId !== assignment.turnId) return false;
   if (evidence.endedEventKey === null) return false;
   const endedIndex = record.eventReceipts.findIndex(
@@ -259,7 +254,7 @@ function quiescent(record: RunRecord, taskId: string): boolean {
   const ended = endedIndex < 0 ? undefined : record.eventReceipts[endedIndex];
   if (ended === undefined || evidence.observationSeq < ended.seq) return false;
   const endedAt = ended.receivedAt;
-  if (Date.parse(evidence.refreshObservedAt) < Date.parse(endedAt)) return false;
+  if (Date.parse(evidence.refresh.observedAt) < Date.parse(endedAt)) return false;
   const laterStarted = record.eventReceipts.some(
     (receipt, index) =>
       index > endedIndex &&
@@ -267,6 +262,40 @@ function quiescent(record: RunRecord, taskId: string): boolean {
       receipt.agentId === assignment.agentId,
   );
   return !laterStarted;
+}
+
+function cancellationAuthorization(record: RunRecord, taskId: string) {
+  return record.decisions.find(
+    (decision) =>
+      decision.category === "D1" &&
+      decision.subjectId === taskId &&
+      decision.dedupeKey === `cancel:${taskId}` &&
+      decision.state === "answered" &&
+      decision.answer !== null &&
+      (decision.answer.action === "cancel" || decision.answer.action === "assign-seat") &&
+      decision.answer.taskIds.includes(taskId),
+  );
+}
+
+function releaseAuthorizedCancellation(
+  next: RunRecord,
+  taskId: string,
+  facts: ReduceFacts,
+): boolean {
+  const decision = cancellationAuthorization(next, taskId);
+  if (!decision || !quiescent(next, taskId)) return false;
+  const task = taskOf(next, taskId);
+  const assignment = task?.currentAssignmentId
+    ? assignmentOf(next, task.currentAssignmentId)
+    : undefined;
+  if (
+    typeof decision.cancelIntentId === "string" &&
+    decision.cancelIntentId !== assignment?.cancellation?.cancelIntentId
+  )
+    return false;
+  if (task) task.releaseDecisionId = decision.decisionId;
+  markCancelled(next, taskId, decision.summary, facts);
+  return true;
 }
 
 function recomputeReady(next: RunRecord): void {
@@ -358,6 +387,7 @@ function afterGateFailure(
       summary: `${plan.decision}: ${plan.reason}`,
       createdAt: facts.now,
       answeredAt: null,
+      answer: null,
     });
     return null;
   }
@@ -469,7 +499,7 @@ function applyEvent(
         const spec = incoming.get(task.spec.id);
         if (spec) {
           if (task.state === "done" || task.state === "cancelled") {
-            if (JSON.stringify(spec) !== JSON.stringify(task.spec)) {
+            if (!sameStoredValue(spec, task.spec)) {
               return reject(
                 "RUN_INVALID_TRANSITION",
                 ["tasks", task.spec.id],
@@ -482,7 +512,7 @@ function applyEvent(
               task.state,
             )
           ) {
-            if (JSON.stringify(spec) !== JSON.stringify(task.spec)) {
+            if (!sameStoredValue(spec, task.spec)) {
               return reject(
                 "RUN_INVALID_TRANSITION",
                 ["tasks", task.spec.id],
@@ -517,8 +547,9 @@ function applyEvent(
           task.currentAssignmentId !== null ||
           next.resources.some((claim) => claim.taskId === taskId);
         if (!active) markCancelled(next, taskId, "dag-revised", facts);
-        else if (quiescent(next, taskId)) markCancelled(next, taskId, "dag-revised", facts);
-        else freezeTask(next, taskId, "dag-revised", facts, event.controlNonceDigest);
+        else if (releaseAuthorizedCancellation(next, taskId, facts)) {
+          /* already released */
+        } else freezeTask(next, taskId, "dag-revised", facts, event.controlNonceDigest);
       }
       recomputeReady(next);
       return null;
@@ -644,12 +675,9 @@ function applyEvent(
                 : scope.kind === "file"
                   ? claim.kind === "file" &&
                     normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path)
-                  : (claim.kind === "file" || claim.kind === "directory") &&
-                    (normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path) ||
-                      (normalizeContainedPath(scope.path) !== null &&
-                        normalizeContainedPath(claim.path)?.startsWith(
-                          `${normalizeContainedPath(scope.path)}/`,
-                        )))),
+                  : claim.kind === "directory" &&
+                    normalizeContainedPath(scope.path) !== null &&
+                    normalizeContainedPath(claim.path) === normalizeContainedPath(scope.path)),
           );
           if (!covered) {
             return reject("RUN_EVENT_INVALID", ["claims"], "claim-coverage");
@@ -722,8 +750,22 @@ function applyEvent(
           "unknown-assignment",
         );
       }
+      const ended = next.eventReceipts.find(
+        (receipt) =>
+          receipt.eventKey === event.endedEventKey &&
+          receipt.kind === "turn_ended" &&
+          receipt.agentId === assignment.agentId &&
+          assignment.turnId !== null &&
+          receipt.turnId === assignment.turnId,
+      );
+      if (!ended)
+        return reject(
+          "RUN_EVENT_INVALID",
+          ["turn-ended", event.endedEventKey],
+          "ended-receipt-mismatch",
+        );
       assignment.state = "ended";
-      assignment.endedAt = facts.now;
+      assignment.endedAt = ended.receivedAt;
       return null;
     }
     case "task-report": {
@@ -951,16 +993,6 @@ function applyEvent(
       if (!task || !decision) {
         return reject("RUN_EVENT_INVALID", ["cancellation", event.taskId], "unknown-decision");
       }
-      if (decision.state === "answered" || decision.answeredAt !== null) {
-        return reject(
-          "RUN_EVENT_INVALID",
-          ["decision", event.decisionId],
-          "decision-already-consumed",
-        );
-      }
-      if (decision.state !== "open") {
-        return reject("RUN_EVENT_INVALID", ["decision", event.decisionId], "decision-not-open");
-      }
       if (
         decision.category !== "D1" ||
         decision.subjectId !== event.taskId ||
@@ -988,16 +1020,12 @@ function applyEvent(
       const assignment = task.currentAssignmentId
         ? assignmentOf(next, task.currentAssignmentId)
         : undefined;
-      if (assignment) assignment.cancellation = event.evidence;
-      if (!quiescent(next, event.taskId)) {
+      const evidence = RunCancellationEvidenceSchema.safeParse(event.evidence);
+      if (assignment && evidence.success) assignment.cancellation = evidence.data;
+      if (!evidence.success || !releaseAuthorizedCancellation(next, event.taskId, facts)) {
         freezeTask(next, event.taskId, "cancel-not-quiescent", facts, decision.controlNonceDigest);
         return null;
       }
-      decision.state = "answered";
-      decision.answeredAt = facts.now;
-      const cancelledTask = taskOf(next, event.taskId);
-      if (cancelledTask) cancelledTask.releaseDecisionId = decision.decisionId;
-      markCancelled(next, event.taskId, decision.summary, facts);
       return null;
     }
     case "run-paused": {
@@ -1058,8 +1086,8 @@ function applyEvent(
           next.resources.some((claim) => claim.taskId === task.spec.id);
         if (!active) {
           markCancelled(next, task.spec.id, event.reason, facts);
-        } else if (quiescent(next, task.spec.id)) {
-          markCancelled(next, task.spec.id, event.reason, facts);
+        } else if (releaseAuthorizedCancellation(next, task.spec.id, facts)) {
+          // Evidence and an earlier explicit response are both present.
         } else {
           freezeTask(next, task.spec.id, event.reason, facts, event.controlNonceDigest);
         }

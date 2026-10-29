@@ -252,10 +252,19 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
   for (const [index, assignment] of record.assignments.entries()) {
     if (!nonces.has(assignment.nonce)) {
       issues.push(violation("I5", ["assignments", index, "nonce"], "unregistered-nonce"));
-    } else if (!record.nonceRegistry.some((entry) => entry.nonce === assignment.nonce &&
-      entry.runId === record.runId && entry.taskId === assignment.taskId &&
-      entry.assignmentId === assignment.assignmentId && entry.attempt === assignment.attempt &&
-      entry.phase === assignmentPhase(assignment) && entry.agentId === assignment.agentId && entry.seatId === assignment.seatId)) {
+    } else if (
+      !record.nonceRegistry.some(
+        (entry) =>
+          entry.nonce === assignment.nonce &&
+          entry.runId === record.runId &&
+          entry.taskId === assignment.taskId &&
+          entry.assignmentId === assignment.assignmentId &&
+          entry.attempt === assignment.attempt &&
+          entry.phase === assignmentPhase(assignment) &&
+          entry.agentId === assignment.agentId &&
+          entry.seatId === assignment.seatId,
+      )
+    ) {
       issues.push(violation("I5", ["assignments", index, "nonce"], "nonce-binding"));
     }
   }
@@ -270,9 +279,14 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
       issues.push(violation("I6", ["counters", counter], "behind-checkpoint", { count: baseline }));
     }
   }
-  const receiptSeq = record.eventReceipts.reduce((highest, receipt) => Math.max(highest, receipt.seq), 0);
+  const receiptSeq = record.eventReceipts.reduce(
+    (highest, receipt) => Math.max(highest, receipt.seq),
+    0,
+  );
   if (record.counters.observationSeq < receiptSeq) {
-    issues.push(violation("I6", ["counters", "observationSeq"], "behind-receipts", { count: receiptSeq }));
+    issues.push(
+      violation("I6", ["counters", "observationSeq"], "behind-receipts", { count: receiptSeq }),
+    );
   }
   const reworkEvents = new Map<string, number>();
   const dispatches = new Map<string, number>();
@@ -414,13 +428,25 @@ function checkI8(record: RunRecord): RunInvariantViolation[] {
     }
   }
   for (const [index, decision] of record.decisions.entries()) {
-    if (decision.state === "answered" || !decision.dedupeKey.startsWith("cancel:") || typeof decision.cancelIntentId !== "string") continue;
+    if (
+      decision.state === "answered" ||
+      !decision.dedupeKey.startsWith("cancel:") ||
+      typeof decision.cancelIntentId !== "string"
+    )
+      continue;
     const intent = record.outbox.find((entry) => entry.id === decision.cancelIntentId);
-    const assignment = intent && intent.kind !== "probe"
-      ? record.assignments.find((entry) => entry.assignmentId === intent.assignmentId) : undefined;
-    if (!intent || (intent.kind !== "archive" && intent.kind !== "wake") || !assignment ||
-      intent.taskId !== decision.subjectId || assignment.taskId !== decision.subjectId ||
-      intent.recipient !== assignment.agentId) {
+    const assignment =
+      intent && intent.kind !== "probe"
+        ? record.assignments.find((entry) => entry.assignmentId === intent.assignmentId)
+        : undefined;
+    if (
+      !intent ||
+      (intent.kind !== "archive" && intent.kind !== "wake") ||
+      !assignment ||
+      intent.taskId !== decision.subjectId ||
+      assignment.taskId !== decision.subjectId ||
+      intent.recipient !== assignment.agentId
+    ) {
       issues.push(violation("I8", ["decisions", index, "cancelIntentId"], "cancel-intent-binding"));
     }
   }

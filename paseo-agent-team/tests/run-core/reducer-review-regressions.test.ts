@@ -263,16 +263,22 @@ describe("150 RB1 implementation attempt accounting", () => {
     expect(reduceRun(record, event, facts)).toMatchObject({ ok: false });
   });
 
-  test.each(["observationSeq", "probeAttempts", "reopenAttempts"] as const)("checkpoint %s baseline cannot decrease", (counter) => {
-    const record = fresh();
-    record.counters.eventsThroughSeq = 10;
-    record.checkpoint = {
-      throughSeq: 10, historyDigest: "a".repeat(64), acceptedNonceDigests: [], terminalAssignmentIds: [],
-      counters: { ...record.counters, [counter]: 2 },
-    };
-    expect(RunRecordSchema.safeParse(record).success).toBe(true);
-    expect(checkLedgerInvariants(record).ok).toBe(false);
-  });
+  test.each(["observationSeq", "probeAttempts", "reopenAttempts"] as const)(
+    "checkpoint %s baseline cannot decrease",
+    (counter) => {
+      const record = fresh();
+      record.counters.eventsThroughSeq = 10;
+      record.checkpoint = {
+        throughSeq: 10,
+        historyDigest: "a".repeat(64),
+        acceptedNonceDigests: [],
+        terminalAssignmentIds: [],
+        counters: { ...record.counters, [counter]: 2 },
+      };
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
 
   test("member → strict done report → reviewer dispatch keeps implementation attempt 1", () => {
     const reviewed = next(reduceRun(reviewing(), dispatch("reviewer", 1, 1), facts));
@@ -316,6 +322,150 @@ describe("150 RB1 implementation attempt accounting", () => {
       ok: false,
       violations: [expect.objectContaining({ invariant: "I6" })],
     });
+  });
+});
+
+describe("157 remaining dispatch and receipt guards", () => {
+  test.each([false, true])(
+    "file/directory overlap is rejected in either insertion order: %s",
+    (reverse) => {
+      const record = next(reduceRun(fresh(), dispatch(), facts));
+      task(record).spec.deps = [];
+      record.tasks.push(taskRecord(spec("t2", "Other writer"), { state: "in_progress" }));
+      const claims = [
+        claim({ taskId: "t1", kind: "file", path: "src/nested/a.ts" }),
+        claim({ claimId: "other", taskId: "t2", kind: "directory", path: "src" }),
+      ];
+      record.resources = reverse ? claims.reverse() : claims;
+      expect(checkLedgerInvariants(record)).toMatchObject({
+        ok: false,
+        violations: expect.arrayContaining([
+          expect.objectContaining({
+            invariant: "I3",
+            params: { reason: "overlapping-claim", taskId: reverse ? "t1" : "t2" },
+          }),
+        ]),
+      });
+    },
+  );
+
+  test("review-report itself refuses missing implementation evidence", () => {
+    const { ready, block } = qualityReview("B", 0, [], 10);
+    delete task(ready).report;
+    expect(reduceRun(ready, { kind: "review-report", block }, facts)).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["tasks", "t1", "report"],
+      params: { reason: "missing-done-report" },
+    });
+  });
+
+  test.each(["src/a.ts:stream", "src/COM\u00b9", "src/a.ts."])(
+    "dispatch rejects invalid path %s",
+    (path) => {
+      const record = fresh();
+      task(record).spec.scopes = [
+        { repoId: "repo-re-verify", kind: "directory", path: "src", access: "write" },
+      ];
+      const event = dispatch();
+      event.claims = [claim({ taskId: "t1", path })];
+      expect(reduceRun(record, event, facts)).toMatchObject({
+        ok: false,
+        params: { reason: "claim-not-in-scope" },
+      });
+    },
+  );
+
+  test("stored NFC/NFD overlap is detected through the shared lock rules", () => {
+    const record = next(reduceRun(fresh(), dispatch(), facts));
+    record.tasks.push(taskRecord(spec("t2", "Other writer"), { state: "in_progress" }));
+    record.resources = [
+      claim({ taskId: "t1", path: "src/caf\u00e9.ts" }),
+      claim({ claimId: "other", taskId: "t2", path: "src/cafe\u0301.ts" }),
+    ];
+    expect(checkLedgerInvariants(record)).toMatchObject({
+      ok: false,
+      violations: expect.arrayContaining([
+        expect.objectContaining({
+          invariant: "I3",
+          params: { reason: "overlapping-claim", taskId: "t2" },
+        }),
+      ]),
+    });
+  });
+
+  test.each(["absent", "wrong-agent", "wrong-turn", "wrong-kind"])(
+    "turn-ended rejects %s receipt",
+    (defect) => {
+      const record = next(reduceRun(fresh(), dispatch(), facts));
+      const current = record.assignments[0];
+      if (!current) throw new Error("assignment");
+      current.turnId = "turn-current";
+      current.state = "in_progress";
+      task(record).state = "in_progress";
+      if (defect !== "absent") {
+        record.eventReceipts.push({
+          eventKey: "claimed-end",
+          kind: defect === "wrong-kind" ? "turn_started" : "turn_ended",
+          agentId: defect === "wrong-agent" ? "other" : current.agentId,
+          turnId: defect === "wrong-turn" ? "other" : current.turnId,
+          seq: 1,
+          receivedAt: AT_UPDATED,
+          dedupeKey: "claimed-end",
+          disposition: "accepted",
+        });
+        record.counters.observationSeq = 1;
+      }
+      const result = reduceRun(
+        record,
+        { kind: "turn-ended", assignmentId: current.assignmentId, endedEventKey: "claimed-end" },
+        facts,
+      );
+      expect(result).toMatchObject({ ok: false, params: { reason: "ended-receipt-mismatch" } });
+      expect(current.state).toBe("in_progress");
+    },
+  );
+
+  test("a file inside a directory cannot prove the whole directory is locked", () => {
+    const record = fresh();
+    task(record).spec.scopes = [
+      { repoId: "repo", kind: "directory", path: "src", access: "write" },
+    ];
+    const event = dispatch();
+    event.claims = [claim({ taskId: "t1", repoId: "repo", path: "src/one.ts" })];
+    expect(reduceRun(record, event, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "claim-coverage" },
+    });
+  });
+
+  test("DAG equality ignores JSON object key order", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    const tasks = record.tasks.map(
+      (entry) => Object.fromEntries(Object.entries(entry.spec).reverse()) as typeof entry.spec,
+    );
+    expect(
+      reduceRun(
+        record,
+        {
+          kind: "dag-revised",
+          controlNonceDigest: CONTROL_DIGEST,
+          block: {
+            protocolVersion: 1,
+            runId: record.runId,
+            taskId: "_dag",
+            nonce: NONCES[0],
+            attempt: 1,
+            dagRevision: record.dagRevision + 1,
+            expectedDagRevision: record.dagRevision,
+            tasks,
+            cancelTaskIds: [],
+            budgetRequests: [],
+          },
+        },
+        facts,
+      ),
+    ).toMatchObject({ ok: true });
   });
 });
 
