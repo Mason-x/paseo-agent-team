@@ -654,6 +654,11 @@ describe("decisions, channels and alerts", () => {
     expect(row?.stateLabel).toBe("limbo");
   });
 
+  test("a superseded decision is not pending and is labelled 已失效", () => {
+    const [row] = decisionRows([decision("1", { state: "superseded" })], []);
+    expect(row).toMatchObject({ open: false, stateLabel: "已失效", answered: null });
+  });
+
   test("channels show the recovery lower bound only when paused", () => {
     const rows = channelRows([
       {
@@ -752,11 +757,14 @@ describe("needsYou", () => {
     expect(needsYou({ ...base, decisions: [{ ...openDecision, state: "answered" }] }).level).toBe(
       "ok",
     );
+    expect(needsYou({ ...base, decisions: [{ ...openDecision, state: "superseded" }] }).level).toBe(
+      "ok",
+    );
   });
 
-  test("a pending permission on an assigned or in-progress task needs you", () => {
+  test("a pending permission on assigned, in-progress, review, or rework needs you", () => {
     const permission = { kind: "permission" as const, ref: "agent-b1" };
-    for (const state of ["assigned", "in_progress"] as const) {
+    for (const state of ["assigned", "in_progress", "review", "rework"] as const) {
       expect(needsYou({ ...base, tasks: [task("T1", { state, blockedBy: permission })] })).toEqual({
         level: "needs-you",
         reasons: ["1 个任务等待权限处理"],

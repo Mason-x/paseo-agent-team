@@ -7,6 +7,7 @@ import {
   type RunTaskView,
 } from "../../schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../zh/run-engine";
+import { isDecisionPending } from "./decision-state";
 
 /**
  * Pure view model for the Runs page Engine view (RE-R07). Everything here is deterministic and
@@ -405,7 +406,7 @@ export function decisionRows(
   const titleOf = new Map(tasks.map((task) => [task.taskId, task.title]));
   return decisions
     .map((decision) => {
-      const open = decision.state !== "answered";
+      const open = isDecisionPending(decision);
       const subject =
         decision.subjectId === null
           ? null
@@ -507,13 +508,16 @@ export function needsYou(
 ): NeedsYou {
   const urgent: string[] = [];
   const waiting: string[] = [];
-  const openDecisions = run.decisions.filter((decision) => decision.state !== "answered").length;
+  const openDecisions = run.decisions.filter((decision) => isDecisionPending(decision)).length;
   if (openDecisions > 0) urgent.push(zh.needsYou.decisions(openDecisions));
   const stuck = run.tasks.filter((task) => task.state === "blocked" || task.state === "failed");
   if (stuck.length > 0) urgent.push(zh.needsYou.blockedTasks(stuck.length));
   const permissions = run.tasks.filter(
     (task) =>
-      (task.state === "assigned" || task.state === "in_progress") &&
+      (task.state === "assigned" ||
+        task.state === "in_progress" ||
+        task.state === "review" ||
+        task.state === "rework") &&
       task.blockedBy?.kind === "permission",
   ).length;
   if (permissions > 0) urgent.push(zh.needsYou.permissions(permissions));

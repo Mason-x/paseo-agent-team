@@ -4,6 +4,7 @@ import type {
   RunSeatSnapshot,
   RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
+import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
 import { executionTier, layerFailures } from "./tier";
 
 export type SchedulerMode = "sota" | "economy" | "economy-all" | "collaborative";
@@ -33,7 +34,10 @@ export type SchedulerContext = {
   seats: readonly SeatRuntime[];
   /** economy-all: only cheap, currently eligible Profiles may be selected. */
   profileAllowed?: (profileId: string) => boolean;
-  /** Optional task duty; when present a seat must declare it. */
+  /**
+   * @deprecated Frozen `spec.dispatchDuties` win. Kept for type compatibility only; ignored and
+   * never overrides a task's produce duty.
+   */
   requiredDuty?: string;
 };
 
@@ -98,7 +102,11 @@ export function eligibleSeats(
   if (task?.state !== "ready") {
     return { candidates: [], denials: [], blocked: "not-ready" };
   }
-  const required = executionTier(task);
+  const requirement = dispatchRequirement(task, "produce");
+  if (requirement.kind !== "required") {
+    return { candidates: [], denials: [], blocked: "no-seat" };
+  }
+  const capable = new Set(structuralSeats(record.roster, requirement).map((entry) => entry.seatId));
   const denials: SeatDenial[] = [];
   const candidates: SeatChoice[] = [];
   for (const seat of ctx.seats) {
@@ -109,11 +117,11 @@ export function eligibleSeats(
     }
     // Structural qualification comes first. An unrelated seat's busy state cannot imply that
     // this task has same-tier capability to wait for (159 / I2).
-    if (roster.tier !== required) {
+    if (requirement.tier !== null && roster.tier !== requirement.tier) {
       denials.push({ seatId: seat.seatId, reason: "tier" });
       continue;
     }
-    if (ctx.requiredDuty !== undefined && !roster.duties.includes(ctx.requiredDuty)) {
+    if (!capable.has(seat.seatId)) {
       denials.push({ seatId: seat.seatId, reason: "duty" });
       continue;
     }
