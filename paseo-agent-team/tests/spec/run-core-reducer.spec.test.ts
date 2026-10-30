@@ -185,13 +185,19 @@ function review(
   } as RunReviewReportBlock;
 }
 
-function attachProof(record: RunRecord, assignmentId: string, proof: unknown) {
+function acceptReviewProof(record: RunRecord, assignmentId: string, block: RunReviewReportBlock) {
   const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
   if (!assignment) throw new Error(`missing ${assignmentId}`);
   assignment.acceptedProof = {
-    ...(proof as Record<string, unknown>),
+    ...block,
+    assignmentId,
     messageId: assignment.messageId,
   } as typeof assignment.acceptedProof;
+  const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === assignmentId);
+  if (nonce) {
+    nonce.acceptedAt = AT_UPDATED;
+    nonce.acceptedEventKey = `proof:${assignmentId}`;
+  }
 }
 
 function reduceOrThrow(record: RunRecord, event: RunReducerEvent): RunRecord {
@@ -210,6 +216,80 @@ function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
     family: "codex",
   });
   return record;
+}
+
+function smokeReady(
+  record = reviewReady(),
+  smokeOverrides: Partial<RunSmokeReportBlock> = {},
+  policyHost = "127.0.0.1:6799",
+) {
+  const task = taskOf(record, "t2");
+  task.spec = {
+    ...task.spec,
+    devSmoke: true,
+    smokeChecklist: ["open runs"],
+    dispatchDuties: { ...task.spec.dispatchDuties, smoke: "smoke" },
+  };
+  record.policy = {
+    ...record.policy,
+    devTargets: [{ serverId: "dev-server-1", host: policyHost, home: "/tmp/dev-home" }],
+  };
+  record = reduceOrThrow(record, { kind: "review-report", block: review() });
+  const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
+  ensureSeat(record, "seat-b3", "agent-b3", "smoke", "A");
+  record.assignments.push(
+    assignment({
+      assignmentId: "assignment-t2-smoke",
+      seatId: "seat-b3",
+      agentId: "agent-b3",
+      purpose: "smoker",
+      nonce: smokeNonce,
+      messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      delivery: { producerAssignmentId: "assignment-t2-a1" },
+    }),
+  );
+  record.nonceRegistry.push({
+    nonce: smokeNonce,
+    runId: record.runId,
+    taskId: "t2",
+    assignmentId: "assignment-t2-smoke",
+    attempt: 1,
+    phase: "smoke",
+    agentId: "agent-b3",
+    seatId: "seat-b3",
+    issuedAt: AT_UPDATED,
+    acceptedAt: null,
+    acceptedEventKey: null,
+    revokedAt: null,
+    revokeReason: null,
+  });
+  record.outbox.push(
+    dispatchIntent({
+      id: "intent-assignment-t2-smoke",
+      taskId: "t2",
+      assignmentId: "assignment-t2-smoke",
+      recipient: "agent-b3",
+      messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      idempotencyKey: "dispatch-assignment-t2-smoke",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  );
+  const block = {
+    protocolVersion: 1,
+    runId: record.runId,
+    taskId: "t2",
+    attempt: 1,
+    nonce: smokeNonce,
+    assignmentId: "assignment-t2-smoke",
+    testedRef: REF,
+    devHost: policyHost,
+    devServerId: "dev-server-1",
+    devHome: "/tmp/dev-home",
+    checks: [{ id: "open runs", result: "pass", evidencePath: "evidence/smoke.png" }],
+    ...smokeOverrides,
+  } as RunSmokeReportBlock;
+  return { record, block };
 }
 
 function cancelIntent(record: RunRecord, kind: "wake" | "archive" = "archive") {
@@ -279,16 +359,7 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
   });
 
   test("a blocking review in the smoke phase cannot be swallowed", () => {
-    const record = reviewReady();
-    const task = taskOf(record, "t2");
-    task.spec = {
-      ...task.spec,
-      devSmoke: true,
-      smokeChecklist: ["open runs"],
-      dispatchDuties: { ...task.spec.dispatchDuties, smoke: "smoke" },
-    };
-    task.phase = "smoke";
-    attachProof(record, "assignment-t2-r1", review());
+    const { record, block } = smokeReady();
     addReviewer(record, {
       id: "assignment-t2-r2",
       seatId: "seat-b4",
@@ -310,51 +381,10 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     );
     expect(blocked.ok).toBe(true);
     if (!blocked.ok) return;
-    const smokeAssignment = "assignment-t2-smoke";
-    const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
-    blocked.next.assignments.push(
-      assignment({
-        assignmentId: smokeAssignment,
-        seatId: "seat-b3",
-        agentId: "agent-b3",
-        purpose: "smoker",
-        nonce: smokeNonce,
-        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-        delivery: { producerAssignmentId: "assignment-t2-a1" },
-      }),
-    );
-    blocked.next.nonceRegistry.push({
-      nonce: smokeNonce,
-      runId: blocked.next.runId,
-      taskId: "t2",
-      assignmentId: smokeAssignment,
-      attempt: 1,
-      phase: "smoke",
-      agentId: "agent-b3",
-      seatId: "seat-b3",
-      issuedAt: AT_UPDATED,
-      acceptedAt: AT_UPDATED,
-      acceptedEventKey: "agent-b3|turn-9|turn_ended",
-      revokedAt: null,
-      revokeReason: null,
-    });
-    const smokeBlock = {
-      protocolVersion: 1,
-      runId: blocked.next.runId,
-      taskId: "t2",
-      attempt: 1,
-      nonce: smokeNonce,
-      assignmentId: smokeAssignment,
-      testedRef: REF,
-      devHost: "127.0.0.1:6799",
-      devServerId: "dev-server-1",
-      devHome: "/tmp/dev-home",
-      checks: [{ id: "open runs", result: "pass", evidencePath: "evidence/smoke.png" }],
-    } as RunSmokeReportBlock;
-    const smoked = reduceRun(blocked.next, { kind: "smoke-report", block: smokeBlock }, facts);
+    expect(taskOf(blocked.next, "t2").qualityFailures).toBe(1);
+    const smoked = reduceRun(blocked.next, { kind: "smoke-report", block }, facts);
     expect(smoked.ok).toBe(true);
-    if (!smoked.ok) return;
-    expect(taskOf(smoked.next, "t2").state).not.toBe("done");
+    if (smoked.ok) expect(taskOf(smoked.next, "t2").state).not.toBe("done");
   });
 });
 
@@ -682,23 +712,24 @@ describe("R03a DAG, pause, finish, determinism", () => {
     expect(paused.ok).toBe(true);
     if (!paused.ok) return;
     const record = structuredClone(paused.next);
-    const task = taskOf(record, "t2");
-    task.state = "ready";
-    task.attempts = 0;
-    task.currentAssignmentId = null;
     const nonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const dispatch = reduceRun(
       record,
       {
         kind: "task-dispatched",
         taskId: "t2",
-        assignment: assignment({ assignmentId: "assignment-paused", taskId: "t2", nonce }),
+        assignment: assignment({
+          assignmentId: "assignment-paused",
+          taskId: "t2",
+          attempt: 2,
+          nonce,
+        }),
         nonce: {
           nonce,
           runId: record.runId,
           taskId: "t2",
           assignmentId: "assignment-paused",
-          attempt: 1,
+          attempt: 2,
           phase: "implementation",
           agentId: "agent-b1",
           seatId: "seat-b1",
@@ -717,7 +748,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
       },
       facts,
     );
-    expect(dispatch).toMatchObject({ ok: false, params: { reason: "task-dispatched" } });
+    expect(dispatch).toMatchObject({ ok: false, params: { reason: "illegal-transition" } });
     const reportValue = reduceRun(paused.next, { kind: "task-report", block: report() }, facts);
     expect(reportValue.ok).toBe(true);
     if (reportValue.ok) expect(taskOf(reportValue.next, "t2").state).toBe("review");
@@ -765,80 +796,6 @@ describe("R03a I7 done gate", () => {
 });
 
 describe("R03a gate details and invariant boundaries", () => {
-  function smokeReady(
-    record = reviewReady(),
-    smokeOverrides: Partial<RunSmokeReportBlock> = {},
-    policyHost = "127.0.0.1:6799",
-  ) {
-    const task = taskOf(record, "t2");
-    task.spec = {
-      ...task.spec,
-      devSmoke: true,
-      smokeChecklist: ["open runs"],
-      dispatchDuties: { ...task.spec.dispatchDuties, smoke: "smoke" },
-    };
-    record.policy = {
-      ...record.policy,
-      devTargets: [{ serverId: "dev-server-1", host: policyHost, home: "/tmp/dev-home" }],
-    };
-    record = reduceOrThrow(record, { kind: "review-report", block: review() });
-    const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
-    ensureSeat(record, "seat-b3", "agent-b3", "smoke", "A");
-    record.assignments.push(
-      assignment({
-        assignmentId: "assignment-t2-smoke",
-        seatId: "seat-b3",
-        agentId: "agent-b3",
-        purpose: "smoker",
-        nonce: smokeNonce,
-        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-        delivery: { producerAssignmentId: "assignment-t2-a1" },
-      }),
-    );
-    record.nonceRegistry.push({
-      nonce: smokeNonce,
-      runId: record.runId,
-      taskId: "t2",
-      assignmentId: "assignment-t2-smoke",
-      attempt: 1,
-      phase: "smoke",
-      agentId: "agent-b3",
-      seatId: "seat-b3",
-      issuedAt: AT_UPDATED,
-      acceptedAt: null,
-      acceptedEventKey: null,
-      revokedAt: null,
-      revokeReason: null,
-    });
-    record.outbox.push(
-      dispatchIntent({
-        id: "intent-assignment-t2-smoke",
-        taskId: "t2",
-        assignmentId: "assignment-t2-smoke",
-        recipient: "agent-b3",
-        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-        idempotencyKey: "dispatch-assignment-t2-smoke",
-        state: "confirmed",
-        confirmedAt: AT_UPDATED,
-      }),
-    );
-    const block = {
-      protocolVersion: 1,
-      runId: record.runId,
-      taskId: "t2",
-      attempt: 1,
-      nonce: smokeNonce,
-      assignmentId: "assignment-t2-smoke",
-      testedRef: REF,
-      devHost: policyHost,
-      devServerId: "dev-server-1",
-      devHome: "/tmp/dev-home",
-      checks: [{ id: "open runs", result: "pass", evidencePath: "evidence/smoke.png" }],
-      ...smokeOverrides,
-    } as RunSmokeReportBlock;
-    return { record, block };
-  }
-
   test("L1 accepts only a different-family B reviewer", () => {
     const same = reviewReady();
     taskOf(same, "t2").spec = { ...taskOf(same, "t2").spec, level: "L1" };
@@ -868,6 +825,43 @@ describe("R03a gate details and invariant boundaries", () => {
   test("an escalation origin raises the required review tier", () => {
     const record = reviewReady();
     taskOf(record, "t2").spec = { ...taskOf(record, "t2").spec, level: "L1" };
+    addReviewer(record, {
+      id: "assignment-t2-r0",
+      seatId: "seat-b5",
+      agentId: "agent-b5",
+      tier: "A",
+      family: "codex",
+      nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000006",
+    });
+    const failedReviewer = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-r0",
+    );
+    if (failedReviewer) {
+      failedReviewer.state = "ended";
+      failedReviewer.turnId = "turn-r0";
+      failedReviewer.endedAt = AT_UPDATED;
+      failedReviewer.endedEventKey = "agent-b5|turn-r0|turn_ended";
+    }
+    record.counters.observationSeq += 1;
+    record.eventReceipts.push({
+      eventKey: "agent-b5|turn-r0|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b5",
+      turnId: "turn-r0",
+      seq: record.counters.observationSeq,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b5|turn-r0|turn_ended",
+      disposition: "accepted",
+    });
+    acceptReviewProof(
+      record,
+      "assignment-t2-r0",
+      review("assignment-t2-r0", {
+        nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000006",
+        verdict: "不可合入",
+        blockers: [{ id: "f0", summary: "failed delivery", path: "src/t2.ts" }],
+      }),
+    );
     taskOf(record, "t2").qualityFailures = 1;
     taskOf(record, "t2").attempts = 1;
     taskOf(record, "t2").escalations = [
