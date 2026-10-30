@@ -45,6 +45,78 @@ function freeze(value: unknown): void {
   Object.freeze(value);
 }
 
+const DISPATCH_STAGES = [
+  {
+    phase: "unaccepted",
+    assignmentId: "assignment-t2-a1",
+    intentId: "intent-t2-a1",
+    otherTaskId: "t1",
+  },
+  {
+    phase: "accepted",
+    assignmentId: "assignment-t1-a1",
+    intentId: "intent-t1-a1",
+    otherTaskId: "t2",
+  },
+] as const;
+
+describe.each(DISPATCH_STAGES)("dispatch identity: $phase", (stage) => {
+  test("normal source closes without manufacturing acceptance facts", () => {
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    expect(assignment(record, stage.assignmentId).acceptedProof === null).toBe(
+      stage.phase === "unaccepted",
+    );
+    expect(keys(record, NORMAL)).toEqual([]);
+  });
+
+  test.each([
+    { fields: ["taskId"] },
+    { fields: ["recipient"] },
+    { fields: ["messageId"] },
+    { fields: ["recipient", "messageId"] },
+  ] as const)("reports the complete identity issue set for $fields", ({ fields }) => {
+    expect(keys(NORMAL_RUN_LEDGER, NORMAL)).toEqual([]);
+    const record = structuredClone(NORMAL_RUN_LEDGER);
+    const intent = record.outbox.find((entry) => entry.id === stage.intentId);
+    if (!intent) throw new Error(`missing test dispatch ${stage.intentId}`);
+    for (const field of fields) {
+      if (field === "taskId") intent.taskId = stage.otherTaskId;
+      else if (field === "recipient") intent.recipient = "agent-other";
+      else intent.messageId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa90";
+    }
+    const expected = fields
+      .map((field) => ({ code: "dispatch-binding", path: `outbox.${stage.intentId}.${field}` }))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const actual = keys(record, NORMAL);
+    if (stage.phase === "unaccepted" && fields.length === 2) {
+      console.log("[230 unaccepted compound]", JSON.stringify(collectSourceIssues(record, NORMAL)));
+    }
+    expect(actual).toEqual(expected);
+  });
+
+  test.each(["missing", "duplicate"] as const)(
+    "%s dispatch keeps its cardinality issue",
+    (kind) => {
+      expect(keys(NORMAL_RUN_LEDGER, NORMAL)).toEqual([]);
+      const record = structuredClone(NORMAL_RUN_LEDGER);
+      const intent = record.outbox.find((entry) => entry.id === stage.intentId);
+      if (!intent) throw new Error(`missing test dispatch ${stage.intentId}`);
+      if (kind === "missing") {
+        record.outbox = record.outbox.filter((entry) => entry.id !== stage.intentId);
+      } else {
+        record.outbox.push({
+          ...intent,
+          id: `${intent.id}-duplicate`,
+          idempotencyKey: `${intent.idempotencyKey}-duplicate`,
+        });
+      }
+      expect(keys(record, NORMAL)).toEqual([
+        { code: "assignment-dispatch", path: `assignments.${stage.assignmentId}.dispatch` },
+      ]);
+    },
+  );
+});
+
 describe("pure finite source issue collection", () => {
   test("228 compound: C2 target cannot hide an unrelated cache mismatch", () => {
     expect(keys(QUIESCENT_CANCELLED_LEDGER, QUIESCENT)).toEqual([]);

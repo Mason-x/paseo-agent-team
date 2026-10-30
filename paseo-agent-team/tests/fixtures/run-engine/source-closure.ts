@@ -215,7 +215,7 @@ export function collectSourceIssues(
     );
     // Ambiguous/missing dispatch is one relation failure, not a reason to stop other branches.
     const dispatch = dispatches.length === 1 ? dispatches[0] : undefined;
-    if (dispatch && proof !== null) {
+    if (dispatch) {
       for (const [key, value] of Object.entries({
         taskId: assignment.taskId,
         recipient: assignment.agentId,
