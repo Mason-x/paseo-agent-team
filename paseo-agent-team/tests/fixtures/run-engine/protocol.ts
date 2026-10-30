@@ -40,7 +40,7 @@ export const EMPTY_EVIDENCE_REPORT: Record<string, unknown> = {
 
 /** RE2.3 / RE2.8 / Y5: one defect per sample; each must reject or be treated as data only. */
 export const PROTOCOL_BLOCK_CASES: readonly { id: string; raw: string; defect: string }[] = [
-  { id: "missing-block", raw: "Implemented T2. All tests pass.", defect: "no-fenced-block" },
+  { id: "missing-block", raw: "Implemented t2. All tests pass.", defect: "no-fenced-block" },
   {
     id: "two-task-reports",
     raw: `${fence("task-report", validReport)}\n${fence("task-report", validReport)}`,

@@ -2,13 +2,18 @@
 // channel-probe lifecycle. These are inputs for cap, escalation, and probe-uniqueness cases.
 import {
   AT_UPDATED,
+  assignmentsForRun,
   claim,
   DECISION_D4,
+  dispatchIntent,
+  NORMAL_RUN_LEDGER,
+  noncesForRun,
   PROFILE_HAIKU,
   probeIntent,
   spec,
-  T1,
-  T2,
+  T3_ASSIGNMENT,
+  t1,
+  t2,
   taskRecord,
   withLedger,
 } from "./base";
@@ -32,30 +37,68 @@ function pausedChannel(until: string | null, incidentId = "incident-claude-1"): 
 /** RE2.3 / RE5.1 / RE5.2 / Y9: every counter already sits at its cap. */
 export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-ctl",
+  nonceRegistry: [
+    ...noncesForRun("run-rec0re-ctl"),
+    {
+      nonce: T3_ASSIGNMENT.nonce,
+      runId: "run-rec0re-ctl",
+      taskId: T3_ASSIGNMENT.taskId,
+      assignmentId: T3_ASSIGNMENT.assignmentId,
+      attempt: T3_ASSIGNMENT.attempt,
+      agentId: T3_ASSIGNMENT.agentId,
+      seatId: T3_ASSIGNMENT.seatId,
+      phase: "implementation",
+      issuedAt: T3_ASSIGNMENT.createdAt,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    },
+  ],
+  assignments: [...assignmentsForRun("run-rec0re-ctl"), T3_ASSIGNMENT],
+  outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
+    dispatchIntent({
+      id: "intent-t3-a1",
+      taskId: "t3",
+      assignmentId: "assignment-t3-a1",
+      messageId: T3_ASSIGNMENT.messageId,
+      idempotencyKey: "dispatch-t3-a1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  ],
   revision: 21,
   tasks: [
     {
-      ...T1,
+      ...t1,
       state: "blocked",
       waitingReason: "protocol-failures-exhausted",
       protocolFailures: 2,
     } as RunTaskRecord,
     {
-      ...T2,
+      ...t2,
       state: "review",
       phase: "awaiting-rework",
       evidenceReturns: 3,
       reworkCount: 2,
     } as RunTaskRecord,
     {
-      ...taskRecord(spec("T3", "Docs"), {
+      ...taskRecord(spec("t3", "Docs"), {
         state: "in_progress",
         phase: "implementation",
         attempts: 6,
       }),
     },
   ],
-  resources: [claim({ claimId: "claim-t3", taskId: "T3", path: "docs/run-engine" })],
+  resources: [
+    claim({
+      claimId: "claim-t3",
+      taskId: "t3",
+      originAssignmentId: "assignment-t3-a1",
+      path: "docs/run-engine",
+    }),
+  ],
   budgets: {
     entries: [
       {
@@ -88,6 +131,9 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
       summary: "seat-b1 reached 80% and 100% in one revision; one merged decision.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
   alerts: [
@@ -106,6 +152,7 @@ export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
 /** RE5.5 / Y19 input: the recovery window has passed and no probe is in flight anywhere. */
 export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbe",
+  nonceRegistry: noncesForRun("run-rec0re-pbe").filter((entry) => entry.taskId === "t1"),
   revision: 22,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
@@ -128,18 +175,18 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
     },
     {
       seatId: "seat-b2",
-      tier: "B",
+      tier: "A",
       agentId: "agent-b2",
       channelId: "claude",
       duties: ["review"],
       enabled: true,
     },
   ],
-  tasks: [T1],
+  tasks: [t1],
   resources: [],
-  assignments: [],
-  outbox: [],
-  eventReceipts: [],
+  assignments: assignmentsForRun("run-rec0re-pbe").filter((entry) => entry.taskId === "t1"),
+  outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId === "t1"),
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts,
   counters: { observationSeq: 0, eventsThroughSeq: 0, probeAttempts: 0, reopenAttempts: 0 },
   decisions: [],
 });
@@ -147,20 +194,25 @@ export const PROBE_ELIGIBLE_LEDGER: LedgerFixture = withLedger({
 /** RE5.5 negative form: an in-flight turn on the same channel makes probeEligible false. */
 export const PROBE_BLOCKED_INFLIGHT_TURN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbt",
+  nonceRegistry: noncesForRun("run-rec0re-pbt"),
+  assignments: assignmentsForRun("run-rec0re-pbt"),
   revision: 22,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
-  outbox: [],
+  outbox: [...NORMAL_RUN_LEDGER.outbox],
   decisions: [],
 });
 
 /** RE5.5: the only probe is already sending; a second Run must not send another. */
 export const PROBE_IN_FLIGHT_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbf",
+  nonceRegistry: noncesForRun("run-rec0re-pbf"),
+  assignments: assignmentsForRun("run-rec0re-pbf"),
   revision: 23,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-inflight",
       messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -174,10 +226,13 @@ export const PROBE_IN_FLIGHT_LEDGER: LedgerFixture = withLedger({
 /** RE5.5: success is the correlated turn_ended(completed); send acceptance alone is not enough. */
 export const PROBE_COMPLETED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbx",
+  nonceRegistry: noncesForRun("run-rec0re-pbx"),
+  assignments: assignmentsForRun("run-rec0re-pbx"),
   revision: 24,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z")],
   eventReceipts: [
+    ...NORMAL_RUN_LEDGER.eventReceipts,
     {
       eventKey: "agent-s1|turn-probe-1|turn_ended",
       kind: "turn_ended",
@@ -190,6 +245,7 @@ export const PROBE_COMPLETED_LEDGER: LedgerFixture = withLedger({
     },
   ],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-done",
       messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -204,10 +260,13 @@ export const PROBE_COMPLETED_LEDGER: LedgerFixture = withLedger({
 /** RE5.5 failure: send accepted, then the turn failed. until is cleared, never auto-renewed. */
 export const PROBE_FAILED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pby",
+  nonceRegistry: noncesForRun("run-rec0re-pby"),
+  assignments: assignmentsForRun("run-rec0re-pby"),
   revision: 25,
   lifecycle: "paused",
   channels: [pausedChannel(null, "incident-claude-2")],
   eventReceipts: [
+    ...NORMAL_RUN_LEDGER.eventReceipts,
     {
       eventKey: "agent-s1|turn-probe-2|turn_ended",
       kind: "turn_ended",
@@ -220,6 +279,7 @@ export const PROBE_FAILED_LEDGER: LedgerFixture = withLedger({
     },
   ],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-failed",
       messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -245,10 +305,13 @@ export const PROBE_FAILED_LEDGER: LedgerFixture = withLedger({
 /** RE5.5 unknown: no correlated turn_ended; the channel must stay paused (Y19). */
 export const PROBE_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-pbz",
+  nonceRegistry: noncesForRun("run-rec0re-pbz"),
+  assignments: assignmentsForRun("run-rec0re-pbz"),
   revision: 26,
   lifecycle: "paused",
   channels: [pausedChannel("2026-10-27T12:30:00.000Z", "incident-claude-3")],
   outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
     probeIntent({
       id: "intent-probe-unknown",
       messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
