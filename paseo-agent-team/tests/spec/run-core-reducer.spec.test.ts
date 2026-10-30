@@ -48,10 +48,11 @@ function report(overrides: Partial<RunTaskReportBlock> = {}): RunTaskReportBlock
   return {
     protocolVersion: 1,
     runId: NORMAL_RUN_LEDGER.runId,
-    taskId: "T2",
+    taskId: "t2",
     attempt: 1,
     nonce: NONCE_T2,
     assignmentId: ASSIGNMENT_T2,
+    messageId: MESSAGE_T2,
     status: "done",
     changedFiles: ["src/t2.ts"],
     ref: REF,
@@ -95,7 +96,8 @@ function addReviewer(
         (overrides.id === "assignment-t2-r1"
           ? NONCE_T2_REVIEW
           : "6f1c2a44-3b7e-4f0a-9a11-000000000007"),
-      messageId: null,
+      messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      delivery: { producerAssignmentId: "assignment-t2-a1" },
     }),
   );
   record.nonceRegistry.push({
@@ -105,7 +107,7 @@ function addReviewer(
         ? NONCE_T2_REVIEW
         : "6f1c2a44-3b7e-4f0a-9a11-000000000007"),
     runId: record.runId,
-    taskId: "T2",
+    taskId: "t2",
     assignmentId: overrides.id,
     attempt: 1,
     phase: "review",
@@ -126,7 +128,7 @@ function review(
   return {
     protocolVersion: 1,
     runId: NORMAL_RUN_LEDGER.runId,
-    taskId: "T2",
+    taskId: "t2",
     attempt: 1,
     nonce:
       assignmentId === "assignment-t2-r1"
@@ -141,12 +143,21 @@ function review(
   } as RunReviewReportBlock;
 }
 
+function attachProof(record: RunRecord, assignmentId: string, proof: unknown) {
+  const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
+  if (!assignment) throw new Error(`missing ${assignmentId}`);
+  assignment.acceptedProof = {
+    ...(proof as Record<string, unknown>),
+    messageId: assignment.messageId,
+  } as typeof assignment.acceptedProof;
+}
+
 function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
-  const task = taskOf(record, "T2");
+  const task = taskOf(record, "t2");
   task.state = "review";
   task.phase = "review";
   task.ref = REF;
-  task.report = report();
+  attachProof(record, ASSIGNMENT_T2, report());
   addReviewer(record, {
     id: "assignment-t2-r1",
     seatId: "seat-b2",
@@ -154,6 +165,7 @@ function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
     tier: "A",
     family: "codex",
   });
+  attachProof(record, "assignment-t2-r1", review());
   return record;
 }
 
@@ -163,7 +175,7 @@ function cancelIntent(record: RunRecord, kind: "wake" | "archive" = "wake") {
       id: INTENT_CANCEL,
       kind,
       assignmentId: ASSIGNMENT_T2,
-      taskId: "T2",
+      taskId: "t2",
       messageId: MESSAGE_CANCEL,
       state: "sending",
       confirmedAt: null,
@@ -194,7 +206,7 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     reviewer.tier = "B";
     const result = reduceRun(record, { kind: "review-report", block: review() }, facts);
     expect(result).toMatchObject({ ok: false, code: "RUN_EVENT_INVALID" });
-    expect(taskOf(record, "T2").state).toBe("review");
+    expect(taskOf(record, "t2").state).toBe("review");
   });
 
   test("a non-mergeable review cannot unlock done", () => {
@@ -205,25 +217,16 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(taskOf(result.next, "T2").state).not.toBe("done");
-    expect(taskOf(result.next, "T2").qualityFailures).toBe(1);
+    expect(taskOf(result.next, "t2").state).not.toBe("done");
+    expect(taskOf(result.next, "t2").qualityFailures).toBe(1);
   });
 
   test("a blocking review in the smoke phase cannot be swallowed", () => {
     const record = reviewReady();
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.spec = { ...task.spec, devSmoke: true, smokeChecklist: ["open runs"] };
     task.phase = "smoke";
-    task.reviews = [
-      {
-        assignmentId: "assignment-t2-r1",
-        reviewerAgentId: "agent-b2",
-        reviewerSeatId: "seat-b2",
-        verdict: "可合入",
-        reviewedRef: REF,
-        blockers: [],
-      },
-    ];
+    attachProof(record, "assignment-t2-r1", review());
     addReviewer(record, {
       id: "assignment-t2-r2",
       seatId: "seat-b4",
@@ -254,13 +257,14 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
         agentId: "agent-b3",
         purpose: "smoker",
         nonce: smokeNonce,
-        messageId: null,
+        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        delivery: { producerAssignmentId: "assignment-t2-a1" },
       }),
     );
     blocked.next.nonceRegistry.push({
       nonce: smokeNonce,
       runId: blocked.next.runId,
-      taskId: "T2",
+      taskId: "t2",
       assignmentId: smokeAssignment,
       attempt: 1,
       phase: "smoke",
@@ -275,7 +279,7 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     const smokeBlock = {
       protocolVersion: 1,
       runId: blocked.next.runId,
-      taskId: "T2",
+      taskId: "t2",
       attempt: 1,
       nonce: smokeNonce,
       assignmentId: smokeAssignment,
@@ -288,14 +292,14 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     const smoked = reduceRun(blocked.next, { kind: "smoke-report", block: smokeBlock }, facts);
     expect(smoked.ok).toBe(true);
     if (!smoked.ok) return;
-    expect(taskOf(smoked.next, "T2").state).not.toBe("done");
+    expect(taskOf(smoked.next, "t2").state).not.toBe("done");
   });
 });
 
 describe("R03a cancellation: two stages, quiescence, and terminal paths", () => {
   test("a dispatched assignment without turn end or authorization stays frozen", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.state = "assigned";
     task.phase = "implementation";
     const current = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
@@ -311,7 +315,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["T2"],
+        taskIds: ["t2"],
         reason: "cancel",
         cancelIntentId: INTENT_CANCEL,
         controlNonceDigest: CONTROL_DIGEST,
@@ -326,7 +330,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       frozen.next,
       {
         kind: "cancellation-checked",
-        taskId: "T2",
+        taskId: "t2",
         decisionId,
         evidence: {
           ...QUIESCENT_CANCELLATION,
@@ -342,7 +346,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     // an archive receipt alone cannot authorize release.
     expect(held.ok).toBe(true);
     if (!held.ok) return;
-    expect(taskOf(held.next, "T2")).toMatchObject({
+    expect(taskOf(held.next, "t2")).toMatchObject({
       state: "blocked",
       phase: "frozen",
       waitingReason: "cancel-not-quiescent",
@@ -353,7 +357,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
 
   test("an in-flight task stays frozen when a later turn starts after the end", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.state = "in_progress";
     const current = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
     if (!current) throw new Error("assignment");
@@ -388,7 +392,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["T2"],
+        taskIds: ["t2"],
         reason: "cancel",
         cancelIntentId: INTENT_CANCEL,
         controlNonceDigest: CONTROL_DIGEST,
@@ -403,7 +407,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       frozen.next,
       {
         kind: "cancellation-checked",
-        taskId: "T2",
+        taskId: "t2",
         decisionId,
         evidence: { ...QUIESCENT_CANCELLATION, observationSeq: 8 },
       },
@@ -411,13 +415,13 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     );
     expect(checked.ok).toBe(true);
     if (checked.ok) {
-      expect(taskOf(checked.next, "T2").state).toBe("blocked");
-      expect(taskOf(checked.next, "T2").phase).toBe("frozen");
+      expect(taskOf(checked.next, "t2").state).toBe("blocked");
+      expect(taskOf(checked.next, "t2").phase).toBe("frozen");
     }
   });
 
   test("pending tasks cancelled by dag-revised and run-cancelled become cancelled", () => {
-    const pending = taskOf(structuredClone(NORMAL_RUN_LEDGER), "T3");
+    const pending = taskOf(structuredClone(NORMAL_RUN_LEDGER), "t3");
     pending.state = "pending";
     const dagRecord = structuredClone(NORMAL_RUN_LEDGER);
     const dagResult = reduceRun(
@@ -434,14 +438,14 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
           dagRevision: dagRecord.dagRevision + 1,
           expectedDagRevision: dagRecord.dagRevision,
           tasks: dagRecord.tasks.map((task) => task.spec),
-          cancelTaskIds: ["T3"],
+          cancelTaskIds: ["t3"],
           budgetRequests: [],
         },
       },
       facts,
     );
     expect(dagResult.ok).toBe(true);
-    if (dagResult.ok) expect(taskOf(dagResult.next, "T3").state).toBe("cancelled");
+    if (dagResult.ok) expect(taskOf(dagResult.next, "t3").state).toBe("cancelled");
 
     const runRecord = structuredClone(NORMAL_RUN_LEDGER);
     const runResult = reduceRun(
@@ -450,7 +454,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       facts,
     );
     expect(runResult.ok).toBe(true);
-    if (runResult.ok) expect(taskOf(runResult.next, "T3").state).toBe("cancelled");
+    if (runResult.ok) expect(taskOf(runResult.next, "t3").state).toBe("cancelled");
   });
 
   test("freezing an in-flight task revokes its nonce", () => {
@@ -463,7 +467,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["T2"],
+        taskIds: ["t2"],
         reason: "cancel",
         cancelIntentId: INTENT_CANCEL,
         controlNonceDigest: CONTROL_DIGEST,
@@ -473,7 +477,7 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(
-      result.next.nonceRegistry.find((entry) => entry.taskId === "T2")?.revokedAt,
+      result.next.nonceRegistry.find((entry) => entry.taskId === "t2")?.revokedAt,
     ).not.toBeNull();
   });
 });
@@ -482,8 +486,8 @@ describe("R03a locks and invariants", () => {
   function withClaims(claims: RunRecord["resources"]): RunRecord {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     record.resources = claims;
-    taskOf(record, "T2").state = "in_progress";
-    const t3 = taskOf(record, "T3");
+    taskOf(record, "t2").state = "in_progress";
+    const t3 = taskOf(record, "t3");
     t3.state = "assigned";
     t3.spec = { ...t3.spec, deps: [] };
     return record;
@@ -491,8 +495,8 @@ describe("R03a locks and invariants", () => {
 
   test("a directory claim covers descendants but hot/tool names are exact", () => {
     const directory = withClaims([
-      claim({ claimId: "dir", taskId: "T2", kind: "directory", path: "src" }),
-      claim({ claimId: "file", taskId: "T3", kind: "file", path: "src/t3.ts" }),
+      claim({ claimId: "dir", taskId: "t2", kind: "directory", path: "src" }),
+      claim({ claimId: "file", taskId: "t3", kind: "file", path: "src/t3.ts" }),
     ]);
     const result = checkLedgerInvariants(directory);
     expect(result.ok).toBe(false);
@@ -504,8 +508,8 @@ describe("R03a locks and invariants", () => {
       ).toBe(true);
     }
     const hot = withClaims([
-      claim({ claimId: "hot-a", taskId: "T2", kind: "hot", path: "repo:hot" }),
-      claim({ claimId: "hot-b", taskId: "T3", kind: "hot", path: "repo:hot:child" }),
+      claim({ claimId: "hot-a", taskId: "t2", kind: "hot", path: "repo:hot" }),
+      claim({ claimId: "hot-b", taskId: "t3", kind: "hot", path: "repo:hot:child" }),
     ]);
     const hotResult = checkLedgerInvariants(hot);
     expect(hotResult.ok).toBe(true);
@@ -513,22 +517,22 @@ describe("R03a locks and invariants", () => {
 
   test("read/write excludes self and a frozen blocked claim is legal", () => {
     const rw = withClaims([
-      claim({ claimId: "read", taskId: "T2", access: "read" }),
-      claim({ claimId: "write", taskId: "T3", access: "write" }),
+      claim({ claimId: "read", taskId: "t2", access: "read" }),
+      claim({ claimId: "write", taskId: "t3", access: "write" }),
     ]);
     expect(checkLedgerInvariants(rw).ok).toBe(false);
     const self = withClaims([
-      claim({ claimId: "a", taskId: "T2", kind: "directory", path: "src" }),
-      claim({ claimId: "b", taskId: "T2", kind: "file", path: "src/t2.ts" }),
+      claim({ claimId: "a", taskId: "t2", kind: "directory", path: "src" }),
+      claim({ claimId: "b", taskId: "t2", kind: "file", path: "src/t2.ts" }),
     ]);
     const selfResult = checkLedgerInvariants(self);
     expect(
       selfResult.ok ||
         selfResult.violations.every((entry) => entry.params.reason !== "overlapping-claim"),
     ).toBe(true);
-    const frozen = withClaims([claim({ claimId: "frozen", taskId: "T2", frozen: true })]);
-    taskOf(frozen, "T2").state = "blocked";
-    taskOf(frozen, "T2").phase = "frozen";
+    const frozen = withClaims([claim({ claimId: "frozen", taskId: "t2", frozen: true })]);
+    taskOf(frozen, "t2").state = "blocked";
+    taskOf(frozen, "t2").phase = "frozen";
     expect(checkLedgerInvariants(frozen).ok).toBe(true);
     const unfrozen = structuredClone(frozen);
     unfrozen.resources[0].frozen = false;
@@ -537,7 +541,7 @@ describe("R03a locks and invariants", () => {
 
   test("a revoked nonce cannot remain on an active task", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    const nonce = record.nonceRegistry.find((entry) => entry.taskId === "T2");
+    const nonce = record.nonceRegistry.find((entry) => entry.taskId === "t2");
     if (!nonce) throw new Error("nonce");
     nonce.revokedAt = AT_UPDATED;
     const result = checkLedgerInvariants(record);
@@ -568,7 +572,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
           nonce: NONCE_T2,
           dagRevision: record.dagRevision + 1,
           expectedDagRevision: record.dagRevision,
-          tasks: [spec("T2", "Changed in flight")],
+          tasks: [spec("t2", "Changed in flight")],
           cancelTaskIds: [],
           budgetRequests: [],
         },
@@ -604,7 +608,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
     expect(paused.ok).toBe(true);
     if (!paused.ok) return;
     const record = structuredClone(paused.next);
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.state = "ready";
     task.attempts = 0;
     const nonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -612,12 +616,12 @@ describe("R03a DAG, pause, finish, determinism", () => {
       record,
       {
         kind: "task-dispatched",
-        taskId: "T2",
-        assignment: assignment({ assignmentId: "assignment-paused", taskId: "T2", nonce }),
+        taskId: "t2",
+        assignment: assignment({ assignmentId: "assignment-paused", taskId: "t2", nonce }),
         nonce: {
           nonce,
           runId: record.runId,
-          taskId: "T2",
+          taskId: "t2",
           assignmentId: "assignment-paused",
           attempt: 1,
           phase: "implementation",
@@ -640,7 +644,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
     expect(dispatch).toMatchObject({ ok: false, params: { reason: "task-dispatched" } });
     const reportValue = reduceRun(paused.next, { kind: "task-report", block: report() }, facts);
     expect(reportValue.ok).toBe(true);
-    if (reportValue.ok) expect(taskOf(reportValue.next, "T2").state).toBe("review");
+    if (reportValue.ok) expect(taskOf(reportValue.next, "t2").state).toBe("review");
   });
 
   test("run-finished requires terminal tasks, no open intents and no claims", () => {
@@ -669,7 +673,8 @@ describe("R03a DAG, pause, finish, determinism", () => {
 describe("R03a I7 done gate", () => {
   test("a done task without a report is rejected by the invariant checker", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    delete (taskOf(record, "T1") as Record<string, unknown>).report;
+    const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1");
+    if (producer) producer.acceptedProof = null;
     const result = checkLedgerInvariants(record);
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -688,19 +693,10 @@ describe("R03a gate details and invariant boundaries", () => {
     smokeOverrides: Partial<RunSmokeReportBlock> = {},
     policyHost = "127.0.0.1:6799",
   ) {
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.spec = { ...task.spec, devSmoke: true, smokeChecklist: ["open runs"] };
     task.phase = "smoke";
-    task.reviews = [
-      {
-        assignmentId: "assignment-t2-r1",
-        reviewerAgentId: "agent-b2",
-        reviewerSeatId: "seat-b2",
-        verdict: "可合入",
-        reviewedRef: REF,
-        blockers: [],
-      },
-    ];
+    attachProof(record, "assignment-t2-r1", review());
     record.policy = {
       ...record.policy,
       devTargets: [{ serverId: "dev-server-1", host: policyHost, home: "/tmp/dev-home" }],
@@ -713,13 +709,14 @@ describe("R03a gate details and invariant boundaries", () => {
         agentId: "agent-b3",
         purpose: "smoker",
         nonce: smokeNonce,
-        messageId: null,
+        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        delivery: { producerAssignmentId: "assignment-t2-a1" },
       }),
     );
     record.nonceRegistry.push({
       nonce: smokeNonce,
       runId: record.runId,
-      taskId: "T2",
+      taskId: "t2",
       assignmentId: "assignment-t2-smoke",
       attempt: 1,
       phase: "smoke",
@@ -734,7 +731,7 @@ describe("R03a gate details and invariant boundaries", () => {
     const block = {
       protocolVersion: 1,
       runId: record.runId,
-      taskId: "T2",
+      taskId: "t2",
       attempt: 1,
       nonce: smokeNonce,
       assignmentId: "assignment-t2-smoke",
@@ -750,7 +747,7 @@ describe("R03a gate details and invariant boundaries", () => {
 
   test("L1 accepts only a different-family B reviewer", () => {
     const same = reviewReady();
-    taskOf(same, "T2").spec = { ...taskOf(same, "T2").spec, level: "L1" };
+    taskOf(same, "t2").spec = { ...taskOf(same, "t2").spec, level: "L1" };
     const sameReviewer = same.assignments.find(
       (entry) => entry.assignmentId === "assignment-t2-r1",
     );
@@ -762,7 +759,7 @@ describe("R03a gate details and invariant boundaries", () => {
     );
 
     const other = reviewReady();
-    taskOf(other, "T2").spec = { ...taskOf(other, "T2").spec, level: "L1" };
+    taskOf(other, "t2").spec = { ...taskOf(other, "t2").spec, level: "L1" };
     const otherReviewer = other.assignments.find(
       (entry) => entry.assignmentId === "assignment-t2-r1",
     );
@@ -771,13 +768,13 @@ describe("R03a gate details and invariant boundaries", () => {
     otherReviewer.family = "codex";
     const result = reduceRun(other, { kind: "review-report", block: review() }, facts);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(taskOf(result.next, "T2").state).toBe("done");
+    if (result.ok) expect(taskOf(result.next, "t2").state).toBe("done");
   });
 
   test("an escalation origin raises the required review tier", () => {
     const record = reviewReady();
-    taskOf(record, "T2").spec = { ...taskOf(record, "T2").spec, level: "L1" };
-    taskOf(record, "T2").escalations = [
+    taskOf(record, "t2").spec = { ...taskOf(record, "t2").spec, level: "L1" };
+    taskOf(record, "t2").escalations = [
       { fromTier: "B", toTier: "A", atAttempt: 1, qualityFailures: 0, at: AT_UPDATED },
     ];
     const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t2-r1");
@@ -813,15 +810,15 @@ describe("R03a gate details and invariant boundaries", () => {
       );
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(taskOf(result.next, "T2").state).toBe("in_progress");
-        expect(taskOf(result.next, "T2").evidenceReturns).toBe(1);
+        expect(taskOf(result.next, "t2").state).toBe("in_progress");
+        expect(taskOf(result.next, "t2").evidenceReturns).toBe(1);
       }
     }
   });
 
   test("a revoked nonce is rejected at task-report", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    const nonce = record.nonceRegistry.find((entry) => entry.taskId === "T2");
+    const nonce = record.nonceRegistry.find((entry) => entry.taskId === "t2");
     if (!nonce) throw new Error("nonce");
     nonce.revokedAt = AT_UPDATED;
     expect(reason(reduceRun(record, { kind: "task-report", block: report() }, facts))).toBe(
@@ -831,7 +828,8 @@ describe("R03a gate details and invariant boundaries", () => {
 
   test("review-report rechecks the evidence gate", () => {
     const record = reviewReady();
-    delete (taskOf(record, "T2") as Record<string, unknown>).report;
+    const producer = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
+    if (producer) producer.acceptedProof = null;
     expect(reason(reduceRun(record, { kind: "review-report", block: review() }, facts))).toBe(
       "missing-done-report",
     );
@@ -845,7 +843,7 @@ describe("R03a gate details and invariant boundaries", () => {
       facts,
     );
     expect(defaultResult.ok).toBe(true);
-    if (defaultResult.ok) expect(taskOf(defaultResult.next, "T2").state).not.toBe("done");
+    if (defaultResult.ok) expect(taskOf(defaultResult.next, "t2").state).not.toBe("done");
 
     const extra = smokeReady();
     extra.block.checks = [
@@ -858,7 +856,7 @@ describe("R03a gate details and invariant boundaries", () => {
       facts,
     );
     expect(extraResult.ok).toBe(true);
-    if (extraResult.ok) expect(taskOf(extraResult.next, "T2").state).not.toBe("done");
+    if (extraResult.ok) expect(taskOf(extraResult.next, "t2").state).not.toBe("done");
 
     const self = smokeReady();
     const smoker = self.record.assignments.find(
@@ -873,23 +871,23 @@ describe("R03a gate details and invariant boundaries", () => {
     smokeNonceEntry.seatId = "seat-b1";
     const selfResult = reduceRun(self.record, { kind: "smoke-report", block: self.block }, facts);
     expect(selfResult.ok).toBe(true);
-    if (selfResult.ok) expect(taskOf(selfResult.next, "T2").state).not.toBe("done");
+    if (selfResult.ok) expect(taskOf(selfResult.next, "t2").state).not.toBe("done");
   });
 
   test("directory/directory overlap and blocked phase mismatch are violations", () => {
     const directory = structuredClone(NORMAL_RUN_LEDGER);
     directory.resources = [
-      claim({ claimId: "d1", taskId: "T2", kind: "directory", path: "src" }),
-      claim({ claimId: "d2", taskId: "T3", kind: "directory", path: "src/sub" }),
+      claim({ claimId: "d1", taskId: "t2", kind: "directory", path: "src" }),
+      claim({ claimId: "d2", taskId: "t3", kind: "directory", path: "src/sub" }),
     ];
-    taskOf(directory, "T3").state = "assigned";
-    taskOf(directory, "T3").spec = { ...taskOf(directory, "T3").spec, deps: [] };
+    taskOf(directory, "t3").state = "assigned";
+    taskOf(directory, "t3").spec = { ...taskOf(directory, "t3").spec, deps: [] };
     const dirResult = checkLedgerInvariants(directory);
     expect(dirResult.ok).toBe(false);
 
     const phase = structuredClone(NORMAL_RUN_LEDGER);
-    taskOf(phase, "T2").state = "blocked";
-    taskOf(phase, "T2").phase = "implementation";
+    taskOf(phase, "t2").state = "blocked";
+    taskOf(phase, "t2").phase = "implementation";
     phase.resources = [claim({ frozen: true })];
     const phaseResult = checkLedgerInvariants(phase);
     expect(phaseResult.ok).toBe(false);
@@ -908,7 +906,7 @@ describe("R03a gate details and invariant boundaries", () => {
       { ...QUIESCENT_CANCELLATION, refreshObservedAt: "2020-01-01T00:00:00.000Z" },
     ]) {
       const record = structuredClone(NORMAL_RUN_LEDGER);
-      const task = taskOf(record, "T2");
+      const task = taskOf(record, "t2");
       task.state = "in_progress";
       const current = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
       if (!current) throw new Error("assignment");
@@ -930,7 +928,7 @@ describe("R03a gate details and invariant boundaries", () => {
         record,
         {
           kind: "cancel-requested",
-          taskIds: ["T2"],
+          taskIds: ["t2"],
           reason: "cancel",
           cancelIntentId: INTENT_CANCEL,
           controlNonceDigest: CONTROL_DIGEST,
@@ -943,18 +941,18 @@ describe("R03a gate details and invariant boundaries", () => {
       if (!decisionId) throw new Error("decision");
       const checked = reduceRun(
         frozen.next,
-        { kind: "cancellation-checked", taskId: "T2", decisionId, evidence },
+        { kind: "cancellation-checked", taskId: "t2", decisionId, evidence },
         facts,
       );
       expect(checked.ok).toBe(true);
-      if (checked.ok) expect(taskOf(checked.next, "T2").state).toBe("blocked");
+      if (checked.ok) expect(taskOf(checked.next, "t2").state).toBe("blocked");
     }
   });
 
   test("dispatch at configured capacity is rejected", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     record.policy = { ...record.policy, configuredConcurrency: 0 };
-    const t3 = taskOf(record, "T3");
+    const t3 = taskOf(record, "t3");
     t3.state = "ready";
     t3.spec = { ...t3.spec, deps: [] };
     t3.attempts = 0;
@@ -963,12 +961,12 @@ describe("R03a gate details and invariant boundaries", () => {
       record,
       {
         kind: "task-dispatched",
-        taskId: "T3",
-        assignment: assignment({ assignmentId: "assignment-t3-a1", taskId: "T3", nonce }),
+        taskId: "t3",
+        assignment: assignment({ assignmentId: "assignment-t3-a1", taskId: "t3", nonce }),
         nonce: {
           nonce,
           runId: record.runId,
-          taskId: "T3",
+          taskId: "t3",
           assignmentId: "assignment-t3-a1",
           attempt: 1,
           phase: "implementation",
@@ -982,7 +980,7 @@ describe("R03a gate details and invariant boundaries", () => {
         },
         intent: dispatchIntent({
           id: "intent-t3-a1",
-          taskId: "T3",
+          taskId: "t3",
           assignmentId: "assignment-t3-a1",
           messageId: MESSAGE_T2,
         }),
@@ -1007,7 +1005,7 @@ describe("R01f cancellation authorization and refresh evidence", () => {
     recipient = "agent-b1",
   ) {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    const task = taskOf(record, "T2");
+    const task = taskOf(record, "t2");
     task.state = "blocked";
     task.phase = "frozen";
     task.frozenClaimId = "claim-t2";
@@ -1021,7 +1019,7 @@ describe("R01f cancellation authorization and refresh evidence", () => {
         id: INTENT_CANCEL,
         kind: "archive",
         assignmentId: ASSIGNMENT_T2,
-        taskId: "T2",
+        taskId: "t2",
         recipient,
         messageId: MESSAGE_CANCEL,
         state: "confirmed",
@@ -1045,12 +1043,12 @@ describe("R01f cancellation authorization and refresh evidence", () => {
         category: "D1",
         controlNonceDigest: CONTROL_DIGEST,
         state: "answered",
-        dedupeKey: "cancel:T2",
-        subjectId: "T2",
-        summary: "cancel T2",
+        dedupeKey: "cancel:t2",
+        subjectId: "t2",
+        summary: "cancel t2",
         createdAt: AT_UPDATED,
         answeredAt: AT_UPDATED,
-        answer: { action: "cancel", taskIds: ["T2"], answeredAt: AT_UPDATED },
+        answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
         cancelIntentId: INTENT_CANCEL,
         ...decisionOverrides,
       } as RunRecord["decisions"][number],
@@ -1067,12 +1065,12 @@ describe("R01f cancellation authorization and refresh evidence", () => {
     const { record, evidence } = cancellationRecord();
     const result = reduceRun(
       record,
-      { kind: "cancellation-checked", taskId: "T2", decisionId: DECISION_D1, evidence },
+      { kind: "cancellation-checked", taskId: "t2", decisionId: DECISION_D1, evidence },
       facts,
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(taskOf(result.next, "T2").state).toBe("cancelled");
+    expect(taskOf(result.next, "t2").state).toBe("cancelled");
     expect(result.next.resources).toEqual([]);
   });
 
@@ -1107,7 +1105,7 @@ describe("R01f cancellation authorization and refresh evidence", () => {
       "resume-seat decision",
       () =>
         cancellationRecord({
-          answer: { action: "resume-seat", taskIds: ["T2"], answeredAt: AT_UPDATED },
+          answer: { action: "resume-seat", taskIds: ["t2"], answeredAt: AT_UPDATED },
         }),
     ],
     [
@@ -1128,12 +1126,12 @@ describe("R01f cancellation authorization and refresh evidence", () => {
       const { record, evidence } = make();
       const result = reduceRun(
         record,
-        { kind: "cancellation-checked", taskId: "T2", decisionId: DECISION_D1, evidence },
+        { kind: "cancellation-checked", taskId: "t2", decisionId: DECISION_D1, evidence },
         facts,
       );
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      const task = taskOf(result.next, "T2");
+      const task = taskOf(result.next, "t2");
       expect(task.state).toBe("blocked");
       expect(task.phase).toBe("frozen");
       expect(result.next.resources[0]?.frozen).toBe(true);
