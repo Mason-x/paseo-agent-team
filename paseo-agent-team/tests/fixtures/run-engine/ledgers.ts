@@ -4,6 +4,7 @@ import {
   AT_CREATED,
   AT_UPDATED,
   assignment,
+  assignmentsForRun,
   claim,
   DECISION_D1,
   DIGEST_D,
@@ -17,6 +18,7 @@ import {
   NONCE_T1,
   NONCE_T2,
   NORMAL_RUN_LEDGER,
+  noncesForRun,
   PARTIAL_CANCELLATION,
   QUIESCENT_CANCELLATION,
   spec,
@@ -34,29 +36,26 @@ const MESSAGE_T1_REVIEW = "66666666-6666-4666-8666-666666666668";
 /** RE1.11 / Y21: host answered `agent_request_outcome_unknown`; intent is terminal, no retry loop. */
 export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-unk",
+  nonceRegistry: noncesForRun("run-rec0re-unk"),
   revision: 9,
   lifecycle: "paused",
   tasks: [t1, { ...t2, state: "blocked", waitingReason: "outcome-unknown" } as RunTaskRecord, t3],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "assigned",
-      turnId: null,
-    }),
-  ],
-  outbox: [
-    dispatchIntent({
-      id: INTENT_T2,
-      messageId: MESSAGE_T2,
-      state: "outcome-unknown",
-      recoverySendCount: 1,
-      confirmedAt: null,
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-unk").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? { ...entry, state: "assigned", turnId: null }
+      : entry,
+  ),
+  outbox: NORMAL_RUN_LEDGER.outbox.map((entry) =>
+    entry.id === INTENT_T2
+      ? {
+          ...entry,
+          state: "outcome-unknown" as const,
+          recoverySendCount: 1,
+          confirmedAt: null,
+        }
+      : entry,
+  ),
   decisions: [
     {
       decisionId: DECISION_D1,
@@ -90,6 +89,7 @@ export const OUTCOME_UNKNOWN_LEDGER: LedgerFixture = withLedger({
 /** RE1.10 / Y18: cancel requested; turn ended and host idle, but the cancel receipt is unconfirmed. */
 export const CANCELLING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-cnl",
+  nonceRegistry: noncesForRun("run-rec0re-cnl"),
   revision: 11,
   tasks: [
     t1,
@@ -102,22 +102,21 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "in_progress",
-      turnId: "turn-7",
-      cancellation: PARTIAL_CANCELLATION,
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-cnl").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "in_progress",
+          turnId: "turn-7",
+          cancellation: PARTIAL_CANCELLATION,
+        }
+      : entry,
+  ),
   outbox: [
-    dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2 }),
+    ...NORMAL_RUN_LEDGER.outbox,
     {
       id: INTENT_CANCEL,
-      kind: "wake",
+      kind: "archive",
       recipient: "agent-b1",
       messageId: MESSAGE_CANCEL,
       idempotencyKey: "cancel-t2-1",
@@ -149,6 +148,7 @@ export const CANCELLING_LEDGER: LedgerFixture = withLedger({
 /** RE1.10 positive form: all three conditions hold, so the release may proceed (claim reclaimed). */
 export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-qsc",
+  nonceRegistry: noncesForRun("run-rec0re-qsc"),
   revision: 12,
   tasks: [
     t1,
@@ -162,19 +162,31 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [],
-  assignments: [
-    assignment({
+  assignments: assignmentsForRun("run-rec0re-qsc").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "cancelled",
+          turnId: "turn-7",
+          endedAt: AT_UPDATED,
+          cancellation: QUIESCENT_CANCELLATION,
+        }
+      : entry,
+  ),
+  outbox: [
+    ...NORMAL_RUN_LEDGER.outbox,
+    dispatchIntent({
+      id: INTENT_CANCEL,
+      kind: "archive",
+      taskId: "t2",
       assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "cancelled",
-      turnId: "turn-7",
-      endedAt: AT_UPDATED,
-      cancellation: QUIESCENT_CANCELLATION,
+      recipient: "agent-b1",
+      messageId: MESSAGE_CANCEL,
+      idempotencyKey: "cancel-t2-1",
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
     }),
   ],
-  outbox: [dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" })],
   decisions: [
     {
       decisionId: DECISION_D1,
@@ -182,16 +194,94 @@ export const QUIESCENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
       controlNonceDigest: "d".repeat(64),
       state: "answered",
       answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
-      dedupeKey: "run-rec0re-qsc|D1|quiescent|t2",
+      dedupeKey: "cancel:t2",
       subjectId: "t2",
       summary: "Operator approved cancellation after quiescence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
-
-      cancelIntents: null,
+      cancelIntents: [{ assignmentId: "assignment-t2-a1", intentId: INTENT_CANCEL }],
       resolution: null,
     },
   ],
+});
+
+/** 194 LocalNeverSent: a prepared dispatch failed locally before any send; no archive/167 is invented. */
+export const LOCAL_NEVER_SENT_CANCELLED_LEDGER: LedgerFixture = withLedger({
+  runId: "run-rec0re-lns",
+  revision: 13,
+  lifecycle: "paused",
+  tasks: [
+    t1,
+    {
+      ...t2,
+      state: "cancelled",
+      phase: undefined,
+      waitingReason: null,
+      releaseDecisionId: null,
+    } as RunTaskRecord,
+    t3,
+  ],
+  resources: [],
+  assignments: assignmentsForRun("run-rec0re-lns").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          state: "cancelled",
+          turnId: null,
+          startedAt: null,
+          endedAt: null,
+          endedEventKey: null,
+          cancellation: null,
+          acceptedProof: null,
+          delivery: null,
+        }
+      : entry,
+  ),
+  outbox: NORMAL_RUN_LEDGER.outbox.map((entry) =>
+    entry.id === INTENT_T2
+      ? {
+          ...entry,
+          state: "failed" as const,
+          recoverySendCount: 0,
+          confirmedAt: null,
+          localCancellation: {
+            reason: "cancel-before-send" as const,
+            at: AT_UPDATED,
+            eventSeq: 8,
+            cause: "cancel-requested" as const,
+          },
+        }
+      : entry,
+  ),
+  nonceRegistry: noncesForRun("run-rec0re-lns").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? {
+          ...entry,
+          acceptedAt: null,
+          acceptedEventKey: null,
+          revokedAt: AT_UPDATED,
+          revokeReason: "cancel-before-send",
+        }
+      : entry,
+  ),
+  events: [
+    ...NORMAL_RUN_LEDGER.events.filter(
+      (entry) => !(entry.payload.taskId === "t2" && String(entry.kind).startsWith("turn_")),
+    ),
+    {
+      seq: 8,
+      kind: "cancel-requested",
+      at: AT_UPDATED,
+      payload: {
+        taskId: "t2",
+        audit: { localIntentIds: [INTENT_T2], supersededDecisionIds: [] },
+      },
+    },
+  ],
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts.filter(
+    (entry) => entry.eventKey !== "agent-b1|turn-7|turn_ended",
+  ),
+  counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8, eventsThroughSeq: 8 },
 });
 
 /**
@@ -204,44 +294,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
   lifecycle: "paused",
   counters: { ...NORMAL_RUN_LEDGER.counters, observationSeq: 8 },
   tasks: [
-    {
-      ...t1,
-      report: {
-        protocolVersion: 1,
-        runId: "run-rec0re-caf",
-        taskId: "t1",
-        attempt: 1,
-        nonce: NONCE_T1,
-        assignmentId: "assignment-t1-a1",
-        status: "done",
-        changedFiles: ["src/t1.ts"],
-        ref: { kind: "git-commit", value: "9f3c1a7" },
-        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
-        evidence: [
-          {
-            id: "five-gates",
-            command: "npm run check && npm run typecheck && npm test",
-            exitCode: 0,
-            summary: "all gates passed",
-            artifactPath: "evidence/t1.log",
-            ref: { kind: "git-commit", value: "9f3c1a7" },
-            isolation: {
-              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
-              outsideRealHome: true,
-            },
-          },
-        ],
-      },
-      reviews: [
-        {
-          reviewerAgentId: "agent-b2",
-          reviewerSeatId: "seat-b2",
-          verdict: "可合入",
-          reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
-          blockers: [],
-        },
-      ],
-    } as RunTaskRecord,
+    t1,
     {
       ...t2,
       state: "blocked",
@@ -262,7 +315,35 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       state: "ended",
       turnId: "turn-6",
       endedAt: AT_UPDATED,
+      endedEventKey: "agent-b1|turn-6|turn_ended",
       workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: "run-rec0re-caf",
+        taskId: "t1",
+        attempt: 1,
+        nonce: NONCE_T1,
+        assignmentId: "assignment-t1-a1",
+        messageId: MESSAGE_T1,
+        status: "done",
+        changedFiles: ["src/t1.ts"],
+        ref: { kind: "git-commit", value: "9f3c1a7" },
+        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+        evidence: [
+          {
+            id: "five-gates",
+            command: "npm run check && npm run typecheck && npm test",
+            exitCode: 0,
+            summary: "all gates passed",
+            artifactPath: "evidence/t1.log",
+            ref: { kind: "git-commit", value: "9f3c1a7" },
+            isolation: {
+              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
+              outsideRealHome: true,
+            },
+          },
+        ],
+      },
     }),
     assignment({
       assignmentId: "assignment-t1-r1",
@@ -274,9 +355,24 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       family: "codex",
       nonce: T1_REVIEW_NONCE,
       messageId: MESSAGE_T1_REVIEW,
+      delivery: { producerAssignmentId: "assignment-t1-a1" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: "run-rec0re-caf",
+        taskId: "t1",
+        attempt: 1,
+        nonce: T1_REVIEW_NONCE,
+        assignmentId: "assignment-t1-r1",
+        messageId: MESSAGE_T1_REVIEW,
+        reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
+        verdict: "可合入",
+        blockers: [],
+        probes: [],
+      },
       state: "ended",
       turnId: "turn-8",
       endedAt: AT_UPDATED,
+      endedEventKey: "agent-b2|turn-8|turn_ended",
       workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
     }),
     assignment({
@@ -311,7 +407,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
     dispatchIntent({ id: INTENT_T2, messageId: MESSAGE_T2, state: "confirmed" }),
     dispatchIntent({
       id: INTENT_CANCEL,
-      kind: "wake",
+      kind: "archive",
       taskId: "t2",
       assignmentId: "assignment-t2-a1",
       recipient: "agent-b1",
@@ -321,29 +417,16 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       confirmedAt: AT_UPDATED,
     }),
   ],
-  eventReceipts: [
-    ...NORMAL_RUN_LEDGER.eventReceipts,
-    {
-      eventKey: "agent-b2|turn-8|turn_ended",
-      kind: "turn_ended",
-      agentId: "agent-b2",
-      turnId: "turn-8",
-      seq: 8,
-      receivedAt: AT_UPDATED,
-      dedupeKey: "agent-b2|turn-8|turn_ended",
-      disposition: "accepted",
-    },
-  ],
+  eventReceipts: [...NORMAL_RUN_LEDGER.eventReceipts],
   nonceRegistry: [
     ...NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({
       ...entry,
       runId: "run-rec0re-caf",
       ...(entry.assignmentId === "assignment-t1-r1"
-        ? {
-            acceptedAt: AT_UPDATED,
-            acceptedEventKey: "agent-b2|turn-8|turn_ended",
-          }
-        : {}),
+        ? { acceptedAt: AT_UPDATED, acceptedEventKey: "proof:assignment-t1-r1" }
+        : entry.assignmentId === "assignment-t1-a1"
+          ? { acceptedAt: AT_UPDATED, acceptedEventKey: "proof:assignment-t1-a1" }
+          : {}),
     })),
     ...(NORMAL_RUN_LEDGER.nonceRegistry.some((entry) => entry.assignmentId === "assignment-t1-r1")
       ? []
@@ -377,8 +460,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
       summary: "Operator approved cancellation; release still requires quiescence evidence.",
       createdAt: AT_UPDATED,
       answeredAt: AT_UPDATED,
-
-      cancelIntents: null,
+      cancelIntents: [{ assignmentId: "assignment-t2-a1", intentId: INTENT_CANCEL }],
       resolution: null,
     },
   ],
@@ -387,6 +469,7 @@ export const CANCELLATION_AUTHORIZED_FROZEN_LEDGER: LedgerFixture = withLedger({
 /** RE1.8 / I3: a blocked task keeps a frozen claim; releasing it would need an explicit decision. */
 export const BLOCKED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-blk",
+  nonceRegistry: noncesForRun("run-rec0re-blk"),
   revision: 8,
   lifecycle: "paused",
   tasks: [
@@ -401,15 +484,11 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
     t3,
   ],
   resources: [claim({ frozen: true, taskId: "t2" })],
-  assignments: [
-    assignment({
-      assignmentId: "assignment-t2-a1",
-      attempt: 1,
-      nonce: NONCE_T2,
-      messageId: MESSAGE_T2,
-      state: "assigned",
-    }),
-  ],
+  assignments: assignmentsForRun("run-rec0re-blk").map((entry) =>
+    entry.assignmentId === "assignment-t2-a1"
+      ? { ...entry, state: "assigned", turnId: null }
+      : entry,
+  ),
   decisions: [
     {
       decisionId: DECISION_D1,
@@ -469,6 +548,8 @@ export function buildOversizedLedger(): LedgerFixture {
 /** RE1.7 / RE2.8: overlong fields; the schema rejects this record (input for rejection cases). */
 export const OVERLONG_FIELDS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-lng",
+  nonceRegistry: noncesForRun("run-rec0re-lng"),
+  assignments: assignmentsForRun("run-rec0re-lng"),
   revision: 4,
   tasks: [
     taskRecord(
