@@ -37,7 +37,24 @@ function pausedChannel(until: string | null, incidentId = "incident-claude-1"): 
 /** RE2.3 / RE5.1 / RE5.2 / Y9: every counter already sits at its cap. */
 export const CONTROL_ATTEMPTS_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-ctl",
-  nonceRegistry: noncesForRun("run-rec0re-ctl"),
+  nonceRegistry: [
+    ...noncesForRun("run-rec0re-ctl"),
+    {
+      nonce: T3_ASSIGNMENT.nonce,
+      runId: "run-rec0re-ctl",
+      taskId: T3_ASSIGNMENT.taskId,
+      assignmentId: T3_ASSIGNMENT.assignmentId,
+      attempt: T3_ASSIGNMENT.attempt,
+      agentId: T3_ASSIGNMENT.agentId,
+      seatId: T3_ASSIGNMENT.seatId,
+      phase: "implementation",
+      issuedAt: T3_ASSIGNMENT.createdAt,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    },
+  ],
   assignments: [...assignmentsForRun("run-rec0re-ctl"), T3_ASSIGNMENT],
   outbox: [
     ...NORMAL_RUN_LEDGER.outbox,

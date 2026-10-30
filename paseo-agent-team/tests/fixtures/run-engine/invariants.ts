@@ -105,7 +105,24 @@ export const INVARIANT_CASES: readonly InvariantCase[] = [
     kind: "violation",
     ledger: withLedger({
       runId: "run-rec0re-i3x",
-      nonceRegistry: noncesForRun("run-rec0re-i3x"),
+      nonceRegistry: [
+        ...noncesForRun("run-rec0re-i3x"),
+        {
+          nonce: T3_ASSIGNMENT.nonce,
+          runId: "run-rec0re-i3x",
+          taskId: T3_ASSIGNMENT.taskId,
+          assignmentId: T3_ASSIGNMENT.assignmentId,
+          attempt: T3_ASSIGNMENT.attempt,
+          agentId: T3_ASSIGNMENT.agentId,
+          seatId: T3_ASSIGNMENT.seatId,
+          phase: "implementation",
+          issuedAt: T3_ASSIGNMENT.createdAt,
+          acceptedAt: null,
+          acceptedEventKey: null,
+          revokedAt: null,
+          revokeReason: null,
+        },
+      ],
       assignments: [...assignmentsForRun("run-rec0re-i3x"), T3_ASSIGNMENT],
       outbox: [
         ...NORMAL_RUN_LEDGER.outbox,

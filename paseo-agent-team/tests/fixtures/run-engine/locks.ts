@@ -45,7 +45,24 @@ export const LOCK_CONFLICT_RUN_A: LedgerFixture = withLedger({
 
 export const LOCK_CONFLICT_RUN_B: LedgerFixture = withLedger({
   runId: "run-rec0re-lkb",
-  nonceRegistry: noncesForRun("run-rec0re-lkb"),
+  nonceRegistry: [
+    ...noncesForRun("run-rec0re-lkb"),
+    {
+      nonce: T3_ASSIGNMENT.nonce,
+      runId: "run-rec0re-lkb",
+      taskId: T3_ASSIGNMENT.taskId,
+      assignmentId: T3_ASSIGNMENT.assignmentId,
+      attempt: T3_ASSIGNMENT.attempt,
+      agentId: T3_ASSIGNMENT.agentId,
+      seatId: T3_ASSIGNMENT.seatId,
+      phase: "implementation",
+      issuedAt: T3_ASSIGNMENT.createdAt,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    },
+  ],
   assignments: [...assignmentsForRun("run-rec0re-lkb"), T3_ASSIGNMENT],
   outbox: [
     ...NORMAL_RUN_LEDGER.outbox,

@@ -37,9 +37,10 @@ function validProducer(record: LedgerFixture, assignment: RunAssignment): boolea
   const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
   const parsed = RunStoredTaskReportSchema.safeParse(assignment.acceptedProof);
   if (!task || !parsed.success || parsed.data.status !== "done") return false;
-  return task.spec.evidence.every((required) =>
-    parsed.data.evidence.some((entry) => entry.id === required.id && entry.exitCode === 0),
-  );
+  return task.spec.evidence.every((required) => {
+    const evidence = parsed.data.evidence.find((entry) => entry.id === required.id);
+    return evidence !== undefined && evidence.exitCode === 0;
+  });
 }
 
 /** The existing finite LocalNeverSent source witness, with no state repair or inference. */
@@ -123,9 +124,20 @@ export function collectSourceIssues(
   for (const assignment of record.assignments) {
     const ap = `assignments.${assignment.assignmentId}`;
     const proof = assignment.acceptedProof;
-    const nonce = record.nonceRegistry.find(
-      (entry) => entry.assignmentId === assignment.assignmentId,
+    // Either frozen identifier locates a candidate, so a single broken link can be named.
+    // Multiple candidates are ambiguous; never pick a first row or hide a duplicate.
+    const nonceCandidates = record.nonceRegistry.filter(
+      (entry) => entry.assignmentId === assignment.assignmentId || entry.nonce === assignment.nonce,
     );
+    const business = assignment.purpose !== "probe";
+    if (business || proof !== null)
+      check(
+        nonceCandidates.length === 1,
+        "assignment-nonce",
+        `${ap}.nonce`,
+        "Business assignment must have exactly one own nonce registration",
+      );
+    const nonce = nonceCandidates.length === 1 ? nonceCandidates[0] : undefined;
     if (proof !== null) {
       const identity = {
         runId: record.runId,
@@ -151,15 +163,34 @@ export function collectSourceIssues(
           "Proof workspace must match assignment",
         );
       }
-      check(
-        nonce !== undefined,
-        "proof-nonce",
-        `${ap}.nonce`,
-        "Accepted proof requires its registered nonce",
-      );
     }
     if (nonce) {
       const np = `nonceRegistry.${nonce.nonce}`;
+      if (business) {
+        const identity = {
+          nonce: assignment.nonce,
+          taskId: assignment.taskId,
+          assignmentId: assignment.assignmentId,
+          attempt: assignment.attempt,
+          agentId: assignment.agentId,
+          seatId: assignment.seatId,
+          phase:
+            assignment.purpose === "reviewer"
+              ? "review"
+              : assignment.purpose === "smoker"
+                ? "smoke"
+                : "implementation",
+        };
+        for (const [field, value] of Object.entries(identity)) {
+          check(
+            equal(nonce[field], value),
+            "nonce-binding",
+            `${np}.${field}`,
+            "Nonce registration must match frozen assignment identity",
+          );
+        }
+        // runId is checked once for every registry row by the existing nonce-run loop below.
+      }
       if (proof !== null) {
         check(
           nonce.acceptedAt !== null,
@@ -611,35 +642,80 @@ export function collectSourceIssues(
         "Task without declared source must have empty cache",
       );
     }
-    if (task.state === "done" && valid) {
-      const reviewer = record.assignments.find(
-        (entry) =>
-          entry.taskId === task.spec.id &&
-          entry.purpose === "reviewer" &&
-          entry.acceptedProof !== null &&
-          "verdict" in entry.acceptedProof &&
-          entry.delivery?.producerAssignmentId === producer?.assignmentId,
+    if (task.state === "done") {
+      const producerProof = producer?.acceptedProof;
+      const hasProducer = check(
+        producer !== undefined &&
+          producer.taskId === task.spec.id &&
+          ["member", "coordinator", "reopen"].includes(producer.purpose) &&
+          producerProof !== null &&
+          producerProof !== undefined &&
+          "status" in producerProof &&
+          producerProof.status === "done",
+        "done-producer-chain",
+        `${tp}.producer`,
+        "Done task requires its explicitly declared producer and own done proof",
       );
-      check(
-        reviewer !== undefined,
-        "done-reviewer-chain",
-        `${tp}.reviewer`,
-        "Done task requires matching reviewer proof chain",
-      );
-      if (reviewer?.acceptedProof && producer?.acceptedProof) {
-        check(
-          "reviewedRef" in reviewer.acceptedProof,
-          "done-reviewer-kind",
-          `assignments.${reviewer.assignmentId}.acceptedProof`,
-          "Done reviewer requires review report",
+      // Review/smoke refs depend on that producer; independent nonce/cache checks still run.
+      if (hasProducer) {
+        const reviewer = record.assignments.find(
+          (entry) =>
+            entry.taskId === task.spec.id &&
+            entry.purpose === "reviewer" &&
+            entry.acceptedProof !== null &&
+            "verdict" in entry.acceptedProof &&
+            entry.delivery?.producerAssignmentId === producer?.assignmentId,
         );
-        if ("reviewedRef" in reviewer.acceptedProof && "ref" in producer.acceptedProof) {
+        check(
+          reviewer !== undefined,
+          "done-reviewer-chain",
+          `${tp}.reviewer`,
+          "Done task requires matching reviewer proof chain",
+        );
+        if (reviewer?.acceptedProof && producer?.acceptedProof) {
           check(
-            equal(reviewer.acceptedProof.reviewedRef, producer.acceptedProof.ref),
-            "done-reviewed-ref",
-            `assignments.${reviewer.assignmentId}.acceptedProof.reviewedRef`,
-            "Done review must reference producer ref",
+            "reviewedRef" in reviewer.acceptedProof,
+            "done-reviewer-kind",
+            `assignments.${reviewer.assignmentId}.acceptedProof`,
+            "Done reviewer requires review report",
           );
+          if ("reviewedRef" in reviewer.acceptedProof && "ref" in producer.acceptedProof) {
+            check(
+              equal(reviewer.acceptedProof.reviewedRef, producer.acceptedProof.ref),
+              "done-reviewed-ref",
+              `assignments.${reviewer.assignmentId}.acceptedProof.reviewedRef`,
+              "Done review must reference producer ref",
+            );
+          }
+        }
+        if (task.spec.devSmoke) {
+          const smoker = record.assignments.find(
+            (entry) =>
+              entry.taskId === task.spec.id &&
+              entry.purpose === "smoker" &&
+              entry.delivery?.producerAssignmentId === producer?.assignmentId &&
+              entry.acceptedProof !== null &&
+              "testedRef" in entry.acceptedProof,
+          );
+          check(
+            smoker !== undefined,
+            "done-smoker-chain",
+            `${tp}.smoker`,
+            "DEV done task requires its matching smoker proof chain",
+          );
+          if (
+            smoker?.acceptedProof &&
+            "testedRef" in smoker.acceptedProof &&
+            producerProof &&
+            "ref" in producerProof
+          ) {
+            check(
+              equal(smoker.acceptedProof.testedRef, producerProof.ref),
+              "done-tested-ref",
+              `assignments.${smoker.assignmentId}.acceptedProof.testedRef`,
+              "Done smoke must reference producer ref",
+            );
+          }
         }
       }
     }
@@ -676,15 +752,6 @@ export function collectSourceIssues(
           "cancellation-answer-coverage",
           `${dp}.answer.taskIds`,
           "Cancellation answer must cover task",
-        );
-        check(
-          equal(
-            (decision.cancelIntents ?? []).map((entry) => entry.assignmentId),
-            [...(scenario.cancelObligations[task.spec.id] ?? [])].sort(),
-          ),
-          "cancellation-pairs",
-          `${dp}.cancelIntents`,
-          "Pairs must equal explicit scenario obligations",
         );
       }
     }
@@ -723,6 +790,37 @@ export function collectSourceIssues(
   }
   for (const decision of record.decisions) {
     const dp = `decisions.${decision.decisionId}`;
+    const cancelSubject =
+      decision.category === "D1" &&
+      decision.subjectId !== null &&
+      decision.dedupeKey === `cancel:${decision.subjectId}`
+        ? decision.subjectId
+        : null;
+    if (cancelSubject !== null && decision.cancelIntents !== null) {
+      if (Object.hasOwn(scenario.cancelObligations, cancelSubject)) {
+        check(
+          equal(
+            decision.cancelIntents.map((entry) => entry.assignmentId),
+            [...(scenario.cancelObligations[cancelSubject] ?? [])].sort(),
+          ),
+          "cancellation-pairs",
+          `${dp}.cancelIntents`,
+          "Pairs must equal explicit scenario obligations",
+        );
+      }
+      for (const binding of decision.cancelIntents) {
+        const actor = record.assignments.find(
+          (entry) => entry.assignmentId === binding.assignmentId,
+        );
+        if (actor)
+          check(
+            actor.taskId === cancelSubject,
+            "cancellation-pair-task",
+            `${dp}.cancelIntents.${binding.assignmentId}.assignmentId`,
+            "Pair must belong to cancellation decision subject",
+          );
+      }
+    }
     if (decision.state === "superseded") {
       check(
         decision.answer === null,
@@ -843,12 +941,6 @@ export function collectSourceIssues(
       `${dp}.cancelIntents`,
       "Cancellation pairs must be unique",
     );
-    const completed = record.assignments.some(
-      (entry) =>
-        entry.taskId === decision.subjectId &&
-        entry.state === "cancelled" &&
-        Boolean(entry.cancellation),
-    );
     for (const binding of decision.cancelIntents) {
       const bp = `${dp}.cancelIntents.${binding.assignmentId}`;
       const assignment = record.assignments.find(
@@ -867,13 +959,6 @@ export function collectSourceIssues(
         `${bp}.intentId`,
         "Pair intent must exist",
       );
-      if (assignment && completed && decision.state === "answered")
-        check(
-          assignment.taskId === decision.subjectId,
-          "cancellation-pair-task",
-          `${bp}.assignmentId`,
-          "Pair must belong to cancelled task",
-        );
       if (assignment && intent) {
         for (const [key, value] of Object.entries({
           kind: "archive",

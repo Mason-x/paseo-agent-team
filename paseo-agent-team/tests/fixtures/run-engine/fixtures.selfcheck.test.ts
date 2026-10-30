@@ -376,7 +376,8 @@ const INVARIANT_METADATA: Record<string, SourceMetadata & { domainExpected?: str
     domainExpected: "I4",
   },
   "i5-nonce-replayed": {
-    expectedSource: [],
+    // Duplicating this same reviewer nonce row is the replay mutation itself, not a second fault.
+    expectedSource: [{ code: "assignment-nonce", path: "assignments.assignment-t1-r1.nonce" }],
     category: "invariant-negative",
     consumer: "R03",
     parent: "NORMAL",
@@ -484,6 +485,7 @@ const CACHE_SOURCE: Readonly<Record<string, Readonly<Record<string, string | nul
 };
 
 const CANCEL_OBLIGATIONS: Readonly<Record<string, readonly string[]>> = {
+  "cancellation-authorized-frozen": ["assignment-t2-a1"],
   "quiescent-cancelled-ledger": ["assignment-t2-a1"],
   "quiescent-two": ["assignment-t2-a1", "assignment-t2-a2"],
 };
@@ -1222,6 +1224,21 @@ describe("run engine fixtures against R01 schemas", () => {
       },
     };
     two.assignments.push(second);
+    two.nonceRegistry.push({
+      nonce: second.nonce,
+      runId: two.runId,
+      taskId: second.taskId,
+      assignmentId: second.assignmentId,
+      attempt: second.attempt,
+      agentId: second.agentId,
+      seatId: second.seatId,
+      phase: "implementation",
+      issuedAt: second.createdAt,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: AT_UPDATED,
+      revokeReason: "cancelled",
+    });
     two.outbox.push(
       dispatchIntent({
         id: "intent-t2-a2",
@@ -1265,6 +1282,14 @@ describe("run engine fixtures against R01 schemas", () => {
     expect(RunRecordSchema.safeParse(two).success).toBe(true);
     expectSources("quiescent-two", two, []);
 
+    const missingSecondNonce = structuredClone(two);
+    missingSecondNonce.nonceRegistry = missingSecondNonce.nonceRegistry.filter(
+      (entry) => entry.assignmentId !== second.assignmentId,
+    );
+    expectSources("quiescent-two", missingSecondNonce, [
+      { code: "assignment-nonce", path: "assignments.assignment-t2-a2.nonce" },
+    ]);
+
     const extra = structuredClone(two);
     const third = {
       ...first,
@@ -1281,6 +1306,21 @@ describe("run engine fixtures against R01 schemas", () => {
       delivery: null,
     };
     extra.assignments.push(third);
+    extra.nonceRegistry.push({
+      nonce: third.nonce,
+      runId: extra.runId,
+      taskId: third.taskId,
+      assignmentId: third.assignmentId,
+      attempt: third.attempt,
+      agentId: third.agentId,
+      seatId: third.seatId,
+      phase: "implementation",
+      issuedAt: third.createdAt,
+      acceptedAt: null,
+      acceptedEventKey: null,
+      revokedAt: null,
+      revokeReason: null,
+    });
     extra.outbox.push(
       dispatchIntent({
         id: "intent-t2-a3",
@@ -1312,6 +1352,18 @@ describe("run engine fixtures against R01 schemas", () => {
     ];
     expect(RunRecordSchema.safeParse(extra).success).toBe(true);
     expectSources("quiescent-two", extra, [
+      {
+        code: "cancellation-pairs",
+        path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents",
+      },
+    ]);
+
+    const missingThirdNonce = structuredClone(extra);
+    missingThirdNonce.nonceRegistry = missingThirdNonce.nonceRegistry.filter(
+      (entry) => entry.assignmentId !== third.assignmentId,
+    );
+    expectSources("quiescent-two", missingThirdNonce, [
+      { code: "assignment-nonce", path: "assignments.assignment-t2-a3.nonce" },
       {
         code: "cancellation-pairs",
         path: "decisions.66666666-6666-4666-8666-666666666666.cancelIntents",
@@ -1481,6 +1533,7 @@ describe("run engine fixtures against R01 schemas", () => {
     expect(RunRecordSchema.safeParse(broken).success).toBe(true);
     expectSources("cancelling-ledger", broken, [
       { code: "cache-source", path: "tasks.t1.cacheSource" },
+      { code: "done-producer-chain", path: "tasks.t1.producer" },
     ]);
 
     const reviewerOnly = structuredClone(CANCELLING_LEDGER);
@@ -1596,6 +1649,10 @@ describe("run engine fixtures against R01 schemas", () => {
         { code: "done-reviewer-chain", path: "tasks.t1.reviewer" },
       ],
       [
+        {
+          code: "nonce-binding",
+          path: "nonceRegistry.6f1c2a44-3b7e-4f0a-9a11-000000000004.seatId",
+        },
         { code: "seat-agent", path: "assignments.assignment-t1-r1.agentId" },
         { code: "seat-tier", path: "assignments.assignment-t1-r1.tier" },
         { code: "seat-duty", path: "roster.seat-b1.duties" },
