@@ -6,7 +6,10 @@ import {
   RunRecordSchema,
   RunStoredTaskReportSchema,
 } from "../../shared/schemas/run-engine/ledger";
-import { RunTaskReportBlockSchema } from "../../shared/schemas/run-engine/protocol";
+import {
+  RunTaskDagBlockSchema,
+  RunTaskReportBlockSchema,
+} from "../../shared/schemas/run-engine/protocol";
 import { NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
 
 const facts = { now: "2026-10-29T00:00:00.000Z", newId: () => crypto.randomUUID() };
@@ -53,10 +56,10 @@ describe("R01g core invariants", () => {
       controlNonceDigest: "a".repeat(64),
       cancelIntents: [],
       preparedCancelIntents: [],
-      block: {
+      block: RunTaskDagBlockSchema.parse({
         protocolVersion: 1,
         runId: record.runId,
-        taskId: done.spec.id,
+        taskId: "_dag",
         attempt: 1,
         nonce: crypto.randomUUID(),
         dagRevision: record.dagRevision + 1,
@@ -64,7 +67,7 @@ describe("R01g core invariants", () => {
         tasks: record.tasks.map((task) => task.spec),
         cancelTaskIds: [done.spec.id],
         budgetRequests: [],
-      },
+      }),
     };
     const result = reduceRun(record, event, facts);
     expect(result.ok).toBe(false);
@@ -72,7 +75,7 @@ describe("R01g core invariants", () => {
   });
 
   test("malformed core fields are rejected structurally, never thrown", () => {
-    const record = base() as RunRecord & { tasks: Array<Record<string, unknown>> };
+    const record = base() as unknown as { tasks: Array<{ escalations: unknown }> };
     record.tasks[0]!.escalations = { invalid: true };
     let outcome: ReturnType<typeof reduceRun> | undefined;
     expect(() => {
