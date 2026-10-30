@@ -5,11 +5,9 @@ import {
   RunStoredReviewSchema,
   type RunStoredSmokeReport,
   RunStoredSmokeReportSchema,
-  type RunStoredTaskReport,
   type RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
-import { type DeliveryCandidate, resolveD } from "./delivery-binding";
-import { normalizeLogicalPath } from "./locks";
+import { resolveD } from "./delivery-binding";
 import { reviewRequirement } from "./tier";
 import { isNormalEnded, taskById } from "./transitions";
 

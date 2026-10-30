@@ -3,9 +3,6 @@ import {
   type RunAcceptedProof,
   type RunAssignment,
   type RunCancellationEvidence,
-  RunCancellationEvidenceSchema,
-  type RunEffectIntent,
-  type RunEventReceipt,
   type RunRecord,
   RunRecordSchema,
   RunStoredReviewSchema,
@@ -16,19 +13,11 @@ import {
 import type {
   RunReviewReportBlock,
   RunSmokeReportBlock,
-  RunTaskDagBlock,
   RunTaskReportBlock,
 } from "../../schemas/run-engine/protocol";
 import { isDecisionPending } from "./decision-state";
-import { canonicalKnown, proofEqual, resolveD, resolveProducerProof } from "./delivery-binding";
-import {
-  checkEvidenceGate,
-  checkReviewGate,
-  checkSmokeGate,
-  doneGate,
-  failedDeliveryIds,
-  normalizeContainedPath,
-} from "./gates";
+import { canonicalKnown, proofEqual, resolveD } from "./delivery-binding";
+import { checkEvidenceGate, doneGate, failedDeliveryIds, normalizeContainedPath } from "./gates";
 import { checkLedgerInvariants, occupiesExecutionSlot } from "./invariants";
 import { nextQualityFailure } from "./scheduler";
 import { executionTier, reviewRequirement } from "./tier";
