@@ -199,7 +199,8 @@ export function isNormalEnded(record: RunRecord, assignment: RunAssignment): boo
       receipt.kind === "turn_ended" &&
       receipt.agentId === assignment.agentId &&
       receipt.turnId === assignment.turnId &&
-      receipt.receivedAt === assignment.endedAt,
+      receipt.receivedAt === assignment.endedAt &&
+      receipt.seq <= record.counters.observationSeq,
   );
 }
 
@@ -223,7 +224,7 @@ export function isLocalNeverSent(record: RunRecord, assignment: RunAssignment): 
   );
 }
 
-function isComplete167(record: RunRecord, assignment: RunAssignment): boolean {
+export function isComplete167(record: RunRecord, assignment: RunAssignment): boolean {
   const evidence = assignment.cancellation;
   if (evidence === undefined || evidence === null) return false;
   if (
@@ -233,19 +234,65 @@ function isComplete167(record: RunRecord, assignment: RunAssignment): boolean {
     evidence.receipt.externalId === null ||
     evidence.endedEventKey === null ||
     evidence.lastTurnId === null ||
-    evidence.observationSeq === 0
+    evidence.lastTurnId !== assignment.turnId ||
+    evidence.refresh.agentId !== assignment.agentId ||
+    evidence.observationSeq === 0 ||
+    evidence.observationSeq > record.counters.observationSeq
   ) {
     return false;
   }
+  const ended = record.eventReceipts.find(
+    (receipt) =>
+      receipt.eventKey === evidence.endedEventKey &&
+      receipt.kind === "turn_ended" &&
+      receipt.agentId === assignment.agentId &&
+      receipt.turnId === evidence.lastTurnId,
+  );
+  if (
+    !ended ||
+    ended.seq > evidence.observationSeq ||
+    (assignment.endedAt !== null && assignment.endedAt !== ended.receivedAt) ||
+    Date.parse(evidence.refresh.observedAt) < Date.parse(ended.receivedAt)
+  )
+    return false;
+  const intent = record.outbox.find((entry) => entry.id === evidence.cancelIntentId);
+  if (
+    intent?.kind !== "archive" ||
+    intent.taskId !== assignment.taskId ||
+    intent.assignmentId !== assignment.assignmentId ||
+    intent.recipient !== assignment.agentId ||
+    !["sending", "confirmed", "outcome-unknown"].includes(intent.state) ||
+    (intent.state === "confirmed" && intent.confirmedAt === null)
+  )
+    return false;
+  if (
+    !cancelPairs(record, assignment.taskId).some(
+      (pair) => pair.assignmentId === assignment.assignmentId && pair.intentId === intent.id,
+    )
+  )
+    return false;
+  if (
+    record.assignments.some(
+      (other) =>
+        other.assignmentId !== assignment.assignmentId &&
+        other.cancellation?.receipt.kind === "archive" &&
+        other.cancellation.receipt.externalId === evidence.receipt.externalId,
+    )
+  )
+    return false;
+  const through =
+    taskById(record, assignment.taskId)?.state === "cancelled"
+      ? evidence.observationSeq
+      : record.counters.observationSeq;
   return (
     evidence.refresh.activeTurn === false &&
     ["idle", "closed", "missing"].includes(evidence.refresh.status) &&
-    record.eventReceipts.some(
+    !record.eventReceipts.some(
       (receipt) =>
-        receipt.eventKey === evidence.endedEventKey &&
-        receipt.kind === "turn_ended" &&
-        receipt.agentId === assignment.agentId &&
-        receipt.turnId === evidence.lastTurnId,
+        receipt.seq > ended.seq &&
+        receipt.seq <= through &&
+        receipt.kind === "turn_started" &&
+        receipt.agentId === assignment.agentId,
     )
   );
 }
@@ -263,6 +310,19 @@ export function cancelPairs(record: RunRecord, taskId: string): Binding[] {
     .flatMap((decision) => decision.cancelIntents ?? []);
 }
 
+export function cancellationAuthorization(record: RunRecord, taskId: string) {
+  return record.decisions.find(
+    (decision) =>
+      decision.category === "D1" &&
+      decision.subjectId === taskId &&
+      decision.dedupeKey === `cancel:${taskId}` &&
+      decision.state === "answered" &&
+      decision.answer !== null &&
+      (decision.answer.action === "cancel" || decision.answer.action === "assign-seat") &&
+      decision.answer.taskIds.includes(taskId),
+  );
+}
+
 export function outstandingAssignments(
   record: RunRecord,
   taskId: string,
@@ -274,7 +334,6 @@ export function outstandingAssignments(
     if (isLocalNeverSent(record, assignment)) return false;
     if (isComplete167(record, assignment)) return false;
     if (isNormalEnded(record, assignment)) return false;
-    if (assignment.startedAt === null && assignment.acceptedProof !== null) return false;
     return true;
   });
 }

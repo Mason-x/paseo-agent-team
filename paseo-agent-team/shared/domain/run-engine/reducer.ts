@@ -16,7 +16,7 @@ import type {
   RunTaskReportBlock,
 } from "../../schemas/run-engine/protocol";
 import { isDecisionPending } from "./decision-state";
-import { canonicalKnown, proofEqual, resolveD } from "./delivery-binding";
+import { canonicalKnown, producerHead, proofEqual, resolveD } from "./delivery-binding";
 import { checkEvidenceGate, doneGate, failedDeliveryIds, normalizeContainedPath } from "./gates";
 import { checkLedgerInvariants, occupiesExecutionSlot } from "./invariants";
 import { nextQualityFailure } from "./scheduler";
@@ -26,7 +26,9 @@ import {
   assignmentById,
   type CancellationObservation,
   cancelCoverage,
+  cancellationAuthorization as decisionAuthorization,
   dispatchIntentMatches,
+  isComplete167,
   isNormalEnded,
   outstandingAssignments,
   RUN_COUNTER_EVENTS,
@@ -122,7 +124,10 @@ function markCancelled(next: RunRecord, taskId: string, reason: string, facts: R
     if (assignment.taskId !== taskId) continue;
     if (assignment.state !== "ended" && assignment.state !== "failed") {
       assignment.state = "cancelled";
-      assignment.endedAt = facts.now;
+      const ended = next.eventReceipts.find(
+        (entry) => entry.eventKey === assignment.cancellation?.endedEventKey,
+      );
+      assignment.endedAt = ended?.receivedAt ?? assignment.endedAt;
     }
   }
   task.state = "cancelled";
@@ -244,22 +249,6 @@ function markLocalCancellations(
   }
 }
 
-function decisionAuthorization(
-  record: RunRecord,
-  taskId: string,
-): RunRecord["decisions"][number] | undefined {
-  return record.decisions.find(
-    (decision) =>
-      decision.category === "D1" &&
-      decision.subjectId === taskId &&
-      decision.dedupeKey === `cancel:${taskId}` &&
-      decision.state === "answered" &&
-      decision.answer !== null &&
-      (decision.answer.action === "cancel" || decision.answer.action === "assign-seat") &&
-      decision.answer.taskIds.includes(taskId),
-  );
-}
-
 function unsettledIntents(record: RunRecord, taskId: string): boolean {
   return record.outbox.some(
     (intent) =>
@@ -281,11 +270,19 @@ function releaseIfSettled(next: RunRecord, taskId: string, facts: ReduceFacts): 
   if (!pairs || pairs.length === 0) return;
   const allQuiescent = pairs.every((pair) => {
     const assignment = assignmentOf(next, pair.assignmentId);
-    return assignment !== undefined && assignment.cancellation != null;
+    return assignment !== undefined && isComplete167(next, assignment);
   });
   if (!allQuiescent || unsettledIntents(next, taskId)) return;
-  if (!decisionAuthorization(next, taskId)) return;
+  const authorization = decisionAuthorization(next, taskId);
+  if (!authorization) return;
+  for (const pair of pairs) {
+    const assignment = assignmentOf(next, pair.assignmentId);
+    if (assignment?.cancellation)
+      assignment.cancellation.observationSeq = next.counters.observationSeq;
+  }
   markCancelled(next, taskId, "cancelled", facts);
+  const task = taskOf(next, taskId);
+  if (task) task.releaseDecisionId = authorization.decisionId;
 }
 
 function applyCancellation(
@@ -671,16 +668,25 @@ function applyEvent(
       }
       if (producer) {
         const awaiting = task.state === "review" && task.phase === "awaiting-rework";
-        if (!["ready", "rework"].includes(task.state) && !awaiting) {
+        const reissue = event.reissueOfAssignmentId ?? null;
+        if (reissue === null && !["ready", "rework"].includes(task.state) && !awaiting) {
           return invalidTransition(event.taskId, task.state, "assigned");
         }
-        const reissue = event.reissueOfAssignmentId ?? null;
         if (reissue !== null) {
           const old = assignmentOf(next, reissue);
+          const head = producerHead(next, task.spec.id);
           if (
             !old ||
             old.taskId !== task.spec.id ||
             old.attempt !== assignment.attempt ||
+            !isNormalEnded(next, old) ||
+            head.kind !== "ok" ||
+            head.assignment.assignmentId !== old.assignmentId ||
+            checkEvidenceGate(next, task).ok ||
+            task.state === "blocked" ||
+            task.state === "failed" ||
+            task.state === "cancelled" ||
+            task.state === "done" ||
             (old.supersededByAssignmentId !== undefined && old.supersededByAssignmentId !== null) ||
             !old.acceptedProof ||
             !("status" in old.acceptedProof) ||
@@ -739,9 +745,9 @@ function applyEvent(
             task.reworkCount += 1;
             appendCounter(next, task, "reworkCount", facts);
           }
-          task.ref = null;
-          task.changedFiles = [];
         }
+        task.ref = null;
+        task.changedFiles = [];
         task.attempts = assignment.attempt;
         task.state = "assigned";
         task.phase = "implementation";
@@ -787,6 +793,7 @@ function applyEvent(
         task.currentAssignmentId = assignment.assignmentId;
         task.waitingReason = null;
       }
+      task.currentAssignmentId = assignment.assignmentId;
       next.assignments.push(assignment);
       next.nonceRegistry.push(event.nonce);
       next.outbox.push(event.intent);
@@ -810,8 +817,16 @@ function applyEvent(
       if (event.agentId !== assignment.agentId)
         return reject("RUN_EVENT_INVALID", ["turn-started", event.assignmentId], "agent-mismatch");
       const reviewer = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
-      if (!reviewer && task.currentAssignmentId !== assignment.assignmentId) {
-        return reject("RUN_EVENT_INVALID", ["assignments", event.assignmentId], "not-current");
+      const head = producerHead(next, task.spec.id);
+      if (
+        !reviewer &&
+        (head.kind !== "ok" || head.assignment.assignmentId !== assignment.assignmentId)
+      ) {
+        return reject(
+          "RUN_EVENT_INVALID",
+          ["assignments", event.assignmentId],
+          "not-producer-head",
+        );
       }
       if (!reviewer && task.state !== "assigned" && task.state !== "in_progress") {
         return invalidTransition(task.spec.id, task.state, "in_progress");

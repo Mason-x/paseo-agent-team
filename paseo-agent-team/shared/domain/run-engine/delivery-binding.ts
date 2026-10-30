@@ -38,12 +38,19 @@ export function producerHead(record: RunRecord, taskId: string): ProducerHead {
       entry.attempt === task.attempts,
   );
   if (producers.length === 0) return { kind: "none" };
-  const superseded = new Set(
-    producers
-      .map((entry) => entry.supersededByAssignmentId)
-      .filter((id): id is string => typeof id === "string"),
-  );
-  const heads = producers.filter((entry) => !superseded.has(entry.assignmentId));
+  const byId = new Map(producers.map((entry) => [entry.assignmentId, entry]));
+  for (const producer of producers) {
+    const seen = new Set<string>();
+    let cursor = producer;
+    while (cursor.supersededByAssignmentId != null) {
+      if (seen.has(cursor.assignmentId)) return { kind: "invalid", reason: "producer-cycle" };
+      seen.add(cursor.assignmentId);
+      const successor = byId.get(cursor.supersededByAssignmentId);
+      if (!successor) return { kind: "invalid", reason: "producer-successor" };
+      cursor = successor;
+    }
+  }
+  const heads = producers.filter((entry) => entry.supersededByAssignmentId == null);
   if (heads.length !== 1) return { kind: "invalid", reason: "ambiguous-producer-head" };
   return { kind: "ok", assignment: heads[0] as RunAssignment };
 }

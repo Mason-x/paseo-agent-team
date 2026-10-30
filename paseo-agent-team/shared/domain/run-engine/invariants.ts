@@ -1,7 +1,15 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
 import { doneGate, failedDeliveryIds } from "./gates";
 import { lockConflicts, normalizeLogicalPath } from "./locks";
-import { assignmentPhase, dispatchIntentMatches, RUN_COUNTER_EVENTS } from "./transitions";
+import {
+  assignmentPhase,
+  cancellationAuthorization,
+  cancelPairs,
+  dispatchIntentMatches,
+  isComplete167,
+  isNormalEnded,
+  RUN_COUNTER_EVENTS,
+} from "./transitions";
 
 export type RunInvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
 
@@ -409,6 +417,26 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
 function checkI7(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const task of record.tasks) {
+    const pairs = cancelPairs(record, task.spec.id);
+    if (task.state === "cancelled" && pairs.length > 0) {
+      const authorization = cancellationAuthorization(record, task.spec.id);
+      if (!authorization)
+        issues.push(
+          violation(
+            "I7",
+            ["tasks", task.spec.id, "releaseDecisionId"],
+            "cancellation-without-authorization",
+          ),
+        );
+      else if (task.releaseDecisionId !== authorization.decisionId)
+        issues.push(
+          violation(
+            "I7",
+            ["tasks", task.spec.id, "releaseDecisionId"],
+            "cancellation-release-binding",
+          ),
+        );
+    }
     if (task.state === "done") {
       const gate = doneGate(record, task);
       if (!gate.ok) {
@@ -418,7 +446,21 @@ function checkI7(record: RunRecord): RunInvariantViolation[] {
       }
     }
     for (const [index, assignment] of record.assignments.entries()) {
-      if (assignment.taskId !== task.spec.id || assignment.acceptedProof === null) continue;
+      if (assignment.taskId !== task.spec.id) continue;
+      const requires167 =
+        task.state === "cancelled" &&
+        pairs.some((pair) => pair.assignmentId === assignment.assignmentId);
+      if ((assignment.cancellation || requires167) && !isComplete167(record, assignment)) {
+        issues.push(
+          violation("I7", ["assignments", index, "cancellation"], "invalid-cancellation-proof"),
+        );
+      }
+      if (assignment.state === "ended" && !isNormalEnded(record, assignment)) {
+        issues.push(
+          violation("I7", ["assignments", index, "endedEventKey"], "invalid-ended-proof"),
+        );
+      }
+      if (assignment.acceptedProof === null) continue;
       const proof = assignment.acceptedProof;
       if (
         proof.runId !== record.runId ||
