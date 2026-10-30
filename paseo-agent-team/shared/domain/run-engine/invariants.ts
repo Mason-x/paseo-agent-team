@@ -1,5 +1,5 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
-import { checkEvidenceGate, checkReviewGate, checkSmokeGate, storedGateIssues } from "./gates";
+import { doneGate, failedDeliveryIds } from "./gates";
 import { lockConflicts, normalizeLogicalPath } from "./locks";
 import { assignmentPhase, dispatchIntentMatches, RUN_COUNTER_EVENTS } from "./transitions";
 
@@ -250,22 +250,56 @@ function checkI5(record: RunRecord): RunInvariantViolation[] {
     }
   }
   for (const [index, assignment] of record.assignments.entries()) {
-    if (!nonces.has(assignment.nonce)) {
+    const nonce = record.nonceRegistry.find(
+      (entry) =>
+        entry.nonce === assignment.nonce &&
+        entry.runId === record.runId &&
+        entry.taskId === assignment.taskId &&
+        entry.assignmentId === assignment.assignmentId &&
+        entry.attempt === assignment.attempt &&
+        entry.phase === assignmentPhase(assignment) &&
+        entry.agentId === assignment.agentId &&
+        entry.seatId === assignment.seatId,
+    );
+    if (!nonces.has(assignment.nonce) || nonce === undefined) {
       issues.push(violation("I5", ["assignments", index, "nonce"], "unregistered-nonce"));
-    } else if (
-      !record.nonceRegistry.some(
-        (entry) =>
-          entry.nonce === assignment.nonce &&
-          entry.runId === record.runId &&
-          entry.taskId === assignment.taskId &&
-          entry.assignmentId === assignment.assignmentId &&
-          entry.attempt === assignment.attempt &&
-          entry.phase === assignmentPhase(assignment) &&
-          entry.agentId === assignment.agentId &&
-          entry.seatId === assignment.seatId,
-      )
+      continue;
+    }
+    const proof = assignment.acceptedProof;
+    if (proof !== null) {
+      if (
+        nonce.acceptedAt === null ||
+        nonce.acceptedEventKey !== `proof:${assignment.assignmentId}`
+      ) {
+        issues.push(
+          violation("I5", ["assignments", index, "acceptedProof"], "proof-without-accept"),
+        );
+      }
+      if (
+        proof.runId !== record.runId ||
+        proof.taskId !== assignment.taskId ||
+        proof.attempt !== assignment.attempt ||
+        proof.nonce !== assignment.nonce ||
+        proof.assignmentId !== assignment.assignmentId ||
+        proof.messageId !== assignment.messageId
+      ) {
+        issues.push(violation("I5", ["assignments", index, "acceptedProof"], "proof-binding"));
+      }
+    } else if (nonce.acceptedAt !== null || nonce.acceptedEventKey !== null) {
+      issues.push(violation("I5", ["assignments", index, "nonce"], "accept-without-proof"));
+    }
+    if (
+      nonce.acceptedAt !== null &&
+      Date.parse(nonce.acceptedAt) < Date.parse(assignment.createdAt)
     ) {
-      issues.push(violation("I5", ["assignments", index, "nonce"], "nonce-binding"));
+      issues.push(violation("I5", ["assignments", index, "nonce"], "accepted-before-created"));
+    }
+    if (
+      nonce.revokedAt !== null &&
+      nonce.acceptedAt !== null &&
+      Date.parse(nonce.revokedAt) < Date.parse(nonce.acceptedAt)
+    ) {
+      issues.push(violation("I5", ["assignments", index, "nonce"], "revoked-before-accepted"));
     }
   }
   return issues;
@@ -326,6 +360,15 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
     dispatches.set(nonce.taskId, Math.max(dispatches.get(nonce.taskId) ?? 0, nonce.attempt));
   }
   for (const task of record.tasks) {
+    const distinctFailures = failedDeliveryIds(record, task).length;
+    if (task.qualityFailures !== distinctFailures) {
+      issues.push(
+        violation("I6", ["tasks", task.spec.id, "qualityFailures"], "distinct-failure-mismatch", {
+          expected: distinctFailures,
+          actual: task.qualityFailures,
+        }),
+      );
+    }
     const reworks = reworkEvents.get(task.spec.id) ?? 0;
     if (task.reworkCount < reworks) {
       issues.push(
@@ -366,48 +409,42 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
 function checkI7(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const task of record.tasks) {
-    const malformed = storedGateIssues(task);
-    if (malformed.length > 0) {
-      issues.push(
-        ...malformed.map((issue) => violation("I7", issue.path, String(issue.params.reason))),
-      );
-      continue;
-    }
-    const extension = task as RunRecord["tasks"][number] & Record<string, unknown>;
-    if (
-      extension.report !== undefined &&
-      (typeof extension.report !== "object" || extension.report === null)
-    ) {
-      issues.push(violation("I7", ["tasks", task.spec.id, "report"], "invalid-report-extension"));
-    }
-    if (extension.reviews !== undefined && !Array.isArray(extension.reviews)) {
-      issues.push(violation("I7", ["tasks", task.spec.id, "reviews"], "invalid-reviews-extension"));
-    }
-    if (
-      extension.smokeReport !== undefined &&
-      (typeof extension.smokeReport !== "object" || extension.smokeReport === null)
-    ) {
-      issues.push(
-        violation("I7", ["tasks", task.spec.id, "smokeReport"], "invalid-smoke-extension"),
-      );
-    }
-    if (task.state !== "done") continue;
-    const evidence = checkEvidenceGate(record, task);
-    if (!evidence.ok) {
-      for (const issue of evidence.issues) {
-        issues.push(violation("I7", issue.path, String(issue.params.reason ?? "evidence")));
+    if (task.state === "done") {
+      const gate = doneGate(record, task);
+      if (!gate.ok) {
+        for (const issue of gate.issues) {
+          issues.push(violation("I7", issue.path, String(issue.params.reason ?? "done-gate")));
+        }
       }
     }
-    const review = checkReviewGate(record, task);
-    if (!review.ok) {
-      for (const issue of review.issues) {
-        issues.push(violation("I7", issue.path, String(issue.params.reason ?? "review")));
+    for (const [index, assignment] of record.assignments.entries()) {
+      if (assignment.taskId !== task.spec.id || assignment.acceptedProof === null) continue;
+      const proof = assignment.acceptedProof;
+      if (
+        proof.runId !== record.runId ||
+        proof.taskId !== assignment.taskId ||
+        proof.attempt !== assignment.attempt ||
+        proof.nonce !== assignment.nonce ||
+        proof.assignmentId !== assignment.assignmentId ||
+        proof.messageId !== assignment.messageId ||
+        (assignment.delivery !== null && !["reviewer", "smoker"].includes(assignment.purpose))
+      ) {
+        issues.push(violation("I7", ["assignments", index, "acceptedProof"], "proof-binding"));
       }
-    }
-    const smoke = checkSmokeGate(record, task);
-    if (!smoke.ok) {
-      for (const issue of smoke.issues) {
-        issues.push(violation("I7", issue.path, String(issue.params.reason ?? "smoke")));
+      if (assignment.delivery !== null) {
+        const producer = record.assignments.find(
+          (entry) => entry.assignmentId === assignment.delivery?.producerAssignmentId,
+        );
+        if (
+          producer === undefined ||
+          producer.taskId !== assignment.taskId ||
+          !["member", "coordinator", "reopen"].includes(producer.purpose) ||
+          producer.acceptedProof === null
+        ) {
+          issues.push(
+            violation("I7", ["assignments", index, "delivery"], "delivery-producer-missing"),
+          );
+        }
       }
     }
   }
@@ -417,7 +454,6 @@ function checkI7(record: RunRecord): RunInvariantViolation[] {
 function checkI8(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const [index, assignment] of record.assignments.entries()) {
-    if (assignment.messageId === null) continue;
     const matches = record.outbox.filter((intent) => dispatchIntentMatches(assignment, intent));
     if (matches.length !== 1) {
       issues.push(
@@ -426,28 +462,44 @@ function checkI8(record: RunRecord): RunInvariantViolation[] {
         }),
       );
     }
+    if (assignment.delivery !== null) {
+      const producer = record.assignments.find(
+        (entry) => entry.assignmentId === assignment.delivery?.producerAssignmentId,
+      );
+      if (producer === undefined || producer.taskId !== assignment.taskId) {
+        issues.push(violation("I8", ["assignments", index, "delivery"], "delivery-task"));
+      }
+    }
   }
   for (const [index, decision] of record.decisions.entries()) {
-    if (
-      decision.state === "answered" ||
-      !decision.dedupeKey.startsWith("cancel:") ||
-      typeof decision.cancelIntentId !== "string"
-    )
-      continue;
-    const intent = record.outbox.find((entry) => entry.id === decision.cancelIntentId);
-    const assignment =
-      intent && intent.kind !== "probe"
-        ? record.assignments.find((entry) => entry.assignmentId === intent.assignmentId)
-        : undefined;
-    if (
-      !intent ||
-      (intent.kind !== "archive" && intent.kind !== "wake") ||
-      !assignment ||
-      intent.taskId !== decision.subjectId ||
-      assignment.taskId !== decision.subjectId ||
-      intent.recipient !== assignment.agentId
-    ) {
-      issues.push(violation("I8", ["decisions", index, "cancelIntentId"], "cancel-intent-binding"));
+    const pairs = decision.cancelIntents;
+    if (pairs === null) continue;
+    const ids = pairs.map((pair) => pair.assignmentId);
+    if (new Set(ids).size !== ids.length) {
+      issues.push(violation("I8", ["decisions", index, "cancelIntents"], "duplicate-pair"));
+    }
+    for (const [pairIndex, pair] of pairs.entries()) {
+      const assignment = record.assignments.find(
+        (entry) => entry.assignmentId === pair.assignmentId,
+      );
+      const intent = record.outbox.find((entry) => entry.id === pair.intentId);
+      if (
+        assignment === undefined ||
+        intent === undefined ||
+        intent.kind !== "archive" ||
+        intent.taskId !== decision.subjectId ||
+        assignment.taskId !== decision.subjectId ||
+        intent.assignmentId !== assignment.assignmentId ||
+        intent.recipient !== assignment.agentId
+      ) {
+        issues.push(
+          violation(
+            "I8",
+            ["decisions", index, "cancelIntents", pairIndex],
+            "cancel-intent-binding",
+          ),
+        );
+      }
     }
   }
   return issues;
