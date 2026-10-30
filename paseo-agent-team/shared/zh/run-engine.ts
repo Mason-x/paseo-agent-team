@@ -133,10 +133,12 @@ export const runEngineZh = {
       D6: "D6 阶段结束",
       D7: "D7 引擎不一致",
     } as Record<string, string>,
-    state: { open: "待回应", "waiting-human": "等待人工", answered: "已回应" } as Record<
-      string,
-      string
-    >,
+    state: {
+      open: "待回应",
+      "waiting-human": "等待人工",
+      answered: "已回应",
+      superseded: "已失效",
+    } as Record<string, string>,
     action: {
       replan: "重新规划",
       "assign-seat": "改派席位",
