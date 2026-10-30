@@ -10,6 +10,7 @@ import {
 } from "../../shared/domain/run-engine/invariants";
 import { findLockConflicts } from "../../shared/domain/run-engine/locks";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import type { RunDispatchEvent, RunReducerEvent } from "../../shared/domain/run-engine/transitions";
 import type {
   RunAssignment,
   RunEffectIntent,
@@ -144,12 +145,14 @@ function valid(record: RunRecord): RunRecord {
 function smokeProof(record: RunRecord, assignmentId: string) {
   const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
   const parsed = RunStoredSmokeReportSchema.safeParse(assignment?.acceptedProof);
-  return parsed.success ? parsed.data : undefined;
+  return parsed.success
+    ? (assignment?.acceptedProof as typeof parsed.data | null | undefined)
+    : undefined;
 }
 
-function next(record: RunRecord, event: unknown): RunRecord {
+function next(record: RunRecord, event: RunReducerEvent): RunRecord {
   valid(record);
-  const result = reduceRun(record, event as never, facts);
+  const result = reduceRun(record, event, facts);
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) throw new Error(JSON.stringify(result));
   valid(result.next);
@@ -299,8 +302,9 @@ function dispatch(
     assignment,
     nonce,
     intent: makeIntent(assignment),
+    reissueOfAssignmentId: null,
     ...(purpose === "member" ? { claims } : {}),
-  };
+  } satisfies RunDispatchEvent;
 }
 
 function doneReport(assignment: RunAssignment, ref = REF_A) {
@@ -577,7 +581,7 @@ describe("R03a delivery binding red specification", () => {
       record,
       dispatch("reviewer", 2, {
         producerAssignmentId: member.assignment.assignmentId,
-      }) as never,
+      }),
       facts,
     );
     expect(result.ok).toBe(false);
@@ -592,14 +596,14 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "review-report",
         block: reviewReport(oldReviewer.assignment, REF_B, "可合入"),
-      } as never,
+      },
       facts,
     );
     expect(result.ok).toBe(false);
     expect(record).toEqual(before);
   });
 
-  test("B2 old reviewer cannot approve a new attempt with the same ref", () => {
+  test("B2 old reviewer same-ref canonical replay stays unchanged and cannot advance the new D", () => {
     const { record, firstReviewer } = smokeRework(REF_A);
     const before = structuredClone(record);
     const result = reduceRun(
@@ -607,7 +611,28 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "review-report",
         block: reviewReport(firstReviewer.assignment, REF_A, "可合入"),
-      } as never,
+      },
+      facts,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.next).toEqual(before);
+      expect(taskOf(result.next).state).toBe(taskOf(before).state);
+      expect(taskOf(result.next).currentAssignmentId).toBe(taskOf(before).currentAssignmentId);
+      expect(taskOf(result.next).qualityFailures).toBe(taskOf(before).qualityFailures);
+    }
+    expect(record).toEqual(before);
+  });
+
+  test("B2 old reviewer same-ref different canonical block is rejected", () => {
+    const { record, firstReviewer } = smokeRework(REF_A);
+    const before = structuredClone(record);
+    const result = reduceRun(
+      record,
+      {
+        kind: "review-report",
+        block: reviewReport(firstReviewer.assignment, REF_A, "不可合入"),
+      },
       facts,
     );
     expect(result.ok).toBe(false);
@@ -622,7 +647,7 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "smoke-report",
         block: smokeReport(firstSmoker.assignment, REF_B, "pass"),
-      } as never,
+      },
       facts,
     );
     expect(result.ok).toBe(false);
@@ -637,7 +662,7 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "smoke-report",
         block: smokeReport(firstSmoker.assignment, REF_A, "pass"),
-      } as never,
+      },
       facts,
     );
     expect(result.ok).toBe(false);
@@ -665,6 +690,8 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "dag-revised",
         controlNonceDigest: CONTROL_DIGEST,
+        cancelIntents: [],
+        preparedCancelIntents: [],
         block: {
           protocolVersion: 1,
           runId: record.runId,
@@ -677,7 +704,7 @@ describe("R03a delivery binding red specification", () => {
           cancelTaskIds: ["t1"],
           budgetRequests: [],
         },
-      } as never,
+      },
       facts,
     );
     expect(result.ok).toBe(false);
@@ -772,7 +799,7 @@ describe("R03a delivery binding red specification", () => {
     const before = structuredClone(record);
     let result: ReturnType<typeof reduceRun> | undefined;
     expect(() => {
-      result = reduceRun(record, dispatch("member") as never, facts);
+      result = reduceRun(record, dispatch("member"), facts);
     }).not.toThrow();
     expect(result?.ok).toBe(false);
     if (result && !result.ok) {
@@ -838,7 +865,7 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "review-report",
         block: reviewReport(first.assignment, REF_A, "可合入"),
-      } as never,
+      },
       facts,
     );
     expect(result.ok).toBe(true);
@@ -857,7 +884,7 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "review-report",
         block: reviewReport(second.assignment, REF_A, "不可合入"),
-      } as never,
+      },
       facts,
     );
     expect(late.ok, JSON.stringify(late)).toBe(true);
@@ -880,7 +907,7 @@ describe("R03a delivery binding red specification", () => {
       {
         kind: "review-report",
         block: reviewReport(second.assignment, REF_A, "可合入"),
-      } as never,
+      },
       facts,
     );
     expect(late.ok, JSON.stringify(late)).toBe(true);
@@ -895,19 +922,22 @@ describe("R03a delivery binding red specification", () => {
       expect(reviewers.every((entry) => entry.acceptedProof !== null)).toBe(true);
 
       const endedEventKey = "agent-a2|turn-r2|turn_ended";
-      const withReceipt = structuredClone(late.next);
-      withReceipt.eventReceipts.push({
+      const receipt = {
         eventKey: endedEventKey,
-        kind: "turn_ended",
+        kind: "turn_ended" as const,
         agentId: second.assignment.agentId,
         turnId: "turn-r2",
-        seq: withReceipt.counters.observationSeq + 1,
+        seq: late.next.counters.observationSeq + 1,
         receivedAt: AT_UPDATED,
         dedupeKey: endedEventKey,
-        disposition: "accepted",
-      });
+        disposition: "accepted" as const,
+      };
+      const observed = reduceRun(late.next, { kind: "observation-recorded", receipt }, facts);
+      expect(observed.ok, JSON.stringify(observed)).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.next.counters.observationSeq).toBe(receipt.seq);
       const ended = reduceRun(
-        withReceipt,
+        observed.next,
         {
           kind: "turn-ended",
           assignmentId: second.assignment.assignmentId,

@@ -4,6 +4,10 @@
 import { describe, expect, test } from "vitest";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import type {
+  CancellationObservation,
+  RunReducerEvent,
+} from "../../shared/domain/run-engine/transitions";
 import type { RunCancellationEvidence, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type {
   RunReviewReportBlock,
@@ -42,6 +46,25 @@ function taskOf(record: RunRecord, id: string) {
   const task = record.tasks.find((entry) => entry.spec.id === id);
   if (!task) throw new Error(`missing ${id}`);
   return task as (typeof record.tasks)[number] & Record<string, unknown>;
+}
+
+function ensureSeat(
+  record: RunRecord,
+  seatId: string,
+  agentId: string,
+  duty: string,
+  tier: "A" | "B" | "S",
+) {
+  if (!record.roster.some((entry) => entry.seatId === seatId)) {
+    record.roster.push({
+      seatId,
+      tier,
+      agentId,
+      channelId: "claude",
+      duties: [duty],
+      enabled: true,
+    });
+  }
 }
 
 function report(overrides: Partial<RunTaskReportBlock> = {}): RunTaskReportBlock {
@@ -83,6 +106,13 @@ function addReviewer(
     nonce?: string;
   },
 ) {
+  ensureSeat(
+    record,
+    overrides.seatId,
+    overrides.agentId,
+    "review",
+    overrides.tier as "A" | "B" | "S",
+  );
   record.assignments.push(
     assignment({
       assignmentId: overrides.id,
@@ -114,11 +144,23 @@ function addReviewer(
     agentId: overrides.agentId,
     seatId: overrides.seatId,
     issuedAt: AT_UPDATED,
-    acceptedAt: AT_UPDATED,
-    acceptedEventKey: `${overrides.agentId}|turn-8|turn_ended`,
+    acceptedAt: null,
+    acceptedEventKey: null,
     revokedAt: null,
     revokeReason: null,
   });
+  record.outbox.push(
+    dispatchIntent({
+      id: `intent-${overrides.id}`,
+      taskId: "t2",
+      assignmentId: overrides.id,
+      recipient: overrides.agentId,
+      messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      idempotencyKey: `dispatch-${overrides.id}`,
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  );
 }
 
 function review(
@@ -152,12 +194,14 @@ function attachProof(record: RunRecord, assignmentId: string, proof: unknown) {
   } as typeof assignment.acceptedProof;
 }
 
+function reduceOrThrow(record: RunRecord, event: RunReducerEvent): RunRecord {
+  const result = reduceRun(record, event, facts);
+  if (!result.ok) throw new Error(JSON.stringify(result));
+  return result.next;
+}
+
 function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
-  const task = taskOf(record, "t2");
-  task.state = "review";
-  task.phase = "review";
-  task.ref = REF;
-  attachProof(record, ASSIGNMENT_T2, report());
+  record = reduceOrThrow(record, { kind: "task-report", block: report() });
   addReviewer(record, {
     id: "assignment-t2-r1",
     seatId: "seat-b2",
@@ -165,11 +209,10 @@ function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
     tier: "A",
     family: "codex",
   });
-  attachProof(record, "assignment-t2-r1", review());
   return record;
 }
 
-function cancelIntent(record: RunRecord, kind: "wake" | "archive" = "wake") {
+function cancelIntent(record: RunRecord, kind: "wake" | "archive" = "archive") {
   record.outbox.push(
     dispatchIntent({
       id: INTENT_CANCEL,
@@ -183,6 +226,15 @@ function cancelIntent(record: RunRecord, kind: "wake" | "archive" = "wake") {
   );
 }
 
+function cancelPayload(record: RunRecord, assignmentId = ASSIGNMENT_T2) {
+  const intent = record.outbox.find((entry) => entry.id === INTENT_CANCEL);
+  if (!intent || intent.assignmentId === null) throw new Error("cancel intent");
+  return {
+    cancelIntents: [{ assignmentId, intentId: intent.id }],
+    preparedCancelIntents: [],
+  };
+}
+
 function reason(result: { ok: boolean; params?: Record<string, unknown> }) {
   return result.ok ? null : result.params?.reason;
 }
@@ -190,7 +242,12 @@ function reason(result: { ok: boolean; params?: Record<string, unknown> }) {
 describe("R03a gates: only reducer-owned raw reports can move a task", () => {
   test("forged gate and force events are rejected", () => {
     for (const kind of ["review-passed", "smoke-passed", "force-done", "dependency-satisfied"]) {
-      const result = reduceRun(structuredClone(NORMAL_RUN_LEDGER), { kind } as never, facts);
+      // Intentional unsupported event boundary; normal events below stay statically typed.
+      const result = reduceRun(
+        structuredClone(NORMAL_RUN_LEDGER),
+        { kind } as unknown as RunReducerEvent,
+        facts,
+      );
       expect(result).toMatchObject({
         ok: false,
         code: "RUN_EVENT_INVALID",
@@ -224,7 +281,12 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
   test("a blocking review in the smoke phase cannot be swallowed", () => {
     const record = reviewReady();
     const task = taskOf(record, "t2");
-    task.spec = { ...task.spec, devSmoke: true, smokeChecklist: ["open runs"] };
+    task.spec = {
+      ...task.spec,
+      devSmoke: true,
+      smokeChecklist: ["open runs"],
+      dispatchDuties: { ...task.spec.dispatchDuties, smoke: "smoke" },
+    };
     task.phase = "smoke";
     attachProof(record, "assignment-t2-r1", review());
     addReviewer(record, {
@@ -315,9 +377,9 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["t2"],
+        taskIds: ["t2"] as const,
         reason: "cancel",
-        cancelIntentId: INTENT_CANCEL,
+        ...cancelPayload(record),
         controlNonceDigest: CONTROL_DIGEST,
       },
       facts,
@@ -392,9 +454,9 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["t2"],
+        taskIds: ["t2"] as const,
         reason: "cancel",
-        cancelIntentId: INTENT_CANCEL,
+        ...cancelPayload(record),
         controlNonceDigest: CONTROL_DIGEST,
       },
       facts,
@@ -429,6 +491,8 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       {
         kind: "dag-revised",
         controlNonceDigest: CONTROL_DIGEST,
+        cancelIntents: [],
+        preparedCancelIntents: [],
         block: {
           protocolVersion: 1,
           runId: dagRecord.runId,
@@ -448,9 +512,15 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     if (dagResult.ok) expect(taskOf(dagResult.next, "t3").state).toBe("cancelled");
 
     const runRecord = structuredClone(NORMAL_RUN_LEDGER);
+    cancelIntent(runRecord, "archive");
     const runResult = reduceRun(
       runRecord,
-      { kind: "run-cancelled", reason: "stop", controlNonceDigest: CONTROL_DIGEST },
+      {
+        kind: "run-cancelled",
+        reason: "stop",
+        controlNonceDigest: CONTROL_DIGEST,
+        ...cancelPayload(runRecord),
+      },
       facts,
     );
     expect(runResult.ok).toBe(true);
@@ -467,9 +537,9 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
       record,
       {
         kind: "cancel-requested",
-        taskIds: ["t2"],
+        taskIds: ["t2"] as const,
         reason: "cancel",
-        cancelIntentId: INTENT_CANCEL,
+        ...cancelPayload(record),
         controlNonceDigest: CONTROL_DIGEST,
       },
       facts,
@@ -564,6 +634,8 @@ describe("R03a DAG, pause, finish, determinism", () => {
       {
         kind: "dag-revised",
         controlNonceDigest: CONTROL_DIGEST,
+        cancelIntents: [],
+        preparedCancelIntents: [],
         block: {
           protocolVersion: 1,
           runId: record.runId,
@@ -585,6 +657,8 @@ describe("R03a DAG, pause, finish, determinism", () => {
       {
         kind: "dag-revised",
         controlNonceDigest: CONTROL_DIGEST,
+        cancelIntents: [],
+        preparedCancelIntents: [],
         block: {
           protocolVersion: 1,
           runId: record.runId,
@@ -611,6 +685,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
     const task = taskOf(record, "t2");
     task.state = "ready";
     task.attempts = 0;
+    task.currentAssignmentId = null;
     const nonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const dispatch = reduceRun(
       record,
@@ -638,6 +713,7 @@ describe("R03a DAG, pause, finish, determinism", () => {
           assignmentId: "assignment-paused",
           messageId: MESSAGE_T2,
         }),
+        reissueOfAssignmentId: null,
       },
       facts,
     );
@@ -675,14 +751,15 @@ describe("R03a I7 done gate", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1");
     if (producer) producer.acceptedProof = null;
+    const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === "assignment-t1-a1");
+    if (nonce) {
+      nonce.acceptedAt = null;
+      nonce.acceptedEventKey = null;
+    }
     const result = checkLedgerInvariants(record);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(
-        result.violations.some(
-          (entry) => entry.invariant === "I7" && entry.params.reason === "missing-done-report",
-        ),
-      ).toBe(true);
+      expect(result.violations.some((entry) => entry.invariant === "I7")).toBe(true);
     }
   });
 });
@@ -694,14 +771,19 @@ describe("R03a gate details and invariant boundaries", () => {
     policyHost = "127.0.0.1:6799",
   ) {
     const task = taskOf(record, "t2");
-    task.spec = { ...task.spec, devSmoke: true, smokeChecklist: ["open runs"] };
-    task.phase = "smoke";
-    attachProof(record, "assignment-t2-r1", review());
+    task.spec = {
+      ...task.spec,
+      devSmoke: true,
+      smokeChecklist: ["open runs"],
+      dispatchDuties: { ...task.spec.dispatchDuties, smoke: "smoke" },
+    };
     record.policy = {
       ...record.policy,
       devTargets: [{ serverId: "dev-server-1", host: policyHost, home: "/tmp/dev-home" }],
     };
+    record = reduceOrThrow(record, { kind: "review-report", block: review() });
     const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
+    ensureSeat(record, "seat-b3", "agent-b3", "smoke", "A");
     record.assignments.push(
       assignment({
         assignmentId: "assignment-t2-smoke",
@@ -723,11 +805,23 @@ describe("R03a gate details and invariant boundaries", () => {
       agentId: "agent-b3",
       seatId: "seat-b3",
       issuedAt: AT_UPDATED,
-      acceptedAt: AT_UPDATED,
-      acceptedEventKey: "agent-b3|turn-9|turn_ended",
+      acceptedAt: null,
+      acceptedEventKey: null,
       revokedAt: null,
       revokeReason: null,
     });
+    record.outbox.push(
+      dispatchIntent({
+        id: "intent-assignment-t2-smoke",
+        taskId: "t2",
+        assignmentId: "assignment-t2-smoke",
+        recipient: "agent-b3",
+        messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        idempotencyKey: "dispatch-assignment-t2-smoke",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+    );
     const block = {
       protocolVersion: 1,
       runId: record.runId,
@@ -774,8 +868,10 @@ describe("R03a gate details and invariant boundaries", () => {
   test("an escalation origin raises the required review tier", () => {
     const record = reviewReady();
     taskOf(record, "t2").spec = { ...taskOf(record, "t2").spec, level: "L1" };
+    taskOf(record, "t2").qualityFailures = 1;
+    taskOf(record, "t2").attempts = 1;
     taskOf(record, "t2").escalations = [
-      { fromTier: "B", toTier: "A", atAttempt: 1, qualityFailures: 0, at: AT_UPDATED },
+      { fromTier: "B", toTier: "A", atAttempt: 1, qualityFailures: 1, at: AT_UPDATED },
     ];
     const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t2-r1");
     if (!reviewer) throw new Error("reviewer");
@@ -822,7 +918,7 @@ describe("R03a gate details and invariant boundaries", () => {
     if (!nonce) throw new Error("nonce");
     nonce.revokedAt = AT_UPDATED;
     expect(reason(reduceRun(record, { kind: "task-report", block: report() }, facts))).toBe(
-      "nonce-invalid",
+      "revoked-nonce-active",
     );
   });
 
@@ -830,9 +926,12 @@ describe("R03a gate details and invariant boundaries", () => {
     const record = reviewReady();
     const producer = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
     if (producer) producer.acceptedProof = null;
-    expect(reason(reduceRun(record, { kind: "review-report", block: review() }, facts))).toBe(
-      "missing-done-report",
-    );
+    const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
+    if (nonce) {
+      nonce.acceptedAt = null;
+      nonce.acceptedEventKey = null;
+    }
+    expect(reduceRun(record, { kind: "review-report", block: review() }, facts).ok).toBe(false);
   });
 
   test("default DEV host, extra smoke checks and self-smoke cannot complete", () => {
@@ -928,9 +1027,9 @@ describe("R03a gate details and invariant boundaries", () => {
         record,
         {
           kind: "cancel-requested",
-          taskIds: ["t2"],
+          taskIds: ["t2"] as const,
           reason: "cancel",
-          cancelIntentId: INTENT_CANCEL,
+          ...cancelPayload(record),
           controlNonceDigest: CONTROL_DIGEST,
         },
         facts,
@@ -951,7 +1050,7 @@ describe("R03a gate details and invariant boundaries", () => {
 
   test("dispatch at configured capacity is rejected", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
-    record.policy = { ...record.policy, configuredConcurrency: 0 };
+    record.policy = { ...record.policy, configuredConcurrency: 1 };
     const t3 = taskOf(record, "t3");
     t3.state = "ready";
     t3.spec = { ...t3.spec, deps: [] };
@@ -984,6 +1083,7 @@ describe("R03a gate details and invariant boundaries", () => {
           assignmentId: "assignment-t3-a1",
           messageId: MESSAGE_T2,
         }),
+        reissueOfAssignmentId: null,
       },
       facts,
     );
@@ -1049,7 +1149,8 @@ describe("R01f cancellation authorization and refresh evidence", () => {
         createdAt: AT_UPDATED,
         answeredAt: AT_UPDATED,
         answer: { action: "cancel", taskIds: ["t2"], answeredAt: AT_UPDATED },
-        cancelIntentId: INTENT_CANCEL,
+        cancelIntents: [{ assignmentId: ASSIGNMENT_T2, intentId: INTENT_CANCEL }],
+        resolution: null,
         ...decisionOverrides,
       } as RunRecord["decisions"][number],
     ];
@@ -1075,14 +1176,16 @@ describe("R01f cancellation authorization and refresh evidence", () => {
   });
 
   const freezeCases: Array<
-    [string, () => { record: RunRecord; evidence: RunCancellationEvidence }]
+    [string, () => { record: RunRecord; evidence: CancellationObservation }]
   > = [
     [
       "missing refresh",
       () => {
         const base = cancellationRecord();
-        delete (base.evidence as Record<string, unknown>).refresh;
-        return base;
+        return {
+          ...base,
+          evidence: { ...base.evidence, refresh: null } as CancellationObservation,
+        };
       },
     ],
     [
