@@ -519,6 +519,115 @@ function failedHistory(count: number) {
 }
 
 describe("R01g real reducer positive chains", () => {
+  test("rework waits for another actual producer's configured slot and advances when it enters review", () => {
+    let record = start(awaitingReviews(), "r1");
+    record.policy.configuredConcurrency = 1;
+    const otherTask = structuredClone(task(ready()));
+    otherTask.spec.id = "t2";
+    otherTask.spec.scopes[0]!.path = "src/t2.ts";
+    record.tasks.push(otherTask);
+    const input = prepareDispatch(record, "p-other", "member", 9);
+    Object.assign(input.event.assignment, {
+      taskId: "t2",
+      attempt: 1,
+      agentId: "agent-other-producer",
+      seatId: "seat-other-producer",
+      workspace: { id: "ws-other", branch: "other-task", baseRef: "main" },
+    });
+    input.event.taskId = "t2";
+    Object.assign(input.event.nonce, {
+      taskId: "t2",
+      attempt: 1,
+      agentId: input.event.assignment.agentId,
+      seatId: input.event.assignment.seatId,
+    });
+    Object.assign(input.event.intent, {
+      taskId: "t2",
+      recipient: input.event.assignment.agentId,
+    });
+    for (const claim of input.event.claims ?? []) {
+      claim.claimId = "claim-t2";
+      claim.taskId = "t2";
+      claim.path = "src/t2.ts";
+    }
+    input.record.roster.push({
+      seatId: input.event.assignment.seatId,
+      agentId: input.event.assignment.agentId,
+      tier: "B",
+      channelId: input.event.assignment.channelId,
+      duties: ["implement"],
+      enabled: true,
+    });
+    record = start(apply(input.record, input.event), "p-other");
+    record = end(review(record, "r1", "不可合入"), "r1");
+    expect(task(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
+    expect(reduceRun(record, nextAttemptEvent(record), facts)).toMatchObject({
+      ok: false,
+      params: { reason: "capacity" },
+    });
+    const other = actor(record, "p-other");
+    const template = RunStoredTaskReportSchema.parse(actor(record, "p1").acceptedProof);
+    record = apply(record, {
+      kind: "task-report",
+      block: RunTaskReportBlockSchema.parse({
+        ...template,
+        taskId: "t2",
+        assignmentId: other.assignmentId,
+        nonce: other.nonce,
+        messageId: other.messageId,
+        workspace: other.workspace,
+        changedFiles: ["src/t2.ts"],
+      }),
+    });
+    expect(task(record)).toMatchObject({
+      state: "rework",
+      qualityFailures: 1,
+      reworkCount: 0,
+    });
+    expect(record.resources.find((claim) => claim.taskId === "t1")!.originAssignmentId).toBe("p1");
+  });
+
+  test("a delivered producer's start may arrive after its report without downgrading review", () => {
+    let record = report(dispatch(ready(), "p1", "member", 1));
+    const proof = structuredClone(actor(record, "p1").acceptedProof);
+    expect(task(record).state).toBe("review");
+    record = start(record, "p1");
+    expect(task(record)).toMatchObject({ state: "review", phase: "review" });
+    expect(actor(record, "p1").acceptedProof).toEqual(proof);
+    record = end(record, "p1");
+    record = end(review(start(dispatch(record, "r1", "reviewer", 2), "r1"), "r1"), "r1");
+    expect(task(record).state).toBe("done");
+  });
+
+  test("an in-flight producer starting after cancellation cannot unfreeze the task", () => {
+    let record = dispatch(ready(), "p1", "member", 1);
+    record = frozenCancellation(record, ["p1"]);
+    record = start(record, "p1");
+    expect(task(record)).toMatchObject({ state: "blocked", phase: "frozen" });
+    expect(record.resources[0]!.frozen).toBe(true);
+    expect(record.nonceRegistry[0]!.revokedAt).toBe(NOW);
+    record = checked(authorized(record), "p1");
+    expect(task(record).state).toBe("cancelled");
+  });
+
+  test("a prepared intent cannot authorize a turn-started actor", () => {
+    const record = dispatch(ready(), "p1", "member", 1, true);
+    const before = structuredClone(record);
+    expect(
+      reduceRun(
+        record,
+        {
+          kind: "turn-started",
+          assignmentId: "p1",
+          agentId: actor(record, "p1").agentId,
+          turnId: "untrusted-start",
+        },
+        facts,
+      ),
+    ).toMatchObject({ ok: false, params: { reason: "dispatch-not-delivered" } });
+    expect(record).toEqual(before);
+  });
+
   test("retained producer work attempts cannot contain a numbering gap", () => {
     const record = failedHistory(2);
     for (const assignment of record.assignments.filter((entry) => entry.attempt === 2)) {

@@ -593,17 +593,24 @@ function acceptNonce(next: RunRecord, assignment: RunAssignment, facts: ReduceFa
   nonce.acceptedEventKey = `proof:${assignment.assignmentId}`;
 }
 
-function liveAuthorized(next: RunRecord, assignment: RunAssignment): boolean {
-  if (assignment.state === "cancelled" || assignment.state === "failed") return false;
+function dispatchWasDelivered(next: RunRecord, assignment: RunAssignment): boolean {
   const intents = next.outbox.filter(
     (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
   );
   const intent = intents.length === 1 ? intents[0] : undefined;
+  return (
+    intent !== undefined &&
+    dispatchIntentMatches(assignment, intent) &&
+    intent.localCancellation === null &&
+    ["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+  );
+}
+
+function liveAuthorized(next: RunRecord, assignment: RunAssignment): boolean {
   if (
-    !intent ||
-    !dispatchIntentMatches(assignment, intent) ||
-    intent.localCancellation !== null ||
-    !["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+    assignment.state === "cancelled" ||
+    assignment.state === "failed" ||
+    !dispatchWasDelivered(next, assignment)
   )
     return false;
   const nonce = next.nonceRegistry.find((entry) => entry.nonce === assignment.nonce);
@@ -1008,6 +1015,13 @@ function applyEvent(
       }
       if (event.agentId !== assignment.agentId)
         return reject("RUN_EVENT_INVALID", ["turn-started", event.assignmentId], "agent-mismatch");
+      if (!dispatchWasDelivered(next, assignment)) {
+        return reject(
+          "RUN_EVENT_INVALID",
+          ["turn-started", event.assignmentId],
+          "dispatch-not-delivered",
+        );
+      }
       const reviewer = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
       const head = producerHead(next, task.spec.id);
       if (
@@ -1020,7 +1034,14 @@ function applyEvent(
           "not-producer-head",
         );
       }
-      if (!reviewer && task.state !== "assigned" && task.state !== "in_progress") {
+      const implementation = task.state === "assigned" || task.state === "in_progress";
+      const knownLateProducer =
+        assignment.acceptedProof !== null ||
+        (task.state === "blocked" &&
+          cancelPairs(next, task.spec.id).some(
+            (pair) => pair.assignmentId === assignment.assignmentId,
+          ));
+      if (!reviewer && !implementation && !knownLateProducer) {
         return invalidTransition(task.spec.id, task.state, "in_progress");
       }
       if (assignment.turnId !== null || assignment.startedAt !== null) {
@@ -1029,7 +1050,7 @@ function applyEvent(
       assignment.state = "in_progress";
       assignment.startedAt = facts.now;
       assignment.turnId = event.turnId;
-      if (!reviewer) {
+      if (!reviewer && implementation) {
         task.state = "in_progress";
         task.phase = "implementation";
       }
