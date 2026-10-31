@@ -166,6 +166,83 @@ function addReviewer(
   );
 }
 
+function rebindReviewer(
+  record: RunRecord,
+  reviewer: RunRecord["assignments"][number],
+  seatId: string,
+  agentId: string,
+  tier: "A" | "B" | "S",
+  family: string,
+) {
+  ensureSeat(record, seatId, agentId, "review", tier);
+  reviewer.seatId = seatId;
+  reviewer.agentId = agentId;
+  reviewer.tier = tier;
+  reviewer.family = family;
+  reviewer.channelId = "claude";
+  const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === reviewer.assignmentId);
+  if (nonce) {
+    nonce.agentId = agentId;
+    nonce.seatId = seatId;
+  }
+  const intent = record.outbox.find((entry) => entry.assignmentId === reviewer.assignmentId);
+  if (intent) intent.recipient = agentId;
+}
+
+function ensureProducer(
+  record: RunRecord,
+  taskId: string,
+  assignmentId: string,
+  seatId: string,
+  agentId: string,
+  tier: "A" | "B" | "S",
+  nonce: string,
+  messageId: string,
+) {
+  ensureSeat(record, seatId, agentId, "implement", tier);
+  const producer = assignment({
+    assignmentId,
+    taskId,
+    seatId,
+    agentId,
+    tier,
+    nonce,
+    messageId,
+  });
+  record.assignments.push(producer);
+  record.nonceRegistry.push({
+    nonce,
+    runId: record.runId,
+    taskId,
+    assignmentId,
+    attempt: 1,
+    phase: "implementation",
+    agentId,
+    seatId,
+    issuedAt: AT_UPDATED,
+    acceptedAt: null,
+    acceptedEventKey: null,
+    revokedAt: null,
+    revokeReason: null,
+  });
+  record.outbox.push(
+    dispatchIntent({
+      id: `intent-${assignmentId}`,
+      taskId,
+      assignmentId,
+      recipient: agentId,
+      messageId,
+      idempotencyKey: `dispatch-${assignmentId}`,
+      state: "confirmed",
+      confirmedAt: AT_UPDATED,
+    }),
+  );
+  const owner = taskOf(record, taskId);
+  owner.currentAssignmentId = assignmentId;
+  owner.attempts = 1;
+  return producer;
+}
+
 function review(
   assignmentId = "assignment-t2-r1",
   overrides: Partial<RunReviewReportBlock> = {},
@@ -277,7 +354,7 @@ function smokeReady(
   record = reduceOrThrow(record, { kind: "review-report", block: review() });
   record = endTurn(record, "assignment-t2-r1");
   const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
-  ensureSeat(record, "seat-b3", "agent-b3", "smoke", "A");
+  ensureSeat(record, "seat-b3", "agent-b3", "smoke", "B");
   record.assignments.push(
     assignment({
       assignmentId: "assignment-t2-smoke",
@@ -647,10 +724,33 @@ describe("R03a locks and invariants", () => {
         ),
       ).toBe(true);
     }
-    const hot = withClaims([
-      claim({ claimId: "hot-a", taskId: "t2", kind: "hot", path: "repo:hot" }),
-      claim({ claimId: "hot-b", taskId: "t3", kind: "hot", path: "repo:hot:child" }),
-    ]);
+    const hot = withClaims([]);
+    const hotProducer = ensureProducer(
+      hot,
+      "t3",
+      "assignment-t3-hot",
+      "seat-b8",
+      "agent-b8",
+      "B",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+    hot.resources = [
+      claim({
+        claimId: "hot-a",
+        taskId: "t2",
+        kind: "hot",
+        path: "repo:hot",
+        originAssignmentId: ASSIGNMENT_T2,
+      }),
+      claim({
+        claimId: "hot-b",
+        taskId: "t3",
+        kind: "hot",
+        path: "repo:hot:child",
+        originAssignmentId: hotProducer.assignmentId,
+      }),
+    ];
     const hotResult = checkLedgerInvariants(hot);
     expect(hotResult.ok).toBe(true);
   });
@@ -843,8 +943,7 @@ describe("R03a gate details and invariant boundaries", () => {
       (entry) => entry.assignmentId === "assignment-t2-r1",
     );
     if (!sameReviewer) throw new Error("reviewer");
-    sameReviewer.tier = "B";
-    sameReviewer.family = "haiku";
+    rebindReviewer(same, sameReviewer, "seat-b5", "agent-b5", "B", "haiku");
     expect(reason(reduceRun(same, { kind: "review-report", block: review() }, facts))).toBe(
       "no-valid-review",
     );
@@ -855,8 +954,7 @@ describe("R03a gate details and invariant boundaries", () => {
       (entry) => entry.assignmentId === "assignment-t2-r1",
     );
     if (!otherReviewer) throw new Error("reviewer");
-    otherReviewer.tier = "B";
-    otherReviewer.family = "codex";
+    rebindReviewer(other, otherReviewer, "seat-b5", "agent-b5", "B", "codex");
     const result = reduceRun(other, { kind: "review-report", block: review() }, facts);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -876,7 +974,7 @@ describe("R03a gate details and invariant boundaries", () => {
       (entry) => entry.assignmentId === "assignment-t2-r1",
     );
     if (!failureReviewer) throw new Error("failure reviewer");
-    failureReviewer.tier = "B";
+    rebindReviewer(record, failureReviewer, "seat-b5", "agent-b5", "B", "codex");
     const failed = reduceRun(
       record,
       {
@@ -1169,43 +1267,66 @@ describe("R03a gate details and invariant boundaries", () => {
   test("dispatch at configured capacity is rejected", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     record.policy = { ...record.policy, configuredConcurrency: 1 };
+    ensureSeat(record, "seat-b8", "agent-b8", "implement", "B");
     const t3 = taskOf(record, "t3");
     t3.state = "ready";
     t3.spec = { ...t3.spec, deps: [] };
     t3.attempts = 0;
     const nonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const result = reduceRun(
-      record,
-      {
-        kind: "task-dispatched",
+    const messageId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const t3Assignment = assignment({
+      assignmentId: "assignment-t3-a1",
+      taskId: "t3",
+      seatId: "seat-b8",
+      agentId: "agent-b8",
+      tier: "B",
+      nonce,
+      messageId,
+    });
+    const event = {
+      kind: "task-dispatched" as const,
+      taskId: "t3",
+      assignment: t3Assignment,
+      nonce: {
+        nonce,
+        runId: record.runId,
         taskId: "t3",
-        assignment: assignment({ assignmentId: "assignment-t3-a1", taskId: "t3", nonce }),
-        nonce: {
-          nonce,
-          runId: record.runId,
-          taskId: "t3",
-          assignmentId: "assignment-t3-a1",
-          attempt: 1,
-          phase: "implementation",
-          agentId: "agent-b1",
-          seatId: "seat-b1",
-          issuedAt: AT_UPDATED,
-          acceptedAt: null,
-          acceptedEventKey: null,
-          revokedAt: null,
-          revokeReason: null,
-        },
-        intent: dispatchIntent({
-          id: "intent-t3-a1",
-          taskId: "t3",
-          assignmentId: "assignment-t3-a1",
-          messageId: MESSAGE_T2,
-        }),
-        reissueOfAssignmentId: null,
+        assignmentId: t3Assignment.assignmentId,
+        attempt: 1,
+        phase: "implementation" as const,
+        agentId: t3Assignment.agentId,
+        seatId: t3Assignment.seatId,
+        issuedAt: AT_UPDATED,
+        acceptedAt: null,
+        acceptedEventKey: null,
+        revokedAt: null,
+        revokeReason: null,
       },
-      facts,
-    );
+      intent: dispatchIntent({
+        id: "intent-t3-a1",
+        taskId: "t3",
+        assignmentId: t3Assignment.assignmentId,
+        recipient: t3Assignment.agentId,
+        messageId,
+        idempotencyKey: "dispatch-t3-a1",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
+      }),
+      claims: [
+        claim({
+          claimId: "claim-t3",
+          taskId: "t3",
+          path: "src/t3.ts",
+          originAssignmentId: t3Assignment.assignmentId,
+        }),
+      ],
+      reissueOfAssignmentId: null,
+    };
+    const result = reduceRun(record, event, facts);
     expect(result).toMatchObject({ ok: false, params: { reason: "capacity" } });
+    const open = structuredClone(record);
+    open.policy = { ...open.policy, configuredConcurrency: 2 };
+    expect(reduceRun(open, event, facts)).toMatchObject({ ok: true });
   });
 });
 
@@ -1307,11 +1428,17 @@ describe("R01f cancellation authorization and refresh evidence", () => {
       },
     ],
     [
-      "agent busy",
-      () =>
-        cancellationRecord({}, {
-          refresh: { ...refresh, status: "busy" },
-        } as unknown as Partial<RunCancellationEvidence>),
+      "agent running",
+      () => {
+        const base = cancellationRecord();
+        return {
+          ...base,
+          evidence: {
+            ...base.evidence,
+            refresh: { ...refresh, status: "running", activeTurn: true },
+          } as CancellationObservation,
+        };
+      },
     ],
     [
       "active turn",
@@ -1340,6 +1467,27 @@ describe("R01f cancellation authorization and refresh evidence", () => {
       },
     ],
   ];
+
+  test("unknown refresh status is rejected at event shape", () => {
+    const { record, evidence } = cancellationRecord();
+    const before = structuredClone(record);
+    const malformed = {
+      ...evidence,
+      refresh: { ...refresh, status: "busy" },
+    } as unknown as CancellationObservation;
+    const result = reduceRun(
+      record,
+      { kind: "cancellation-checked", taskId: "t2", decisionId: DECISION_D1, evidence: malformed },
+      facts,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["cancellation"],
+      params: { reason: "event-shape" },
+    });
+    expect(record).toEqual(before);
+  });
 
   test("wrong intent recipient is rejected before freeze", () => {
     const { record, evidence } = cancellationRecord({}, {}, "agent-other");
