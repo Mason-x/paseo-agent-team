@@ -1,5 +1,11 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
-import { doneGate, failedDeliveryIds, historicalProofValid } from "./gates";
+import { artifactRefEqual, producerHead, resolveD } from "./delivery-binding";
+import {
+  checkEvidenceForProducer,
+  doneGate,
+  failedDeliveryIds,
+  historicalProofValid,
+} from "./gates";
 import { lockConflicts, normalizeLogicalPath } from "./locks";
 import {
   assignmentPhase,
@@ -12,6 +18,7 @@ import {
   isNormalEnded,
   noEffectsResolutionValid,
   RUN_COUNTER_EVENTS,
+  sameStoredValue,
 } from "./transitions";
 
 export type RunInvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
@@ -147,6 +154,18 @@ function checkI3(record: RunRecord): RunInvariantViolation[] {
     if (!task) {
       issues.push(violation("I3", ["resources", index], "unknown-task"));
       continue;
+    }
+    const origin = record.assignments.find(
+      (assignment) => assignment.assignmentId === claim.originAssignmentId,
+    );
+    if (
+      !origin ||
+      origin.taskId !== claim.taskId ||
+      !["member", "coordinator", "reopen"].includes(origin.purpose)
+    ) {
+      issues.push(
+        violation("I3", ["resources", index, "originAssignmentId"], "origin-producer-missing"),
+      );
     }
     if (task.state === "done" || task.state === "cancelled") {
       issues.push(
@@ -402,10 +421,16 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
         );
       }
     }
-    const expectedReworks = Math.max(
-      0,
-      new Set(producers.map((producer) => producer.attempt)).size - 1,
-    );
+    const attemptCount = new Set(producers.map((producer) => producer.attempt)).size;
+    if (task.attempts !== attemptCount) {
+      issues.push(
+        violation("I6", ["tasks", task.spec.id, "attempts"], "attempt-count-mismatch", {
+          expected: attemptCount,
+          actual: task.attempts,
+        }),
+      );
+    }
+    const expectedReworks = Math.max(0, attemptCount - 1);
     if (task.reworkCount !== expectedReworks) {
       issues.push(
         violation("I6", ["tasks", task.spec.id, "reworkCount"], "rework-count-mismatch", {
@@ -454,6 +479,60 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
 function checkI7(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const task of record.tasks) {
+    const head = producerHead(record, task.spec.id);
+    if (head.kind === "invalid") {
+      issues.push(violation("I7", ["tasks", task.spec.id, "producer"], head.reason));
+    } else {
+      const producers = record.assignments.filter(
+        (assignment) =>
+          assignment.taskId === task.spec.id &&
+          ["member", "coordinator", "reopen"].includes(assignment.purpose),
+      );
+      const validPerAttempt = new Map<number, number>();
+      for (const producer of producers) {
+        if (checkEvidenceForProducer(record, task, producer).ok) {
+          validPerAttempt.set(producer.attempt, (validPerAttempt.get(producer.attempt) ?? 0) + 1);
+        }
+      }
+      for (const [attempt, count] of validPerAttempt) {
+        if (count > 1)
+          issues.push(
+            violation("I7", ["tasks", task.spec.id, "attempts", attempt], "multiple-deliveries"),
+          );
+      }
+      for (const producer of producers) {
+        if (producer.supersededByAssignmentId == null) continue;
+        if (
+          !isNormalEnded(record, producer) ||
+          !producer.acceptedProof ||
+          !("status" in producer.acceptedProof) ||
+          producer.acceptedProof.status !== "done" ||
+          ((validPerAttempt.get(producer.attempt) ?? 0) <= 1 &&
+            checkEvidenceForProducer(record, task, producer).ok)
+        )
+          issues.push(
+            violation(
+              "I7",
+              ["assignments", record.assignments.indexOf(producer), "supersededByAssignmentId"],
+              "invalid-reissue-predecessor",
+            ),
+          );
+      }
+      if (head.kind === "none" && task.attempts > 0) {
+        issues.push(violation("I7", ["tasks", task.spec.id, "producer"], "missing-producer"));
+      }
+      const resolved = resolveD(record, task.spec.id);
+      const delivery =
+        resolved.kind === "ok" && checkEvidenceForProducer(record, task, resolved.d.producer).ok
+          ? resolved.d
+          : null;
+      if (!artifactRefEqual(task.ref, delivery?.ref ?? null)) {
+        issues.push(violation("I7", ["tasks", task.spec.id, "ref"], "delivery-cache"));
+      }
+      if (!sameStoredValue(task.changedFiles, delivery?.files ?? [])) {
+        issues.push(violation("I7", ["tasks", task.spec.id, "changedFiles"], "delivery-cache"));
+      }
+    }
     const pairs = cancelPairs(record, task.spec.id);
     if (task.state === "cancelled" && pairs.length > 0) {
       const authorization = cancellationAuthorization(record, task.spec.id);

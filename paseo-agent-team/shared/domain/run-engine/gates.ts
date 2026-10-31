@@ -9,7 +9,12 @@ import {
   RunStoredSmokeReportSchema,
   type RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
-import { type DeliveryCandidate, resolveD, resolveProducerProof } from "./delivery-binding";
+import {
+  artifactRefEqual,
+  type DeliveryCandidate,
+  resolveD,
+  resolveProducerProof,
+} from "./delivery-binding";
 import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
 import { executionTier, reviewRequirement } from "./tier";
 import {
@@ -37,10 +42,6 @@ function fail(
   reason: string,
 ): GateResult {
   return { ok: false, issues: [{ gate, path, params: { reason } }] };
-}
-
-function artifactKey(ref: RunArtifactRef): string {
-  return ref.kind === "git-commit" ? `git:${ref.value}` : `diff:${ref.value}`;
 }
 
 function withinRoot(root: string, path: string): boolean {
@@ -83,7 +84,7 @@ export function checkEvidenceGate(record: RunRecord, task: RunTaskRecord): GateR
   const { d } = resolved;
   const checked = checkEvidenceForProducer(record, task, d.producer);
   if (!checked.ok) return checked;
-  if (task.ref !== null && artifactKey(d.ref) !== artifactKey(task.ref)) {
+  if (task.ref !== null && !artifactRefEqual(d.ref, task.ref)) {
     return fail("evidence", ["tasks", task.spec.id, "ref"], "ref-mismatch");
   }
   return OK;
@@ -189,7 +190,7 @@ function evidenceChecks(
     if (requirement.command !== null && evidence.command !== requirement.command) {
       return fail("evidence", ["tasks", task.spec.id, "evidence", requirement.id], "command");
     }
-    if (artifactKey(evidence.ref) !== artifactKey(report.ref)) {
+    if (!artifactRefEqual(evidence.ref, report.ref)) {
       return fail("evidence", ["tasks", task.spec.id, "evidence", requirement.id], "ref-mismatch");
     }
     if (evidence.exitCode !== 0) {
@@ -286,7 +287,7 @@ function reviewForProducer(
   if (assignment.taskId !== task.spec.id || assignment.purpose !== "reviewer") return false;
   if (assignment.attempt !== producer.attempt) return false;
   if (assignment.delivery?.producerAssignmentId !== producer.assignmentId) return false;
-  if (artifactKey(review.reviewedRef) !== artifactKey(ref)) return false;
+  if (!artifactRefEqual(review.reviewedRef, ref)) return false;
   const requirement = reviewRequirement(producerEpoch(task, producer));
   if (assignment.tier !== requirement.tier) return false;
   if (assignment.agentId === producer.agentId || assignment.seatId === producer.seatId) {
@@ -380,7 +381,7 @@ function validSmokeSource(
     assignment.delivery?.producerAssignmentId !== producer.assignmentId ||
     assignment.agentId === producer.agentId ||
     assignment.seatId === producer.seatId ||
-    artifactKey(proof.testedRef) !== artifactKey(ref)
+    !artifactRefEqual(proof.testedRef, ref)
   )
     return false;
   const endpoint = devEndpoint(proof.devHost);

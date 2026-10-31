@@ -519,6 +519,139 @@ function failedHistory(count: number) {
 }
 
 describe("R01g real reducer positive chains", () => {
+  test("retained producer work attempts cannot contain a numbering gap", () => {
+    const record = failedHistory(2);
+    for (const assignment of record.assignments.filter((entry) => entry.attempt === 2)) {
+      assignment.attempt = 3;
+      if (assignment.acceptedProof) assignment.acceptedProof.attempt = 3;
+      record.nonceRegistry.find(
+        (entry) => entry.assignmentId === assignment.assignmentId,
+      )!.attempt = 3;
+    }
+    task(record).attempts = 3;
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(checkLedgerInvariants(record)).toEqual({
+      ok: false,
+      violations: [
+        {
+          invariant: "I6",
+          path: ["tasks", "t1", "attempts"],
+          params: { reason: "attempt-count-mismatch", expected: 2, actual: 3 },
+        },
+      ],
+    });
+  });
+
+  test.each(["actor", "legacy-task"] as const)(
+    "a prepared label cannot erase retained turn audit facts: %s",
+    (kind) => {
+      const record = dispatch(ready(), "p1", "member", 1, true);
+      record.events.push({
+        seq: record.counters.eventsThroughSeq + 1,
+        at: NOW,
+        kind: kind === "actor" ? "turn-started" : "turn_started",
+        payload:
+          kind === "actor"
+            ? { assignmentId: "p1", agentId: actor(record, "p1").agentId, turnId: "audit-turn" }
+            : { taskId: "t1", turnId: "audit-turn" },
+      });
+      record.counters.eventsThroughSeq += 1;
+      expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+      const before = structuredClone(record);
+      expect(reduceRun(record, emptyCancel(), facts)).toMatchObject({
+        ok: false,
+        params: { reason: "incomplete-coverage" },
+      });
+      expect(record).toEqual(before);
+      expect(record.resources).toHaveLength(1);
+    },
+  );
+
+  test("one work attempt cannot retain two evidence-qualified producer deliveries", () => {
+    let record = end(report(start(dispatch(ready(), "p1", "member", 1), "p1"), true), "p1");
+    record = apply(record, reissueEvent(record));
+    record = end(report(start(record, "p2"), false, "p2"), "p2");
+    const oldProof = RunStoredTaskReportSchema.parse(actor(record, "p1").acceptedProof);
+    if (oldProof.status !== "done") throw new Error("non-D done parent");
+    oldProof.evidence[0]!.exitCode = 0;
+    actor(record, "p1").acceptedProof = oldProof;
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(checkLedgerInvariants(record)).toEqual({
+      ok: false,
+      violations: [
+        {
+          invariant: "I7",
+          path: ["tasks", "t1", "attempts", 1],
+          params: { reason: "multiple-deliveries" },
+        },
+      ],
+    });
+  });
+
+  test.each(["ref", "changed-files", "no-D"] as const)(
+    "task cache is exactly the current valid D: %s",
+    (kind) => {
+      const record = kind === "no-D" ? ready() : awaitingReviews();
+      if (kind === "changed-files") task(record).changedFiles = ["src/unreported.ts"];
+      else task(record).ref = { kind: "git-commit", value: "deadbeef" };
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(checkLedgerInvariants(record)).toEqual({
+        ok: false,
+        violations: [
+          {
+            invariant: "I7",
+            path: ["tasks", "t1", kind === "changed-files" ? "changedFiles" : "ref"],
+            params: { reason: "delivery-cache" },
+          },
+        ],
+      });
+    },
+  );
+
+  test.each(["dangling", "cycle"] as const)(
+    "producer head validates historical supersession, not only the latest attempt: %s",
+    (kind) => {
+      const record = failedHistory(2);
+      actor(record, "p1").supersededByAssignmentId = kind === "cycle" ? "p1" : "missing";
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(producerHead(record, "t1")).toEqual({
+        kind: "invalid",
+        reason: kind === "cycle" ? "producer-cycle" : "producer-successor",
+      });
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
+
+  test.each(["baseCommit", "patchPath"] as const)(
+    "a diff ref with the same hash still binds its known %s",
+    (field) => {
+      const record = awaitingReviews();
+      const proof = RunStoredTaskReportSchema.parse(actor(record, "p1").acceptedProof);
+      if (proof.status !== "done") throw new Error("producer done");
+      const ref = {
+        kind: "diff-sha256" as const,
+        value: "a".repeat(64),
+        baseCommit: "base-commit",
+        patchPath: "patches/current.diff",
+      };
+      proof.ref = ref;
+      for (const evidence of proof.evidence) evidence.ref = structuredClone(ref);
+      actor(record, "p1").acceptedProof = proof;
+      task(record).ref = structuredClone(ref);
+      expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+      const event = reviewEvent(record, "r1");
+      if (event.block.reviewedRef.kind !== "diff-sha256") throw new Error("diff parent");
+      event.block.reviewedRef[field] =
+        field === "baseCommit" ? "another-base" : "patches/other.diff";
+      const before = structuredClone(record);
+      expect(reduceRun(record, event, facts)).toMatchObject({
+        ok: false,
+        params: { reason: "no-valid-review" },
+      });
+      expect(record).toEqual(before);
+    },
+  );
+
   test("a cancellation batch cannot register an archive absent from its exact pair set", () => {
     const record = start(dispatch(ready(), "p1", "member", 1), "p1");
     const intent = (id: string): ArchiveIntent => ({

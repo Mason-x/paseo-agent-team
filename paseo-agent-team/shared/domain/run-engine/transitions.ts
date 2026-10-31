@@ -260,6 +260,20 @@ function hasTurnFacts(record: RunRecord, assignment: RunAssignment): boolean {
     assignment.startedAt !== null ||
     assignment.endedAt !== null ||
     assignment.endedEventKey !== null ||
+    record.events.some(
+      (event) =>
+        ["turn-started", "turn-ended", "turn_started", "turn_ended"].includes(event.kind) &&
+        Date.parse(event.at) >= Date.parse(assignment.createdAt) &&
+        (event.payload.assignmentId === assignment.assignmentId ||
+          (event.payload.taskId === assignment.taskId &&
+            typeof event.payload.turnId === "string" &&
+            !record.assignments.some(
+              (other) =>
+                other.assignmentId !== assignment.assignmentId &&
+                other.taskId === assignment.taskId &&
+                other.turnId === event.payload.turnId,
+            ))),
+    ) ||
     record.eventReceipts.some(
       (receipt) =>
         receipt.agentId === assignment.agentId &&

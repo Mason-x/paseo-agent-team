@@ -31,25 +31,32 @@ const producerPurposes = new Set(["member", "coordinator", "reopen"]);
 export function producerHead(record: RunRecord, taskId: string): ProducerHead {
   const task = record.tasks.find((entry) => entry.spec.id === taskId);
   if (task === undefined) return { kind: "none" };
-  const producers = record.assignments.filter(
-    (entry) =>
-      entry.taskId === taskId &&
-      producerPurposes.has(entry.purpose) &&
-      entry.attempt === task.attempts,
+  const allProducers = record.assignments.filter(
+    (entry) => entry.taskId === taskId && producerPurposes.has(entry.purpose),
   );
-  if (producers.length === 0) return { kind: "none" };
-  const byId = new Map(producers.map((entry) => [entry.assignmentId, entry]));
-  for (const producer of producers) {
+  const byId = new Map(allProducers.map((entry) => [entry.assignmentId, entry]));
+  for (const producer of allProducers) {
     const seen = new Set<string>();
     let cursor = producer;
     while (cursor.supersededByAssignmentId != null) {
       if (seen.has(cursor.assignmentId)) return { kind: "invalid", reason: "producer-cycle" };
       seen.add(cursor.assignmentId);
       const successor = byId.get(cursor.supersededByAssignmentId);
-      if (!successor) return { kind: "invalid", reason: "producer-successor" };
+      if (!successor || successor.attempt !== cursor.attempt)
+        return { kind: "invalid", reason: "producer-successor" };
       cursor = successor;
     }
   }
+  for (const attempt of new Set(allProducers.map((producer) => producer.attempt))) {
+    if (
+      allProducers.filter(
+        (producer) => producer.attempt === attempt && producer.supersededByAssignmentId == null,
+      ).length !== 1
+    )
+      return { kind: "invalid", reason: "ambiguous-producer-head" };
+  }
+  const producers = allProducers.filter((entry) => entry.attempt === task.attempts);
+  if (producers.length === 0) return { kind: "none" };
   const heads = producers.filter((entry) => entry.supersededByAssignmentId == null);
   if (heads.length !== 1) return { kind: "invalid", reason: "ambiguous-producer-head" };
   return { kind: "ok", assignment: heads[0] as RunAssignment };
@@ -119,6 +126,10 @@ function knownRef(value: unknown): unknown {
       ? ["kind", "value", "baseCommit", "patchPath"]
       : ["kind", "value"],
   );
+}
+
+export function artifactRefEqual(a: unknown, b: unknown): boolean {
+  return proofEqual(knownRef(a), knownRef(b));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
