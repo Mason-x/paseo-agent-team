@@ -40,10 +40,15 @@ import {
   type ArchiveIntent,
   assignmentById,
   type CancellationObservation,
+  canCancelLocally,
   cancelCoverage,
+  cancelPairs,
   cancellationAuthorization as decisionAuthorization,
   dispatchIntentMatches,
+  hasUnsettledEffects,
+  isCancellationKind,
   isComplete167,
+  isLocalNeverSent,
   isNormalEnded,
   outstandingAssignments,
   RUN_COUNTER_EVENTS,
@@ -106,7 +111,23 @@ function appendEvent(next: RunRecord, event: RunReducerEvent, facts: ReduceFacts
   const seq = next.counters.eventsThroughSeq + 1;
   next.counters.eventsThroughSeq = seq;
   next.events.push({ seq, kind: event.kind, at: facts.now, payload: { ...event } });
+  if (isCancellationKind(event.kind)) updateCancellationAudit(next);
   next.updatedAt = facts.now;
+}
+
+function updateCancellationAudit(next: RunRecord): void {
+  const source = next.events.at(-1);
+  if (!source || !isCancellationKind(source.kind)) return;
+  source.payload.audit = {
+    localIntentIds: next.outbox
+      .filter((intent) => intent.localCancellation?.eventSeq === source.seq)
+      .map((intent) => intent.id)
+      .sort(),
+    supersededDecisionIds: next.decisions
+      .filter((decision) => decision.resolution?.eventSeq === source.seq)
+      .map((decision) => decision.decisionId)
+      .sort(),
+  };
 }
 
 function appendCounter(
@@ -181,7 +202,9 @@ function freezeTask(
       nonce.revokeReason = "cancel-requested";
     }
   }
-  const sorted = [...pairs].sort((a, b) => a.assignmentId.localeCompare(b.assignmentId));
+  const sorted = [...pairs].sort((a, b) =>
+    a.assignmentId < b.assignmentId ? -1 : a.assignmentId > b.assignmentId ? 1 : 0,
+  );
   const dedupeKey = `cancel:${taskId}`;
   const existing = next.decisions.find((entry) => entry.dedupeKey === dedupeKey);
   if (existing) {
@@ -227,23 +250,11 @@ function markLocalCancellations(
   cause: "cancel-requested" | "dag-revised" | "run-cancelled",
   facts: ReduceFacts,
 ): void {
-  const eventSeq = next.counters.eventsThroughSeq + 1;
+  const eventSeq = next.counters.eventsThroughSeq;
   for (const intent of next.outbox) {
     if (intent.kind !== "dispatch" || intent.taskId !== taskId) continue;
     const assignment = assignmentOf(next, intent.assignmentId);
-    if (
-      assignment === undefined ||
-      assignment.acceptedProof !== null ||
-      assignment.turnId !== null
-    ) {
-      continue;
-    }
-    if (
-      intent.state !== "prepared" ||
-      intent.recoverySendCount !== 0 ||
-      intent.confirmedAt !== null ||
-      intent.localCancellation !== null
-    ) {
+    if (assignment === undefined || !canCancelLocally(next, assignment, intent)) {
       continue;
     }
     intent.state = "failed";
@@ -258,27 +269,24 @@ function markLocalCancellations(
       nonce.revokedAt = facts.now;
       nonce.revokeReason = "cancel-before-send";
     }
-    const claim = next.resources.find(
-      (entry) =>
-        entry.originAssignmentId === assignment.assignmentId && entry.taskId === assignment.taskId,
+  }
+  updateCancellationAudit(next);
+  const actors = next.assignments.filter((entry) => entry.taskId === taskId);
+  // A prepared retry cannot remove a claim retained from an earlier sent delivery.
+  if (actors.every((entry) => isLocalNeverSent(next, entry))) {
+    next.resources = next.resources.filter(
+      (claim) =>
+        claim.taskId !== taskId ||
+        !actors.some((entry) => entry.assignmentId === claim.originAssignmentId),
     );
-    if (claim) {
-      next.resources = next.resources.filter((entry) => entry !== claim);
-      const task = taskOf(next, taskId);
-      if (task?.frozenClaimId === claim.claimId) task.frozenClaimId = null;
-    }
+    const task = taskOf(next, taskId);
+    if (task && !next.resources.some((claim) => claim.claimId === task.frozenClaimId))
+      task.frozenClaimId = null;
   }
 }
 
 function unsettledIntents(record: RunRecord, taskId: string): boolean {
-  return record.outbox.some(
-    (intent) =>
-      intent.taskId === taskId &&
-      (intent.state === "prepared" ||
-        intent.state === "sending" ||
-        intent.state === "outcome-unknown" ||
-        (intent.state === "failed" && intent.localCancellation === null)),
-  );
+  return hasUnsettledEffects(record, taskId);
 }
 
 function releaseIfSettled(next: RunRecord, taskId: string, facts: ReduceFacts): void {
@@ -293,7 +301,14 @@ function releaseIfSettled(next: RunRecord, taskId: string, facts: ReduceFacts): 
     const assignment = assignmentOf(next, pair.assignmentId);
     return assignment !== undefined && isComplete167(next, assignment);
   });
-  if (!allQuiescent || unsettledIntents(next, taskId)) return;
+  if (
+    !allQuiescent ||
+    outstandingAssignments(next, taskId).some(
+      (assignment) => !pairs.some((pair) => pair.assignmentId === assignment.assignmentId),
+    ) ||
+    unsettledIntents(next, taskId)
+  )
+    return;
   const authorization = decisionAuthorization(next, taskId);
   if (!authorization) return;
   for (const pair of pairs) {
@@ -331,6 +346,38 @@ function applyCancellation(
     !next.resources.some((claim) => claim.taskId === taskId)
   ) {
     markCancelled(next, taskId, reason, facts);
+    const source = next.events.at(-1);
+    if (source && isCancellationKind(source.kind)) {
+      for (const decision of next.decisions) {
+        if (
+          decision.dedupeKey !== `cancel:${taskId}` ||
+          decision.category !== "D1" ||
+          decision.subjectId !== taskId ||
+          decision.cancelIntents?.length !== 0 ||
+          (decision.state !== "open" && decision.state !== "waiting-human")
+        )
+          continue;
+        decision.state = "superseded";
+        decision.resolution = {
+          reason: "no-in-flight",
+          at: facts.now,
+          eventSeq: source.seq,
+          cause: source.kind,
+          witness: {
+            kind: "no-effects-cancel",
+            taskId,
+            localIntentIds: next.outbox
+              .filter(
+                (intent) =>
+                  intent.taskId === taskId && intent.localCancellation?.eventSeq === source.seq,
+              )
+              .map((intent) => intent.id)
+              .sort(),
+          },
+        };
+      }
+      updateCancellationAudit(next);
+    }
     return null;
   }
   const taskPairs = pairs.filter(
@@ -1275,13 +1322,7 @@ function applyEvent(
       const unsettled = next.tasks.some(
         (task) => task.state !== "done" && task.state !== "cancelled",
       );
-      const openIntent = next.outbox.some(
-        (intent) =>
-          intent.state === "prepared" ||
-          intent.state === "sending" ||
-          intent.state === "outcome-unknown" ||
-          (intent.state === "failed" && intent.localCancellation === null),
-      );
+      const openIntent = hasUnsettledEffects(next);
       const pendingDecision = next.decisions.some((decision) => isDecisionPending(decision));
       const outstanding = next.tasks.some(
         (task) => outstandingAssignments(next, task.spec.id).length > 0,
@@ -1426,6 +1467,21 @@ function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts)
   ) {
     return reject("RUN_EVENT_INVALID", ["cancel", "taskIds"], "single-task-required");
   }
+  if (
+    event.kind === "cancel-requested" &&
+    validControlNonceDigest(event.controlNonceDigest) &&
+    taskOf(record, event.taskIds[0])?.state === "cancelled" &&
+    event.cancelIntents.length === 0 &&
+    event.preparedCancelIntents.length === 0 &&
+    cancelPairs(record, event.taskIds[0]).length === 0 &&
+    !record.decisions.some(
+      (decision) =>
+        decision.dedupeKey === `cancel:${event.taskIds[0]}` && isDecisionPending(decision),
+    ) &&
+    outstandingAssignments(record, event.taskIds[0]).length === 0 &&
+    !hasUnsettledEffects(record, event.taskIds[0])
+  )
+    return { ok: true, next: structuredClone(record), effects: [] };
   if (event.kind === "observation-recorded") {
     const incoming = RunEventReceiptSchema.safeParse(event.receipt);
     if (!incoming.success)
@@ -1458,12 +1514,16 @@ function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts)
     return reject("RUN_EVENT_INVALID", ["assignments", proofAssignmentId, "nonce"], "nonce-replay");
   }
   const next = structuredClone(record);
+  // Reserve the cancellation source event in the private draft. Rejections discard it together
+  // with markers/resolutions; no future seq is trusted by a source validator.
+  const reservedCancellation = isCancellationKind(event.kind);
+  if (reservedCancellation) appendEvent(next, event, facts);
   const applied = applyEvent(next, event, facts);
   if (applied) return applied;
   for (const task of next.tasks) advanceRework(next, task);
   recomputeReady(next);
   next.updatedAt = facts.now;
-  appendEvent(next, event, facts);
+  if (!reservedCancellation) appendEvent(next, event, facts);
   const parsed = RunRecordSchema.safeParse(next);
   if (!parsed.success) return reject("RUN_EVENT_INVALID", ["record"], "record-schema");
   const invariants = checkLedgerInvariants(parsed.data);

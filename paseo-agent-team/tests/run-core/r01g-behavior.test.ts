@@ -3,7 +3,11 @@ import { describe, expect, test } from "vitest";
 import { producerHead } from "../../shared/domain/run-engine/delivery-binding";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
-import type { ArchiveIntent, RunReducerEvent } from "../../shared/domain/run-engine/transitions";
+import {
+  type ArchiveIntent,
+  isLocalNeverSent,
+  type RunReducerEvent,
+} from "../../shared/domain/run-engine/transitions";
 import {
   type RunAssignment,
   type RunRecord,
@@ -400,7 +404,224 @@ function checked(record: RunRecord, id: string, status: "idle" | "running" = "id
   });
 }
 
+function emptyCancel(): Extract<RunReducerEvent, { kind: "cancel-requested" }> {
+  return {
+    kind: "cancel-requested",
+    taskIds: ["t1"],
+    reason: "cancel",
+    controlNonceDigest: "c".repeat(64),
+    cancelIntents: [],
+    preparedCancelIntents: [],
+  };
+}
+
+function openEmptyCancellation(record = ready()) {
+  record.decisions.push({
+    decisionId: uuid(700),
+    category: "D1",
+    controlNonceDigest: "c".repeat(64),
+    state: "open",
+    answer: null,
+    dedupeKey: "cancel:t1",
+    cancelIntents: [],
+    subjectId: "t1",
+    summary: "An earlier cancellation still needs a no-effects check",
+    createdAt: NOW,
+    answeredAt: null,
+    resolution: null,
+  });
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  return record;
+}
+
+function compact(record: RunRecord): RunRecord {
+  const next = structuredClone(record);
+  next.checkpoint = {
+    throughSeq: next.counters.eventsThroughSeq,
+    historyDigest: "a".repeat(64),
+    counters: structuredClone(next.counters),
+    acceptedNonceDigests: [],
+    terminalAssignmentIds: next.assignments
+      .filter((entry) => entry.state === "ended" || entry.state === "cancelled")
+      .map((entry) => entry.assignmentId),
+  };
+  next.events = [];
+  return next;
+}
+
 describe("R01g real reducer positive chains", () => {
+  test("a never-sent reservation is cancelled with server-computed typed audit only", () => {
+    const record = dispatch(ready(), "p1", "member", 1, true);
+    const event = {
+      ...emptyCancel(),
+      audit: { localIntentIds: ["forged"], supersededDecisionIds: [uuid(777)] },
+    };
+    const next = apply(record, event);
+    expect(task(next)).toMatchObject({ state: "cancelled", releaseDecisionId: null });
+    expect(next.resources).toEqual([]);
+    expect(actor(next, "p1")).toMatchObject({
+      acceptedProof: null,
+      turnId: null,
+      endedAt: null,
+    });
+    expect(actor(next, "p1").cancellation ?? null).toBeNull();
+    expect(next.eventReceipts).toEqual([]);
+    expect(next.events.at(-1)!.payload.audit).toEqual({
+      localIntentIds: ["dispatch-p1"],
+      supersededDecisionIds: [],
+    });
+    expect(isLocalNeverSent(next, actor(next, "p1"))).toBe(true);
+    expect(checkLedgerInvariants(compact(next))).toEqual({ ok: true });
+  });
+
+  test.each(["audit", "scope", "nonce", "turn-fact"] as const)(
+    "local cancellation retains its own uncompressed audit closure: %s",
+    (field) => {
+      const record = apply(dispatch(ready(), "p1", "member", 1, true), emptyCancel());
+      if (field === "audit") delete record.events.at(-1)!.payload.audit;
+      if (field === "scope") record.events.at(-1)!.payload.taskIds = ["t2"];
+      if (field === "nonce") record.nonceRegistry[0]!.revokeReason = "unrelated";
+      if (field === "turn-fact") {
+        record.eventReceipts.push({
+          eventKey: "unowned-start",
+          kind: "turn_started",
+          agentId: actor(record, "p1").agentId,
+          turnId: "unknown-turn",
+          seq: 1,
+          receivedAt: NOW,
+          dedupeKey: "unowned-start",
+          disposition: "observed",
+        });
+        record.counters.observationSeq = 1;
+      }
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(isLocalNeverSent(record, actor(record, "p1"))).toBe(false);
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
+
+  test("a cancelled empty D1 is superseded with a persistent witness, never a human answer", () => {
+    const record = openEmptyCancellation(dispatch(ready(), "p1", "member", 1, true));
+    const next = apply(record, emptyCancel());
+    const decision = next.decisions[0]!;
+    expect(decision).toMatchObject({
+      state: "superseded",
+      answer: null,
+      answeredAt: null,
+      resolution: {
+        reason: "no-in-flight",
+        at: NOW,
+        cause: "cancel-requested",
+        eventSeq: next.counters.eventsThroughSeq,
+        witness: {
+          kind: "no-effects-cancel",
+          taskId: "t1",
+          localIntentIds: ["dispatch-p1"],
+        },
+      },
+    });
+    expect(task(next).releaseDecisionId).toBeNull();
+    expect(next.events.at(-1)!.payload.audit).toEqual({
+      localIntentIds: ["dispatch-p1"],
+      supersededDecisionIds: [decision.decisionId],
+    });
+    const compressed = compact(next);
+    expect(checkLedgerInvariants(compressed)).toEqual({ ok: true });
+    expect(apply(compressed, { kind: "run-finished" }).lifecycle).toBe("finished");
+  });
+
+  test.each(["audit", "witness", "time", "release-id"] as const)(
+    "superseded cancellation must retain its typed closure: %s",
+    (field) => {
+      const record = apply(openEmptyCancellation(), emptyCancel());
+      const decision = record.decisions[0]!;
+      // Explicitly build the expected typed closure so the old implementation cannot pass by
+      // omitting resolution generation entirely.
+      decision.state = "superseded";
+      decision.resolution = {
+        reason: "no-in-flight",
+        at: NOW,
+        eventSeq: record.counters.eventsThroughSeq,
+        cause: "cancel-requested",
+        witness: { kind: "no-effects-cancel", taskId: "t1", localIntentIds: [] },
+      };
+      record.events.at(-1)!.payload.audit = {
+        localIntentIds: [],
+        supersededDecisionIds: [decision.decisionId],
+      };
+      expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+      if (field === "audit") delete record.events.at(-1)!.payload.audit;
+      if (field === "witness") decision.resolution.witness.taskId = "other";
+      if (field === "time") decision.resolution.at = "2026-10-30T00:01:00.000Z";
+      if (field === "release-id") task(record).releaseDecisionId = decision.decisionId;
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
+
+  test("local withdrawal of a retry preserves the claim from its historical sent producer", () => {
+    let record = end(review(start(awaitingReviews(), "r1"), "r1", "不可合入"), "r1");
+    const event = nextAttemptEvent(record);
+    event.intent.state = "prepared";
+    event.intent.confirmedAt = null;
+    record = apply(record, event);
+    record = apply(record, emptyCancel());
+    expect(task(record).state).toBe("blocked");
+    expect(record.resources).toMatchObject([{ originAssignmentId: "p1", frozen: true }]);
+    expect(record.decisions[0]!.cancelIntents).toEqual([]);
+    expect(isLocalNeverSent(record, actor(record, "p2"))).toBe(true);
+  });
+
+  test("a repeated no-effects cancellation is byte-stable", () => {
+    const record = apply(openEmptyCancellation(), emptyCancel());
+    expect(apply(record, emptyCancel())).toEqual(record);
+  });
+
+  test("a confirmed effect without a completion witness still blocks run-finished", () => {
+    const record = apply(ready(), emptyCancel());
+    record.outbox.push(
+      dispatchIntent({
+        id: "orphan-wake",
+        kind: "wake",
+        taskId: "t1",
+        assignmentId: null,
+        recipient: "agent-orphan",
+        messageId: uuid(999),
+        state: "confirmed",
+        confirmedAt: NOW,
+      }),
+    );
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    const before = structuredClone(record);
+    expect(reduceRun(record, { kind: "run-finished" }, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "run-not-finished", intents: 1 },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("a retry cannot replace an actor's fixed archive intent", () => {
+    const record = frozenCancellation(start(dispatch(ready(), "p1", "member", 1), "p1"), ["p1"]);
+    const old = record.outbox.find((intent) => intent.id === "archive-p1")!;
+    const replacement = { ...structuredClone(old), id: "archive-replacement" } as ArchiveIntent;
+    const before = structuredClone(record);
+    expect(
+      reduceRun(
+        record,
+        {
+          ...emptyCancel(),
+          cancelIntents: [{ assignmentId: "p1", intentId: replacement.id }],
+          preparedCancelIntents: [replacement],
+        },
+        facts,
+      ),
+    ).toMatchObject({
+      ok: false,
+      params: { reason: "fixed-pair-intent" },
+    });
+    expect(record).toEqual(before);
+  });
+
   test("B smoker is independent of review tier and cannot finish before registered R2", () => {
     let record = start(start(awaitingReviews(true, undefined, true), "r1"), "r2");
     record = end(review(record, "r1"), "r1");
@@ -919,6 +1140,15 @@ describe("R01g real reducer positive chains", () => {
       expect(checkLedgerInvariants(record)).toEqual({
         ok: false,
         violations: [
+          ...(kind === "superseded-authorization"
+            ? [
+                {
+                  invariant: "I8",
+                  path: ["decisions", 0, "resolution"],
+                  params: { reason: "invalid-resolution" },
+                },
+              ]
+            : []),
           {
             invariant: "I7",
             path:
