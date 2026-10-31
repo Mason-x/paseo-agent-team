@@ -8,6 +8,11 @@ import type {
   RunRecord,
   RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
+import {
+  RunCancellationEvidenceSchema,
+  RunIdRefSchema,
+  RunTimeSchema,
+} from "../../schemas/run-engine/ledger";
 import type {
   RunDecisionBlock,
   RunReviewReportBlock,
@@ -34,6 +39,38 @@ export type CancellationObservation = {
   cancelIntentId: string;
   receipt: RunCancellationEvidence["receipt"];
 };
+
+/** Input allows non-quiescent observations; malformed fields never become clearance facts. */
+export function validCancellationObservation(value: unknown): value is CancellationObservation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const observation = value as Record<string, unknown>;
+  const fields = [
+    "assignmentId",
+    "lastTurnId",
+    "endedEventKey",
+    "observationSeq",
+    "cancelIntentId",
+    "receipt",
+  ] as const;
+  if (
+    !fields.every(
+      (field) => RunCancellationEvidenceSchema.shape[field].safeParse(observation[field]).success,
+    )
+  )
+    return false;
+  const refresh = observation.refresh;
+  if (refresh === null) return true;
+  if (typeof refresh !== "object" || refresh === null || Array.isArray(refresh)) return false;
+  const fieldsOfRefresh = refresh as Record<string, unknown>;
+  return (
+    RunIdRefSchema.safeParse(fieldsOfRefresh.agentId).success &&
+    ["initializing", "idle", "running", "closed", "error", "missing"].includes(
+      fieldsOfRefresh.status as string,
+    ) &&
+    typeof fieldsOfRefresh.activeTurn === "boolean" &&
+    RunTimeSchema.safeParse(fieldsOfRefresh.observedAt).success
+  );
+}
 
 export type RunDispatchEvent = {
   kind: "task-dispatched";

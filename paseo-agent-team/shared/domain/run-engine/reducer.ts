@@ -4,6 +4,7 @@ import {
   type RunAssignment,
   RunAssignmentSchema,
   type RunCancellationEvidence,
+  RunCancellationEvidenceSchema,
   RunDecisionBindingSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
@@ -56,6 +57,7 @@ import {
   type RunReducerEvent,
   sameStoredValue,
   taskById,
+  validCancellationObservation,
 } from "./transitions";
 
 export type RunEffect = { kind: string; payload: Record<string, unknown> };
@@ -1068,6 +1070,7 @@ function applyEvent(
       assignment.endedEventKey = event.endedEventKey;
       const task = taskOf(next, assignment.taskId);
       if (task?.state === "review") recomputeDone(next, task);
+      if (task?.state === "blocked") releaseIfSettled(next, task.spec.id, facts);
       return null;
     }
     case "task-report": {
@@ -1241,6 +1244,12 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["cancellation", event.taskId], "pair-binding");
       }
+      if (
+        event.evidence.refresh !== null &&
+        event.evidence.refresh.agentId !== assignment.agentId
+      ) {
+        return reject("RUN_EVENT_INVALID", ["cancellation", "refresh", "agentId"], "refresh-actor");
+      }
       const evidence = normalizeObservation(next, assignment, event.evidence);
       if (evidence === null) {
         assignment.cancellation = null;
@@ -1331,9 +1340,7 @@ function applyEvent(
       );
       const openIntent = hasUnsettledEffects(next);
       const pendingDecision = next.decisions.some((decision) => isDecisionPending(decision));
-      const outstanding = next.tasks.some(
-        (task) => outstandingAssignments(next, task.spec.id).length > 0,
-      );
+      const outstanding = next.assignments.some((assignment) => !isActorSettled(next, assignment));
       if (unsettled || openIntent || pendingDecision || outstanding || next.resources.length > 0) {
         return reject("RUN_INVALID_TRANSITION", ["lifecycle"], "run-not-finished", {
           tasks: unsettled ? 1 : 0,
@@ -1355,6 +1362,30 @@ function applyEvent(
         return null;
       next.eventReceipts.push({ ...event.receipt, seq: next.counters.observationSeq + 1 });
       next.counters.observationSeq += 1;
+      if (event.receipt.kind === "turn_started") {
+        for (const assignment of next.assignments) {
+          const task = taskOf(next, assignment.taskId);
+          if (
+            assignment.agentId !== event.receipt.agentId ||
+            !assignment.cancellation ||
+            task?.state === "cancelled"
+          )
+            continue;
+          const decision = next.decisions.find(
+            (entry) => entry.dedupeKey === `cancel:${assignment.taskId}`,
+          );
+          assignment.cancellation = null;
+          if (decision)
+            freezeTask(
+              next,
+              assignment.taskId,
+              "cancel-new-turn",
+              facts,
+              decision.controlNonceDigest,
+              decision.cancelIntents ?? [],
+            );
+        }
+      }
       return null;
     }
     default:
@@ -1367,58 +1398,16 @@ function normalizeObservation(
   assignment: RunAssignment,
   observation: CancellationObservation,
 ): RunCancellationEvidence | null {
-  const refresh = observation.refresh;
-  if (
-    refresh === null ||
-    !["idle", "closed", "missing"].includes(refresh.status) ||
-    refresh.activeTurn !== false ||
-    refresh.agentId !== assignment.agentId ||
-    observation.assignmentId !== assignment.assignmentId ||
-    observation.lastTurnId === null ||
-    observation.lastTurnId !== assignment.turnId ||
-    observation.endedEventKey === null ||
-    observation.receipt.kind !== "archive" ||
-    observation.receipt.confirmedAt === null ||
-    observation.receipt.externalId === null
-  ) {
-    return null;
-  }
-  const intent = record.outbox.find((entry) => entry.id === observation.cancelIntentId);
-  if (
-    intent === undefined ||
-    intent.kind !== "archive" ||
-    intent.taskId !== assignment.taskId ||
-    intent.assignmentId !== assignment.assignmentId ||
-    intent.recipient !== assignment.agentId ||
-    !["sending", "confirmed", "outcome-unknown"].includes(intent.state)
-  ) {
-    return null;
-  }
-  const ended = record.eventReceipts.find(
-    (receipt) =>
-      receipt.eventKey === observation.endedEventKey &&
-      receipt.kind === "turn_ended" &&
-      receipt.agentId === assignment.agentId &&
-      receipt.turnId === assignment.turnId,
-  );
-  if (!ended || observation.observationSeq < ended.seq) return null;
-  if (Date.parse(refresh.observedAt) < Date.parse(ended.receivedAt)) return null;
-  const later = record.eventReceipts.some(
-    (receipt) =>
-      receipt.seq > ended.seq &&
-      receipt.kind === "turn_started" &&
-      receipt.agentId === assignment.agentId,
-  );
-  if (later) return null;
-  return {
-    ...observation,
-    refresh: refresh as {
-      agentId: string;
-      status: "idle" | "closed" | "missing";
-      activeTurn: false;
-      observedAt: string;
-    },
+  const parsed = RunCancellationEvidenceSchema.safeParse(observation);
+  if (!parsed.success) return null;
+  const candidate = { ...assignment, cancellation: parsed.data };
+  const view = {
+    ...record,
+    assignments: record.assignments.map((entry) =>
+      entry.assignmentId === assignment.assignmentId ? candidate : entry,
+    ),
   };
+  return isComplete167(view, candidate) ? parsed.data : null;
 }
 
 function reviewEligibleProof(
@@ -1435,6 +1424,9 @@ function reviewEligibleProof(
 function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts): ReduceResult {
   const existing = validateExisting(record);
   if (existing) return existing;
+  if (event.kind === "cancellation-checked" && !validCancellationObservation(event.evidence)) {
+    return reject("RUN_EVENT_INVALID", ["cancellation"], "event-shape");
+  }
   if (event.kind === "task-dispatched") {
     if (
       !RunAssignmentSchema.safeParse(event.assignment).success ||
@@ -1464,6 +1456,20 @@ function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts)
       )
     ) {
       return reject("RUN_EVENT_INVALID", ["cancel"], "event-shape");
+    }
+    if (
+      event.preparedCancelIntents.some(
+        (intent) =>
+          !event.cancelIntents.some(
+            (pair) => pair.intentId === intent.id && pair.assignmentId === intent.assignmentId,
+          ),
+      )
+    ) {
+      return reject(
+        "RUN_EVENT_INVALID",
+        ["cancel", "preparedCancelIntents"],
+        "unreferenced-cancel-intent",
+      );
     }
   }
   if (

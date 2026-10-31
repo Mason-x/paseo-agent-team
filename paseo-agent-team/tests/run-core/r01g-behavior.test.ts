@@ -421,6 +421,17 @@ function emptyCancel(): Extract<RunReducerEvent, { kind: "cancel-requested" }> {
   };
 }
 
+function storedCheck(record: RunRecord, id = "r1") {
+  const evidence = actor(record, id).cancellation;
+  if (!evidence) throw new Error("retained cancellation parent");
+  return {
+    kind: "cancellation-checked" as const,
+    taskId: "t1",
+    decisionId: record.decisions[0]!.decisionId,
+    evidence: structuredClone(evidence),
+  };
+}
+
 function openEmptyCancellation(record = ready()) {
   record.decisions.push({
     decisionId: uuid(700),
@@ -508,6 +519,177 @@ function failedHistory(count: number) {
 }
 
 describe("R01g real reducer positive chains", () => {
+  test("a cancellation batch cannot register an archive absent from its exact pair set", () => {
+    const record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    const intent = (id: string): ArchiveIntent => ({
+      ...dispatchIntent({
+        id,
+        kind: "archive",
+        taskId: "t1",
+        assignmentId: "p1",
+        recipient: actor(record, "p1").agentId,
+        messageId: uuid(id === "paired" ? 301 : 302),
+        state: "prepared",
+        confirmedAt: null,
+      }),
+      kind: "archive",
+      taskId: "t1",
+      assignmentId: "p1",
+    });
+    const before = structuredClone(record);
+    expect(
+      reduceRun(
+        record,
+        {
+          ...emptyCancel(),
+          cancelIntents: [{ assignmentId: "p1", intentId: "paired" }],
+          preparedCancelIntents: [intent("paired"), intent("orphan")],
+        },
+        facts,
+      ),
+    ).toMatchObject({
+      ok: false,
+      params: { reason: "unreferenced-cancel-intent" },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("sealed 167 remains valid when the same agent starts a later legitimate task", () => {
+    let record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    record = checked(authorized(frozenCancellation(record, ["p1"])), "p1");
+    const sealed = structuredClone(actor(record, "p1").cancellation);
+    const child = structuredClone(task(ready()));
+    child.spec.id = "t2";
+    record.tasks.push(child);
+    const input = prepareDispatch(record, "p-next", "member", 9);
+    input.event.taskId = "t2";
+    input.event.assignment.taskId = "t2";
+    input.event.assignment.attempt = 1;
+    input.event.nonce.taskId = "t2";
+    input.event.nonce.attempt = 1;
+    input.event.intent.taskId = "t2";
+    for (const claim of input.event.claims ?? []) claim.taskId = "t2";
+    record = start(apply(input.record, input.event), "p-next");
+    record = apply(record, {
+      kind: "observation-recorded",
+      receipt: {
+        eventKey: "later-legitimate-start",
+        kind: "turn_started",
+        agentId: actor(record, "p-next").agentId,
+        turnId: "turn-p-next",
+        seq: record.counters.observationSeq + 1,
+        receivedAt: NOW,
+        dedupeKey: "later-legitimate-start",
+        disposition: "accepted",
+      },
+    });
+    expect(actor(record, "p1").cancellation).toEqual(sealed);
+    expect(task(record).state).toBe("cancelled");
+    expect(record.tasks[1]!.state).toBe("in_progress");
+  });
+
+  test("a fully authorized cancellation can finish the run despite its retained fixed pairs", () => {
+    let record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    record = checked(authorized(frozenCancellation(record, ["p1"])), "p1");
+    expect(apply(record, { kind: "run-finished" }).lifecycle).toBe("finished");
+  });
+
+  test("real turn-ended also settles retained complete 167 after the host answers", () => {
+    let record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    record = authorized(frozenCancellation(record, ["p1"]));
+    record.decisions[0]!.state = "open";
+    record.decisions[0]!.answer = null;
+    record.decisions[0]!.answeredAt = null;
+    record = checked(record, "p1");
+    expect(task(record).state).toBe("blocked");
+    record = authorized(record);
+    record = end(record, "p1");
+    expect(task(record)).toMatchObject({
+      state: "cancelled",
+      releaseDecisionId: record.decisions[0]!.decisionId,
+    });
+    expect(record.resources).toEqual([]);
+  });
+
+  test("a receipt externalId cannot be copied to another actor's pair", () => {
+    let record = start(start(awaitingReviews(true), "r1"), "r2");
+    record = checked(authorized(frozenCancellation(record, ["r1", "r2"])), "r1");
+    record = observeEnd(record, "r2");
+    const event = storedCheck(record);
+    event.evidence.assignmentId = "r2";
+    event.evidence.lastTurnId = actor(record, "r2").turnId;
+    event.evidence.endedEventKey = `${actor(record, "r2").agentId}|turn-r2|turn_ended`;
+    event.evidence.refresh.agentId = actor(record, "r2").agentId;
+    event.evidence.cancelIntentId = "archive-r2";
+    event.evidence.observationSeq = record.counters.observationSeq;
+    const original = structuredClone(actor(record, "r1").cancellation);
+    record = apply(record, event);
+    expect(actor(record, "r1").cancellation).toEqual(original);
+    expect(actor(record, "r2").cancellation ?? null).toBeNull();
+    expect(task(record)).toMatchObject({ state: "blocked", phase: "frozen" });
+    expect(record.resources[0]!.frozen).toBe(true);
+  });
+
+  test("a refresh from the wrong actor is rejected without clearing a valid own proof", () => {
+    let record = start(start(awaitingReviews(true), "r1"), "r2");
+    record = checked(authorized(frozenCancellation(record, ["r1", "r2"])), "r1");
+    const event = storedCheck(record);
+    event.evidence.refresh.agentId = actor(record, "r2").agentId;
+    const before = structuredClone(record);
+    expect(reduceRun(record, event, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "refresh-actor" },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test.each(["missing", "bad-time", "bad-status", "bad-boolean"] as const)(
+    "malformed observation is rejected at the input boundary: %s",
+    (kind) => {
+      let record = start(start(awaitingReviews(true), "r1"), "r2");
+      record = checked(authorized(frozenCancellation(record, ["r1", "r2"])), "r1");
+      const event = storedCheck(record);
+      const runtime = event as unknown as { evidence?: Record<string, unknown> };
+      if (kind === "missing") delete runtime.evidence;
+      else {
+        const refresh = runtime.evidence!.refresh as Record<string, unknown>;
+        if (kind === "bad-time") refresh.observedAt = "invalid-time";
+        if (kind === "bad-status") refresh.status = "__proto__";
+        if (kind === "bad-boolean") refresh.activeTurn = "false";
+      }
+      const before = structuredClone(record);
+      expect(reduceRun(record, event, facts)).toMatchObject({
+        ok: false,
+        code: "RUN_EVENT_INVALID",
+        params: { reason: "event-shape" },
+      });
+      expect(record).toEqual(before);
+    },
+  );
+
+  test("a new own turn observation clears unsealed cancellation without losing the observation", () => {
+    let record = start(start(awaitingReviews(true), "r1"), "r2");
+    record = checked(authorized(frozenCancellation(record, ["r1", "r2"])), "r1");
+    const event: RunReducerEvent = {
+      kind: "observation-recorded",
+      receipt: {
+        eventKey: "late-start",
+        kind: "turn_started",
+        agentId: actor(record, "r1").agentId,
+        turnId: "new-turn",
+        receivedAt: NOW,
+        seq: record.counters.observationSeq + 1,
+        dedupeKey: "late-start",
+        disposition: "observed",
+      },
+    };
+    record = apply(record, event);
+    expect(actor(record, "r1").cancellation).toBeNull();
+    expect(record.eventReceipts.at(-1)!.eventKey).toBe("late-start");
+    expect(task(record).state).toBe("blocked");
+    expect(record.resources[0]!.frozen).toBe(true);
+  });
+
   test.each(["assigned", "in_progress"] as const)(
     "an agent cannot receive a second unsettled business assignment: %s",
     (state) => {
