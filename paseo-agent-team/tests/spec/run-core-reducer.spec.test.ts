@@ -206,8 +206,60 @@ function reduceOrThrow(record: RunRecord, event: RunReducerEvent): RunRecord {
   return result.next;
 }
 
+function startTurn(record: RunRecord, assignmentId: string, turnId = `turn-${assignmentId}`) {
+  return reduceOrThrow(record, {
+    kind: "turn-started",
+    assignmentId,
+    agentId: record.assignments.find((entry) => entry.assignmentId === assignmentId)?.agentId ?? "",
+    turnId,
+  });
+}
+
+function endTurn(record: RunRecord, assignmentId: string) {
+  const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
+  if (!assignment || assignment.turnId === null) throw new Error(`unstarted ${assignmentId}`);
+  const endedEventKey = `${assignment.agentId}|${assignment.turnId}|turn_ended`;
+  const observed = reduceOrThrow(record, {
+    kind: "observation-recorded",
+    receipt: {
+      eventKey: endedEventKey,
+      kind: "turn_ended",
+      agentId: assignment.agentId,
+      turnId: assignment.turnId,
+      seq: record.counters.observationSeq + 1,
+      receivedAt: AT_UPDATED,
+      dedupeKey: endedEventKey,
+      disposition: "accepted",
+    },
+  });
+  return reduceOrThrow(observed, { kind: "turn-ended", assignmentId, endedEventKey });
+}
+
+function smokeWithSettlement(record: RunRecord, block: RunSmokeReportBlock) {
+  const assignment = record.assignments.find((entry) => entry.assignmentId === block.assignmentId);
+  if (!assignment) throw new Error(`missing smoker ${block.assignmentId}`);
+  // The report must be accepted before the actor can settle.
+  const beforeEnd = reduceRun(
+    record,
+    {
+      kind: "turn-started",
+      assignmentId: block.assignmentId,
+      agentId: assignment.agentId,
+      turnId: `turn-${block.assignmentId}`,
+    },
+    facts,
+  );
+  if (!beforeEnd.ok) return beforeEnd;
+  const reported = reduceRun(beforeEnd.next, { kind: "smoke-report", block }, facts);
+  if (!reported.ok) return reported;
+  const settled = endTurn(reported.next, block.assignmentId);
+  return { ok: true as const, next: settled };
+}
+
 function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
+  record = startTurn(record, ASSIGNMENT_T2, "turn-t2-producer");
   record = reduceOrThrow(record, { kind: "task-report", block: report() });
+  record = endTurn(record, ASSIGNMENT_T2);
   addReviewer(record, {
     id: "assignment-t2-r1",
     seatId: "seat-b2",
@@ -215,7 +267,7 @@ function reviewReady(record = structuredClone(NORMAL_RUN_LEDGER)): RunRecord {
     tier: "A",
     family: "codex",
   });
-  return record;
+  return startTurn(record, "assignment-t2-r1", "turn-t2-review");
 }
 
 function smokeReady(
@@ -235,6 +287,7 @@ function smokeReady(
     devTargets: [{ serverId: "dev-server-1", host: policyHost, home: "/tmp/dev-home" }],
   };
   record = reduceOrThrow(record, { kind: "review-report", block: review() });
+  record = endTurn(record, "assignment-t2-r1");
   const smokeNonce = "6f1c2a44-3b7e-4f0a-9a11-000000000008";
   ensureSeat(record, "seat-b3", "agent-b3", "smoke", "A");
   record.assignments.push(
@@ -382,7 +435,7 @@ describe("R03a gates: only reducer-owned raw reports can move a task", () => {
     expect(blocked.ok).toBe(true);
     if (!blocked.ok) return;
     expect(taskOf(blocked.next, "t2").qualityFailures).toBe(1);
-    const smoked = reduceRun(blocked.next, { kind: "smoke-report", block }, facts);
+    const smoked = smokeWithSettlement(blocked.next, block);
     expect(smoked.ok).toBe(true);
     if (smoked.ok) expect(taskOf(smoked.next, "t2").state).not.toBe("done");
   });
@@ -455,7 +508,6 @@ describe("R03a cancellation: two stages, quiescence, and terminal paths", () => 
     if (!current) throw new Error("assignment");
     current.turnId = "turn-7";
     current.state = "in_progress";
-    current.cancellation = QUIESCENT_CANCELLATION;
     record.eventReceipts.push(
       {
         eventKey: "agent-b1|turn-7|turn_ended",
@@ -819,7 +871,10 @@ describe("R03a gate details and invariant boundaries", () => {
     otherReviewer.family = "codex";
     const result = reduceRun(other, { kind: "review-report", block: review() }, facts);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(taskOf(result.next, "t2").state).toBe("done");
+    if (result.ok) {
+      const settled = endTurn(result.next, "assignment-t2-r1");
+      expect(taskOf(settled, "t2").state).toBe("done");
+    }
   });
 
   test("an escalation origin raises the required review tier", () => {
@@ -930,11 +985,10 @@ describe("R03a gate details and invariant boundaries", () => {
 
   test("default DEV host, extra smoke checks and self-smoke cannot complete", () => {
     const defaultHost = smokeReady(reviewReady(), {}, "127.0.0.1:6767");
-    const defaultResult = reduceRun(
-      defaultHost.record,
-      { kind: "smoke-report", block: { ...defaultHost.block, devHost: "127.0.0.1:6767" } },
-      facts,
-    );
+    const defaultResult = smokeWithSettlement(defaultHost.record, {
+      ...defaultHost.block,
+      devHost: "127.0.0.1:6767",
+    });
     expect(defaultResult.ok).toBe(true);
     if (defaultResult.ok) expect(taskOf(defaultResult.next, "t2").state).not.toBe("done");
 
@@ -943,11 +997,7 @@ describe("R03a gate details and invariant boundaries", () => {
       ...extra.block.checks,
       { id: "extra", result: "pass", evidencePath: "evidence/extra.png" },
     ];
-    const extraResult = reduceRun(
-      extra.record,
-      { kind: "smoke-report", block: extra.block },
-      facts,
-    );
+    const extraResult = smokeWithSettlement(extra.record, extra.block);
     expect(extraResult.ok).toBe(true);
     if (extraResult.ok) expect(taskOf(extraResult.next, "t2").state).not.toBe("done");
 
@@ -962,7 +1012,15 @@ describe("R03a gate details and invariant boundaries", () => {
     if (!smokeNonceEntry) throw new Error("smoke nonce");
     smokeNonceEntry.agentId = "agent-b1";
     smokeNonceEntry.seatId = "seat-b1";
-    const selfResult = reduceRun(self.record, { kind: "smoke-report", block: self.block }, facts);
+    const smokeIntent = self.record.outbox.find(
+      (entry) => entry.assignmentId === smoker.assignmentId,
+    );
+    if (!smokeIntent) throw new Error("smoke intent");
+    smokeIntent.recipient = "agent-b1";
+    const selfSeat = self.record.roster.find((entry) => entry.seatId === "seat-b1");
+    if (!selfSeat) throw new Error("self seat");
+    selfSeat.duties = [...new Set([...selfSeat.duties, "smoke"])];
+    const selfResult = smokeWithSettlement(self.record, self.block);
     expect(selfResult.ok).toBe(true);
     if (selfResult.ok) expect(taskOf(selfResult.next, "t2").state).not.toBe("done");
   });
@@ -1004,7 +1062,6 @@ describe("R03a gate details and invariant boundaries", () => {
       const current = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
       if (!current) throw new Error("assignment");
       current.turnId = "turn-7";
-      current.cancellation = evidence;
       record.eventReceipts.push({
         eventKey: "agent-b1|turn-7|turn_ended",
         kind: "turn_ended",
@@ -1196,7 +1253,6 @@ describe("R01f cancellation authorization and refresh evidence", () => {
           refresh: { ...refresh, activeTurn: true },
         } as unknown as Partial<RunCancellationEvidence>),
     ],
-    ["wrong intent recipient", () => cancellationRecord({}, {}, "agent-other")],
     ["D1 still open", () => cancellationRecord({ state: "open", answeredAt: null, answer: null })],
     [
       "resume-seat decision",
@@ -1217,6 +1273,23 @@ describe("R01f cancellation authorization and refresh evidence", () => {
       },
     ],
   ];
+
+  test("wrong intent recipient is rejected before freeze", () => {
+    const { record, evidence } = cancellationRecord({}, {}, "agent-other");
+    const before = structuredClone(record);
+    const result = reduceRun(
+      record,
+      { kind: "cancellation-checked", taskId: "t2", decisionId: DECISION_D1, evidence },
+      facts,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      code: "RUN_INVARIANT_VIOLATION",
+      path: ["decisions", 0, "cancelIntents", 0],
+      params: { reason: "cancel-intent-binding" },
+    });
+    expect(record).toEqual(before);
+  });
 
   for (const [label, make] of freezeCases) {
     test(`${label} keeps the task frozen`, () => {
