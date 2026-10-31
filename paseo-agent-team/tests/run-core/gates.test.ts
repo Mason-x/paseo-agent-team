@@ -37,6 +37,12 @@ function dev(source = DEV_SMOKE_READY_LEDGER): RunRecord {
   const record = RunRecordSchema.parse(structuredClone(source));
   // The source fixture supplies attempt-1 actors and retained observations, not task counters.
   task(record, "t6").attempts = 1;
+  const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t6-a1")!;
+  const proof = RunStoredTaskReportSchema.parse(producer.acceptedProof);
+  if (proof.status !== "done") throw new Error("DEV producer");
+  // This private core scenario declares the full evidence facts, beyond the public source skeleton.
+  proof.evidence[0]!.isolation = { homePath: "C:/Temp/gates-home", outsideRealHome: true };
+  producer.acceptedProof = proof;
   record.counters.observationSeq = Math.max(
     record.counters.observationSeq,
     ...record.eventReceipts.map((entry) => entry.seq),

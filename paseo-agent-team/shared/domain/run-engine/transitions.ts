@@ -210,18 +210,240 @@ function dispatchIntents(record: RunRecord, assignmentId: string): RunEffectInte
   );
 }
 
+type CancelStamp = NonNullable<RunEffectIntent["localCancellation"]>;
+
+export function isCancellationKind(kind: string): kind is CancelStamp["cause"] {
+  return kind === "cancel-requested" || kind === "dag-revised" || kind === "run-cancelled";
+}
+
+/** Unknown turns cannot be explained away by a never-sent marker. Known historical actors can. */
+function hasTurnFacts(record: RunRecord, assignment: RunAssignment): boolean {
+  return (
+    assignment.turnId !== null ||
+    assignment.startedAt !== null ||
+    assignment.endedAt !== null ||
+    assignment.endedEventKey !== null ||
+    record.eventReceipts.some(
+      (receipt) =>
+        receipt.agentId === assignment.agentId &&
+        (receipt.kind === "turn_started" || receipt.kind === "turn_ended") &&
+        Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt) &&
+        !record.assignments.some(
+          (other) =>
+            other.assignmentId !== assignment.assignmentId &&
+            other.agentId === receipt.agentId &&
+            other.turnId !== null &&
+            other.turnId === receipt.turnId,
+        ),
+    )
+  );
+}
+
+/** Evaluates the source prepared state before the transaction writes a cancellation marker. */
+export function canCancelLocally(
+  record: RunRecord,
+  assignment: RunAssignment,
+  intent: RunEffectIntent,
+): boolean {
+  return (
+    assignment.state === "assigned" &&
+    assignment.acceptedProof === null &&
+    !hasTurnFacts(record, assignment) &&
+    dispatchIntents(record, assignment.assignmentId).length === 1 &&
+    dispatchIntentMatches(assignment, intent) &&
+    intent.state === "prepared" &&
+    intent.recoverySendCount === 0 &&
+    intent.confirmedAt === null &&
+    intent.localCancellation === null
+  );
+}
+
+/** Retained events authenticate exact server audit; a compressed prefix uses typed witnesses. */
+export function cancellationAuditValid(
+  record: RunRecord,
+  taskId: string,
+  stamp: Pick<CancelStamp, "eventSeq" | "at" | "cause">,
+): boolean {
+  if (stamp.eventSeq <= 0 || stamp.eventSeq > record.counters.eventsThroughSeq) return false;
+  if (Date.parse(stamp.at) > Date.parse(record.updatedAt)) return false;
+  if (stamp.eventSeq <= (record.checkpoint?.throughSeq ?? 0)) return true;
+  const event = record.events.find((entry) => entry.seq === stamp.eventSeq);
+  if (!event || event.kind !== stamp.cause || event.at !== stamp.at) return false;
+  let scope: unknown;
+  if (event.kind === "cancel-requested") scope = event.payload.taskIds;
+  else if (event.kind === "dag-revised") {
+    const block = event.payload.block;
+    scope =
+      block !== null && typeof block === "object" && !Array.isArray(block)
+        ? (block as Record<string, unknown>).cancelTaskIds
+        : undefined;
+  } else if (event.kind === "run-cancelled") scope = record.tasks.map((task) => task.spec.id);
+  if (!Array.isArray(scope) || !scope.includes(taskId)) return false;
+  const locals = record.outbox
+    .filter(
+      (intent) =>
+        intent.localCancellation?.eventSeq === stamp.eventSeq &&
+        intent.localCancellation.at === stamp.at &&
+        intent.localCancellation.cause === stamp.cause,
+    )
+    .map((intent) => intent.id)
+    .sort();
+  const superseded = record.decisions
+    .filter(
+      (decision) =>
+        decision.state === "superseded" &&
+        decision.resolution?.eventSeq === stamp.eventSeq &&
+        decision.resolution.at === stamp.at &&
+        decision.resolution.cause === stamp.cause,
+    )
+    .map((decision) => decision.decisionId)
+    .sort();
+  return sameStoredValue(event.payload.audit, {
+    localIntentIds: locals,
+    supersededDecisionIds: superseded,
+  });
+}
+
 export function isLocalNeverSent(record: RunRecord, assignment: RunAssignment): boolean {
-  if (assignment.acceptedProof !== null || assignment.turnId !== null) return false;
+  if (
+    assignment.acceptedProof !== null ||
+    (assignment.state !== "assigned" && assignment.state !== "cancelled") ||
+    hasTurnFacts(record, assignment)
+  )
+    return false;
   const intents = dispatchIntents(record, assignment.assignmentId);
   if (intents.length !== 1) return false;
   const intent = intents[0] as RunEffectIntent;
-  return (
-    intent.state === "failed" &&
-    intent.localCancellation !== null &&
-    intent.localCancellation.eventSeq > 0 &&
-    intent.recoverySendCount === 0 &&
-    intent.confirmedAt === null
+  const local = intent.localCancellation;
+  const nonce = record.nonceRegistry.find(
+    (entry) => entry.assignmentId === assignment.assignmentId && entry.nonce === assignment.nonce,
   );
+  return (
+    dispatchIntentMatches(assignment, intent) &&
+    intent.state === "failed" &&
+    local !== null &&
+    local.reason === "cancel-before-send" &&
+    Date.parse(local.at) >= Date.parse(assignment.createdAt) &&
+    Date.parse(local.at) >= Date.parse(intent.createdAt) &&
+    intent.recoverySendCount === 0 &&
+    intent.confirmedAt === null &&
+    nonce !== undefined &&
+    nonce.acceptedAt === null &&
+    nonce.acceptedEventKey === null &&
+    nonce.revokedAt === local.at &&
+    nonce.revokeReason === "cancel-before-send" &&
+    cancellationAuditValid(record, assignment.taskId, local)
+  );
+}
+
+function actorSettledBy(record: RunRecord, assignment: RunAssignment, at?: string): boolean {
+  const limit = at === undefined ? Number.POSITIVE_INFINITY : Date.parse(at);
+  if (isLocalNeverSent(record, assignment)) {
+    return record.outbox.some(
+      (intent) =>
+        intent.assignmentId === assignment.assignmentId &&
+        intent.localCancellation !== null &&
+        Date.parse(intent.localCancellation.at) <= limit,
+    );
+  }
+  if (isNormalEnded(record, assignment)) return Date.parse(assignment.endedAt as string) <= limit;
+  if (!isComplete167(record, assignment)) return false;
+  const proof = assignment.cancellation as RunCancellationEvidence;
+  const ended = record.eventReceipts.find((receipt) => receipt.eventKey === proof.endedEventKey);
+  return (
+    ended !== undefined &&
+    Date.parse(ended.receivedAt) <= limit &&
+    Date.parse(proof.refresh.observedAt) <= limit &&
+    Date.parse(proof.receipt.confirmedAt as string) <= limit
+  );
+}
+
+/** Confirmed side effects need their own retained completion facts, not only a state label. */
+export function hasUnsettledEffects(record: RunRecord, taskId?: string, at?: string): boolean {
+  return record.outbox.some((intent) => {
+    if (taskId !== undefined && intent.taskId !== taskId) return false;
+    const assignment = record.assignments.find(
+      (entry) => entry.assignmentId === intent.assignmentId,
+    );
+    if (intent.state === "failed" && intent.localCancellation !== null) {
+      return (
+        !assignment ||
+        !isLocalNeverSent(record, assignment) ||
+        !actorSettledBy(record, assignment, at)
+      );
+    }
+    if (
+      intent.state !== "confirmed" ||
+      intent.confirmedAt === null ||
+      (at !== undefined && Date.parse(intent.confirmedAt) > Date.parse(at))
+    ) {
+      // An archive/dispatch receipt can prove an outcome-unknown operation settled.
+      if (
+        assignment &&
+        (intent.state === "sending" || intent.state === "outcome-unknown") &&
+        actorSettledBy(record, assignment, at)
+      ) {
+        if (intent.kind === "dispatch" && dispatchIntentMatches(assignment, intent)) return false;
+        if (
+          intent.kind === "archive" &&
+          assignment.cancellation?.cancelIntentId === intent.id &&
+          isComplete167(record, assignment)
+        )
+          return false;
+      }
+      return true;
+    }
+    if (!assignment || !actorSettledBy(record, assignment, at)) return true;
+    if (intent.kind === "dispatch") return !dispatchIntentMatches(assignment, intent);
+    if (intent.kind === "archive") {
+      return (
+        assignment.cancellation?.cancelIntentId !== intent.id || !isComplete167(record, assignment)
+      );
+    }
+    return true;
+  });
+}
+
+export function noEffectsResolutionValid(
+  record: RunRecord,
+  decision: RunRecord["decisions"][number],
+): boolean {
+  const resolution = decision.resolution;
+  const task = record.tasks.find((entry) => entry.spec.id === decision.subjectId);
+  if (
+    decision.state !== "superseded" ||
+    decision.category !== "D1" ||
+    !task ||
+    decision.dedupeKey !== `cancel:${task.spec.id}` ||
+    decision.cancelIntents?.length !== 0 ||
+    decision.answer !== null ||
+    decision.answeredAt !== null ||
+    !resolution ||
+    resolution.witness.taskId !== task.spec.id ||
+    task.state !== "cancelled" ||
+    task.releaseDecisionId === decision.decisionId ||
+    Date.parse(resolution.at) < Date.parse(decision.createdAt) ||
+    record.resources.some((claim) => claim.taskId === task.spec.id) ||
+    outstandingAssignments(record, task.spec.id).length > 0 ||
+    hasUnsettledEffects(record, task.spec.id, resolution.at) ||
+    !record.assignments
+      .filter((assignment) => assignment.taskId === task.spec.id)
+      .every((assignment) => actorSettledBy(record, assignment, resolution.at)) ||
+    !cancellationAuditValid(record, task.spec.id, resolution)
+  )
+    return false;
+  const ids = record.outbox
+    .filter(
+      (intent) =>
+        intent.taskId === task.spec.id &&
+        intent.localCancellation !== null &&
+        intent.localCancellation.eventSeq === resolution.eventSeq &&
+        intent.localCancellation.at === resolution.at &&
+        intent.localCancellation.cause === resolution.cause,
+    )
+    .map((intent) => intent.id)
+    .sort();
+  return sameStoredValue(ids, resolution.witness.localIntentIds);
 }
 
 export function isComplete167(record: RunRecord, assignment: RunAssignment): boolean {
@@ -350,7 +572,28 @@ export function cancelCoverage(
     for (const assignment of outstandingAssignments(record, taskId)) {
       expected.add(assignment.assignmentId);
     }
-    for (const pair of cancelPairs(record, taskId)) expected.add(pair.assignmentId);
+    const old = cancelPairs(record, taskId);
+    for (const pair of old) {
+      expected.add(pair.assignmentId);
+      if (
+        pairs.some(
+          (candidate) =>
+            candidate.assignmentId === pair.assignmentId && candidate.intentId !== pair.intentId,
+        )
+      )
+        return { ok: false, reason: "fixed-pair-intent" };
+    }
+    if (
+      record.decisions.some(
+        (decision) => decision.dedupeKey === `cancel:${taskId}` && decision.state === "answered",
+      ) &&
+      pairs.some(
+        (pair) =>
+          assignmentById(record, pair.assignmentId)?.taskId === taskId &&
+          !old.some((prior) => prior.assignmentId === pair.assignmentId),
+      )
+    )
+      return { ok: false, reason: "answered-pairs-fixed" };
   }
   const seen = new Set<string>();
   for (const pair of pairs) {

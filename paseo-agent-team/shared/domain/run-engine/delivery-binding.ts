@@ -93,18 +93,32 @@ function knownEvidence(value: unknown): unknown {
     exitCode: value.exitCode,
     summary: value.summary,
     artifactPath: value.artifactPath,
-    ref: knownValue(value.ref),
-    coverage: value.coverage === undefined ? undefined : knownValue(value.coverage),
-    isolation: value.isolation === undefined ? undefined : knownValue(value.isolation),
+    ref: knownRef(value.ref),
+    coverage:
+      value.coverage === undefined
+        ? undefined
+        : knownFields(value.coverage, ["lines", "functions"]),
+    isolation:
+      value.isolation === undefined
+        ? undefined
+        : knownFields(value.isolation, ["homePath", "outsideRealHome"]),
   };
 }
 
-function knownValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => knownValue(entry));
+function knownFields(value: unknown, fields: readonly string[]): unknown {
   if (!isRecord(value)) return value;
   const out: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) out[key] = knownValue(entry);
+  for (const key of fields) if (Object.hasOwn(value, key)) out[key] = value[key];
   return out;
+}
+
+function knownRef(value: unknown): unknown {
+  return knownFields(
+    value,
+    isRecord(value) && value.kind === "diff-sha256"
+      ? ["kind", "value", "baseCommit", "patchPath"]
+      : ["kind", "value"],
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,8 +143,8 @@ export function canonicalKnown(proof: RunAcceptedProof): unknown {
         ...base,
         status: proof.status,
         changedFiles: proof.changedFiles,
-        ref: knownValue(proof.ref),
-        workspace: knownValue(proof.workspace),
+        ref: knownRef(proof.ref),
+        workspace: knownFields(proof.workspace, ["id", "branch", "baseRef"]),
         evidence: Array.isArray(proof.evidence)
           ? proof.evidence.map(knownEvidence)
           : proof.evidence,
@@ -147,19 +161,23 @@ export function canonicalKnown(proof: RunAcceptedProof): unknown {
   if ("reviewedRef" in proof) {
     return {
       ...base,
-      reviewedRef: knownValue(proof.reviewedRef),
+      reviewedRef: knownRef(proof.reviewedRef),
       verdict: proof.verdict,
-      blockers: knownValue(proof.blockers),
+      blockers: Array.isArray(proof.blockers)
+        ? proof.blockers.map((entry) => knownFields(entry, ["id", "summary", "path"]))
+        : proof.blockers,
       probes: Array.isArray(proof.probes) ? proof.probes.map(knownEvidence) : proof.probes,
     };
   }
   return {
     ...base,
-    testedRef: knownValue(proof.testedRef),
+    testedRef: knownRef(proof.testedRef),
     devHost: proof.devHost,
     devServerId: proof.devServerId,
     devHome: proof.devHome,
-    checks: knownValue(proof.checks),
+    checks: Array.isArray(proof.checks)
+      ? proof.checks.map((entry) => knownFields(entry, ["id", "result", "evidencePath"]))
+      : proof.checks,
   };
 }
 

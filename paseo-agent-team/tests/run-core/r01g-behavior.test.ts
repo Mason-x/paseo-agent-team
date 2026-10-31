@@ -3,19 +3,25 @@ import { describe, expect, test } from "vitest";
 import { producerHead } from "../../shared/domain/run-engine/delivery-binding";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
-import type { ArchiveIntent, RunReducerEvent } from "../../shared/domain/run-engine/transitions";
+import {
+  type ArchiveIntent,
+  isLocalNeverSent,
+  type RunReducerEvent,
+} from "../../shared/domain/run-engine/transitions";
 import {
   type RunAssignment,
   type RunRecord,
   RunRecordSchema,
   RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
   RunStoredTaskReportSchema,
 } from "../../shared/schemas/run-engine/ledger";
 import {
   RunReviewReportBlockSchema,
+  RunSmokeReportBlockSchema,
   RunTaskReportBlockSchema,
 } from "../../shared/schemas/run-engine/protocol";
-import { dispatchIntent, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
+import { DEV_SMOKE_READY_LEDGER, dispatchIntent, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
 
 const NOW = "2026-10-30T00:00:00.000Z";
 const uuid = (number: number) => `00000000-0000-4000-8000-${number.toString().padStart(12, "0")}`;
@@ -28,7 +34,7 @@ const actor = (record: RunRecord, id: string) =>
   record.assignments.find((entry) => entry.assignmentId === id)!;
 const task = (record: RunRecord) => record.tasks[0]!;
 
-function ready(): RunRecord {
+function ready(attemptCap?: number, smoke = false): RunRecord {
   const record = RunRecordSchema.parse(structuredClone(NORMAL_RUN_LEDGER));
   record.tasks = [record.tasks.find((entry) => entry.spec.id === "t1")!];
   Object.assign(task(record), {
@@ -48,13 +54,23 @@ function ready(): RunRecord {
   delete record.checkpoint;
   record.counters.eventsThroughSeq = 0;
   record.counters.observationSeq = 0;
+  if (attemptCap !== undefined) record.policy.perTask.implementationAttempts = attemptCap;
+  if (smoke) {
+    task(record).spec.devSmoke = true;
+    task(record).spec.smokeChecklist = ["launch", "interaction"];
+    task(record).spec.dispatchDuties.smoke = "smoke";
+  }
   expect(checkLedgerInvariants(record)).toEqual({ ok: true });
   return record;
 }
 
-function apply(record: RunRecord, event: RunReducerEvent): RunRecord {
+function apply(
+  record: RunRecord,
+  event: RunReducerEvent,
+  suppliedFacts: ReduceFacts = facts,
+): RunRecord {
   const before = structuredClone(record);
-  const result = reduceRun(record, event, facts);
+  const result = reduceRun(record, event, suppliedFacts);
   expect(record).toEqual(before);
   expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
   if (!result.ok) throw new Error(JSON.stringify(result));
@@ -62,13 +78,19 @@ function apply(record: RunRecord, event: RunReducerEvent): RunRecord {
   return result.next;
 }
 
-function dispatch(record: RunRecord, id: string, purpose: "member" | "reviewer", sequence: number) {
-  const template = NORMAL_RUN_LEDGER.assignments.find(
-    (entry) => entry.taskId === "t1" && entry.purpose === purpose,
-  )!;
+function prepareDispatch(
+  record: RunRecord,
+  id: string,
+  purpose: "member" | "reviewer" | "smoker",
+  sequence: number,
+  prepared = false,
+) {
+  const source = purpose === "smoker" ? DEV_SMOKE_READY_LEDGER : NORMAL_RUN_LEDGER;
+  const template = source.assignments.find((entry) => entry.purpose === purpose)!;
   const assignment: RunAssignment = {
     ...structuredClone(template),
     assignmentId: id,
+    taskId: "t1",
     purpose,
     nonce: uuid(sequence),
     messageId: uuid(sequence + 100),
@@ -79,14 +101,16 @@ function dispatch(record: RunRecord, id: string, purpose: "member" | "reviewer",
     turnId: null,
     endedEventKey: null,
     acceptedProof: null,
-    delivery: purpose === "reviewer" ? { producerAssignmentId: "p1" } : null,
+    delivery: purpose !== "member" ? { producerAssignmentId: "p1" } : null,
   };
-  if (id === "r2") {
-    assignment.agentId = "agent-r2";
-    assignment.seatId = "seat-r2";
+  if (id === "r2" || purpose === "smoker") {
+    if (id === "r2") {
+      assignment.agentId = "agent-r2";
+      assignment.seatId = "seat-r2";
+    }
     record = structuredClone(record);
     record.roster.push({
-      ...record.roster.find((seat) => seat.seatId === template.seatId)!,
+      ...source.roster.find((seat) => seat.seatId === template.seatId)!,
       agentId: assignment.agentId,
       seatId: assignment.seatId,
     });
@@ -103,7 +127,7 @@ function dispatch(record: RunRecord, id: string, purpose: "member" | "reviewer",
       taskId: "t1",
       assignmentId: id,
       attempt: 1,
-      phase: purpose === "reviewer" ? "review" : "implementation",
+      phase: purpose === "reviewer" ? "review" : purpose === "smoker" ? "smoke" : "implementation",
       agentId: assignment.agentId,
       seatId: assignment.seatId,
       issuedAt: NOW,
@@ -119,8 +143,8 @@ function dispatch(record: RunRecord, id: string, purpose: "member" | "reviewer",
       recipient: assignment.agentId,
       messageId: assignment.messageId,
       idempotencyKey: `dispatch-${id}`,
-      state: "confirmed",
-      confirmedAt: NOW,
+      state: prepared ? "prepared" : "confirmed",
+      confirmedAt: prepared ? null : NOW,
     }),
     claims:
       purpose === "member"
@@ -136,7 +160,18 @@ function dispatch(record: RunRecord, id: string, purpose: "member" | "reviewer",
           ]
         : undefined,
   };
-  return apply(record, event);
+  return { record, event };
+}
+
+function dispatch(
+  record: RunRecord,
+  id: string,
+  purpose: "member" | "reviewer" | "smoker",
+  sequence: number,
+  prepared = false,
+) {
+  const input = prepareDispatch(record, id, purpose, sequence, prepared);
+  return apply(input.record, input.event);
 }
 
 function start(record: RunRecord, id: string) {
@@ -174,24 +209,29 @@ function end(record: RunRecord, id: string) {
   });
 }
 
-function report(record: RunRecord, invalidEvidence = false) {
+function report(record: RunRecord, invalidEvidence = false, producerId = "p1") {
   const template = RunStoredTaskReportSchema.parse(
     NORMAL_RUN_LEDGER.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1")!
       .acceptedProof,
   );
-  const assignment = actor(record, "p1");
+  const assignment = actor(record, producerId);
   if (invalidEvidence && template.status === "done") template.evidence[0]!.exitCode = 1;
   const block = RunTaskReportBlockSchema.parse({
     ...template,
     runId: record.runId,
-    assignmentId: "p1",
+    assignmentId: producerId,
+    attempt: assignment.attempt,
     nonce: assignment.nonce,
     messageId: assignment.messageId,
     workspace: assignment.workspace,
   });
   return apply(record, { kind: "task-report", block });
 }
-function review(record: RunRecord, id: string) {
+function reviewEvent(
+  record: RunRecord,
+  id: string,
+  verdict: "可合入" | "不可合入" = "可合入",
+): Extract<RunReducerEvent, { kind: "review-report" }> {
   const template = RunStoredReviewSchema.parse(
     NORMAL_RUN_LEDGER.assignments.find((entry) => entry.purpose === "reviewer")!.acceptedProof,
   );
@@ -203,12 +243,46 @@ function review(record: RunRecord, id: string) {
     nonce: assignment.nonce,
     messageId: assignment.messageId,
     reviewedRef: task(record).ref,
+    verdict,
+    blockers:
+      verdict === "可合入"
+        ? []
+        : [{ id: "blocking", summary: "Must fix", path: task(record).changedFiles[0] ?? null }],
   });
-  return apply(record, { kind: "review-report", block });
+  return { kind: "review-report", block };
 }
 
-function awaitingReviews(two = false) {
-  let record = report(start(dispatch(ready(), "p1", "member", 1), "p1"));
+function review(record: RunRecord, id: string, verdict: "可合入" | "不可合入" = "可合入") {
+  return apply(record, reviewEvent(record, id, verdict));
+}
+
+function smokeEvent(record: RunRecord, id = "s1", failed = false) {
+  const source = RunStoredSmokeReportSchema.parse(
+    DEV_SMOKE_READY_LEDGER.assignments.find((entry) => entry.purpose === "smoker")!.acceptedProof,
+  );
+  const assignment = actor(record, id);
+  return {
+    kind: "smoke-report" as const,
+    block: RunSmokeReportBlockSchema.parse({
+      ...source,
+      taskId: "t1",
+      runId: record.runId,
+      assignmentId: id,
+      attempt: assignment.attempt,
+      nonce: assignment.nonce,
+      messageId: assignment.messageId,
+      testedRef: task(record).ref,
+      checks: task(record).spec.smokeChecklist.map((check, index) => ({
+        id: check,
+        result: failed && index === 0 ? "fail" : "pass",
+        evidencePath: `evidence/${check}.log`,
+      })),
+    }),
+  };
+}
+
+function awaitingReviews(two = false, attemptCap?: number, smoke = false) {
+  let record = report(start(dispatch(ready(attemptCap, smoke), "p1", "member", 1), "p1"));
   record = end(record, "p1");
   record = dispatch(record, "r1", "reviewer", 2);
   if (two) record = dispatch(record, "r2", "reviewer", 3);
@@ -257,6 +331,14 @@ function reissueEvent(record: RunRecord): Extract<RunReducerEvent, { kind: "task
     }),
     reissueOfAssignmentId: "p1",
   };
+}
+
+function nextAttemptEvent(record: RunRecord) {
+  const event = reissueEvent(record);
+  event.assignment.attempt = task(record).attempts + 1;
+  event.nonce.attempt = event.assignment.attempt;
+  event.reissueOfAssignmentId = null;
+  return event;
 }
 
 function frozenCancellation(record: RunRecord, ids: string[]) {
@@ -322,7 +404,588 @@ function checked(record: RunRecord, id: string, status: "idle" | "running" = "id
   });
 }
 
+function emptyCancel(): Extract<RunReducerEvent, { kind: "cancel-requested" }> {
+  return {
+    kind: "cancel-requested",
+    taskIds: ["t1"],
+    reason: "cancel",
+    controlNonceDigest: "c".repeat(64),
+    cancelIntents: [],
+    preparedCancelIntents: [],
+  };
+}
+
+function openEmptyCancellation(record = ready()) {
+  record.decisions.push({
+    decisionId: uuid(700),
+    category: "D1",
+    controlNonceDigest: "c".repeat(64),
+    state: "open",
+    answer: null,
+    dedupeKey: "cancel:t1",
+    cancelIntents: [],
+    subjectId: "t1",
+    summary: "An earlier cancellation still needs a no-effects check",
+    createdAt: NOW,
+    answeredAt: null,
+    resolution: null,
+  });
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  return record;
+}
+
+function compact(record: RunRecord): RunRecord {
+  const next = structuredClone(record);
+  next.checkpoint = {
+    throughSeq: next.counters.eventsThroughSeq,
+    historyDigest: "a".repeat(64),
+    counters: structuredClone(next.counters),
+    acceptedNonceDigests: [],
+    terminalAssignmentIds: next.assignments
+      .filter((entry) => entry.state === "ended" || entry.state === "cancelled")
+      .map((entry) => entry.assignmentId),
+  };
+  next.events = [];
+  return next;
+}
+
 describe("R01g real reducer positive chains", () => {
+  test("a never-sent reservation is cancelled with server-computed typed audit only", () => {
+    const record = dispatch(ready(), "p1", "member", 1, true);
+    const event = {
+      ...emptyCancel(),
+      audit: { localIntentIds: ["forged"], supersededDecisionIds: [uuid(777)] },
+    };
+    const next = apply(record, event);
+    expect(task(next)).toMatchObject({ state: "cancelled", releaseDecisionId: null });
+    expect(next.resources).toEqual([]);
+    expect(actor(next, "p1")).toMatchObject({
+      acceptedProof: null,
+      turnId: null,
+      endedAt: null,
+    });
+    expect(actor(next, "p1").cancellation ?? null).toBeNull();
+    expect(next.eventReceipts).toEqual([]);
+    expect(next.events.at(-1)!.payload.audit).toEqual({
+      localIntentIds: ["dispatch-p1"],
+      supersededDecisionIds: [],
+    });
+    expect(isLocalNeverSent(next, actor(next, "p1"))).toBe(true);
+    expect(checkLedgerInvariants(compact(next))).toEqual({ ok: true });
+  });
+
+  test.each(["audit", "scope", "nonce", "turn-fact"] as const)(
+    "local cancellation retains its own uncompressed audit closure: %s",
+    (field) => {
+      const record = apply(dispatch(ready(), "p1", "member", 1, true), emptyCancel());
+      if (field === "audit") delete record.events.at(-1)!.payload.audit;
+      if (field === "scope") record.events.at(-1)!.payload.taskIds = ["t2"];
+      if (field === "nonce") record.nonceRegistry[0]!.revokeReason = "unrelated";
+      if (field === "turn-fact") {
+        record.eventReceipts.push({
+          eventKey: "unowned-start",
+          kind: "turn_started",
+          agentId: actor(record, "p1").agentId,
+          turnId: "unknown-turn",
+          seq: 1,
+          receivedAt: NOW,
+          dedupeKey: "unowned-start",
+          disposition: "observed",
+        });
+        record.counters.observationSeq = 1;
+      }
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(isLocalNeverSent(record, actor(record, "p1"))).toBe(false);
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
+
+  test("a cancelled empty D1 is superseded with a persistent witness, never a human answer", () => {
+    const record = openEmptyCancellation(dispatch(ready(), "p1", "member", 1, true));
+    const next = apply(record, emptyCancel());
+    const decision = next.decisions[0]!;
+    expect(decision).toMatchObject({
+      state: "superseded",
+      answer: null,
+      answeredAt: null,
+      resolution: {
+        reason: "no-in-flight",
+        at: NOW,
+        cause: "cancel-requested",
+        eventSeq: next.counters.eventsThroughSeq,
+        witness: {
+          kind: "no-effects-cancel",
+          taskId: "t1",
+          localIntentIds: ["dispatch-p1"],
+        },
+      },
+    });
+    expect(task(next).releaseDecisionId).toBeNull();
+    expect(next.events.at(-1)!.payload.audit).toEqual({
+      localIntentIds: ["dispatch-p1"],
+      supersededDecisionIds: [decision.decisionId],
+    });
+    const compressed = compact(next);
+    expect(checkLedgerInvariants(compressed)).toEqual({ ok: true });
+    expect(apply(compressed, { kind: "run-finished" }).lifecycle).toBe("finished");
+  });
+
+  test.each(["audit", "witness", "time", "release-id"] as const)(
+    "superseded cancellation must retain its typed closure: %s",
+    (field) => {
+      const record = apply(openEmptyCancellation(), emptyCancel());
+      const decision = record.decisions[0]!;
+      // Explicitly build the expected typed closure so the old implementation cannot pass by
+      // omitting resolution generation entirely.
+      decision.state = "superseded";
+      decision.resolution = {
+        reason: "no-in-flight",
+        at: NOW,
+        eventSeq: record.counters.eventsThroughSeq,
+        cause: "cancel-requested",
+        witness: { kind: "no-effects-cancel", taskId: "t1", localIntentIds: [] },
+      };
+      record.events.at(-1)!.payload.audit = {
+        localIntentIds: [],
+        supersededDecisionIds: [decision.decisionId],
+      };
+      expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+      if (field === "audit") delete record.events.at(-1)!.payload.audit;
+      if (field === "witness") decision.resolution.witness.taskId = "other";
+      if (field === "time") decision.resolution.at = "2026-10-30T00:01:00.000Z";
+      if (field === "release-id") task(record).releaseDecisionId = decision.decisionId;
+      expect(RunRecordSchema.safeParse(record).success).toBe(true);
+      expect(checkLedgerInvariants(record).ok).toBe(false);
+    },
+  );
+
+  test("local withdrawal of a retry preserves the claim from its historical sent producer", () => {
+    let record = end(review(start(awaitingReviews(), "r1"), "r1", "不可合入"), "r1");
+    const event = nextAttemptEvent(record);
+    event.intent.state = "prepared";
+    event.intent.confirmedAt = null;
+    record = apply(record, event);
+    record = apply(record, emptyCancel());
+    expect(task(record).state).toBe("blocked");
+    expect(record.resources).toMatchObject([{ originAssignmentId: "p1", frozen: true }]);
+    expect(record.decisions[0]!.cancelIntents).toEqual([]);
+    expect(isLocalNeverSent(record, actor(record, "p2"))).toBe(true);
+  });
+
+  test("a repeated no-effects cancellation is byte-stable", () => {
+    const record = apply(openEmptyCancellation(), emptyCancel());
+    expect(apply(record, emptyCancel())).toEqual(record);
+  });
+
+  test("a confirmed effect without a completion witness still blocks run-finished", () => {
+    const record = apply(ready(), emptyCancel());
+    record.outbox.push(
+      dispatchIntent({
+        id: "orphan-wake",
+        kind: "wake",
+        taskId: "t1",
+        assignmentId: null,
+        recipient: "agent-orphan",
+        messageId: uuid(999),
+        state: "confirmed",
+        confirmedAt: NOW,
+      }),
+    );
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    const before = structuredClone(record);
+    expect(reduceRun(record, { kind: "run-finished" }, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "run-not-finished", intents: 1 },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("a retry cannot replace an actor's fixed archive intent", () => {
+    const record = frozenCancellation(start(dispatch(ready(), "p1", "member", 1), "p1"), ["p1"]);
+    const old = record.outbox.find((intent) => intent.id === "archive-p1")!;
+    const replacement = { ...structuredClone(old), id: "archive-replacement" } as ArchiveIntent;
+    const before = structuredClone(record);
+    expect(
+      reduceRun(
+        record,
+        {
+          ...emptyCancel(),
+          cancelIntents: [{ assignmentId: "p1", intentId: replacement.id }],
+          preparedCancelIntents: [replacement],
+        },
+        facts,
+      ),
+    ).toMatchObject({
+      ok: false,
+      params: { reason: "fixed-pair-intent" },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("B smoker is independent of review tier and cannot finish before registered R2", () => {
+    let record = start(start(awaitingReviews(true, undefined, true), "r1"), "r2");
+    record = end(review(record, "r1"), "r1");
+    const input = prepareDispatch(record, "s1", "smoker", 5);
+    input.event.assignment.tier = "B";
+    input.record.roster.find((entry) => entry.seatId === input.event.assignment.seatId)!.tier = "B";
+    record = start(apply(input.record, input.event), "s1");
+    record = end(apply(record, smokeEvent(record)), "s1");
+    expect(task(record).state).toBe("review");
+    expect(record.resources).toHaveLength(1);
+    record = end(review(record, "r2"), "r2");
+    expect(task(record).state).toBe("done");
+    expect(record.resources).toEqual([]);
+  });
+
+  test.each(["reissueOfAssignmentId", "assignment.delivery", "nonce.runId"] as const)(
+    "missing frozen dispatch field rejects structurally before factories: %s",
+    (field) => {
+      const { record, event } = prepareDispatch(ready(), "p1", "member", 1);
+      const runtime = event as unknown as Record<string, unknown>;
+      if (field === "reissueOfAssignmentId") delete runtime.reissueOfAssignmentId;
+      if (field === "assignment.delivery") {
+        delete (runtime.assignment as Record<string, unknown>).delivery;
+      }
+      if (field === "nonce.runId") delete (runtime.nonce as Record<string, unknown>).runId;
+      const calls: string[] = [];
+      const before = structuredClone(record);
+      expect(
+        reduceRun(record, event, {
+          ...facts,
+          newId: () => {
+            calls.push("id");
+            return uuid(950);
+          },
+          newDecisionNonceDigest: () => {
+            calls.push("digest");
+            return "a".repeat(64);
+          },
+        }),
+      ).toMatchObject({ ok: false, code: "RUN_EVENT_INVALID", params: { reason: "event-shape" } });
+      expect(calls).toEqual([]);
+      expect(record).toEqual(before);
+    },
+  );
+
+  test.each(["cancelIntents", "preparedCancelIntents"] as const)(
+    "missing cancellation array rejects structurally before factories: %s",
+    (field) => {
+      const record = ready();
+      const runtime: Record<string, unknown> = {
+        kind: "cancel-requested",
+        taskIds: ["t1"],
+        reason: "cancel",
+        controlNonceDigest: "c".repeat(64),
+        cancelIntents: [],
+        preparedCancelIntents: [],
+      };
+      delete runtime[field];
+      const before = structuredClone(record);
+      expect(reduceRun(record, runtime as RunReducerEvent, facts)).toMatchObject({
+        ok: false,
+        code: "RUN_EVENT_INVALID",
+        params: { reason: "event-shape" },
+      });
+      expect(record).toEqual(before);
+    },
+  );
+
+  test("registered smoker accepts a late proof after R2 failure without done or a second F", () => {
+    let record = start(start(awaitingReviews(true, undefined, true), "r1"), "r2");
+    record = end(review(record, "r1"), "r1");
+    record = start(dispatch(record, "s1", "smoker", 5), "s1");
+    record = review(record, "r2", "不可合入");
+    record = end(end(record, "r2"), "s1");
+    expect(task(record)).toMatchObject({ state: "rework", qualityFailures: 1 });
+    const failures = record.events.filter((event) => event.kind === "quality_failed").length;
+    record = apply(record, smokeEvent(record));
+    expect(actor(record, "s1").acceptedProof).not.toBeNull();
+    expect(task(record)).toMatchObject({ state: "rework", qualityFailures: 1 });
+    expect(record.events.filter((event) => event.kind === "quality_failed")).toHaveLength(failures);
+  });
+
+  test.each(["directory", "second-scope"] as const)(
+    "a partial claim cannot shrink the frozen write authorization: %s",
+    (kind) => {
+      const record = ready();
+      task(record).spec.scopes = [
+        { repoId: "repo-re-verify", kind: "directory", path: "src", access: "write" },
+      ];
+      if (kind === "second-scope")
+        task(record).spec.scopes.push({
+          repoId: "repo-re-verify",
+          kind: "file",
+          path: "docs/design.md",
+          access: "write",
+        });
+      const input = prepareDispatch(record, "p1", "member", 1);
+      if (kind === "directory") {
+        input.event.claims![0]!.kind = "file";
+        input.event.claims![0]!.path = "src/one.ts";
+      }
+      expect(checkLedgerInvariants(input.record)).toEqual({ ok: true });
+      const before = structuredClone(input.record);
+      expect(reduceRun(input.record, input.event, facts)).toMatchObject({
+        ok: false,
+        path: ["claims"],
+        params: { reason: "scope-not-covered" },
+      });
+      expect(input.record).toEqual(before);
+    },
+  );
+
+  test.each(["tier", "duty", "disabled"] as const)(
+    "producer registration requires its frozen structural seat: %s",
+    (kind) => {
+      const record = ready();
+      if (kind === "tier") {
+        task(record).spec.tier = "S";
+        task(record).spec.level = "L4";
+      }
+      const input = prepareDispatch(record, "p1", "member", 1);
+      const seat = input.record.roster.find(
+        (entry) => entry.seatId === input.event.assignment.seatId,
+      )!;
+      if (kind === "duty") seat.duties = ["review"];
+      if (kind === "disabled") seat.enabled = false;
+      expect(checkLedgerInvariants(input.record)).toEqual({ ok: true });
+      const before = structuredClone(input.record);
+      expect(reduceRun(input.record, input.event, facts)).toMatchObject({
+        ok: false,
+        path: ["assignment", "seatId"],
+        params: { reason: "structural-seat" },
+      });
+      expect(input.record).toEqual(before);
+    },
+  );
+  test("duplicate observation is byte-stable rather than another audit event", () => {
+    const record = observeEnd(start(dispatch(ready(), "p1", "member", 1), "p1"), "p1");
+    const next = apply(record, {
+      kind: "observation-recorded",
+      receipt: structuredClone(record.eventReceipts[0]!),
+    });
+    expect(next).toEqual(record);
+  });
+
+  test("true completion makes its pending dependency ready", () => {
+    let record = review(start(awaitingReviews(), "r1"), "r1");
+    const child = structuredClone(task(ready()));
+    child.spec.id = "t3";
+    child.spec.deps = ["t1"];
+    child.state = "pending";
+    record.tasks.push(child);
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    record = end(record, "r1");
+    expect(task(record).state).toBe("done");
+    expect(record.tasks.find((entry) => entry.spec.id === "t3")!.state).toBe("ready");
+  });
+
+  test("runtime multi-task cancellation rejects shape before touching any task", () => {
+    const record = ready();
+    const second = structuredClone(task(record));
+    second.spec.id = "t2";
+    record.tasks.push(second);
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    // Deliberately cross the typed single-task tuple at the untrusted runtime boundary.
+    const event = {
+      kind: "cancel-requested",
+      taskIds: ["t1", "t2"],
+      reason: "cancel",
+      controlNonceDigest: "c".repeat(64),
+      cancelIntents: [],
+      preparedCancelIntents: [],
+    } as unknown as RunReducerEvent;
+    const before = structuredClone(record);
+    expect(reduceRun(record, event, facts)).toMatchObject({
+      ok: false,
+      path: ["cancel", "taskIds"],
+      params: { reason: "single-task-required" },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("future observation watermark is rejected at the observation boundary", () => {
+    let record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    record = observeEnd(authorized(frozenCancellation(record, ["p1"])), "p1");
+    const assignment = actor(record, "p1");
+    const event: Extract<RunReducerEvent, { kind: "cancellation-checked" }> = {
+      kind: "cancellation-checked",
+      taskId: "t1",
+      decisionId: record.decisions[0]!.decisionId,
+      evidence: {
+        assignmentId: "p1",
+        lastTurnId: assignment.turnId,
+        endedEventKey: record.eventReceipts[0]!.eventKey,
+        refresh: {
+          agentId: assignment.agentId,
+          status: "idle",
+          activeTurn: false,
+          observedAt: NOW,
+        },
+        observationSeq: 999,
+        cancelIntentId: "archive-p1",
+        receipt: { kind: "archive", confirmedAt: NOW, externalId: "receipt-p1" },
+      },
+    };
+    const before = structuredClone(record);
+    expect(reduceRun(record, event, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "observation-watermark" },
+    });
+    expect(record).toEqual(before);
+    expect(record.resources[0]!.frozen).toBe(true);
+  });
+
+  test("explicit task cancellation revokes only the unused live nonce window", () => {
+    const record = start(dispatch(ready(), "p1", "member", 1), "p1");
+    const next = frozenCancellation(record, ["p1"]);
+    expect(next.nonceRegistry[0]).toMatchObject({
+      acceptedAt: null,
+      revokedAt: NOW,
+      revokeReason: "cancel-requested",
+    });
+  });
+
+  test("pause blocks new dispatch while an already delivered report remains receivable", () => {
+    const record = apply(start(dispatch(ready(), "p1", "member", 1), "p1"), { kind: "run-paused" });
+    expect(reduceRun(record, nextAttemptEvent(record), facts)).toMatchObject({ ok: false });
+    const next = report(record);
+    expect(next.lifecycle).toBe("paused");
+    expect(task(next).state).toBe("review");
+  });
+  test("an authentic report may arrive after its observed turn end", () => {
+    const record = end(start(dispatch(ready(), "p1", "member", 1), "p1"), "p1");
+    const next = report(record);
+    expect(task(next).state).toBe("review");
+    expect(actor(next, "p1").acceptedProof).not.toBeNull();
+  });
+
+  test("a prepared dispatch cannot authorize a new proof", () => {
+    const received = report(start(dispatch(ready(), "p1", "member", 1), "p1"));
+    const block = RunTaskReportBlockSchema.parse(actor(received, "p1").acceptedProof);
+    const record = dispatch(ready(), "p1", "member", 1, true);
+    const before = structuredClone(record);
+    expect(reduceRun(record, { kind: "task-report", block }, facts)).toMatchObject({ ok: false });
+    expect(record).toEqual(before);
+  });
+
+  test.each(["workspace", "ref", "isolation"] as const)(
+    "historical nested extension stays stored but is not canonical: %s",
+    (field) => {
+      const record = awaitingReviews();
+      const stored = RunStoredTaskReportSchema.parse(actor(record, "p1").acceptedProof);
+      if (stored.status !== "done") throw new Error("done source");
+      const block = RunTaskReportBlockSchema.parse(stored);
+      if (field === "workspace") stored.workspace.futureMetadata = "retained";
+      else if (field === "ref") stored.ref.futureMetadata = "retained";
+      else stored.evidence[0]!.isolation!.futureMetadata = "retained";
+      actor(record, "p1").acceptedProof = stored;
+      const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === "p1")!;
+      nonce.revokedAt = NOW;
+      nonce.revokeReason = "historical";
+      expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+      const next = apply(record, { kind: "task-report", block });
+      expect(next).toEqual(record);
+    },
+  );
+
+  test("a supplied wrong messageId cannot be normalized into an accepted replay", () => {
+    const record = awaitingReviews();
+    const block = RunTaskReportBlockSchema.parse(actor(record, "p1").acceptedProof);
+    block.messageId = uuid(999);
+    expect(reduceRun(record, { kind: "task-report", block }, facts)).toMatchObject({ ok: false });
+  });
+
+  test("a different known field is a nonce replay, without mutation", () => {
+    const record = awaitingReviews();
+    const block = RunTaskReportBlockSchema.parse(actor(record, "p1").acceptedProof);
+    if (block.status !== "done") throw new Error("done source");
+    block.evidence[0]!.summary = "changed canonical content";
+    const before = structuredClone(record);
+    expect(reduceRun(record, { kind: "task-report", block }, facts)).toMatchObject({
+      ok: false,
+      params: { reason: "nonce-replay" },
+    });
+    expect(record).toEqual(before);
+  });
+
+  test("an under-tier reviewer proof is rejected before acceptance", () => {
+    const record = start(awaitingReviews(), "r1");
+    const reviewer = actor(record, "r1");
+    reviewer.tier = "B";
+    record.roster.find((entry) => entry.seatId === reviewer.seatId)!.tier = "B";
+    const before = structuredClone(record);
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(reduceRun(record, reviewEvent(record, "r1", "不可合入"), facts)).toMatchObject({
+      ok: false,
+    });
+    expect(record).toEqual(before);
+    expect(task(record).qualityFailures).toBe(0);
+  });
+
+  test("two failed reviewers of one D count once and wait for true actor settlement", () => {
+    let record = start(start(awaitingReviews(true), "r1"), "r2");
+    const claim = structuredClone(record.resources[0]);
+    record = review(record, "r1", "不可合入");
+    expect(task(record)).toMatchObject({
+      state: "review",
+      phase: "awaiting-rework",
+      qualityFailures: 1,
+      reworkCount: 0,
+    });
+    expect(record.resources).toEqual([claim]);
+    expect(reduceRun(record, nextAttemptEvent(record), facts)).toMatchObject({ ok: false });
+    record = review(record, "r2", "不可合入");
+    expect(task(record).qualityFailures).toBe(1);
+    record = end(end(record, "r1"), "r2");
+    expect(task(record).state).toBe("rework");
+    record = apply(record, nextAttemptEvent(record));
+    expect(task(record)).toMatchObject({ attempts: 2, reworkCount: 1, qualityFailures: 1 });
+    expect(record.resources[0]!.originAssignmentId).toBe("p1");
+  });
+
+  test("missing D4 digest rolls back proof, nonce, failure count and events", () => {
+    const record = start(awaitingReviews(false, 1), "r1");
+    const before = structuredClone(record);
+    expect(
+      reduceRun(record, reviewEvent(record, "r1", "不可合入"), {
+        ...facts,
+        newDecisionNonceDigest: undefined,
+      }),
+    ).toMatchObject({ ok: false, params: { reason: "missing-control-nonce-digest" } });
+    expect(record).toEqual(before);
+  });
+
+  test("D4 keeps registered late replies receivable and creates only one decision", () => {
+    let record = start(start(awaitingReviews(true, 1), "r1"), "r2");
+    const calls: string[] = [];
+    const supplied = {
+      ...facts,
+      newDecisionNonceDigest: (category: "D3" | "D4", id: string) => {
+        calls.push(`${category}:${id}`);
+        return "d".repeat(64);
+      },
+    };
+    record = apply(record, reviewEvent(record, "r1", "不可合入"), supplied);
+    expect(task(record)).toMatchObject({ state: "blocked", phase: "frozen", qualityFailures: 1 });
+    record = apply(record, reviewEvent(record, "r2", "不可合入"), supplied);
+    expect(calls).toEqual(["D4:t1"]);
+    expect(record.decisions).toHaveLength(1);
+    expect(task(record).qualityFailures).toBe(1);
+    expect(actor(record, "r2").acceptedProof).not.toBeNull();
+  });
+
+  test("an old failed D with the same ref cannot contaminate the new D", () => {
+    let record = start(awaitingReviews(), "r1");
+    record = end(review(record, "r1", "不可合入"), "r1");
+    const old = reviewEvent(record, "r1", "不可合入");
+    record = apply(record, nextAttemptEvent(record));
+    record = report(start(record, "p2"), false, "p2");
+    const before = structuredClone(record);
+    record = apply(record, old);
+    expect(record).toEqual(before);
+    expect(task(record)).toMatchObject({ state: "review", qualityFailures: 1, attempts: 2 });
+  });
   test("same-attempt evidence reissue follows its real ended non-D producer", () => {
     let record = report(start(dispatch(ready(), "p1", "member", 1), "p1"), true);
     record = end(record, "p1");
@@ -477,6 +1140,15 @@ describe("R01g real reducer positive chains", () => {
       expect(checkLedgerInvariants(record)).toEqual({
         ok: false,
         violations: [
+          ...(kind === "superseded-authorization"
+            ? [
+                {
+                  invariant: "I8",
+                  path: ["decisions", 0, "resolution"],
+                  params: { reason: "invalid-resolution" },
+                },
+              ]
+            : []),
           {
             invariant: "I7",
             path:

@@ -1,5 +1,7 @@
 import {
+  type RunAcceptedProof,
   type RunArtifactRef,
+  type RunAssignment,
   type RunRecord,
   type RunStoredReview,
   RunStoredReviewSchema,
@@ -7,9 +9,16 @@ import {
   RunStoredSmokeReportSchema,
   type RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
-import { resolveD } from "./delivery-binding";
-import { reviewRequirement } from "./tier";
-import { isNormalEnded, taskById } from "./transitions";
+import { type DeliveryCandidate, resolveD, resolveProducerProof } from "./delivery-binding";
+import { executionTier, reviewRequirement } from "./tier";
+import {
+  assignmentPhase,
+  dispatchIntentMatches,
+  isComplete167,
+  isLocalNeverSent,
+  isNormalEnded,
+  taskById,
+} from "./transitions";
 
 export type GateIssue = {
   gate: "evidence" | "review" | "smoke";
@@ -71,20 +80,99 @@ export function checkEvidenceGate(record: RunRecord, task: RunTaskRecord): GateR
     return fail("evidence", ["tasks", task.spec.id, "producer"], "missing-done-producer");
   }
   const { d } = resolved;
-  const report = d.proof;
-  if (task.ref !== null && artifactKey(report.ref) !== artifactKey(task.ref)) {
+  const checked = checkEvidenceForProducer(record, task, d.producer);
+  if (!checked.ok) return checked;
+  if (task.ref !== null && artifactKey(d.ref) !== artifactKey(task.ref)) {
     return fail("evidence", ["tasks", task.spec.id, "ref"], "ref-mismatch");
   }
+  return OK;
+}
+
+function acceptedIdentity(
+  record: RunRecord,
+  assignment: RunAssignment,
+  proof: RunAcceptedProof,
+): boolean {
+  if (
+    proof.runId !== record.runId ||
+    proof.taskId !== assignment.taskId ||
+    proof.assignmentId !== assignment.assignmentId ||
+    proof.attempt !== assignment.attempt ||
+    proof.nonce !== assignment.nonce ||
+    proof.messageId !== assignment.messageId
+  )
+    return false;
+  const nonces = record.nonceRegistry.filter(
+    (entry) => entry.nonce === assignment.nonce && entry.assignmentId === assignment.assignmentId,
+  );
+  const nonce = nonces.length === 1 ? nonces[0] : undefined;
+  if (
+    !nonce ||
+    nonce.runId !== record.runId ||
+    nonce.taskId !== assignment.taskId ||
+    nonce.attempt !== assignment.attempt ||
+    nonce.agentId !== assignment.agentId ||
+    nonce.seatId !== assignment.seatId ||
+    nonce.phase !== assignmentPhase(assignment) ||
+    nonce.acceptedAt === null ||
+    nonce.acceptedEventKey !== `proof:${assignment.assignmentId}` ||
+    Date.parse(nonce.acceptedAt) < Date.parse(assignment.createdAt) ||
+    (nonce.revokedAt !== null && Date.parse(nonce.revokedAt) < Date.parse(nonce.acceptedAt))
+  )
+    return false;
+  const intents = record.outbox.filter(
+    (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+  );
+  const intent = intents.length === 1 ? intents[0] : undefined;
+  return (
+    intent !== undefined &&
+    dispatchIntentMatches(assignment, intent) &&
+    intent.localCancellation === null &&
+    ["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+  );
+}
+
+export function producerEpoch(task: RunTaskRecord, producer: RunAssignment): RunTaskRecord {
+  return {
+    ...task,
+    escalations: task.escalations.filter((entry) => entry.atAttempt < producer.attempt),
+  };
+}
+
+/** Validates the historical producer directly, never through the current head or cache. */
+export function checkEvidenceForProducer(
+  record: RunRecord,
+  task: RunTaskRecord,
+  producer: RunAssignment,
+): GateResult {
+  const proof = resolveProducerProof(record, producer.assignmentId);
+  if (
+    !proof ||
+    !acceptedIdentity(record, producer, proof) ||
+    producer.taskId !== task.spec.id ||
+    executionTier(producerEpoch(task, producer)) !== producer.tier
+  ) {
+    return fail("evidence", ["assignments", producer.assignmentId], "invalid-producer");
+  }
+  return evidenceChecks(record, task, producer, proof);
+}
+
+function evidenceChecks(
+  record: RunRecord,
+  task: RunTaskRecord,
+  producer: RunAssignment,
+  report: DeliveryCandidate["proof"],
+): GateResult {
   for (const file of report.changedFiles) {
     if (!inWriteScope(task, file)) {
       return fail("evidence", ["tasks", task.spec.id, "changedFiles"], "outside-scope");
     }
   }
   if (
-    d.producer.workspace !== null &&
-    (d.producer.workspace.id !== report.workspace.id ||
-      d.producer.workspace.branch !== report.workspace.branch ||
-      d.producer.workspace.baseRef !== report.workspace.baseRef)
+    producer.workspace !== null &&
+    (producer.workspace.id !== report.workspace.id ||
+      producer.workspace.branch !== report.workspace.branch ||
+      producer.workspace.baseRef !== report.workspace.baseRef)
   ) {
     return fail("evidence", ["tasks", task.spec.id, "workspace"], "workspace-mismatch");
   }
@@ -178,17 +266,33 @@ export function reviewEligible(
   const resolved = resolveD(record, task.spec.id);
   if (resolved.kind !== "ok") return false;
   const d = resolved.d;
+  return reviewForProducer(record, task, assignment, review, d.producer, d.ref);
+}
+
+function reviewForProducer(
+  record: RunRecord,
+  task: RunTaskRecord,
+  assignment: RunAssignment,
+  review: RunStoredReview,
+  producer: RunAssignment,
+  ref: RunArtifactRef,
+): boolean {
+  if (
+    !acceptedIdentity(record, assignment, review) ||
+    !checkEvidenceForProducer(record, task, producer).ok
+  )
+    return false;
   if (assignment.taskId !== task.spec.id || assignment.purpose !== "reviewer") return false;
-  if (assignment.attempt !== d.producer.attempt) return false;
-  if (assignment.delivery?.producerAssignmentId !== d.producer.assignmentId) return false;
-  if (artifactKey(review.reviewedRef) !== artifactKey(d.ref)) return false;
-  const requirement = reviewRequirement(task);
+  if (assignment.attempt !== producer.attempt) return false;
+  if (assignment.delivery?.producerAssignmentId !== producer.assignmentId) return false;
+  if (artifactKey(review.reviewedRef) !== artifactKey(ref)) return false;
+  const requirement = reviewRequirement(producerEpoch(task, producer));
   if (assignment.tier !== requirement.tier) return false;
-  if (assignment.agentId === d.producer.agentId || assignment.seatId === d.producer.seatId) {
+  if (assignment.agentId === producer.agentId || assignment.seatId === producer.seatId) {
     return false;
   }
   if (requirement.level === "L1") {
-    const producerFamily = d.producer.family;
+    const producerFamily = producer.family;
     if (producerFamily === null || assignment.family === null) return false;
     if (assignment.family === producerFamily) return false;
   }
@@ -214,17 +318,27 @@ export function failedDeliveryIds(record: RunRecord, task: RunTaskRecord): strin
   for (const producer of record.assignments) {
     if (producer.taskId !== task.spec.id) continue;
     if (!["member", "coordinator", "reopen"].includes(producer.purpose)) continue;
-    const proof = producer.acceptedProof;
-    if (!proof || !("status" in proof) || proof.status !== "done") continue;
+    const proof = resolveProducerProof(record, producer.assignmentId);
+    if (!proof || !checkEvidenceForProducer(record, task, producer).ok) continue;
     const reviews = reviewsForD(record, producer.assignmentId);
     if (
-      reviews.some(({ proof: review }) => review.verdict !== "可合入" || review.blockers.length > 0)
+      reviews.some(
+        ({ assignment, proof: review }) =>
+          reviewForProducer(record, task, assignment, review, producer, proof.ref) &&
+          (review.verdict !== "可合入" || review.blockers.length > 0),
+      )
     ) {
       ids.add(producer.assignmentId);
       continue;
     }
     const smokes = smokesForD(record, producer.assignmentId);
-    if (smokes.some(({ proof: smoke }) => smoke.checks.some((check) => check.result === "fail"))) {
+    if (
+      smokes.some(
+        ({ assignment, proof: smoke }) =>
+          validSmokeSource(record, task, assignment, smoke, producer, proof.ref) &&
+          smoke.checks.some((check) => check.result === "fail"),
+      )
+    ) {
       ids.add(producer.assignmentId);
     }
   }
@@ -253,6 +367,11 @@ function validSmokeSource(
   producer: RunRecord["assignments"][number],
   ref: RunArtifactRef,
 ): boolean {
+  if (
+    !acceptedIdentity(record, assignment, proof) ||
+    !checkEvidenceForProducer(record, task, producer).ok
+  )
+    return false;
   if (
     assignment.purpose !== "smoker" ||
     assignment.taskId !== task.spec.id ||
@@ -288,6 +407,8 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
   const resolved = resolveD(record, task.spec.id);
   if (resolved.kind !== "ok") return fail("evidence", ["tasks", task.spec.id], "missing-delivery");
   const d = resolved.d;
+  const evidence = checkEvidenceForProducer(record, task, d.producer);
+  if (!evidence.ok) return evidence;
   if (failedDeliveryIds(record, task).includes(d.producer.assignmentId)) {
     return fail("review", ["tasks", task.spec.id, "quality"], "failed-delivery");
   }
@@ -340,6 +461,17 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
   } else if (!actorSettled(record, d.producer)) {
     return fail("evidence", ["tasks", task.spec.id], "unsettled-producer");
   }
+  if (
+    record.assignments.some(
+      (entry) =>
+        entry.taskId === task.spec.id &&
+        !isNormalEnded(record, entry) &&
+        !isComplete167(record, entry) &&
+        !isLocalNeverSent(record, entry),
+    )
+  ) {
+    return fail("review", ["tasks", task.spec.id], "unsettled-task-actor");
+  }
   return OK;
 }
 
@@ -359,6 +491,18 @@ export function checkSmokeGate(record: RunRecord, task: RunTaskRecord): GateResu
     return fail("smoke", ["tasks", task.spec.id, "smoke"], "failed-smoke");
   }
   return OK;
+}
+
+export function smokeEligible(
+  record: RunRecord,
+  task: RunTaskRecord,
+  assignment: RunAssignment,
+  proof: RunStoredSmokeReport,
+): boolean {
+  const d = resolveD(record, task.spec.id);
+  return (
+    d.kind === "ok" && validSmokeSource(record, task, assignment, proof, d.d.producer, d.d.ref)
+  );
 }
 
 export function findTask(record: RunRecord, taskId: string): RunTaskRecord | undefined {

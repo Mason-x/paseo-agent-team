@@ -7,7 +7,9 @@ import {
   cancelPairs,
   dispatchIntentMatches,
   isComplete167,
+  isLocalNeverSent,
   isNormalEnded,
+  noEffectsResolutionValid,
   RUN_COUNTER_EVENTS,
 } from "./transitions";
 
@@ -495,6 +497,21 @@ function checkI7(record: RunRecord): RunInvariantViolation[] {
 
 function checkI8(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
+  for (const [index, intent] of record.outbox.entries()) {
+    if (intent.localCancellation !== null) {
+      const assignment = record.assignments.find(
+        (entry) => entry.assignmentId === intent.assignmentId,
+      );
+      if (intent.kind !== "dispatch" || !assignment || !isLocalNeverSent(record, assignment)) {
+        issues.push(
+          violation("I8", ["outbox", index, "localCancellation"], "invalid-local-cancellation"),
+        );
+      }
+    }
+    if (intent.state === "confirmed" && intent.confirmedAt === null) {
+      issues.push(violation("I8", ["outbox", index, "confirmedAt"], "unconfirmed-intent"));
+    }
+  }
   for (const [index, assignment] of record.assignments.entries()) {
     const matches = record.outbox.filter((intent) => dispatchIntentMatches(assignment, intent));
     if (matches.length !== 1) {
@@ -514,6 +531,9 @@ function checkI8(record: RunRecord): RunInvariantViolation[] {
     }
   }
   for (const [index, decision] of record.decisions.entries()) {
+    if (decision.state === "superseded" && !noEffectsResolutionValid(record, decision)) {
+      issues.push(violation("I8", ["decisions", index, "resolution"], "invalid-resolution"));
+    }
     const pairs = decision.cancelIntents;
     if (pairs === null) continue;
     const ids = pairs.map((pair) => pair.assignmentId);
