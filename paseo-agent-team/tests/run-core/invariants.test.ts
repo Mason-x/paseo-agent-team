@@ -1,169 +1,163 @@
-// biome-ignore-all lint/style/noNonNullAssertion: fixture builders guarantee these indices.
+// biome-ignore-all lint/style/noNonNullAssertion: every complete parent is asserted first.
 import { describe, expect, test } from "vitest";
-import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
-import { AT_UPDATED, INVARIANT_CASES, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
+import {
+  checkLedgerInvariants,
+  occupiesExecutionSlot,
+} from "../../shared/domain/run-engine/invariants";
+import { type RunRecord, RunRecordSchema } from "../../shared/schemas/run-engine/ledger";
+import { AT_UPDATED, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
 
-describe("checkLedgerInvariants", () => {
-  test("the normal ledger has no violations", () => {
-    expect(checkLedgerInvariants(NORMAL_RUN_LEDGER)).toEqual({ ok: true });
+function base(): RunRecord {
+  const record = RunRecordSchema.parse(structuredClone(NORMAL_RUN_LEDGER));
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  return record;
+}
+function task(record: RunRecord, id: string) {
+  const found = record.tasks.find((entry) => entry.spec.id === id);
+  if (!found) throw new Error(`missing ${id}`);
+  return found;
+}
+function issues(record: unknown) {
+  const result = checkLedgerInvariants(record);
+  return result.ok
+    ? []
+    : result.violations.map(({ invariant, path, params }) => ({
+        invariant,
+        path,
+        reason: params.reason,
+      }));
+}
+
+describe("R01g invariant single-defect preconditions", () => {
+  test("the acceptedProof source is legal", () => {
+    base();
   });
-
-  for (const entry of INVARIANT_CASES) {
-    if (entry.kind === "violation") {
-      test(`${entry.id} reports ${entry.invariant}`, () => {
-        const report = checkLedgerInvariants(entry.ledger);
-        expect(report.ok).toBe(false);
-        if (report.ok) return;
-        expect(report.violations.map((item) => item.invariant)).toContain(entry.invariant);
-      });
-    } else {
-      test(`${entry.id} stays legal`, () => {
-        expect(checkLedgerInvariants(entry.ledger)).toEqual({ ok: true });
-      });
-    }
-  }
-});
-
-describe("invariant denial matrix", () => {
-  test("schema failures, dependency cycles, and unknown dependencies", () => {
-    const schema = checkLedgerInvariants({} as never);
-    expect(schema.ok).toBe(false);
-    if (!schema.ok) expect(schema.violations[0]?.invariant).toBe("I1");
-    const cycle = structuredClone(NORMAL_RUN_LEDGER);
-    const t1 = cycle.tasks.find((entry) => entry.spec.id === "T1")!;
-    t1.spec = { ...t1.spec, deps: ["T3"] };
-    const t3 = cycle.tasks.find((entry) => entry.spec.id === "T3")!;
-    t3.spec = { ...t3.spec, deps: ["T1"] };
-    const cyclic = checkLedgerInvariants(cycle);
-    expect(cyclic.ok).toBe(false);
-    if (!cyclic.ok) expect(cyclic.violations.some((entry) => entry.invariant === "I2")).toBe(true);
-    const unknown = structuredClone(NORMAL_RUN_LEDGER);
-    const task = unknown.tasks.find((entry) => entry.spec.id === "T3")!;
-    task.spec = { ...task.spec, deps: ["missing"] };
-    const dangling = checkLedgerInvariants(unknown);
-    expect(dangling.ok).toBe(false);
-    if (!dangling.ok) {
-      expect(
-        dangling.violations.some((entry) => entry.params.reason === "unknown-dependency"),
-      ).toBe(true);
-    }
+  test.each(["report", "reviews", "smokeReport"])(
+    "old task mirror %s is rejected by I1",
+    (field) => {
+      const record = base();
+      task(record, "t1")[field] = [];
+      const result = issues(record);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ invariant: "I1", reason: "record-schema" });
+    },
+  );
+  test("partial bytes and malformed arrays are structured I1 denials", () => {
+    expect(issues({})).toEqual(
+      expect.arrayContaining([expect.objectContaining({ invariant: "I1" })]),
+    );
+    const record = base();
+    record.rawBytes = "{";
+    expect(issues(record)).toEqual([
+      { invariant: "I1", path: ["rawBytes"], reason: "partial-bytes" },
+    ]);
   });
-
-  test("I3 directory directions, invalid paths and frozen ids", () => {
-    const record = structuredClone(NORMAL_RUN_LEDGER);
-    const dir = record.resources[0]!;
-    const other = record.resources[0]!;
-    record.resources = [
-      { ...dir, claimId: "dir-a", kind: "directory", path: "src", taskId: "T2" },
-      { ...other, claimId: "dir-b", kind: "directory", path: "src/nested", taskId: "T3" },
-    ];
-    record.tasks.find((entry) => entry.spec.id === "T3")!.state = "in_progress";
-    const nested = checkLedgerInvariants(record);
-    expect(nested.ok).toBe(false);
-    const invalid = structuredClone(NORMAL_RUN_LEDGER);
-    invalid.resources = [{ ...dir, claimId: "bad", path: "src/a.ts.", taskId: "T2" }];
-    const badPath = checkLedgerInvariants(invalid);
-    expect(badPath.ok).toBe(false);
-    if (!badPath.ok) {
-      expect(badPath.violations.some((entry) => entry.params.reason === "invalid-path")).toBe(true);
-    }
-    const frozen = structuredClone(NORMAL_RUN_LEDGER);
-    const frozenTask = frozen.tasks.find((entry) => entry.spec.id === "T2")!;
-    frozenTask.state = "blocked";
-    frozenTask.phase = "frozen";
-    frozenTask.frozenClaimId = "not-the-claim";
-    frozen.resources[0]!.frozen = true;
-    const mismatch = checkLedgerInvariants(frozen);
-    expect(mismatch.ok).toBe(false);
-    if (!mismatch.ok) {
-      expect(
-        mismatch.violations.some((entry) => entry.params.reason === "frozen-claim-mismatch"),
-      ).toBe(true);
-    }
+  test("unknown dependency is a single I2 defect", () => {
+    const record = base();
+    task(record, "t3").spec.deps = ["missing"];
+    expect(issues(record)).toEqual([
+      { invariant: "I2", path: ["tasks", "t3", "deps"], reason: "unknown-dependency" },
+    ]);
   });
-
-  test("I5 binding/revocation and I6 attempts are checked", () => {
-    const revoked = structuredClone(NORMAL_RUN_LEDGER);
-    const nonce = revoked.nonceRegistry.find((entry) => entry.taskId === "T2");
-    if (nonce) nonce.revokedAt = AT_UPDATED;
-    const revokedReport = checkLedgerInvariants(revoked);
-    expect(revokedReport.ok).toBe(false);
-    if (!revokedReport.ok) {
-      expect(
-        revokedReport.violations.some((entry) => entry.params.reason === "revoked-nonce-active"),
-      ).toBe(true);
-    }
-    const binding = structuredClone(NORMAL_RUN_LEDGER);
-    const bound = binding.nonceRegistry.find((entry) => entry.taskId === "T2");
-    if (bound) bound.attempt = 2;
-    expect(checkLedgerInvariants(binding).ok).toBe(false);
-    const attempts = structuredClone(NORMAL_RUN_LEDGER);
-    const target = attempts.tasks.find((entry) => entry.spec.id === "T2")!;
-    target.attempts = 0;
-    attempts.events.push({
-      seq: 8,
-      kind: "task-dispatched",
-      at: AT_UPDATED,
-      payload: { taskId: "T2" },
-    } as never);
-    attempts.counters.eventsThroughSeq = 8;
-    const attemptReport = checkLedgerInvariants(attempts);
-    expect(attemptReport.ok).toBe(false);
-    if (!attemptReport.ok) {
-      expect(
-        attemptReport.violations.some((entry) => entry.params.reason === "behind-events"),
-      ).toBe(true);
-    }
+  test("cycle is a single I2 defect", () => {
+    const record = base();
+    task(record, "t1").spec.deps = ["t3"];
+    task(record, "t3").spec.deps = ["t1"];
+    expect(issues(record)).toEqual([
+      { invariant: "I2", path: ["tasks", "t1", "deps"], reason: "cycle" },
+    ]);
   });
-
-  test("invalid stored extensions are violations, not exceptions", () => {
-    const reviews = structuredClone(NORMAL_RUN_LEDGER);
-    const task = reviews.tasks.find((entry) => entry.spec.id === "T1") as unknown as {
-      reviews: unknown;
-    };
-    task.reviews = { invalid: true };
-    expect(() => checkLedgerInvariants(reviews)).not.toThrow();
-    expect(checkLedgerInvariants(reviews).ok).toBe(false);
-    const report = structuredClone(NORMAL_RUN_LEDGER);
-    const reportTask = report.tasks.find((entry) => entry.spec.id === "T1") as unknown as {
-      report: unknown;
-    };
-    reportTask.report = [];
-    expect(checkLedgerInvariants(report).ok).toBe(false);
+  test("pending task holding its own claim is a single I3 defect", () => {
+    const record = base();
+    task(record, "t2").state = "pending";
+    delete task(record, "t2").phase;
+    expect(issues(record)).toEqual([
+      { invariant: "I3", path: ["resources", 0], reason: "inactive-holds-claim" },
+    ]);
   });
-});
-
-describe("I3 opposite file/directory coverage", () => {
-  test("file claim and covering directory claim conflict in both directions", () => {
-    for (const first of ["file", "directory"] as const) {
-      const record = structuredClone(NORMAL_RUN_LEDGER);
-      const base = record.resources[0]!;
-      record.resources = [
-        {
-          ...base,
-          claimId: "first",
-          taskId: "T2",
-          kind: first,
-          path: first === "file" ? "src/a.ts" : "src",
-        },
-        {
-          ...base,
-          claimId: "second",
-          taskId: "T3",
-          kind: first === "file" ? "directory" : "file",
-          path: first === "file" ? "src" : "src/a.ts",
-        },
-      ];
-      record.tasks.find((entry) => entry.spec.id === "T3")!.state = "in_progress";
-      const reportValue = checkLedgerInvariants(record);
-      expect(reportValue.ok, first).toBe(false);
-      if (!reportValue.ok) {
-        expect(
-          reportValue.violations.some(
-            (entry) => entry.invariant === "I3" && entry.params.reason === "overlapping-claim",
-          ),
-        ).toBe(true);
-      }
-    }
+  test("frozen claim parent is legal; a wrong frozenClaimId is not", () => {
+    const record = base();
+    const target = task(record, "t2");
+    target.state = "blocked";
+    target.phase = "frozen";
+    record.resources[0]!.frozen = true;
+    target.frozenClaimId = record.resources[0]!.claimId;
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    target.frozenClaimId = "wrong-claim";
+    expect(issues(record)).toEqual([
+      { invariant: "I3", path: ["tasks", "t2", "frozenClaimId"], reason: "frozen-claim-mismatch" },
+    ]);
+  });
+  test("review retains a normal claim but does not consume an implementation slot", () => {
+    const record = base();
+    const target = task(record, "t2");
+    target.state = "review";
+    target.phase = "awaiting-rework";
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    expect(occupiesExecutionSlot(record, target)).toBe(false);
+    target.state = "blocked";
+    target.phase = "frozen";
+    record.resources[0]!.frozen = true;
+    target.frozenClaimId = record.resources[0]!.claimId;
+    expect(occupiesExecutionSlot(record, target)).toBe(true);
+  });
+  test("registry frozen identity mismatch is a single I5 defect", () => {
+    const record = base();
+    record.nonceRegistry.find((entry) => entry.assignmentId === "assignment-t2-a1")!.agentId =
+      "other-agent";
+    expect(issues(record).map((entry) => entry.reason)).toEqual([
+      "nonce-binding",
+      "unregistered-nonce",
+    ]);
+    expect(issues(record).every((entry) => entry.invariant === "I5")).toBe(true);
+  });
+  test("revoking a live current nonce is not a valid snapshot", () => {
+    const record = base();
+    const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === "assignment-t2-a1")!;
+    nonce.revokedAt = AT_UPDATED;
+    nonce.revokeReason = "cancelled";
+    expect(issues(record)).toEqual([
+      {
+        invariant: "I5",
+        path: ["nonceRegistry", record.nonceRegistry.indexOf(nonce)],
+        reason: "revoked-nonce-active",
+      },
+    ]);
+  });
+  test("actual observation watermark must cover retained receipts", () => {
+    const record = base();
+    const maximum = Math.max(...record.eventReceipts.map((entry) => entry.seq));
+    record.counters.observationSeq = maximum - 1;
+    // One watermark defect invalidates both the counter and the dependent ended proof.
+    expect(issues(record)).toEqual([
+      { invariant: "I6", path: ["counters", "observationSeq"], reason: "behind-receipts" },
+      { invariant: "I7", path: ["tasks", "t1", "reviews"], reason: "unsettled-reviewer" },
+      { invariant: "I7", path: ["assignments", 1, "endedEventKey"], reason: "invalid-ended-proof" },
+    ]);
+  });
+  test("removing only the completed reviewer bundle is I7, not schema corruption", () => {
+    const record = base();
+    const id = "assignment-t1-r1";
+    record.assignments = record.assignments.filter((entry) => entry.assignmentId !== id);
+    record.nonceRegistry = record.nonceRegistry.filter((entry) => entry.assignmentId !== id);
+    record.outbox = record.outbox.filter((entry) => entry.assignmentId !== id);
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(issues(record)).toEqual([
+      { invariant: "I7", path: ["tasks", "t1", "reviews"], reason: "no-reviewer" },
+    ]);
+  });
+  test("wrong dispatch recipient is a single I8 defect", () => {
+    const record = base();
+    record.outbox.find((entry) => entry.id === "intent-t2-a1")!.recipient = "other-agent";
+    expect(issues(record)).toEqual([
+      {
+        invariant: "I8",
+        path: [
+          "assignments",
+          record.assignments.findIndex((entry) => entry.assignmentId === "assignment-t2-a1"),
+        ],
+        reason: "assignment-without-intent",
+      },
+    ]);
   });
 });

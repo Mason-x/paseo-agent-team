@@ -1,408 +1,230 @@
-// biome-ignore-all lint/style/noNonNullAssertion: fixture builders guarantee these indices.
+// biome-ignore-all lint/style/noNonNullAssertion: complete parent fixtures assert these entries.
 import { describe, expect, test } from "vitest";
 import {
   checkEvidenceGate,
   checkReviewGate,
   checkSmokeGate,
+  doneGate,
   findTask,
 } from "../../shared/domain/run-engine/gates";
+import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
+import {
+  type RunRecord,
+  RunRecordSchema,
+  RunStoredSmokeReportSchema,
+  type RunStoredTaskReport,
+  RunStoredTaskReportSchema,
+} from "../../shared/schemas/run-engine/ledger";
 import {
   DEV_SMOKE_MISSING_LEDGER,
   DEV_SMOKE_READY_LEDGER,
-  EVIDENCE_INCOMPLETE_LEDGER,
+  INVARIANT_CASES,
   NORMAL_RUN_LEDGER,
   STALE_REVIEW_LEDGER,
-  task,
 } from "../fixtures/run-engine";
 
-function taskOf(record: typeof NORMAL_RUN_LEDGER, id: string) {
-  const found = record.tasks.find((entry) => entry.spec.id === id);
+function task(record: RunRecord, id: string) {
+  const found = findTask(record, id);
   if (!found) throw new Error(`missing ${id}`);
   return found;
 }
+function normal(): RunRecord {
+  const record = RunRecordSchema.parse(structuredClone(NORMAL_RUN_LEDGER));
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  return record;
+}
+function dev(source = DEV_SMOKE_READY_LEDGER): RunRecord {
+  const record = RunRecordSchema.parse(structuredClone(source));
+  // The source fixture supplies attempt-1 actors and retained observations, not task counters.
+  task(record, "t6").attempts = 1;
+  record.counters.observationSeq = Math.max(
+    record.counters.observationSeq,
+    ...record.eventReceipts.map((entry) => entry.seq),
+  );
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  return record;
+}
+function doneProof(record: RunRecord) {
+  const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1")!;
+  const proof = RunStoredTaskReportSchema.parse(producer.acceptedProof);
+  if (proof.status !== "done") throw new Error("missing done proof");
+  producer.acceptedProof = proof;
+  return proof;
+}
+function smokeProof(record: RunRecord) {
+  const smoker = record.assignments.find((entry) => entry.assignmentId === "assignment-t6-s1")!;
+  const proof = RunStoredSmokeReportSchema.parse(smoker.acceptedProof);
+  smoker.acceptedProof = proof;
+  return proof;
+}
 
-describe("three gates", () => {
-  test("evidence rejects an incomplete report", () => {
-    expect(
-      checkEvidenceGate(EVIDENCE_INCOMPLETE_LEDGER, taskOf(EVIDENCE_INCOMPLETE_LEDGER, "T2")),
-    ).toMatchObject({
+describe("R01g three gates use assignment acceptedProof", () => {
+  test("normal evidence/review and actual ended actors close done", () => {
+    const record = normal();
+    expect(checkEvidenceGate(record, task(record, "t1"))).toEqual({ ok: true });
+    expect(checkReviewGate(record, task(record, "t1"))).toEqual({ ok: true });
+    expect(checkSmokeGate(record, task(record, "t1"))).toEqual({ ok: true });
+    expect(doneGate(record, task(record, "t1"))).toEqual({ ok: true });
+    expect(findTask(record, "missing")).toBeUndefined();
+  });
+  const evidenceCases: {
+    reason: string;
+    mutate: (proof: Extract<RunStoredTaskReport, { status: "done" }>) => void;
+  }[] = [
+    {
+      reason: "outside-scope",
+      mutate: (p) => {
+        p.changedFiles = ["src/../outside.ts"];
+      },
+    },
+    {
+      reason: "outside-scope",
+      mutate: (p) => {
+        p.changedFiles = ["docs/outside.md"];
+      },
+    },
+    {
+      reason: "workspace-mismatch",
+      mutate: (p) => {
+        p.workspace.branch = "different";
+      },
+    },
+    {
+      reason: "duplicate-id",
+      mutate: (p) => {
+        p.evidence.push(structuredClone(p.evidence[0]!));
+      },
+    },
+    {
+      reason: "missing",
+      mutate: (p) => {
+        p.evidence[0]!.id = "unrequested";
+      },
+    },
+    {
+      reason: "command",
+      mutate: (p) => {
+        p.evidence[0]!.command = "echo wrong";
+      },
+    },
+    {
+      reason: "ref-mismatch",
+      mutate: (p) => {
+        p.evidence[0]!.ref = { kind: "git-commit", value: "different" };
+      },
+    },
+    {
+      reason: "exit-code",
+      mutate: (p) => {
+        p.evidence[0]!.exitCode = 1;
+      },
+    },
+    {
+      reason: "artifact-root",
+      mutate: (p) => {
+        p.evidence[0]!.artifactPath = "outside/report.log";
+      },
+    },
+    {
+      reason: "isolation",
+      mutate: (p) => {
+        p.evidence[0]!.isolation = { homePath: "C:/Users/runner/.paseo", outsideRealHome: true };
+      },
+    },
+  ];
+  test.each(evidenceCases)("evidence single defect: $reason", ({ reason, mutate }) => {
+    const record = normal();
+    const proof = doneProof(record);
+    mutate(proof);
+    task(record, "t1").changedFiles = [...proof.changedFiles];
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(checkEvidenceGate(record, task(record, "t1"))).toMatchObject({
       ok: false,
+      issues: [{ gate: "evidence", params: { reason } }],
     });
   });
-
-  test("review rejects a stale or self review and accepts an independent one", () => {
-    expect(checkReviewGate(NORMAL_RUN_LEDGER, taskOf(NORMAL_RUN_LEDGER, "T1"))).toEqual({
-      ok: true,
-    });
-    expect(checkReviewGate(STALE_REVIEW_LEDGER, taskOf(STALE_REVIEW_LEDGER, "T1"))).toMatchObject({
+  test.each(["lines", "functions"] as const)("evidence coverage %s", (field) => {
+    const record = normal();
+    const requirement = task(record, "t1").spec.evidence[0]!;
+    requirement.minLines = 90;
+    requirement.minFunctions = 85;
+    doneProof(record).evidence[0]!.coverage = { lines: 100, functions: 100, [field]: 0 };
+    expect(checkEvidenceGate(record, task(record, "t1"))).toMatchObject({
       ok: false,
+      issues: [{ params: { reason: `coverage-${field}` } }],
     });
-    const self = {
-      ...NORMAL_RUN_LEDGER,
-      tasks: NORMAL_RUN_LEDGER.tasks.map((entry) =>
-        entry.spec.id === "T1"
-          ? ({
-              ...entry,
-              reviews: [
-                {
-                  reviewerAgentId: "agent-b1",
-                  reviewerSeatId: "seat-b1",
-                  verdict: "可合入" as const,
-                  reviewedRef: entry.ref,
-                  blockers: [],
-                },
-              ],
-            } as typeof entry)
-          : entry,
-      ),
-    };
-    expect(checkReviewGate(self, taskOf(self, "T1"))).toMatchObject({ ok: false });
   });
-
-  test("smoke requires the pre-registered DEV target and the full checklist", () => {
-    expect(checkSmokeGate(DEV_SMOKE_READY_LEDGER, taskOf(DEV_SMOKE_READY_LEDGER, "T6"))).toEqual({
-      ok: true,
-    });
-    expect(
-      checkSmokeGate(DEV_SMOKE_MISSING_LEDGER, taskOf(DEV_SMOKE_MISSING_LEDGER, "T6")),
-    ).toMatchObject({ ok: false });
+  test("shape-negative summary is distinct from evidence policy", () => {
+    const record = normal();
+    doneProof(record).evidence[0]!.summary = "";
+    expect(RunRecordSchema.safeParse(record).success).toBe(false);
   });
-
-  test("a non-smoke task passes the smoke gate without evidence", () => {
-    const record = {
-      ...NORMAL_RUN_LEDGER,
-      tasks: [...NORMAL_RUN_LEDGER.tasks, task("T9", "No smoke")],
-    };
-    expect(checkSmokeGate(record, taskOf(record, "T9"))).toEqual({ ok: true });
-  });
-});
-
-describe("gate branch matrix", () => {
-  test("evidence rejects path escape, command/ref/summary/coverage/isolation variants", () => {
-    const base = structuredClone(NORMAL_RUN_LEDGER);
-    const taskValue = taskOf(base, "T1");
-    const report = (taskValue as unknown as { report: Record<string, unknown> }).report;
-    const cases = [
-      { changedFiles: ["src/../outside.ts"] },
-      { changedFiles: ["docs/other.md"] },
-      {
-        evidence: [
-          {
-            ...(report.evidence as Record<string, unknown>[])[0],
-            command: "echo wrong",
-          },
-        ],
-      },
-      {
-        evidence: [
-          {
-            ...(report.evidence as Record<string, unknown>[])[0],
-            summary: "",
-          },
-        ],
-      },
-      {
-        evidence: [
-          {
-            ...(report.evidence as Record<string, unknown>[])[0],
-            artifactPath: "artifacts/x.log",
-          },
-        ],
-      },
-      {
-        evidence: [
-          {
-            ...(report.evidence as Record<string, unknown>[])[0],
-            isolation: { homePath: "C:/Users/runner/.paseo", outsideRealHome: true },
-          },
-        ],
-      },
-      {
-        evidence: [
-          {
-            ...(report.evidence as Record<string, unknown>[])[0],
-            coverage: { lines: 0, functions: 0 },
-          },
-          { ...(report.evidence as Record<string, unknown>[])[0] },
-        ],
-      },
-    ];
-    for (const patch of cases) {
-      const record = structuredClone(base);
-      const target = taskOf(record, "T1") as unknown as { report: Record<string, unknown> };
-      target.report = { ...target.report, ...patch };
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok, JSON.stringify(patch)).toBe(false);
-    }
-  });
-
-  test("review enforces level tier and cross-family rules", () => {
-    const record = structuredClone(NORMAL_RUN_LEDGER);
-    const t1 = taskOf(record, "T1");
-    t1.spec = { ...t1.spec, level: "L1" };
-    const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-r1");
-    if (!reviewer) throw new Error("missing reviewer");
-    reviewer.tier = "B";
-    reviewer.family = "codex";
-    record.assignments.push({
-      ...reviewer,
-      assignmentId: "assignment-t1-impl",
-      purpose: "member",
-      agentId: "agent-b1",
-      seatId: "seat-b1",
-      family: "claude",
-      messageId: null,
-    });
-    expect(checkReviewGate(record, t1).ok).toBe(true);
-    const sameFamily = structuredClone(record);
-    const sameReviewer = sameFamily.assignments.find(
-      (entry) => entry.assignmentId === "assignment-t1-r1",
+  test("stale D and source-bound self reviewer cannot pass", () => {
+    const stale = RunRecordSchema.parse(STALE_REVIEW_LEDGER);
+    expect(checkReviewGate(stale, task(stale, "t1"))).toMatchObject({ ok: false });
+    const self = RunRecordSchema.parse(
+      INVARIANT_CASES.find((entry) => entry.id === "i7-self-review")?.ledger,
     );
-    if (sameReviewer) sameReviewer.family = "claude";
-    expect(checkReviewGate(sameFamily, taskOf(sameFamily, "T1")).ok).toBe(false);
-
-    const l4 = structuredClone(NORMAL_RUN_LEDGER);
-    const taskL4 = taskOf(l4, "T1");
-    taskL4.spec = { ...taskL4.spec, level: "L4" };
-    const l4Reviewer = l4.assignments.find((entry) => entry.assignmentId === "assignment-t1-r1");
-    if (l4Reviewer) l4Reviewer.tier = "S";
-    expect(checkReviewGate(l4, taskL4).ok).toBe(true);
-    if (l4Reviewer) l4Reviewer.tier = "A";
-    expect(checkReviewGate(l4, taskL4).ok).toBe(false);
+    expect(checkReviewGate(self, task(self, "t1"))).toMatchObject({ ok: false });
   });
-
-  test("a qualified blocking review fails the review gate", () => {
-    const record = structuredClone(NORMAL_RUN_LEDGER);
-    const t1 = taskOf(record, "T1") as unknown as {
-      reviews: Array<{ verdict: string; blockers: unknown[] }>;
-    };
-    const current = t1.reviews[0];
-    if (!current) throw new Error("missing review");
-    current.verdict = "不可合入";
-    current.blockers = [{ id: "B1", summary: "blocking", path: "src/t1.ts" }];
-    expect(checkReviewGate(record, t1 as never)).toMatchObject({ ok: false });
+  test("L1 frozen family independence", () => {
+    const record = normal();
+    task(record, "t1").spec.level = "L1";
+    const reviewer = record.assignments.find((entry) => entry.purpose === "reviewer")!;
+    record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1")!.family =
+      "claude";
+    reviewer.family = "codex";
+    reviewer.tier = "B";
+    record.roster.find((entry) => entry.seatId === reviewer.seatId)!.tier = "B";
+    expect(checkReviewGate(record, task(record, "t1"))).toEqual({ ok: true });
+    reviewer.family = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t1-a1",
+    )!.family;
+    expect(checkReviewGate(record, task(record, "t1"))).toMatchObject({ ok: false });
   });
-
-  test("smoke rejects self-smoke, target aliases and checklist variants", () => {
-    const baseline = structuredClone(DEV_SMOKE_READY_LEDGER);
-    const baselineTask = taskOf(baseline, "T6");
-    if (baselineTask.smokeReport === undefined) throw new Error("missing smoke report");
-    const report = baselineTask.smokeReport as Record<string, unknown>;
-    const target = baseline.policy.devTargets[0];
-    if (!target) throw new Error("missing target");
-    const withHosts = (host: string, registered = host) => {
-      const record = structuredClone(baseline);
-      record.policy.devTargets = [{ ...target, host: registered }];
-      const taskValue = taskOf(record, "T6");
-      if (taskValue.smokeReport === undefined) throw new Error("missing smoke report");
-      (taskValue.smokeReport as Record<string, unknown>).devHost = host;
-      return record;
-    };
-    for (const host of [
-      "[0:0:0:0:0:0:0:1]:6767",
-      "127.0.0.2:6767",
-      "127.1:6767",
-      "localhost.:6767",
-      "2130706433:6767",
-      "0x7f000001:6767",
-      "[::ffff:127.0.0.1]:6767",
-      "[::]:6767",
-      "ws://127.0.0.1:6767",
-      "user@127.0.0.1:6767",
-      "127.0.0.1",
-    ]) {
-      expect(checkSmokeGate(withHosts(host), taskOf(withHosts(host), "T6")).ok, host).toBe(false);
-    }
-    for (const host of ["127.0.0.2:6799", "127.1:6799", "localhost.:6799", "ws://127.0.0.1:6799"]) {
-      const record = withHosts(host);
-      expect(checkSmokeGate(record, taskOf(record, "T6")).ok, host).toBe(true);
-    }
-    const self = structuredClone(baseline);
-    self.assignments.push({
-      ...self.assignments[0]!,
-      assignmentId: "impl-self",
-      taskId: "T6",
-      agentId: "agent-b1",
-      seatId: "seat-b1",
-      purpose: "member",
-      messageId: null,
+  test("reports cannot replace a true ended receipt", () => {
+    const record = normal();
+    const reviewer = record.assignments.find((entry) => entry.purpose === "reviewer")!;
+    reviewer.state = "assigned";
+    reviewer.startedAt = null;
+    reviewer.turnId = null;
+    reviewer.endedAt = null;
+    reviewer.endedEventKey = null;
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(doneGate(record, task(record, "t1"))).toMatchObject({
+      ok: false,
+      issues: [{ params: { reason: "unsettled-reviewer" } }],
     });
-    self.assignments.push({
-      ...self.assignments[0]!,
-      assignmentId: "smoke-self",
-      taskId: "T6",
-      agentId: "agent-b1",
-      seatId: "seat-b1",
-      purpose: "smoker",
-      messageId: null,
-    });
-    const selfTask = taskOf(self, "T6");
-    if (selfTask.smokeReport) {
-      (selfTask.smokeReport as Record<string, unknown>).assignmentId = "smoke-self";
-    }
-    expect(checkSmokeGate(self, selfTask).ok).toBe(false);
-    for (const patch of [
-      { checks: (report.checks as unknown[]).slice(0, 1) },
-      {
-        checks: [
-          ...(report.checks as unknown[]),
-          { id: "extra", result: "pass", evidencePath: "evidence/x" },
-        ],
-      },
-      {
-        checks: (report.checks as unknown[]).map((check) => ({
-          ...(check as object),
-          result: "fail",
-        })),
-      },
-      {
-        checks: (report.checks as unknown[]).map((check) => ({
-          ...(check as object),
-          evidencePath: "outside/x",
-        })),
-      },
-    ]) {
-      const record = structuredClone(baseline);
-      const taskValue = taskOf(record, "T6");
-      if (taskValue.smokeReport) {
-        Object.assign(taskValue.smokeReport, patch);
-      }
-      expect(checkSmokeGate(record, taskValue).ok, JSON.stringify(patch)).toBe(false);
-    }
   });
-});
-
-describe("gate denial branches", () => {
-  test("evidence distinguishes missing/invalid/status/workspace/ref/evidence failures", () => {
-    const base = structuredClone(NORMAL_RUN_LEDGER);
-    const make = () => {
-      const record = structuredClone(base);
-      const task = taskOf(record, "T1") as unknown as { report: Record<string, unknown> };
-      return { record, task };
-    };
-    {
-      const { record, task } = make();
-      task.report = [] as unknown as Record<string, unknown>;
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.status = "blocked";
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.changedFiles = "src/t1.ts";
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.assignmentId = "assignment-t1-r1";
-      task.report.workspace = { id: "other", branch: "x", baseRef: "main" };
-      expect(checkEvidenceGate(record, taskOf(record, "T1"))).toMatchObject({
-        ok: false,
-        issues: [{ params: { reason: "workspace-mismatch" } }],
-      });
-    }
-    {
-      const { record, task } = make();
-      task.report.evidence = [];
-      expect(checkEvidenceGate(record, taskOf(record, "T1"))).toMatchObject({
-        ok: false,
-        issues: [{ params: { reason: "missing" } }],
-      });
-    }
-    {
-      const { record, task } = make();
-      task.report.evidence = [
-        { ...(task.report.evidence as Record<string, unknown>[])[0] },
-        { ...(task.report.evidence as Record<string, unknown>[])[0] },
-      ];
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.evidence = [
-        { ...(task.report.evidence as Record<string, unknown>[])[0], summary: 1 },
-      ];
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.evidence = [
-        { ...(task.report.evidence as Record<string, unknown>[])[0], ref: { value: "x" } },
-      ];
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      const taskWithSpec = task as unknown as {
-        spec: { evidence: Array<Record<string, unknown>> };
-      };
-      taskWithSpec.spec.evidence = [
-        { ...taskWithSpec.spec.evidence[0], minLines: 90, minFunctions: 85 },
-      ];
-      task.report.evidence = [
-        {
-          ...(task.report.evidence as Record<string, unknown>[])[0],
-          coverage: { lines: 0, functions: 0 },
-        },
-      ];
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      task.report.evidence = [
-        {
-          ...(task.report.evidence as Record<string, unknown>[])[0],
-          isolation: { homePath: "C:/Users/runner/.paseo", outsideRealHome: true },
-        },
-      ];
-      expect(checkEvidenceGate(record, taskOf(record, "T1")).ok).toBe(false);
-    }
+  test("registered DEV passes, default target fails", () => {
+    const ready = dev();
+    expect(checkSmokeGate(ready, task(ready, "t6"))).toEqual({ ok: true });
+    const missing = dev(DEV_SMOKE_MISSING_LEDGER);
+    expect(checkSmokeGate(missing, task(missing, "t6"))).toMatchObject({ ok: false });
   });
-
-  test("smoke denial branches and findTask", () => {
-    const base = structuredClone(DEV_SMOKE_READY_LEDGER);
-    const target = base.policy.devTargets[0]!;
-    const make = () => {
-      const record = structuredClone(base);
-      const task = taskOf(record, "T6");
-      return { record, task };
-    };
-    expect(findTask(base, "T6")).toBeDefined();
-    expect(findTask(base, "missing")).toBeUndefined();
-    {
-      const { record, task } = make();
-      (task as unknown as { smokeReport: unknown }).smokeReport = [];
-      expect(checkSmokeGate(record, task).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      (task.smokeReport as Record<string, unknown>).checks = "bad";
-      expect(checkSmokeGate(record, task).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      (task as unknown as { ref: unknown }).ref = { kind: "git-commit", value: "current" };
-      (task.smokeReport as Record<string, unknown>).testedRef = {
-        kind: "git-commit",
-        value: "other",
-      };
-      expect(checkSmokeGate(record, task).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      (task.smokeReport as Record<string, unknown>).checks = [
-        ...((task.smokeReport as Record<string, unknown>).checks as unknown[]),
-        { id: "open runs tab", result: "pass", evidencePath: "evidence/dup" },
-      ];
-      expect(checkSmokeGate(record, task).ok).toBe(false);
-    }
-    {
-      const { record, task } = make();
-      (task.smokeReport as Record<string, unknown>).devHost = "127.0.0.1";
-      (task.smokeReport as Record<string, unknown>).devServerId = target.serverId;
-      expect(checkSmokeGate(record, task).ok).toBe(false);
-    }
+  test.each([
+    "target",
+    "home",
+    "ref",
+    "missing-check",
+    "extra-check",
+    "duplicate-check",
+    "evidence-path",
+    "failed",
+  ] as const)("smoke single defect: %s", (kind) => {
+    const record = dev();
+    expect(checkSmokeGate(record, task(record, "t6"))).toEqual({ ok: true });
+    const proof = smokeProof(record);
+    if (kind === "target") proof.devServerId = "not-registered";
+    else if (kind === "home") proof.devHome = "C:/Users/runner/.paseo";
+    else if (kind === "ref") proof.testedRef = { kind: "git-commit", value: "different" };
+    else if (kind === "missing-check") proof.checks.pop();
+    else if (kind === "extra-check")
+      proof.checks.push({ id: "unrequested", result: "pass", evidencePath: "evidence/extra.log" });
+    else if (kind === "duplicate-check") proof.checks.push(structuredClone(proof.checks[0]!));
+    else if (kind === "evidence-path") proof.checks[0]!.evidencePath = "outside/check.log";
+    else proof.checks[0]!.result = "fail";
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(checkSmokeGate(record, task(record, "t6"))).toMatchObject({ ok: false });
   });
 });

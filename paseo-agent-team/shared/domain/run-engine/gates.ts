@@ -36,6 +36,7 @@ function artifactKey(ref: RunArtifactRef): string {
 function withinRoot(root: string, path: string): boolean {
   const normalizedRoot = root.replaceAll("\\", "/").replace(/\/+$/u, "");
   const normalized = path.replaceAll("\\", "/");
+  if (normalized.split("/").some((part) => part === "." || part === "..")) return false;
   return normalized === normalizedRoot || normalized.startsWith(`${normalizedRoot}/`);
 }
 
@@ -231,13 +232,55 @@ export function failedDeliveryIds(record: RunRecord, task: RunTaskRecord): strin
 }
 
 function actorSettled(record: RunRecord, assignment: RunRecord["assignments"][number]): boolean {
-  if (isNormalEnded(record, assignment)) return true;
-  return (
-    assignment.startedAt === null &&
-    assignment.acceptedProof !== null &&
-    assignment.state !== "cancelled" &&
-    assignment.state !== "failed"
-  );
+  return isNormalEnded(record, assignment);
+}
+
+function devEndpoint(host: string): string | null {
+  try {
+    const url = new URL(host.includes("://") ? host : `http://${host}`);
+    if (url.username || url.password || url.port === "" || url.port === "6767") return null;
+    return `${url.hostname.replace(/\.$/u, "")}:${url.port}`;
+  } catch {
+    return null;
+  }
+}
+
+function validSmokeSource(
+  record: RunRecord,
+  task: RunTaskRecord,
+  assignment: RunRecord["assignments"][number],
+  proof: RunStoredSmokeReport,
+  producer: RunRecord["assignments"][number],
+  ref: RunArtifactRef,
+): boolean {
+  if (
+    assignment.purpose !== "smoker" ||
+    assignment.taskId !== task.spec.id ||
+    assignment.attempt !== producer.attempt ||
+    assignment.delivery?.producerAssignmentId !== producer.assignmentId ||
+    assignment.agentId === producer.agentId ||
+    assignment.seatId === producer.seatId ||
+    artifactKey(proof.testedRef) !== artifactKey(ref)
+  )
+    return false;
+  const endpoint = devEndpoint(proof.devHost);
+  const target = record.policy.devTargets.find((entry) => entry.serverId === proof.devServerId);
+  if (
+    endpoint === null ||
+    !target ||
+    devEndpoint(target.host) !== endpoint ||
+    proof.devHome.replaceAll("\\", "/") !== target.home.replaceAll("\\", "/") ||
+    /(^|\/)\.paseo($|\/)/iu.test(proof.devHome.replaceAll("\\", "/"))
+  )
+    return false;
+  const ids = proof.checks.map((entry) => entry.id);
+  if (
+    new Set(ids).size !== ids.length ||
+    ids.length !== task.spec.smokeChecklist.length ||
+    task.spec.smokeChecklist.some((id) => !ids.includes(id))
+  )
+    return false;
+  return proof.checks.every((entry) => withinRoot(record.policy.evidenceRoot, entry.evidencePath));
 }
 
 /** All registered replies for the current D, with every actor settled, are required for done. */
@@ -280,7 +323,11 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
     if (smokers.length === 0) return fail("smoke", ["tasks", task.spec.id, "smoke"], "no-smoker");
     for (const smoker of smokers) {
       const proof = RunStoredSmokeReportSchema.safeParse(smoker.acceptedProof);
-      if (!proof.success || proof.data.checks.some((check) => check.result !== "pass")) {
+      if (
+        !proof.success ||
+        !validSmokeSource(record, task, smoker, proof.data, d.producer, d.ref) ||
+        proof.data.checks.some((check) => check.result !== "pass")
+      ) {
         return fail("smoke", ["tasks", task.spec.id, "smoke"], "pending-or-failed-smoke");
       }
       if (!actorSettled(record, smoker)) {
@@ -302,7 +349,13 @@ export function checkSmokeGate(record: RunRecord, task: RunTaskRecord): GateResu
   if (resolved.kind !== "ok") return fail("smoke", ["tasks", task.spec.id], "missing-delivery");
   const proofs = smokesForD(record, resolved.d.producer.assignmentId);
   if (proofs.length === 0) return fail("smoke", ["tasks", task.spec.id, "smoke"], "no-smoke");
-  if (proofs.some(({ proof }) => proof.checks.some((check) => check.result !== "pass"))) {
+  if (
+    proofs.some(
+      ({ assignment, proof }) =>
+        !validSmokeSource(record, task, assignment, proof, resolved.d.producer, resolved.d.ref) ||
+        proof.checks.some((check) => check.result !== "pass"),
+    )
+  ) {
     return fail("smoke", ["tasks", task.spec.id, "smoke"], "failed-smoke");
   }
   return OK;
