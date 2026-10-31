@@ -559,6 +559,45 @@ describe("R01g real reducer positive chains", () => {
       enabled: true,
     });
     record = start(apply(input.record, input.event), "p-other");
+    const beforeMulti = structuredClone(record);
+    const targets = ["r1", "p-other"];
+    const archives = targets.map(
+      (id, index): ArchiveIntent => ({
+        ...dispatchIntent({
+          id: `multi-archive-${id}`,
+          kind: "archive",
+          taskId: actor(record, id).taskId,
+          assignmentId: id,
+          recipient: actor(record, id).agentId,
+          messageId: uuid(350 + index),
+          state: "prepared",
+          confirmedAt: null,
+        }),
+        kind: "archive",
+        taskId: actor(record, id).taskId,
+        assignmentId: id,
+      }),
+    );
+    expect(
+      reduceRun(
+        record,
+        {
+          ...emptyCancel(),
+          taskIds: ["t1", "t2"],
+          cancelIntents: targets.map((id) => ({
+            assignmentId: id,
+            intentId: `multi-archive-${id}`,
+          })),
+          preparedCancelIntents: archives,
+        } as unknown as RunReducerEvent,
+        facts,
+      ),
+    ).toMatchObject({
+      ok: false,
+      path: ["cancel", "taskIds"],
+      params: { reason: "single-task-required" },
+    });
+    expect(record).toEqual(beforeMulti);
     record = end(review(record, "r1", "不可合入"), "r1");
     expect(task(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
     expect(reduceRun(record, nextAttemptEvent(record), facts)).toMatchObject({
