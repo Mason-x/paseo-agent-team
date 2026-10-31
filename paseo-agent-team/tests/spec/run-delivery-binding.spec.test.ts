@@ -448,9 +448,17 @@ function reworkFlow() {
     block: reviewReport(reviewer.assignment, REF_A, "不可合入"),
   });
   record = endTurn(record, reviewer.assignment.assignmentId);
-  // 92e leaves a settled quality failure in review/awaiting-rework; dispatch is still legal and
-  // starts the rework attempt with the original claims. The state-label gap stays reported.
-  expect(taskOf(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
+  // Every actor is NormalEnded and the slot is free, so the task must now be rework.
+  expect(taskOf(record)).toMatchObject({ state: "rework" });
+  const retainedClaims = record.resources
+    .filter((entry) => entry.taskId === "t1")
+    .map((entry) => ({ claimId: entry.claimId, originAssignmentId: entry.originAssignmentId }));
+  const retainedProofs = structuredClone(
+    record.assignments.map((entry) => ({
+      assignmentId: entry.assignmentId,
+      proof: entry.acceptedProof,
+    })),
+  );
   const nextMember = dispatch("member", 2, { claims: reworkClaims(record) });
   record = startTurn(next(record, nextMember), nextMember.assignment.assignmentId);
   record = next(record, {
@@ -458,6 +466,17 @@ function reworkFlow() {
     block: doneReport(nextMember.assignment, REF_B),
   });
   record = endTurn(record, nextMember.assignment.assignmentId);
+  expect(
+    record.resources
+      .filter((entry) => entry.taskId === "t1")
+      .map((entry) => ({ claimId: entry.claimId, originAssignmentId: entry.originAssignmentId })),
+  ).toEqual(retainedClaims);
+  for (const retained of retainedProofs) {
+    expect(
+      record.assignments.find((entry) => entry.assignmentId === retained.assignmentId)
+        ?.acceptedProof,
+    ).toEqual(retained.proof);
+  }
   return { record, oldReviewer: reviewer };
 }
 
@@ -486,7 +505,16 @@ function smokeRework(ref: string) {
     block: smokeReport(firstSmoker.assignment, REF_A, "fail"),
   });
   record = endTurn(record, firstSmoker.assignment.assignmentId);
-  expect(taskOf(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
+  expect(taskOf(record)).toMatchObject({ state: "rework" });
+  const retainedClaims = record.resources
+    .filter((entry) => entry.taskId === "t1")
+    .map((entry) => ({ claimId: entry.claimId, originAssignmentId: entry.originAssignmentId }));
+  const retainedProofs = structuredClone(
+    record.assignments.map((entry) => ({
+      assignmentId: entry.assignmentId,
+      proof: entry.acceptedProof,
+    })),
+  );
 
   const secondMember = dispatch("member", 2, { claims: reworkClaims(record) });
   record = startTurn(next(record, secondMember), secondMember.assignment.assignmentId);
@@ -505,6 +533,17 @@ function smokeRework(ref: string) {
   });
   record = endTurn(record, secondReviewer.assignment.assignmentId);
   expect(taskOf(record).phase).toBe("smoke");
+  expect(
+    record.resources
+      .filter((entry) => entry.taskId === "t1")
+      .map((entry) => ({ claimId: entry.claimId, originAssignmentId: entry.originAssignmentId })),
+  ).toEqual(retainedClaims);
+  for (const retained of retainedProofs) {
+    expect(
+      record.assignments.find((entry) => entry.assignmentId === retained.assignmentId)
+        ?.acceptedProof,
+    ).toEqual(retained.proof);
+  }
   return { record, firstReviewer, firstSmoker, secondReviewer };
 }
 
@@ -954,6 +993,57 @@ describe("R03a delivery binding red specification", () => {
       expect(task.qualityFailures).toBeGreaterThan(0);
     }
     expect(record).toEqual(before);
+  });
+
+  test("prepared first proof is rejected while a confirmed partial report is accepted", () => {
+    const prepared = dispatch("member");
+    const preparedEvent = {
+      ...prepared,
+      intent: { ...prepared.intent, state: "prepared" as const, confirmedAt: null },
+    };
+    const record = next(fresh(), preparedEvent);
+    valid(record);
+    const before = structuredClone(record);
+    const rejected = reduceRun(
+      record,
+      { kind: "task-report", block: doneReport(prepared.assignment) },
+      facts,
+    );
+    expect(rejected).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["task-report", "nonce"],
+      params: { reason: "nonce-invalid" },
+    });
+    expect(record).toEqual(before);
+    expect(record.counters).toEqual(before.counters);
+    expect(record.events).toEqual(before.events);
+    const rejectedAssignment = record.assignments.find(
+      (entry) => entry.assignmentId === prepared.assignment.assignmentId,
+    );
+    expect(rejectedAssignment?.acceptedProof).toBeNull();
+    const rejectedNonce = record.nonceRegistry.find(
+      (entry) => entry.assignmentId === prepared.assignment.assignmentId,
+    );
+    expect(rejectedNonce?.acceptedAt).toBeNull();
+    expect(rejectedNonce?.acceptedEventKey).toBeNull();
+
+    const confirmed = dispatch("member");
+    const control = next(fresh(), confirmed);
+    const accepted = reduceRun(
+      control,
+      { kind: "task-report", block: doneReport(confirmed.assignment) },
+      facts,
+    );
+    expect(accepted.ok, JSON.stringify(accepted)).toBe(true);
+    if (!accepted.ok) return;
+    valid(accepted.next);
+    expect(taskOf(accepted.next)).toMatchObject({ state: "review" });
+    const acceptedAssignment = accepted.next.assignments.find(
+      (entry) => entry.assignmentId === confirmed.assignment.assignmentId,
+    );
+    expect(acceptedAssignment?.acceptedProof).not.toBeNull();
+    expect(acceptedAssignment?.state).not.toBe("ended");
   });
 
   test("positive: the last R2 pass after smoke is accepted and recomputes the stored smoke result to done", () => {
