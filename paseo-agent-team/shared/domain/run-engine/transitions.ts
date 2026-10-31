@@ -358,6 +358,10 @@ function actorSettledBy(record: RunRecord, assignment: RunAssignment, at?: strin
   );
 }
 
+export function isActorSettled(record: RunRecord, assignment: RunAssignment): boolean {
+  return actorSettledBy(record, assignment);
+}
+
 /** Confirmed side effects need their own retained completion facts, not only a state label. */
 export function hasUnsettledEffects(record: RunRecord, taskId?: string, at?: string): boolean {
   return record.outbox.some((intent) => {

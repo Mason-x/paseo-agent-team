@@ -46,6 +46,7 @@ import {
   cancellationAuthorization as decisionAuthorization,
   dispatchIntentMatches,
   hasUnsettledEffects,
+  isActorSettled,
   isCancellationKind,
   isComplete167,
   isLocalNeverSent,
@@ -827,6 +828,13 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["assignment", "state"], "untrusted-assignment");
       }
+      if (
+        next.assignments.some(
+          (entry) => entry.agentId === assignment.agentId && !isActorSettled(next, entry),
+        )
+      ) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "agentId"], "agent-in-flight");
+      }
       if (producer) {
         const awaiting = task.state === "review" && task.phase === "awaiting-rework";
         const reissue = event.reissueOfAssignmentId;
@@ -952,13 +960,13 @@ function applyEvent(
         ) {
           return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "delivery-attempt");
         }
+        if (failedDeliveryIds(next, task).includes(d.d.producer.assignmentId)) {
+          return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "failed-delivery");
+        }
         if (reviewer) {
           const requirement = reviewRequirement(task);
           if (assignment.tier !== requirement.tier)
             return reject("RUN_EVENT_INVALID", ["assignment", "tier"], "tier-mismatch");
-          if (failedDeliveryIds(next, task).includes(d.d.producer.assignmentId)) {
-            return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "failed-delivery");
-          }
         }
         if (
           smoker &&
@@ -967,8 +975,7 @@ function applyEvent(
               entry.taskId === task.spec.id &&
               entry.purpose === "smoker" &&
               entry.delivery?.producerAssignmentId === d.d.producer.assignmentId &&
-              !isNormalEnded(next, entry) &&
-              entry.acceptedProof === null,
+              (!isActorSettled(next, entry) || entry.acceptedProof === null),
           )
         ) {
           return reject("RUN_EVENT_INVALID", ["assignment", "purpose"], "unsettled-smoker");

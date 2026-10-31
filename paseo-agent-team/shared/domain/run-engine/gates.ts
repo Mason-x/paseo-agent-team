@@ -10,6 +10,7 @@ import {
   type RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
 import { type DeliveryCandidate, resolveD, resolveProducerProof } from "./delivery-binding";
+import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
 import { executionTier, reviewRequirement } from "./tier";
 import {
   assignmentPhase,
@@ -400,6 +401,60 @@ function validSmokeSource(
   )
     return false;
   return proof.checks.every((entry) => withinRoot(record.policy.evidenceRoot, entry.evidencePath));
+}
+
+/** I7 validates every stored reply against its producer epoch, including revoked/history replies.
+ * A producer's failed/blocked or evidence-rejected done report remains a valid stored fact.
+ */
+export function historicalProofValid(
+  record: RunRecord,
+  task: RunTaskRecord,
+  assignment: RunAssignment,
+): boolean {
+  const proof = assignment.acceptedProof;
+  if (proof === null || !acceptedIdentity(record, assignment, proof)) return false;
+  const action =
+    assignment.purpose === "reviewer"
+      ? "review"
+      : assignment.purpose === "smoker"
+        ? "smoke"
+        : "produce";
+  const producer =
+    action === "produce"
+      ? assignment
+      : record.assignments.find(
+          (entry) => entry.assignmentId === assignment.delivery?.producerAssignmentId,
+        );
+  if (!producer || producer.taskId !== task.spec.id) return false;
+  const requirement = dispatchRequirement(producerEpoch(task, producer), action);
+  if (
+    requirement.kind !== "required" ||
+    !requirement.allowedPurposes.includes(assignment.purpose) ||
+    !structuralSeats(record.roster, requirement).some(
+      (seat) =>
+        seat.seatId === assignment.seatId &&
+        seat.agentId === assignment.agentId &&
+        seat.channelId === assignment.channelId &&
+        seat.tier === assignment.tier,
+    )
+  )
+    return false;
+  if (action === "produce") return assignment.delivery === null;
+  const delivery = resolveProducerProof(record, producer.assignmentId);
+  if (!delivery) return false;
+  if (action === "review") {
+    const review = RunStoredReviewSchema.safeParse(proof);
+    return (
+      review.success &&
+      reviewForProducer(record, task, assignment, review.data, producer, delivery.ref)
+    );
+  }
+  const smoke = RunStoredSmokeReportSchema.safeParse(proof);
+  return (
+    task.spec.devSmoke === true &&
+    smoke.success &&
+    validSmokeSource(record, task, assignment, smoke.data, producer, delivery.ref)
+  );
 }
 
 /** All registered replies for the current D, with every actor settled, are required for done. */

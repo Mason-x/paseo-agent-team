@@ -1,11 +1,12 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
-import { doneGate, failedDeliveryIds } from "./gates";
+import { doneGate, failedDeliveryIds, historicalProofValid } from "./gates";
 import { lockConflicts, normalizeLogicalPath } from "./locks";
 import {
   assignmentPhase,
   cancellationAuthorization,
   cancelPairs,
   dispatchIntentMatches,
+  isActorSettled,
   isComplete167,
   isLocalNeverSent,
   isNormalEnded,
@@ -370,12 +371,46 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
     dispatches.set(nonce.taskId, Math.max(dispatches.get(nonce.taskId) ?? 0, nonce.attempt));
   }
   for (const task of record.tasks) {
-    const distinctFailures = failedDeliveryIds(record, task).length;
+    const failedIds = new Set(failedDeliveryIds(record, task));
+    const distinctFailures = failedIds.size;
     if (task.qualityFailures !== distinctFailures) {
       issues.push(
         violation("I6", ["tasks", task.spec.id, "qualityFailures"], "distinct-failure-mismatch", {
           expected: distinctFailures,
           actual: task.qualityFailures,
+        }),
+      );
+    }
+    const producers = record.assignments.filter(
+      (assignment) =>
+        assignment.taskId === task.spec.id &&
+        ["member", "coordinator", "reopen"].includes(assignment.purpose),
+    );
+    for (const [index, escalation] of task.escalations.entries()) {
+      const expected = producers.filter(
+        (producer) =>
+          failedIds.has(producer.assignmentId) && producer.attempt <= escalation.atAttempt,
+      ).length;
+      if (escalation.qualityFailures !== expected) {
+        issues.push(
+          violation(
+            "I6",
+            ["tasks", task.spec.id, "escalations", index, "qualityFailures"],
+            "escalation-baseline",
+            { expected, actual: escalation.qualityFailures },
+          ),
+        );
+      }
+    }
+    const expectedReworks = Math.max(
+      0,
+      new Set(producers.map((producer) => producer.attempt)).size - 1,
+    );
+    if (task.reworkCount !== expectedReworks) {
+      issues.push(
+        violation("I6", ["tasks", task.spec.id, "reworkCount"], "rework-count-mismatch", {
+          expected: expectedReworks,
+          actual: task.reworkCount,
         }),
       );
     }
@@ -463,6 +498,11 @@ function checkI7(record: RunRecord): RunInvariantViolation[] {
         );
       }
       if (assignment.acceptedProof === null) continue;
+      if (!historicalProofValid(record, task, assignment)) {
+        issues.push(
+          violation("I7", ["assignments", index, "acceptedProof"], "invalid-historical-proof"),
+        );
+      }
       const proof = assignment.acceptedProof;
       if (
         proof.runId !== record.runId ||
@@ -513,6 +553,18 @@ function checkI8(record: RunRecord): RunInvariantViolation[] {
     }
   }
   for (const [index, assignment] of record.assignments.entries()) {
+    if (!isActorSettled(record, assignment)) {
+      const other = record.assignments
+        .slice(0, index)
+        .find((entry) => entry.agentId === assignment.agentId && !isActorSettled(record, entry));
+      if (other) {
+        issues.push(
+          violation("I8", ["assignments", index, "agentId"], "agent-in-flight", {
+            otherAssignmentId: other.assignmentId,
+          }),
+        );
+      }
+    }
     const matches = record.outbox.filter((intent) => dispatchIntentMatches(assignment, intent));
     if (matches.length !== 1) {
       issues.push(

@@ -16,7 +16,6 @@ import {
   RunStoredTaskReportSchema,
 } from "../../shared/schemas/run-engine/ledger";
 import {
-  DEV_SMOKE_MISSING_LEDGER,
   DEV_SMOKE_READY_LEDGER,
   INVARIANT_CASES,
   NORMAL_RUN_LEDGER,
@@ -33,8 +32,8 @@ function normal(): RunRecord {
   expect(checkLedgerInvariants(record)).toEqual({ ok: true });
   return record;
 }
-function dev(source = DEV_SMOKE_READY_LEDGER): RunRecord {
-  const record = RunRecordSchema.parse(structuredClone(source));
+function dev(): RunRecord {
+  const record = RunRecordSchema.parse(structuredClone(DEV_SMOKE_READY_LEDGER));
   // The source fixture supplies attempt-1 actors and retained observations, not task counters.
   task(record, "t6").attempts = 1;
   const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t6-a1")!;
@@ -205,8 +204,15 @@ describe("R01g three gates use assignment acceptedProof", () => {
   test("registered DEV passes, default target fails", () => {
     const ready = dev();
     expect(checkSmokeGate(ready, task(ready, "t6"))).toEqual({ ok: true });
-    const missing = dev(DEV_SMOKE_MISSING_LEDGER);
+    const missing = dev();
+    smokeProof(missing).devHost = "127.0.0.1:6767";
+    missing.policy.devTargets[0]!.host = "127.0.0.1:6767";
+    expect(RunRecordSchema.safeParse(missing).success).toBe(true);
     expect(checkSmokeGate(missing, task(missing, "t6"))).toMatchObject({ ok: false });
+    expect(checkLedgerInvariants(missing)).toMatchObject({
+      ok: false,
+      violations: [{ invariant: "I7", params: { reason: "invalid-historical-proof" } }],
+    });
   });
   test.each([
     "target",
