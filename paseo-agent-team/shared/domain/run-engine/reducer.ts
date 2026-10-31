@@ -3,6 +3,7 @@ import {
   type RunAcceptedProof,
   type RunAssignment,
   type RunCancellationEvidence,
+  RunEventReceiptSchema,
   type RunRecord,
   RunRecordSchema,
   RunStoredReviewSchema,
@@ -17,7 +18,14 @@ import type {
 } from "../../schemas/run-engine/protocol";
 import { isDecisionPending } from "./decision-state";
 import { canonicalKnown, producerHead, proofEqual, resolveD } from "./delivery-binding";
-import { checkEvidenceGate, doneGate, failedDeliveryIds, normalizeContainedPath } from "./gates";
+import {
+  checkEvidenceGate,
+  doneGate,
+  failedDeliveryIds,
+  normalizeContainedPath,
+  reviewEligible,
+  smokeEligible,
+} from "./gates";
 import { checkLedgerInvariants, occupiesExecutionSlot } from "./invariants";
 import { nextQualityFailure } from "./scheduler";
 import { executionTier, reviewRequirement } from "./tier";
@@ -159,6 +167,12 @@ function freezeTask(
     if (claim.taskId !== taskId) continue;
     claim.frozen = true;
     task.frozenClaimId ??= claim.claimId;
+  }
+  for (const nonce of next.nonceRegistry) {
+    if (nonce.taskId === taskId && nonce.acceptedAt === null && nonce.revokedAt === null) {
+      nonce.revokedAt = facts.now;
+      nonce.revokeReason = "cancel-requested";
+    }
   }
   const sorted = [...pairs].sort((a, b) => a.assignmentId.localeCompare(b.assignmentId));
   const dedupeKey = `cancel:${taskId}`;
@@ -413,13 +427,7 @@ function afterGateFailure(
   const active = next.tasks.filter((entry) => occupiesExecutionSlot(next, entry)).length;
   const taskSettled = next.assignments
     .filter((entry) => entry.taskId === task.spec.id)
-    .every(
-      (entry) =>
-        entry.startedAt === null ||
-        isNormalEnded(next, entry) ||
-        entry.state === "cancelled" ||
-        entry.state === "failed",
-    );
+    .every((entry) => isNormalEnded(next, entry));
   if (active < next.policy.configuredConcurrency && taskSettled) {
     task.state = "rework";
     task.phase = undefined;
@@ -432,25 +440,67 @@ function afterGateFailure(
   return null;
 }
 
+function advanceRework(next: RunRecord, task: RunTaskRecord): void {
+  if (task.state !== "review" || task.phase !== "awaiting-rework") return;
+  if (
+    next.decisions.some(
+      (entry) => entry.dedupeKey === `cancel:${task.spec.id}` && entry.state !== "superseded",
+    )
+  )
+    return;
+  if (
+    next.assignments.some((entry) => entry.taskId === task.spec.id && !isNormalEnded(next, entry))
+  )
+    return;
+  const activeOthers = next.tasks.filter(
+    (entry) => entry.spec.id !== task.spec.id && occupiesExecutionSlot(next, entry),
+  ).length;
+  if (activeOthers < next.policy.configuredConcurrency) {
+    task.state = "rework";
+    task.phase = undefined;
+  }
+}
+
+function qualityReplyWindow(record: RunRecord, task: RunTaskRecord): boolean {
+  if (
+    record.decisions.some(
+      (entry) => entry.dedupeKey === `cancel:${task.spec.id}` && entry.state !== "superseded",
+    )
+  )
+    return false;
+  const d = resolveD(record, task.spec.id);
+  return (
+    d.kind === "ok" &&
+    ["review", "rework", "failed", "blocked"].includes(task.state) &&
+    failedDeliveryIds(record, task).includes(d.d.producer.assignmentId)
+  );
+}
+
 function storedTaskProof(
   block: RunTaskReportBlock,
   assignment: RunAssignment,
 ): RunRecord["assignments"][number]["acceptedProof"] {
-  return RunStoredTaskReportSchema.parse({ ...block, messageId: assignment.messageId });
+  const parsed = RunStoredTaskReportSchema.safeParse({ ...block, messageId: assignment.messageId });
+  return parsed.success ? parsed.data : null;
 }
 
 function storedReviewProof(
   block: RunReviewReportBlock,
   assignment: RunAssignment,
-): RunAcceptedProof {
-  return RunStoredReviewSchema.parse({ ...block, messageId: assignment.messageId });
+): RunAcceptedProof | null {
+  const parsed = RunStoredReviewSchema.safeParse({ ...block, messageId: assignment.messageId });
+  return parsed.success ? parsed.data : null;
 }
 
 function storedSmokeProof(
   block: RunSmokeReportBlock,
   assignment: RunAssignment,
 ): RunRecord["assignments"][number]["acceptedProof"] {
-  return RunStoredSmokeReportSchema.parse({ ...block, messageId: assignment.messageId });
+  const parsed = RunStoredSmokeReportSchema.safeParse({
+    ...block,
+    messageId: assignment.messageId,
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 function acceptNonce(next: RunRecord, assignment: RunAssignment, facts: ReduceFacts): void {
@@ -466,7 +516,18 @@ function acceptNonce(next: RunRecord, assignment: RunAssignment, facts: ReduceFa
 }
 
 function liveAuthorized(next: RunRecord, assignment: RunAssignment): boolean {
-  if (assignment.state === "cancelled" || assignment.state === "ended") return false;
+  if (assignment.state === "cancelled" || assignment.state === "failed") return false;
+  const intents = next.outbox.filter(
+    (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+  );
+  const intent = intents.length === 1 ? intents[0] : undefined;
+  if (
+    !intent ||
+    !dispatchIntentMatches(assignment, intent) ||
+    intent.localCancellation !== null ||
+    !["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+  )
+    return false;
   const nonce = next.nonceRegistry.find((entry) => entry.nonce === assignment.nonce);
   return nonce !== undefined && nonce.revokedAt === null && nonce.acceptedAt === null;
 }
@@ -475,6 +536,14 @@ function proofFromEvent(
   event: RunReducerEvent,
   assignment: RunAssignment,
 ): RunAcceptedProof | null {
+  if (
+    (event.kind === "task-report" ||
+      event.kind === "review-report" ||
+      event.kind === "smoke-report") &&
+    event.block.messageId !== undefined &&
+    event.block.messageId !== assignment.messageId
+  )
+    return null;
   if (event.kind === "task-report") return storedTaskProof(event.block, assignment);
   if (event.kind === "review-report") return storedReviewProof(event.block, assignment);
   if (event.kind === "smoke-report") return storedSmokeProof(event.block, assignment);
@@ -699,6 +768,15 @@ function applyEvent(
         } else if (assignment.attempt !== task.attempts + 1) {
           return reject("RUN_EVENT_INVALID", ["assignment", "attempt"], "attempt-mismatch");
         }
+        if (
+          reissue === null &&
+          task.attempts > 0 &&
+          next.assignments.some(
+            (entry) => entry.taskId === task.spec.id && !isNormalEnded(next, entry),
+          )
+        ) {
+          return reject("RUN_INVALID_TRANSITION", ["tasks", task.spec.id], "actors-unsettled");
+        }
         const activeOthers = next.tasks.filter(
           (entry) => entry.spec.id !== task.spec.id && occupiesExecutionSlot(next, entry),
         ).length;
@@ -748,6 +826,16 @@ function applyEvent(
         }
         task.ref = null;
         task.changedFiles = [];
+        for (const nonce of next.nonceRegistry) {
+          if (
+            nonce.taskId === task.spec.id &&
+            nonce.acceptedAt === null &&
+            nonce.revokedAt === null
+          ) {
+            nonce.revokedAt = facts.now;
+            nonce.revokeReason = "superseded-delivery";
+          }
+        }
         task.attempts = assignment.attempt;
         task.state = "assigned";
         task.phase = "implementation";
@@ -903,6 +991,7 @@ function applyEvent(
         return reject("RUN_EVENT_INVALID", ["task-report", "nonce"], "nonce-invalid");
       }
       const proof = storedTaskProof(block, assignment);
+      if (proof === null) return reject("RUN_EVENT_INVALID", ["task-report"], "invalid-proof");
       acceptNonce(next, assignment, facts);
       assignment.acceptedProof = proof;
       if (block.status !== "done") {
@@ -941,7 +1030,10 @@ function applyEvent(
       if (!task || !assignment || assignment.taskId !== block.taskId) {
         return reject("RUN_EVENT_INVALID", ["review-report", block.taskId], "unknown-assignment");
       }
-      if (task.state !== "review" || (task.phase !== "review" && task.phase !== "smoke")) {
+      if (
+        (task.state !== "review" || (task.phase !== "review" && task.phase !== "smoke")) &&
+        !qualityReplyWindow(next, task)
+      ) {
         return invalidTransition(block.taskId, task.state, "review");
       }
       if (
@@ -956,6 +1048,7 @@ function applyEvent(
       if (!liveAuthorized(next, assignment))
         return reject("RUN_EVENT_INVALID", ["review-report", "nonce"], "nonce-invalid");
       const proof = storedReviewProof(block, assignment);
+      if (proof === null) return reject("RUN_EVENT_INVALID", ["review-report"], "invalid-proof");
       const before = new Set(failedDeliveryIds(next, task));
       acceptNonce(next, assignment, facts);
       assignment.acceptedProof = proof;
@@ -981,7 +1074,7 @@ function applyEvent(
       if (!task || !assignment || assignment.taskId !== block.taskId) {
         return reject("RUN_EVENT_INVALID", ["smoke-report", block.taskId], "unknown-assignment");
       }
-      if (task.state !== "review" || task.phase !== "smoke") {
+      if ((task.state !== "review" || task.phase !== "smoke") && !qualityReplyWindow(next, task)) {
         return invalidTransition(block.taskId, task.state, "done");
       }
       if (
@@ -996,12 +1089,17 @@ function applyEvent(
       if (!liveAuthorized(next, assignment))
         return reject("RUN_EVENT_INVALID", ["smoke-report", "nonce"], "nonce-invalid");
       const proof = storedSmokeProof(block, assignment);
+      if (proof === null) return reject("RUN_EVENT_INVALID", ["smoke-report"], "invalid-proof");
       const before = new Set(failedDeliveryIds(next, task));
       acceptNonce(next, assignment, facts);
       assignment.acceptedProof = proof;
       const resolved = resolveD(next, task.spec.id);
       if (resolved.kind !== "ok")
         return reject("RUN_EVENT_INVALID", ["smoke-report", "delivery"], "missing-delivery");
+      const smoke = RunStoredSmokeReportSchema.safeParse(proof);
+      if (!smoke.success || !smokeEligible(next, task, assignment, smoke.data)) {
+        return reject("RUN_EVENT_INVALID", ["smoke-report"], "invalid-smoke");
+      }
       const failed = failedDeliveryIds(next, task);
       const producerId = resolved.d.producer.assignmentId;
       if (failed.includes(producerId) && !before.has(producerId)) {
@@ -1011,6 +1109,17 @@ function applyEvent(
       return null;
     }
     case "cancellation-checked": {
+      if (
+        !Number.isSafeInteger(event.evidence.observationSeq) ||
+        event.evidence.observationSeq < 0 ||
+        event.evidence.observationSeq > next.counters.observationSeq
+      ) {
+        return reject(
+          "RUN_EVENT_INVALID",
+          ["cancellation", "observationSeq"],
+          "observation-watermark",
+        );
+      }
       const task = taskOf(next, event.taskId);
       const assignment = assignmentOf(next, event.evidence.assignmentId);
       const decision = next.decisions.find((entry) => entry.decisionId === event.decisionId);
@@ -1224,24 +1333,56 @@ function reviewEligibleProof(
 ): boolean {
   const parsed = RunStoredReviewSchema.safeParse(proof);
   if (!parsed.success) return false;
-  const resolved = resolveD(record, task.spec.id);
-  if (resolved.kind !== "ok") return false;
-  const d = resolved.d;
-  if (assignment.attempt !== d.producer.attempt) return false;
-  if (assignment.delivery?.producerAssignmentId !== d.producer.assignmentId) return false;
-  if (proofEqual(parsed.data.reviewedRef, d.ref)) return true;
-  return false;
+  return reviewEligible(record, task, assignment, parsed.data);
 }
 
 function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts): ReduceResult {
   const existing = validateExisting(record);
   if (existing) return existing;
+  if (
+    event.kind === "cancel-requested" &&
+    (!Array.isArray(event.taskIds) ||
+      event.taskIds.length !== 1 ||
+      typeof event.taskIds[0] !== "string")
+  ) {
+    return reject("RUN_EVENT_INVALID", ["cancel", "taskIds"], "single-task-required");
+  }
+  if (event.kind === "observation-recorded") {
+    const incoming = RunEventReceiptSchema.safeParse(event.receipt);
+    if (!incoming.success)
+      return reject("RUN_EVENT_INVALID", ["observation"], "invalid-observation");
+    const prior = record.eventReceipts.find((entry) => entry.dedupeKey === incoming.data.dedupeKey);
+    if (prior) {
+      const fields = [
+        "eventKey",
+        "kind",
+        "agentId",
+        "turnId",
+        "receivedAt",
+        "dedupeKey",
+        "disposition",
+      ] as const;
+      if (!fields.every((key) => sameStoredValue(prior[key], incoming.data[key]))) {
+        return reject("RUN_EVENT_INVALID", ["observation", "dedupeKey"], "observation-replay");
+      }
+      return { ok: true, next: structuredClone(record), effects: [] };
+    }
+  }
   if (sameAcceptedProof(record, event)) {
     return { ok: true, next: structuredClone(record), effects: [] };
+  }
+  const proofAssignmentId = eventAssignmentId(event);
+  if (
+    proofAssignmentId !== null &&
+    assignmentOf(record, proofAssignmentId)?.acceptedProof != null
+  ) {
+    return reject("RUN_EVENT_INVALID", ["assignments", proofAssignmentId, "nonce"], "nonce-replay");
   }
   const next = structuredClone(record);
   const applied = applyEvent(next, event, facts);
   if (applied) return applied;
+  for (const task of next.tasks) advanceRework(next, task);
+  recomputeReady(next);
   next.updatedAt = facts.now;
   appendEvent(next, event, facts);
   const parsed = RunRecordSchema.safeParse(next);
