@@ -4,6 +4,7 @@ import {
   type RunAssignment,
   RunAssignmentSchema,
   type RunCancellationEvidence,
+  RunCancellationEvidenceSchema,
   RunDecisionBindingSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
@@ -46,6 +47,7 @@ import {
   cancellationAuthorization as decisionAuthorization,
   dispatchIntentMatches,
   hasUnsettledEffects,
+  isActorSettled,
   isCancellationKind,
   isComplete167,
   isLocalNeverSent,
@@ -55,6 +57,7 @@ import {
   type RunReducerEvent,
   sameStoredValue,
   taskById,
+  validCancellationObservation,
 } from "./transitions";
 
 export type RunEffect = { kind: string; payload: Record<string, unknown> };
@@ -590,17 +593,24 @@ function acceptNonce(next: RunRecord, assignment: RunAssignment, facts: ReduceFa
   nonce.acceptedEventKey = `proof:${assignment.assignmentId}`;
 }
 
-function liveAuthorized(next: RunRecord, assignment: RunAssignment): boolean {
-  if (assignment.state === "cancelled" || assignment.state === "failed") return false;
+function dispatchWasDelivered(next: RunRecord, assignment: RunAssignment): boolean {
   const intents = next.outbox.filter(
     (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
   );
   const intent = intents.length === 1 ? intents[0] : undefined;
+  return (
+    intent !== undefined &&
+    dispatchIntentMatches(assignment, intent) &&
+    intent.localCancellation === null &&
+    ["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+  );
+}
+
+function liveAuthorized(next: RunRecord, assignment: RunAssignment): boolean {
   if (
-    !intent ||
-    !dispatchIntentMatches(assignment, intent) ||
-    intent.localCancellation !== null ||
-    !["sending", "confirmed", "outcome-unknown"].includes(intent.state)
+    assignment.state === "cancelled" ||
+    assignment.state === "failed" ||
+    !dispatchWasDelivered(next, assignment)
   )
     return false;
   const nonce = next.nonceRegistry.find((entry) => entry.nonce === assignment.nonce);
@@ -827,6 +837,13 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["assignment", "state"], "untrusted-assignment");
       }
+      if (
+        next.assignments.some(
+          (entry) => entry.agentId === assignment.agentId && !isActorSettled(next, entry),
+        )
+      ) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "agentId"], "agent-in-flight");
+      }
       if (producer) {
         const awaiting = task.state === "review" && task.phase === "awaiting-rework";
         const reissue = event.reissueOfAssignmentId;
@@ -952,13 +969,13 @@ function applyEvent(
         ) {
           return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "delivery-attempt");
         }
+        if (failedDeliveryIds(next, task).includes(d.d.producer.assignmentId)) {
+          return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "failed-delivery");
+        }
         if (reviewer) {
           const requirement = reviewRequirement(task);
           if (assignment.tier !== requirement.tier)
             return reject("RUN_EVENT_INVALID", ["assignment", "tier"], "tier-mismatch");
-          if (failedDeliveryIds(next, task).includes(d.d.producer.assignmentId)) {
-            return reject("RUN_EVENT_INVALID", ["assignment", "delivery"], "failed-delivery");
-          }
         }
         if (
           smoker &&
@@ -967,8 +984,7 @@ function applyEvent(
               entry.taskId === task.spec.id &&
               entry.purpose === "smoker" &&
               entry.delivery?.producerAssignmentId === d.d.producer.assignmentId &&
-              !isNormalEnded(next, entry) &&
-              entry.acceptedProof === null,
+              (!isActorSettled(next, entry) || entry.acceptedProof === null),
           )
         ) {
           return reject("RUN_EVENT_INVALID", ["assignment", "purpose"], "unsettled-smoker");
@@ -999,6 +1015,13 @@ function applyEvent(
       }
       if (event.agentId !== assignment.agentId)
         return reject("RUN_EVENT_INVALID", ["turn-started", event.assignmentId], "agent-mismatch");
+      if (!dispatchWasDelivered(next, assignment)) {
+        return reject(
+          "RUN_EVENT_INVALID",
+          ["turn-started", event.assignmentId],
+          "dispatch-not-delivered",
+        );
+      }
       const reviewer = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
       const head = producerHead(next, task.spec.id);
       if (
@@ -1011,7 +1034,14 @@ function applyEvent(
           "not-producer-head",
         );
       }
-      if (!reviewer && task.state !== "assigned" && task.state !== "in_progress") {
+      const implementation = task.state === "assigned" || task.state === "in_progress";
+      const knownLateProducer =
+        assignment.acceptedProof !== null ||
+        (task.state === "blocked" &&
+          cancelPairs(next, task.spec.id).some(
+            (pair) => pair.assignmentId === assignment.assignmentId,
+          ));
+      if (!reviewer && !implementation && !knownLateProducer) {
         return invalidTransition(task.spec.id, task.state, "in_progress");
       }
       if (assignment.turnId !== null || assignment.startedAt !== null) {
@@ -1020,7 +1050,7 @@ function applyEvent(
       assignment.state = "in_progress";
       assignment.startedAt = facts.now;
       assignment.turnId = event.turnId;
-      if (!reviewer) {
+      if (!reviewer && implementation) {
         task.state = "in_progress";
         task.phase = "implementation";
       }
@@ -1061,6 +1091,7 @@ function applyEvent(
       assignment.endedEventKey = event.endedEventKey;
       const task = taskOf(next, assignment.taskId);
       if (task?.state === "review") recomputeDone(next, task);
+      if (task?.state === "blocked") releaseIfSettled(next, task.spec.id, facts);
       return null;
     }
     case "task-report": {
@@ -1234,6 +1265,12 @@ function applyEvent(
       ) {
         return reject("RUN_EVENT_INVALID", ["cancellation", event.taskId], "pair-binding");
       }
+      if (
+        event.evidence.refresh !== null &&
+        event.evidence.refresh.agentId !== assignment.agentId
+      ) {
+        return reject("RUN_EVENT_INVALID", ["cancellation", "refresh", "agentId"], "refresh-actor");
+      }
       const evidence = normalizeObservation(next, assignment, event.evidence);
       if (evidence === null) {
         assignment.cancellation = null;
@@ -1324,9 +1361,7 @@ function applyEvent(
       );
       const openIntent = hasUnsettledEffects(next);
       const pendingDecision = next.decisions.some((decision) => isDecisionPending(decision));
-      const outstanding = next.tasks.some(
-        (task) => outstandingAssignments(next, task.spec.id).length > 0,
-      );
+      const outstanding = next.assignments.some((assignment) => !isActorSettled(next, assignment));
       if (unsettled || openIntent || pendingDecision || outstanding || next.resources.length > 0) {
         return reject("RUN_INVALID_TRANSITION", ["lifecycle"], "run-not-finished", {
           tasks: unsettled ? 1 : 0,
@@ -1348,6 +1383,30 @@ function applyEvent(
         return null;
       next.eventReceipts.push({ ...event.receipt, seq: next.counters.observationSeq + 1 });
       next.counters.observationSeq += 1;
+      if (event.receipt.kind === "turn_started") {
+        for (const assignment of next.assignments) {
+          const task = taskOf(next, assignment.taskId);
+          if (
+            assignment.agentId !== event.receipt.agentId ||
+            !assignment.cancellation ||
+            task?.state === "cancelled"
+          )
+            continue;
+          const decision = next.decisions.find(
+            (entry) => entry.dedupeKey === `cancel:${assignment.taskId}`,
+          );
+          assignment.cancellation = null;
+          if (decision)
+            freezeTask(
+              next,
+              assignment.taskId,
+              "cancel-new-turn",
+              facts,
+              decision.controlNonceDigest,
+              decision.cancelIntents ?? [],
+            );
+        }
+      }
       return null;
     }
     default:
@@ -1360,58 +1419,16 @@ function normalizeObservation(
   assignment: RunAssignment,
   observation: CancellationObservation,
 ): RunCancellationEvidence | null {
-  const refresh = observation.refresh;
-  if (
-    refresh === null ||
-    !["idle", "closed", "missing"].includes(refresh.status) ||
-    refresh.activeTurn !== false ||
-    refresh.agentId !== assignment.agentId ||
-    observation.assignmentId !== assignment.assignmentId ||
-    observation.lastTurnId === null ||
-    observation.lastTurnId !== assignment.turnId ||
-    observation.endedEventKey === null ||
-    observation.receipt.kind !== "archive" ||
-    observation.receipt.confirmedAt === null ||
-    observation.receipt.externalId === null
-  ) {
-    return null;
-  }
-  const intent = record.outbox.find((entry) => entry.id === observation.cancelIntentId);
-  if (
-    intent === undefined ||
-    intent.kind !== "archive" ||
-    intent.taskId !== assignment.taskId ||
-    intent.assignmentId !== assignment.assignmentId ||
-    intent.recipient !== assignment.agentId ||
-    !["sending", "confirmed", "outcome-unknown"].includes(intent.state)
-  ) {
-    return null;
-  }
-  const ended = record.eventReceipts.find(
-    (receipt) =>
-      receipt.eventKey === observation.endedEventKey &&
-      receipt.kind === "turn_ended" &&
-      receipt.agentId === assignment.agentId &&
-      receipt.turnId === assignment.turnId,
-  );
-  if (!ended || observation.observationSeq < ended.seq) return null;
-  if (Date.parse(refresh.observedAt) < Date.parse(ended.receivedAt)) return null;
-  const later = record.eventReceipts.some(
-    (receipt) =>
-      receipt.seq > ended.seq &&
-      receipt.kind === "turn_started" &&
-      receipt.agentId === assignment.agentId,
-  );
-  if (later) return null;
-  return {
-    ...observation,
-    refresh: refresh as {
-      agentId: string;
-      status: "idle" | "closed" | "missing";
-      activeTurn: false;
-      observedAt: string;
-    },
+  const parsed = RunCancellationEvidenceSchema.safeParse(observation);
+  if (!parsed.success) return null;
+  const candidate = { ...assignment, cancellation: parsed.data };
+  const view = {
+    ...record,
+    assignments: record.assignments.map((entry) =>
+      entry.assignmentId === assignment.assignmentId ? candidate : entry,
+    ),
   };
+  return isComplete167(view, candidate) ? parsed.data : null;
 }
 
 function reviewEligibleProof(
@@ -1428,6 +1445,9 @@ function reviewEligibleProof(
 function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts): ReduceResult {
   const existing = validateExisting(record);
   if (existing) return existing;
+  if (event.kind === "cancellation-checked" && !validCancellationObservation(event.evidence)) {
+    return reject("RUN_EVENT_INVALID", ["cancellation"], "event-shape");
+  }
   if (event.kind === "task-dispatched") {
     if (
       !RunAssignmentSchema.safeParse(event.assignment).success ||
@@ -1457,6 +1477,20 @@ function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts)
       )
     ) {
       return reject("RUN_EVENT_INVALID", ["cancel"], "event-shape");
+    }
+    if (
+      event.preparedCancelIntents.some(
+        (intent) =>
+          !event.cancelIntents.some(
+            (pair) => pair.intentId === intent.id && pair.assignmentId === intent.assignmentId,
+          ),
+      )
+    ) {
+      return reject(
+        "RUN_EVENT_INVALID",
+        ["cancel", "preparedCancelIntents"],
+        "unreferenced-cancel-intent",
+      );
     }
   }
   if (

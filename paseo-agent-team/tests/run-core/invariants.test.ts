@@ -75,6 +75,20 @@ describe("R01g invariant single-defect preconditions", () => {
       { invariant: "I3", path: ["resources", 0], reason: "inactive-holds-claim" },
     ]);
   });
+  test.each(["missing", "assignment-t1-a1", "assignment-t1-r1"])(
+    "claim origin must be its own task's producer: %s",
+    (origin) => {
+      const record = base();
+      record.resources[0]!.originAssignmentId = origin;
+      expect(issues(record)).toEqual([
+        {
+          invariant: "I3",
+          path: ["resources", 0, "originAssignmentId"],
+          reason: "origin-producer-missing",
+        },
+      ]);
+    },
+  );
   test("frozen claim parent is legal; a wrong frozenClaimId is not", () => {
     const record = base();
     const target = task(record, "t2");

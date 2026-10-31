@@ -8,6 +8,11 @@ import type {
   RunRecord,
   RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
+import {
+  RunCancellationEvidenceSchema,
+  RunIdRefSchema,
+  RunTimeSchema,
+} from "../../schemas/run-engine/ledger";
 import type {
   RunDecisionBlock,
   RunReviewReportBlock,
@@ -34,6 +39,38 @@ export type CancellationObservation = {
   cancelIntentId: string;
   receipt: RunCancellationEvidence["receipt"];
 };
+
+/** Input allows non-quiescent observations; malformed fields never become clearance facts. */
+export function validCancellationObservation(value: unknown): value is CancellationObservation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const observation = value as Record<string, unknown>;
+  const fields = [
+    "assignmentId",
+    "lastTurnId",
+    "endedEventKey",
+    "observationSeq",
+    "cancelIntentId",
+    "receipt",
+  ] as const;
+  if (
+    !fields.every(
+      (field) => RunCancellationEvidenceSchema.shape[field].safeParse(observation[field]).success,
+    )
+  )
+    return false;
+  const refresh = observation.refresh;
+  if (refresh === null) return true;
+  if (typeof refresh !== "object" || refresh === null || Array.isArray(refresh)) return false;
+  const fieldsOfRefresh = refresh as Record<string, unknown>;
+  return (
+    RunIdRefSchema.safeParse(fieldsOfRefresh.agentId).success &&
+    ["initializing", "idle", "running", "closed", "error", "missing"].includes(
+      fieldsOfRefresh.status as string,
+    ) &&
+    typeof fieldsOfRefresh.activeTurn === "boolean" &&
+    RunTimeSchema.safeParse(fieldsOfRefresh.observedAt).success
+  );
+}
 
 export type RunDispatchEvent = {
   kind: "task-dispatched";
@@ -223,6 +260,20 @@ function hasTurnFacts(record: RunRecord, assignment: RunAssignment): boolean {
     assignment.startedAt !== null ||
     assignment.endedAt !== null ||
     assignment.endedEventKey !== null ||
+    record.events.some(
+      (event) =>
+        ["turn-started", "turn-ended", "turn_started", "turn_ended"].includes(event.kind) &&
+        Date.parse(event.at) >= Date.parse(assignment.createdAt) &&
+        (event.payload.assignmentId === assignment.assignmentId ||
+          (event.payload.taskId === assignment.taskId &&
+            typeof event.payload.turnId === "string" &&
+            !record.assignments.some(
+              (other) =>
+                other.assignmentId !== assignment.assignmentId &&
+                other.taskId === assignment.taskId &&
+                other.turnId === event.payload.turnId,
+            ))),
+    ) ||
     record.eventReceipts.some(
       (receipt) =>
         receipt.agentId === assignment.agentId &&
@@ -356,6 +407,10 @@ function actorSettledBy(record: RunRecord, assignment: RunAssignment, at?: strin
     Date.parse(proof.refresh.observedAt) <= limit &&
     Date.parse(proof.receipt.confirmedAt as string) <= limit
   );
+}
+
+export function isActorSettled(record: RunRecord, assignment: RunAssignment): boolean {
+  return actorSettledBy(record, assignment);
 }
 
 /** Confirmed side effects need their own retained completion facts, not only a state label. */
