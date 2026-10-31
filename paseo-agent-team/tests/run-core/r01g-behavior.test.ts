@@ -9,13 +9,15 @@ import {
   type RunRecord,
   RunRecordSchema,
   RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
   RunStoredTaskReportSchema,
 } from "../../shared/schemas/run-engine/ledger";
 import {
   RunReviewReportBlockSchema,
+  RunSmokeReportBlockSchema,
   RunTaskReportBlockSchema,
 } from "../../shared/schemas/run-engine/protocol";
-import { dispatchIntent, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
+import { DEV_SMOKE_READY_LEDGER, dispatchIntent, NORMAL_RUN_LEDGER } from "../fixtures/run-engine";
 
 const NOW = "2026-10-30T00:00:00.000Z";
 const uuid = (number: number) => `00000000-0000-4000-8000-${number.toString().padStart(12, "0")}`;
@@ -28,7 +30,7 @@ const actor = (record: RunRecord, id: string) =>
   record.assignments.find((entry) => entry.assignmentId === id)!;
 const task = (record: RunRecord) => record.tasks[0]!;
 
-function ready(attemptCap?: number): RunRecord {
+function ready(attemptCap?: number, smoke = false): RunRecord {
   const record = RunRecordSchema.parse(structuredClone(NORMAL_RUN_LEDGER));
   record.tasks = [record.tasks.find((entry) => entry.spec.id === "t1")!];
   Object.assign(task(record), {
@@ -49,6 +51,11 @@ function ready(attemptCap?: number): RunRecord {
   record.counters.eventsThroughSeq = 0;
   record.counters.observationSeq = 0;
   if (attemptCap !== undefined) record.policy.perTask.implementationAttempts = attemptCap;
+  if (smoke) {
+    task(record).spec.devSmoke = true;
+    task(record).spec.smokeChecklist = ["launch", "interaction"];
+    task(record).spec.dispatchDuties.smoke = "smoke";
+  }
   expect(checkLedgerInvariants(record)).toEqual({ ok: true });
   return record;
 }
@@ -67,19 +74,19 @@ function apply(
   return result.next;
 }
 
-function dispatch(
+function prepareDispatch(
   record: RunRecord,
   id: string,
-  purpose: "member" | "reviewer",
+  purpose: "member" | "reviewer" | "smoker",
   sequence: number,
   prepared = false,
 ) {
-  const template = NORMAL_RUN_LEDGER.assignments.find(
-    (entry) => entry.taskId === "t1" && entry.purpose === purpose,
-  )!;
+  const source = purpose === "smoker" ? DEV_SMOKE_READY_LEDGER : NORMAL_RUN_LEDGER;
+  const template = source.assignments.find((entry) => entry.purpose === purpose)!;
   const assignment: RunAssignment = {
     ...structuredClone(template),
     assignmentId: id,
+    taskId: "t1",
     purpose,
     nonce: uuid(sequence),
     messageId: uuid(sequence + 100),
@@ -90,14 +97,16 @@ function dispatch(
     turnId: null,
     endedEventKey: null,
     acceptedProof: null,
-    delivery: purpose === "reviewer" ? { producerAssignmentId: "p1" } : null,
+    delivery: purpose !== "member" ? { producerAssignmentId: "p1" } : null,
   };
-  if (id === "r2") {
-    assignment.agentId = "agent-r2";
-    assignment.seatId = "seat-r2";
+  if (id === "r2" || purpose === "smoker") {
+    if (id === "r2") {
+      assignment.agentId = "agent-r2";
+      assignment.seatId = "seat-r2";
+    }
     record = structuredClone(record);
     record.roster.push({
-      ...record.roster.find((seat) => seat.seatId === template.seatId)!,
+      ...source.roster.find((seat) => seat.seatId === template.seatId)!,
       agentId: assignment.agentId,
       seatId: assignment.seatId,
     });
@@ -114,7 +123,7 @@ function dispatch(
       taskId: "t1",
       assignmentId: id,
       attempt: 1,
-      phase: purpose === "reviewer" ? "review" : "implementation",
+      phase: purpose === "reviewer" ? "review" : purpose === "smoker" ? "smoke" : "implementation",
       agentId: assignment.agentId,
       seatId: assignment.seatId,
       issuedAt: NOW,
@@ -147,7 +156,18 @@ function dispatch(
           ]
         : undefined,
   };
-  return apply(record, event);
+  return { record, event };
+}
+
+function dispatch(
+  record: RunRecord,
+  id: string,
+  purpose: "member" | "reviewer" | "smoker",
+  sequence: number,
+  prepared = false,
+) {
+  const input = prepareDispatch(record, id, purpose, sequence, prepared);
+  return apply(input.record, input.event);
 }
 
 function start(record: RunRecord, id: string) {
@@ -232,8 +252,33 @@ function review(record: RunRecord, id: string, verdict: "可合入" | "不可合
   return apply(record, reviewEvent(record, id, verdict));
 }
 
-function awaitingReviews(two = false, attemptCap?: number) {
-  let record = report(start(dispatch(ready(attemptCap), "p1", "member", 1), "p1"));
+function smokeEvent(record: RunRecord, id = "s1", failed = false) {
+  const source = RunStoredSmokeReportSchema.parse(
+    DEV_SMOKE_READY_LEDGER.assignments.find((entry) => entry.purpose === "smoker")!.acceptedProof,
+  );
+  const assignment = actor(record, id);
+  return {
+    kind: "smoke-report" as const,
+    block: RunSmokeReportBlockSchema.parse({
+      ...source,
+      taskId: "t1",
+      runId: record.runId,
+      assignmentId: id,
+      attempt: assignment.attempt,
+      nonce: assignment.nonce,
+      messageId: assignment.messageId,
+      testedRef: task(record).ref,
+      checks: task(record).spec.smokeChecklist.map((check, index) => ({
+        id: check,
+        result: failed && index === 0 ? "fail" : "pass",
+        evidencePath: `evidence/${check}.log`,
+      })),
+    }),
+  };
+}
+
+function awaitingReviews(two = false, attemptCap?: number, smoke = false) {
+  let record = report(start(dispatch(ready(attemptCap, smoke), "p1", "member", 1), "p1"));
   record = end(record, "p1");
   record = dispatch(record, "r1", "reviewer", 2);
   if (two) record = dispatch(record, "r2", "reviewer", 3);
@@ -356,6 +401,142 @@ function checked(record: RunRecord, id: string, status: "idle" | "running" = "id
 }
 
 describe("R01g real reducer positive chains", () => {
+  test("B smoker is independent of review tier and cannot finish before registered R2", () => {
+    let record = start(start(awaitingReviews(true, undefined, true), "r1"), "r2");
+    record = end(review(record, "r1"), "r1");
+    const input = prepareDispatch(record, "s1", "smoker", 5);
+    input.event.assignment.tier = "B";
+    input.record.roster.find((entry) => entry.seatId === input.event.assignment.seatId)!.tier = "B";
+    record = start(apply(input.record, input.event), "s1");
+    record = end(apply(record, smokeEvent(record)), "s1");
+    expect(task(record).state).toBe("review");
+    expect(record.resources).toHaveLength(1);
+    record = end(review(record, "r2"), "r2");
+    expect(task(record).state).toBe("done");
+    expect(record.resources).toEqual([]);
+  });
+
+  test.each(["reissueOfAssignmentId", "assignment.delivery", "nonce.runId"] as const)(
+    "missing frozen dispatch field rejects structurally before factories: %s",
+    (field) => {
+      const { record, event } = prepareDispatch(ready(), "p1", "member", 1);
+      const runtime = event as unknown as Record<string, unknown>;
+      if (field === "reissueOfAssignmentId") delete runtime.reissueOfAssignmentId;
+      if (field === "assignment.delivery") {
+        delete (runtime.assignment as Record<string, unknown>).delivery;
+      }
+      if (field === "nonce.runId") delete (runtime.nonce as Record<string, unknown>).runId;
+      const calls: string[] = [];
+      const before = structuredClone(record);
+      expect(
+        reduceRun(record, event, {
+          ...facts,
+          newId: () => {
+            calls.push("id");
+            return uuid(950);
+          },
+          newDecisionNonceDigest: () => {
+            calls.push("digest");
+            return "a".repeat(64);
+          },
+        }),
+      ).toMatchObject({ ok: false, code: "RUN_EVENT_INVALID", params: { reason: "event-shape" } });
+      expect(calls).toEqual([]);
+      expect(record).toEqual(before);
+    },
+  );
+
+  test.each(["cancelIntents", "preparedCancelIntents"] as const)(
+    "missing cancellation array rejects structurally before factories: %s",
+    (field) => {
+      const record = ready();
+      const runtime: Record<string, unknown> = {
+        kind: "cancel-requested",
+        taskIds: ["t1"],
+        reason: "cancel",
+        controlNonceDigest: "c".repeat(64),
+        cancelIntents: [],
+        preparedCancelIntents: [],
+      };
+      delete runtime[field];
+      const before = structuredClone(record);
+      expect(reduceRun(record, runtime as RunReducerEvent, facts)).toMatchObject({
+        ok: false,
+        code: "RUN_EVENT_INVALID",
+        params: { reason: "event-shape" },
+      });
+      expect(record).toEqual(before);
+    },
+  );
+
+  test("registered smoker accepts a late proof after R2 failure without done or a second F", () => {
+    let record = start(start(awaitingReviews(true, undefined, true), "r1"), "r2");
+    record = end(review(record, "r1"), "r1");
+    record = start(dispatch(record, "s1", "smoker", 5), "s1");
+    record = review(record, "r2", "不可合入");
+    record = end(end(record, "r2"), "s1");
+    expect(task(record)).toMatchObject({ state: "rework", qualityFailures: 1 });
+    const failures = record.events.filter((event) => event.kind === "quality_failed").length;
+    record = apply(record, smokeEvent(record));
+    expect(actor(record, "s1").acceptedProof).not.toBeNull();
+    expect(task(record)).toMatchObject({ state: "rework", qualityFailures: 1 });
+    expect(record.events.filter((event) => event.kind === "quality_failed")).toHaveLength(failures);
+  });
+
+  test.each(["directory", "second-scope"] as const)(
+    "a partial claim cannot shrink the frozen write authorization: %s",
+    (kind) => {
+      const record = ready();
+      task(record).spec.scopes = [
+        { repoId: "repo-re-verify", kind: "directory", path: "src", access: "write" },
+      ];
+      if (kind === "second-scope")
+        task(record).spec.scopes.push({
+          repoId: "repo-re-verify",
+          kind: "file",
+          path: "docs/design.md",
+          access: "write",
+        });
+      const input = prepareDispatch(record, "p1", "member", 1);
+      if (kind === "directory") {
+        input.event.claims![0]!.kind = "file";
+        input.event.claims![0]!.path = "src/one.ts";
+      }
+      expect(checkLedgerInvariants(input.record)).toEqual({ ok: true });
+      const before = structuredClone(input.record);
+      expect(reduceRun(input.record, input.event, facts)).toMatchObject({
+        ok: false,
+        path: ["claims"],
+        params: { reason: "scope-not-covered" },
+      });
+      expect(input.record).toEqual(before);
+    },
+  );
+
+  test.each(["tier", "duty", "disabled"] as const)(
+    "producer registration requires its frozen structural seat: %s",
+    (kind) => {
+      const record = ready();
+      if (kind === "tier") {
+        task(record).spec.tier = "S";
+        task(record).spec.level = "L4";
+      }
+      const input = prepareDispatch(record, "p1", "member", 1);
+      const seat = input.record.roster.find(
+        (entry) => entry.seatId === input.event.assignment.seatId,
+      )!;
+      if (kind === "duty") seat.duties = ["review"];
+      if (kind === "disabled") seat.enabled = false;
+      expect(checkLedgerInvariants(input.record)).toEqual({ ok: true });
+      const before = structuredClone(input.record);
+      expect(reduceRun(input.record, input.event, facts)).toMatchObject({
+        ok: false,
+        path: ["assignment", "seatId"],
+        params: { reason: "structural-seat" },
+      });
+      expect(input.record).toEqual(before);
+    },
+  );
   test("duplicate observation is byte-stable rather than another audit event", () => {
     const record = observeEnd(start(dispatch(ready(), "p1", "member", 1), "p1"), "p1");
     const next = apply(record, {

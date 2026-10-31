@@ -2,10 +2,15 @@ import {
   RUN_EVENT_RECEIPT_KINDS,
   type RunAcceptedProof,
   type RunAssignment,
+  RunAssignmentSchema,
   type RunCancellationEvidence,
+  RunDecisionBindingSchema,
+  RunEffectIntentSchema,
   RunEventReceiptSchema,
+  RunNonceEntrySchema,
   type RunRecord,
   RunRecordSchema,
+  RunResourceClaimSchema,
   RunStoredReviewSchema,
   RunStoredSmokeReportSchema,
   RunStoredTaskReportSchema,
@@ -18,6 +23,7 @@ import type {
 } from "../../schemas/run-engine/protocol";
 import { isDecisionPending } from "./decision-state";
 import { canonicalKnown, producerHead, proofEqual, resolveD } from "./delivery-binding";
+import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
 import {
   checkEvidenceGate,
   doneGate,
@@ -27,6 +33,7 @@ import {
   smokeEligible,
 } from "./gates";
 import { checkLedgerInvariants, occupiesExecutionSlot } from "./invariants";
+import { normalizeLogicalPath, scopeCovers } from "./locks";
 import { nextQualityFailure } from "./scheduler";
 import { executionTier, reviewRequirement } from "./tier";
 import {
@@ -354,12 +361,33 @@ function claimMatchesTask(task: RunTaskRecord, claim: RunRecord["resources"][num
   );
 }
 
+function coversWriteScopes(
+  task: RunTaskRecord,
+  claims: readonly RunRecord["resources"][number][],
+): boolean {
+  return task.spec.scopes
+    .filter((scope) => scope.access === "write")
+    .every((scope) => {
+      const target = normalizeLogicalPath(scope.path);
+      if (!target.ok) return false;
+      return claims.some((claim) => {
+        if (claim.repoId !== scope.repoId || claim.access !== "write") return false;
+        const path = normalizeLogicalPath(claim.path);
+        if (!path.ok) return false;
+        if (claim.kind === "directory") return scopeCovers(path, target);
+        return (
+          scope.kind === "file" && claim.kind === "file" && path.caseFolded === target.caseFolded
+        );
+      });
+    });
+}
+
 function readyForDone(record: RunRecord, task: RunTaskRecord): boolean {
   return doneGate(record, task).ok;
 }
 
 function recomputeDone(next: RunRecord, task: RunTaskRecord): void {
-  if (task.state !== "review") return;
+  if (task.state !== "review" || task.phase === "awaiting-rework") return;
   if (task.spec.devSmoke && task.phase !== "smoke") {
     task.phase = "smoke";
   }
@@ -708,6 +736,23 @@ function applyEvent(
       const producer = ["member", "coordinator", "reopen"].includes(assignment.purpose);
       const reviewer = assignment.purpose === "reviewer";
       const smoker = assignment.purpose === "smoker";
+      const requirement = dispatchRequirement(
+        task,
+        producer ? "produce" : reviewer ? "review" : "smoke",
+      );
+      if (
+        requirement.kind !== "required" ||
+        !requirement.allowedPurposes.includes(assignment.purpose) ||
+        !structuralSeats(next.roster, requirement).some(
+          (seat) =>
+            seat.seatId === assignment.seatId &&
+            seat.agentId === assignment.agentId &&
+            seat.channelId === assignment.channelId &&
+            seat.tier === assignment.tier,
+        )
+      ) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "seatId"], "structural-seat");
+      }
       if (
         !dispatchIntentMatches(assignment, event.intent) ||
         next.assignments.some((entry) => entry.assignmentId === assignment.assignmentId) ||
@@ -737,7 +782,7 @@ function applyEvent(
       }
       if (producer) {
         const awaiting = task.state === "review" && task.phase === "awaiting-rework";
-        const reissue = event.reissueOfAssignmentId ?? null;
+        const reissue = event.reissueOfAssignmentId;
         if (reissue === null && !["ready", "rework"].includes(task.state) && !awaiting) {
           return invalidTransition(event.taskId, task.state, "assigned");
         }
@@ -802,6 +847,9 @@ function applyEvent(
           ) {
             return reject("RUN_EVENT_INVALID", ["claims"], "claim-not-in-scope");
           }
+        }
+        if (!coversWriteScopes(task, claims)) {
+          return reject("RUN_EVENT_INVALID", ["claims"], "scope-not-covered");
         }
         const claimIds = new Set(
           next.resources
@@ -1339,6 +1387,37 @@ function reviewEligibleProof(
 function finalize(record: RunRecord, event: RunReducerEvent, facts: ReduceFacts): ReduceResult {
   const existing = validateExisting(record);
   if (existing) return existing;
+  if (event.kind === "task-dispatched") {
+    if (
+      !RunAssignmentSchema.safeParse(event.assignment).success ||
+      !RunNonceEntrySchema.safeParse(event.nonce).success ||
+      !RunEffectIntentSchema.safeParse(event.intent).success ||
+      (event.reissueOfAssignmentId !== null &&
+        (typeof event.reissueOfAssignmentId !== "string" ||
+          event.reissueOfAssignmentId.length === 0)) ||
+      (event.claims !== undefined &&
+        (!Array.isArray(event.claims) ||
+          !event.claims.every((claim) => RunResourceClaimSchema.safeParse(claim).success)))
+    ) {
+      return reject("RUN_EVENT_INVALID", ["task-dispatched"], "event-shape");
+    }
+  }
+  if (
+    event.kind === "cancel-requested" ||
+    event.kind === "dag-revised" ||
+    event.kind === "run-cancelled"
+  ) {
+    if (
+      !Array.isArray(event.cancelIntents) ||
+      !event.cancelIntents.every((pair) => RunDecisionBindingSchema.safeParse(pair).success) ||
+      !Array.isArray(event.preparedCancelIntents) ||
+      !event.preparedCancelIntents.every(
+        (intent) => RunEffectIntentSchema.safeParse(intent).success && intent.kind === "archive",
+      )
+    ) {
+      return reject("RUN_EVENT_INVALID", ["cancel"], "event-shape");
+    }
+  }
   if (
     event.kind === "cancel-requested" &&
     (!Array.isArray(event.taskIds) ||
