@@ -260,8 +260,8 @@ function makeIntent(assignment: RunAssignment): RunEffectIntent {
     recipient: assignment.agentId,
     messageId: assignment.messageId ?? undefined,
     idempotencyKey: `dispatch-${assignment.assignmentId}-${serial}`,
-    state: "prepared",
-    confirmedAt: null,
+    state: "confirmed",
+    confirmedAt: AT_UPDATED,
     localCancellation: null,
   });
 }
@@ -368,8 +368,46 @@ function smokeReport(assignment: RunAssignment, ref: string, result: "pass" | "f
   });
 }
 
+function startTurn(record: RunRecord, assignmentId: string): RunRecord {
+  const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
+  if (!assignment) throw new Error(`missing assignment ${assignmentId}`);
+  if (assignment.turnId !== null) return record;
+  return next(record, {
+    kind: "turn-started",
+    assignmentId,
+    agentId: assignment.agentId,
+    turnId: `turn-${assignmentId}`,
+  });
+}
+
+function endTurn(record: RunRecord, assignmentId: string): RunRecord {
+  const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
+  if (!assignment || assignment.turnId === null) throw new Error(`unstarted ${assignmentId}`);
+  const endedEventKey = `${assignment.agentId}|${assignment.turnId}|turn_ended`;
+  const observed = next(record, {
+    kind: "observation-recorded",
+    receipt: {
+      eventKey: endedEventKey,
+      kind: "turn_ended",
+      agentId: assignment.agentId,
+      turnId: assignment.turnId,
+      seq: record.counters.observationSeq + 1,
+      receivedAt: AT_UPDATED,
+      dedupeKey: endedEventKey,
+      disposition: "accepted",
+    },
+  });
+  return next(observed, { kind: "turn-ended", assignmentId, endedEventKey });
+}
+
+function completeReport(record: RunRecord, assignment: RunAssignment, block: RunReducerEvent) {
+  const started = startTurn(record, assignment.assignmentId);
+  return endTurn(next(started, block), assignment.assignmentId);
+}
+
 function report(event: ReturnType<typeof dispatch>, ref = REF_A) {
-  return next(next(fresh(), event), {
+  const seeded = next(fresh(), event);
+  return completeReport(seeded, event.assignment, {
     kind: "task-report",
     block: doneReport(event.assignment, ref),
   });
@@ -404,59 +442,68 @@ function reviewFlow() {
 
 function reworkFlow() {
   const { record: seeded, reviewer } = reviewFlow();
-  let record = next(seeded, reviewer);
+  let record = startTurn(next(seeded, reviewer), reviewer.assignment.assignmentId);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(reviewer.assignment, REF_A, "不可合入"),
   });
-  expect(taskOf(record).state).toBe("rework");
+  record = endTurn(record, reviewer.assignment.assignmentId);
+  // 92e leaves a settled quality failure in review/awaiting-rework; dispatch is still legal and
+  // starts the rework attempt with the original claims. The state-label gap stays reported.
+  expect(taskOf(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
   const nextMember = dispatch("member", 2, { claims: reworkClaims(record) });
-  record = next(record, nextMember);
+  record = startTurn(next(record, nextMember), nextMember.assignment.assignmentId);
   record = next(record, {
     kind: "task-report",
     block: doneReport(nextMember.assignment, REF_B),
   });
+  record = endTurn(record, nextMember.assignment.assignmentId);
   return { record, oldReviewer: reviewer };
 }
 
 function smokeRework(ref: string) {
   let record = fresh({ smoke: true });
   const member = dispatch("member");
-  record = next(record, member);
+  record = startTurn(next(record, member), member.assignment.assignmentId);
   record = next(record, { kind: "task-report", block: doneReport(member.assignment, REF_A) });
+  record = endTurn(record, member.assignment.assignmentId);
   const firstReviewer = dispatch("reviewer", 1, {
     producerAssignmentId: member.assignment.assignmentId,
   });
-  record = next(record, firstReviewer);
+  record = startTurn(next(record, firstReviewer), firstReviewer.assignment.assignmentId);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(firstReviewer.assignment, REF_A, "可合入"),
   });
+  record = endTurn(record, firstReviewer.assignment.assignmentId);
   expect(taskOf(record).phase).toBe("smoke");
   const firstSmoker = dispatch("smoker", 1, {
     producerAssignmentId: member.assignment.assignmentId,
   });
-  record = next(record, firstSmoker);
+  record = startTurn(next(record, firstSmoker), firstSmoker.assignment.assignmentId);
   record = next(record, {
     kind: "smoke-report",
     block: smokeReport(firstSmoker.assignment, REF_A, "fail"),
   });
-  expect(taskOf(record).state).toBe("rework");
+  record = endTurn(record, firstSmoker.assignment.assignmentId);
+  expect(taskOf(record)).toMatchObject({ state: "review", phase: "awaiting-rework" });
 
   const secondMember = dispatch("member", 2, { claims: reworkClaims(record) });
-  record = next(record, secondMember);
+  record = startTurn(next(record, secondMember), secondMember.assignment.assignmentId);
   record = next(record, {
     kind: "task-report",
     block: doneReport(secondMember.assignment, ref),
   });
+  record = endTurn(record, secondMember.assignment.assignmentId);
   const secondReviewer = dispatch("reviewer", 2, {
     producerAssignmentId: secondMember.assignment.assignmentId,
   });
-  record = next(record, secondReviewer);
+  record = startTurn(next(record, secondReviewer), secondReviewer.assignment.assignmentId);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(secondReviewer.assignment, ref, "可合入"),
   });
+  record = endTurn(record, secondReviewer.assignment.assignmentId);
   expect(taskOf(record).phase).toBe("smoke");
   return { record, firstReviewer, firstSmoker, secondReviewer };
 }
@@ -464,24 +511,27 @@ function smokeRework(ref: string) {
 function smokeDoneFlow() {
   let record = fresh({ smoke: true });
   const member = dispatch("member");
-  record = next(record, member);
+  record = startTurn(next(record, member), member.assignment.assignmentId);
   record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+  record = endTurn(record, member.assignment.assignmentId);
   const reviewer = dispatch("reviewer", 1, {
     producerAssignmentId: member.assignment.assignmentId,
   });
-  record = next(record, reviewer);
+  record = startTurn(next(record, reviewer), reviewer.assignment.assignmentId);
   record = next(record, {
     kind: "review-report",
     block: reviewReport(reviewer.assignment, REF_A, "可合入"),
   });
+  record = endTurn(record, reviewer.assignment.assignmentId);
   const smoker = dispatch("smoker", 1, {
     producerAssignmentId: member.assignment.assignmentId,
   });
-  record = next(record, smoker);
+  record = startTurn(next(record, smoker), smoker.assignment.assignmentId);
   record = next(record, {
     kind: "smoke-report",
     block: smokeReport(smoker.assignment, REF_A, "pass"),
   });
+  record = endTurn(record, smoker.assignment.assignmentId);
   expect(taskOf(record).state).toBe("done");
   expect(smokeProof(record, smoker.assignment.assignmentId)).toBeDefined();
   return { record, smoker };
@@ -512,8 +562,9 @@ describe("R03a delivery binding red specification", () => {
   test("B1 smoke dispatch retains the implementation claim, competing scope, and does not take a slot", () => {
     let record = fresh({ smoke: true });
     const member = dispatch("member");
-    record = next(record, member);
+    record = startTurn(next(record, member), member.assignment.assignmentId);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    record = endTurn(record, member.assignment.assignmentId);
     const originalClaims = structuredClone(
       record.resources.filter((entry) => entry.taskId === "t1"),
     );
@@ -522,11 +573,12 @@ describe("R03a delivery binding red specification", () => {
     const reviewer = dispatch("reviewer", 1, {
       producerAssignmentId: member.assignment.assignmentId,
     });
-    record = next(record, reviewer);
+    record = startTurn(next(record, reviewer), reviewer.assignment.assignmentId);
     record = next(record, {
       kind: "review-report",
       block: reviewReport(reviewer.assignment, REF_A, "可合入"),
     });
+    record = endTurn(record, reviewer.assignment.assignmentId);
 
     // Isolation snapshot for the smoke step only: after the review path has deleted the claim,
     // restore this exact pre-review implementation claim on a structured clone. The claim was
@@ -574,8 +626,9 @@ describe("R03a delivery binding red specification", () => {
   test("B2 reviewer dispatch attempt must equal the implementation attempt", () => {
     let record = fresh();
     const member = dispatch("member");
-    record = next(record, member);
+    record = startTurn(next(record, member), member.assignment.assignmentId);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    record = endTurn(record, member.assignment.assignmentId);
     const before = structuredClone(record);
     const result = reduceRun(
       record,
@@ -672,16 +725,18 @@ describe("R03a delivery binding red specification", () => {
   test("B3 DAG cancellation of a genuinely done task is rejected as one batch", () => {
     let record = fresh();
     const member = dispatch("member");
-    record = next(record, member);
+    record = startTurn(next(record, member), member.assignment.assignmentId);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    record = endTurn(record, member.assignment.assignmentId);
     const reviewer = dispatch("reviewer", 1, {
       producerAssignmentId: member.assignment.assignmentId,
     });
-    record = next(record, reviewer);
+    record = startTurn(next(record, reviewer), reviewer.assignment.assignmentId);
     record = next(record, {
       kind: "review-report",
       block: reviewReport(reviewer.assignment, REF_A, "可合入"),
     });
+    record = endTurn(record, reviewer.assignment.assignmentId);
     expect(taskOf(record).state).toBe("done");
     const before = structuredClone(record);
     const doneRef = taskOf(record).ref;
@@ -811,8 +866,9 @@ describe("R03a delivery binding red specification", () => {
   function smokeWaitingOnSecondReviewer() {
     let record = fresh({ smoke: true });
     const member = dispatch("member");
-    record = next(record, member);
+    record = startTurn(next(record, member), member.assignment.assignmentId);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    record = endTurn(record, member.assignment.assignmentId);
     const first = dispatch("reviewer", 1, {
       slot: 0,
       producerAssignmentId: member.assignment.assignmentId,
@@ -821,7 +877,7 @@ describe("R03a delivery binding red specification", () => {
       slot: 1,
       producerAssignmentId: member.assignment.assignmentId,
     });
-    record = next(record, first);
+    record = startTurn(next(record, first), first.assignment.assignmentId);
     record = next(record, second);
     record = next(record, {
       kind: "turn-started",
@@ -833,22 +889,25 @@ describe("R03a delivery binding red specification", () => {
       kind: "review-report",
       block: reviewReport(first.assignment, REF_A, "可合入"),
     });
+    record = endTurn(record, first.assignment.assignmentId);
     const smoker = dispatch("smoker", 1, {
       producerAssignmentId: member.assignment.assignmentId,
     });
-    record = next(record, smoker);
+    record = startTurn(next(record, smoker), smoker.assignment.assignmentId);
     record = next(record, {
       kind: "smoke-report",
       block: smokeReport(smoker.assignment, REF_A, "pass"),
     });
+    record = endTurn(record, smoker.assignment.assignmentId);
     return { record, second, smoker };
   }
 
   test("positive: multiple reviewers may be registered for the same delivery and a non-current reviewer can reply", () => {
     let record = fresh();
     const member = dispatch("member");
-    record = next(record, member);
+    record = startTurn(next(record, member), member.assignment.assignmentId);
     record = next(record, { kind: "task-report", block: doneReport(member.assignment) });
+    record = endTurn(record, member.assignment.assignmentId);
     const first = dispatch("reviewer", 1, {
       slot: 0,
       producerAssignmentId: member.assignment.assignmentId,
@@ -857,7 +916,7 @@ describe("R03a delivery binding red specification", () => {
       slot: 1,
       producerAssignmentId: member.assignment.assignmentId,
     });
-    record = next(record, first);
+    record = startTurn(next(record, first), first.assignment.assignmentId);
     record = next(record, second);
     expect(taskOf(record).currentAssignmentId).toBe(second.assignment.assignmentId);
     const result = reduceRun(
@@ -869,6 +928,7 @@ describe("R03a delivery binding red specification", () => {
       facts,
     );
     expect(result.ok).toBe(true);
+    if (result.ok) endTurn(result.next, first.assignment.assignmentId);
   });
 
   test("positive: smoke pass before the last reviewer returns must not finish", () => {
