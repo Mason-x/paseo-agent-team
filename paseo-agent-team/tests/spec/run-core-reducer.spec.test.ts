@@ -104,6 +104,7 @@ function addReviewer(
     tier: string;
     family: string;
     nonce?: string;
+    producerAssignmentId?: string;
   },
 ) {
   ensureSeat(
@@ -127,7 +128,9 @@ function addReviewer(
           ? NONCE_T2_REVIEW
           : "6f1c2a44-3b7e-4f0a-9a11-000000000007"),
       messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      delivery: { producerAssignmentId: "assignment-t2-a1" },
+      delivery: {
+        producerAssignmentId: overrides.producerAssignmentId ?? "assignment-t2-a1",
+      },
     }),
   );
   record.nonceRegistry.push({
@@ -183,21 +186,6 @@ function review(
     probes: [],
     ...overrides,
   } as RunReviewReportBlock;
-}
-
-function acceptReviewProof(record: RunRecord, assignmentId: string, block: RunReviewReportBlock) {
-  const assignment = record.assignments.find((entry) => entry.assignmentId === assignmentId);
-  if (!assignment) throw new Error(`missing ${assignmentId}`);
-  assignment.acceptedProof = {
-    ...block,
-    assignmentId,
-    messageId: assignment.messageId,
-  } as typeof assignment.acceptedProof;
-  const nonce = record.nonceRegistry.find((entry) => entry.assignmentId === assignmentId);
-  if (nonce) {
-    nonce.acceptedAt = AT_UPDATED;
-    nonce.acceptedEventKey = `proof:${assignmentId}`;
-  }
 }
 
 function reduceOrThrow(record: RunRecord, event: RunReducerEvent): RunRecord {
@@ -878,57 +866,118 @@ describe("R03a gate details and invariant boundaries", () => {
   });
 
   test("an escalation origin raises the required review tier", () => {
-    const record = reviewReady();
+    let record = reviewReady();
     taskOf(record, "t2").spec = { ...taskOf(record, "t2").spec, level: "L1" };
-    addReviewer(record, {
-      id: "assignment-t2-r0",
-      seatId: "seat-b5",
-      agentId: "agent-b5",
+    record.policy = {
+      ...record.policy,
+      perTask: { ...record.policy.perTask, reworkPerLayer: 0 },
+    };
+    const failureReviewer = record.assignments.find(
+      (entry) => entry.assignmentId === "assignment-t2-r1",
+    );
+    if (!failureReviewer) throw new Error("failure reviewer");
+    failureReviewer.tier = "B";
+    const failed = reduceRun(
+      record,
+      {
+        kind: "review-report",
+        block: review("assignment-t2-r1", {
+          verdict: "不可合入",
+          blockers: [{ id: "f0", summary: "failed delivery", path: "src/t2.ts" }],
+        }),
+      },
+      facts,
+    );
+    expect(failed.ok, JSON.stringify(failed)).toBe(true);
+    if (!failed.ok) return;
+    record = endTurn(failed.next, "assignment-t2-r1");
+    expect(taskOf(record, "t2")).toMatchObject({
+      state: "rework",
+      qualityFailures: 1,
+    });
+    expect(taskOf(record, "t2").escalations).toHaveLength(1);
+
+    const nonce = facts.newId("nonce");
+    const messageId = facts.newId("message");
+    ensureSeat(record, "seat-b7", "agent-b7", "implement", "A");
+    const second = assignment({
+      assignmentId: "assignment-t2-a2",
+      taskId: "t2",
+      attempt: 2,
+      nonce,
+      messageId,
+      seatId: "seat-b7",
+      agentId: "agent-b7",
       tier: "A",
       family: "codex",
-      nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000006",
+      workspace: {
+        id: "ws-run-rec0re-a2-t2",
+        branch: "re-rec0rea1-t2-a2-1",
+        baseRef: "main",
+      },
     });
-    const failedReviewer = record.assignments.find(
-      (entry) => entry.assignmentId === "assignment-t2-r0",
-    );
-    if (failedReviewer) {
-      failedReviewer.state = "ended";
-      failedReviewer.turnId = "turn-r0";
-      failedReviewer.endedAt = AT_UPDATED;
-      failedReviewer.endedEventKey = "agent-b5|turn-r0|turn_ended";
-    }
-    record.counters.observationSeq += 1;
-    record.eventReceipts.push({
-      eventKey: "agent-b5|turn-r0|turn_ended",
-      kind: "turn_ended",
-      agentId: "agent-b5",
-      turnId: "turn-r0",
-      seq: record.counters.observationSeq,
-      receivedAt: AT_UPDATED,
-      dedupeKey: "agent-b5|turn-r0|turn_ended",
-      disposition: "accepted",
-    });
-    acceptReviewProof(
-      record,
-      "assignment-t2-r0",
-      review("assignment-t2-r0", {
-        nonce: "6f1c2a44-3b7e-4f0a-9a11-000000000006",
-        verdict: "不可合入",
-        blockers: [{ id: "f0", summary: "failed delivery", path: "src/t2.ts" }],
+    record = reduceOrThrow(record, {
+      kind: "task-dispatched",
+      taskId: "t2",
+      assignment: second,
+      nonce: {
+        nonce,
+        runId: record.runId,
+        taskId: "t2",
+        assignmentId: second.assignmentId,
+        attempt: 2,
+        phase: "implementation",
+        agentId: second.agentId,
+        seatId: second.seatId,
+        issuedAt: AT_UPDATED,
+        acceptedAt: null,
+        acceptedEventKey: null,
+        revokedAt: null,
+        revokeReason: null,
+      },
+      intent: dispatchIntent({
+        id: "intent-assignment-t2-a2",
+        assignmentId: second.assignmentId,
+        taskId: "t2",
+        recipient: second.agentId,
+        messageId,
+        idempotencyKey: "dispatch-assignment-t2-a2",
+        state: "confirmed",
+        confirmedAt: AT_UPDATED,
       }),
-    );
-    taskOf(record, "t2").qualityFailures = 1;
-    taskOf(record, "t2").attempts = 1;
-    taskOf(record, "t2").escalations = [
-      { fromTier: "B", toTier: "A", atAttempt: 1, qualityFailures: 1, at: AT_UPDATED },
-    ];
-    const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t2-r1");
+      reissueOfAssignmentId: null,
+    });
+    if (!second.workspace) throw new Error("second workspace");
+    const secondWorkspace = second.workspace;
+    record = startTurn(record, second.assignmentId, "turn-t2-a2");
+    record = reduceOrThrow(record, {
+      kind: "task-report",
+      block: report({
+        assignmentId: second.assignmentId,
+        attempt: 2,
+        nonce,
+        messageId,
+        workspace: secondWorkspace,
+      }),
+    });
+    record = endTurn(record, second.assignmentId);
+
+    addReviewer(record, {
+      id: "assignment-t2-r2",
+      seatId: "seat-b6",
+      agentId: "agent-b6",
+      tier: "B",
+      family: "codex",
+      producerAssignmentId: second.assignmentId,
+    });
+    record = startTurn(record, "assignment-t2-r2", "turn-t2-r2");
+    const reviewer = record.assignments.find((entry) => entry.assignmentId === "assignment-t2-r2");
     if (!reviewer) throw new Error("reviewer");
-    reviewer.tier = "B";
-    reviewer.family = "codex";
-    expect(reason(reduceRun(record, { kind: "review-report", block: review() }, facts))).toBe(
-      "no-valid-review",
-    );
+    expect(
+      reason(
+        reduceRun(record, { kind: "review-report", block: review("assignment-t2-r2") }, facts),
+      ),
+    ).toBe("no-valid-review");
   });
 
   test("evidence outside the write scope, wrong command and real home stay in progress", () => {
@@ -985,21 +1034,33 @@ describe("R03a gate details and invariant boundaries", () => {
 
   test("default DEV host, extra smoke checks and self-smoke cannot complete", () => {
     const defaultHost = smokeReady(reviewReady(), {}, "127.0.0.1:6767");
+    const defaultBefore = structuredClone(defaultHost.record);
     const defaultResult = smokeWithSettlement(defaultHost.record, {
       ...defaultHost.block,
       devHost: "127.0.0.1:6767",
     });
-    expect(defaultResult.ok).toBe(true);
-    if (defaultResult.ok) expect(taskOf(defaultResult.next, "t2").state).not.toBe("done");
+    expect(defaultResult).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["smoke-report"],
+      params: { reason: "invalid-smoke" },
+    });
+    expect(defaultHost.record).toEqual(defaultBefore);
 
     const extra = smokeReady();
     extra.block.checks = [
       ...extra.block.checks,
       { id: "extra", result: "pass", evidencePath: "evidence/extra.png" },
     ];
+    const extraBefore = structuredClone(extra.record);
     const extraResult = smokeWithSettlement(extra.record, extra.block);
-    expect(extraResult.ok).toBe(true);
-    if (extraResult.ok) expect(taskOf(extraResult.next, "t2").state).not.toBe("done");
+    expect(extraResult).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["smoke-report"],
+      params: { reason: "invalid-smoke" },
+    });
+    expect(extra.record).toEqual(extraBefore);
 
     const self = smokeReady();
     const smoker = self.record.assignments.find(
@@ -1020,9 +1081,15 @@ describe("R03a gate details and invariant boundaries", () => {
     const selfSeat = self.record.roster.find((entry) => entry.seatId === "seat-b1");
     if (!selfSeat) throw new Error("self seat");
     selfSeat.duties = [...new Set([...selfSeat.duties, "smoke"])];
+    const selfBefore = structuredClone(self.record);
     const selfResult = smokeWithSettlement(self.record, self.block);
-    expect(selfResult.ok).toBe(true);
-    if (selfResult.ok) expect(taskOf(selfResult.next, "t2").state).not.toBe("done");
+    expect(selfResult).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["smoke-report"],
+      params: { reason: "invalid-smoke" },
+    });
+    expect(self.record).toEqual(selfBefore);
   });
 
   test("directory/directory overlap and blocked phase mismatch are violations", () => {
