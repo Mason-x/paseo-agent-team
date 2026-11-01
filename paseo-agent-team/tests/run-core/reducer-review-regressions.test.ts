@@ -570,9 +570,22 @@ describe("150 RB1 implementation attempt accounting", () => {
   test("an existing implementation assignment proves the attempts counter cannot be zero", () => {
     const record = structuredClone(NORMAL_RUN_LEDGER);
     task(record, "t2").attempts = 0;
-    expect(checkLedgerInvariants(record)).toMatchObject({
+    // One mutation trips two independent I6 rules on the same counter: the distinct producer
+    // attempts held in assignments, and the dispatch events the counter must not trail.
+    expect(checkLedgerInvariants(record)).toEqual({
       ok: false,
-      violations: [expect.objectContaining({ invariant: "I6" })],
+      violations: [
+        {
+          invariant: "I6",
+          path: ["tasks", "t2", "attempts"],
+          params: { reason: "attempt-count-mismatch", expected: 1, actual: 0 },
+        },
+        {
+          invariant: "I6",
+          path: ["tasks", "t2", "attempts"],
+          params: { reason: "behind-events", count: 1 },
+        },
+      ],
     });
   });
 
@@ -651,7 +664,7 @@ describe("157 remaining dispatch and receipt guards", () => {
     },
   );
 
-  test("review-report itself refuses missing implementation evidence", () => {
+  test("review-report on a ledger that lost its implementation evidence is refused as a corrupt source", () => {
     const { ready, block } = qualityReview("B", 0, [], 10);
     const producer = ready.assignments.find(
       (entry) =>
@@ -665,11 +678,24 @@ describe("157 remaining dispatch and receipt guards", () => {
     if (!nonce) throw new Error("missing producer nonce");
     nonce.acceptedAt = null;
     nonce.acceptedEventKey = null;
+    // No valid delivery D resolves any more while the task still caches its ref and changed
+    // files, so the source is refused whole (I7) before the report handler can run.
+    const before = structuredClone(ready);
     expect(reduceRun(ready, { kind: "review-report", block }, facts)).toMatchObject({
       ok: false,
-      code: "RUN_EVENT_INVALID",
-      params: { reason: "no-valid-review" },
+      code: "RUN_INVARIANT_VIOLATION",
+      params: { reason: "delivery-cache" },
+      violations: [
+        { invariant: "I7", path: ["tasks", "t1", "ref"], params: { reason: "delivery-cache" } },
+        {
+          invariant: "I7",
+          path: ["tasks", "t1", "changedFiles"],
+          params: { reason: "delivery-cache" },
+        },
+      ],
     });
+    expect(ready).toEqual(before);
+    expect(task(ready).qualityFailures).toBe(0);
   });
 
   test.each(["src/a.ts:stream", "src/COM\u00b9", "src/a.ts."])(

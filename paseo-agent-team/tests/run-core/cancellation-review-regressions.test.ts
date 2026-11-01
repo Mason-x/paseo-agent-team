@@ -42,6 +42,14 @@ function accepted(result: ReduceResult) {
   return result.next;
 }
 
+// The seed already stores a complete 167 proof on the t2 assignment. A stored proof that no longer
+// matches its intent or ended receipt is a corrupt source (I7 invalid-cancellation-proof) and the
+// whole record is refused before the event runs. The binding defects below therefore start from a
+// valid ledger that has no stored proof yet, and assert the event registers none.
+function withoutStoredProof(c: ReturnType<typeof cancellation>) {
+  c.assignment.cancellation = null;
+}
+
 describe("167 cancellation proof and authorization", () => {
   test.each(["cancel", "assign-seat"] as const)(
     "answered %s releases with all proofs",
@@ -109,6 +117,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "unconfirmed intent",
       (c) => {
+        withoutStoredProof(c);
         c.intent.state = "prepared";
         c.intent.confirmedAt = null;
       },
@@ -172,6 +181,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "null turn",
       (c) => {
+        withoutStoredProof(c);
         c.assignment.turnId = null;
         c.evidence.lastTurnId = null;
         c.evidence.endedEventKey = null;
@@ -192,6 +202,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "missing ended receipt",
       (c) => {
+        withoutStoredProof(c);
         c.record.eventReceipts = c.record.eventReceipts.filter(
           (receipt) => receipt.eventKey !== c.evidence.endedEventKey,
         );
@@ -200,6 +211,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong ended actor",
       (c) => {
+        withoutStoredProof(c);
         const ended = c.record.eventReceipts.find((r) => r.eventKey === c.evidence.endedEventKey);
         if (ended) ended.agentId = "other-agent";
       },
@@ -207,6 +219,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong ended turn",
       (c) => {
+        withoutStoredProof(c);
         const ended = c.record.eventReceipts.find((r) => r.eventKey === c.evidence.endedEventKey);
         if (ended) ended.turnId = "other-turn";
       },
@@ -214,22 +227,27 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong ended kind",
       (c) => {
+        withoutStoredProof(c);
         const ended = c.record.eventReceipts.find((r) => r.eventKey === c.evidence.endedEventKey);
         if (ended) ended.kind = "turn_started";
       },
     ],
   ];
+  // Defects the core now refuses outright (zero write) instead of accepting and staying frozen.
   const rejectCases = new Map([
     ["wrong recipient", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
     ["wrong intent assignment", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
     ["wrong intent task", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
     ["wrong evidence assignment", ["RUN_EVENT_INVALID", "unknown-binding"]],
+    ["wrong refresh actor", ["RUN_EVENT_INVALID", "refresh-actor"]],
+    ["future observation", ["RUN_EVENT_INVALID", "observation-watermark"]],
   ]);
   test.each(cases)("%s keeps the frozen claims", (_label, mutate) => {
     const c = cancellation();
     mutate(c);
     if (rejectCases.has(_label)) {
       expect(RunRecordSchema.safeParse(c.record).success).toBe(true);
+      const before = structuredClone(c.record);
       const result = reduceRun(c.record, c.event, facts);
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -237,6 +255,7 @@ describe("167 cancellation proof and authorization", () => {
         expect(result.code).toBe(code);
         expect(result.params.reason).toBe(reason);
       }
+      expect(c.record).toEqual(before);
       expect(c.record.tasks.find((entry) => entry.spec.id === "t2")).toMatchObject({
         state: "blocked",
         phase: "frozen",
