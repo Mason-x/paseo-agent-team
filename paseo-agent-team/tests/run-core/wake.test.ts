@@ -23,6 +23,8 @@ function decision(category: "D1" | "D2" | "D3" | "D4" | "D5" | "D6" | "D7" = "D1
     summary: "WORKER TEXT nonce payload must not leak",
     createdAt: "2026-10-28T00:00:00.000Z",
     answeredAt: null,
+    cancelIntents: null,
+    resolution: null,
   };
 }
 
@@ -57,7 +59,7 @@ describe("wake classification", () => {
     expect(classifyWake(next, next, { policyEpoch: POLICY_EPOCH })).toEqual([]);
 
     const progress = record({
-      tasks: [taskRecord(spec("T9", "Done"), { state: "done" })],
+      tasks: [taskRecord(spec("t9", "Done"), { state: "done" })],
       lifecycle: "active",
     });
     expect(classifyWake(record(), progress, { policyEpoch: POLICY_EPOCH })).toEqual([]);
@@ -65,11 +67,11 @@ describe("wake classification", () => {
 
   test("D3 requires a decision; budget exhaustion and run finish map to D4/D6", () => {
     const failed = record({
-      tasks: [taskRecord(spec("T9", "Hard", { tier: "S" }), { state: "failed" })],
-      decisions: [{ ...decision("D3"), subjectId: "T9" }],
+      tasks: [taskRecord(spec("t9", "Hard", { tier: "S" }), { state: "failed" })],
+      decisions: [{ ...decision("D3"), subjectId: "t9" }],
     });
     expect(classifyWake(record(), failed, { policyEpoch: POLICY_EPOCH })).toMatchObject([
-      { category: "D3", subjectId: "T9", taskId: "T9", source: "decision" },
+      { category: "D3", subjectId: "t9", taskId: "t9", source: "decision" },
     ]);
 
     const budgets = record({
@@ -107,11 +109,11 @@ describe("wake classification", () => {
 
   test("a non-S failed task does not wake; a D3 decision covers its task failure once", () => {
     const bFailed = record({
-      tasks: [taskRecord(spec("T9", "Small", { tier: "B" }), { state: "failed" })],
+      tasks: [taskRecord(spec("t9", "Small", { tier: "B" }), { state: "failed" })],
     });
     expect(classifyWake(record(), bFailed, { policyEpoch: POLICY_EPOCH })).toEqual([]);
     const sFailed = record({
-      tasks: [taskRecord(spec("T9", "Hard", { tier: "S" }), { state: "failed" })],
+      tasks: [taskRecord(spec("t9", "Hard", { tier: "S" }), { state: "failed" })],
       decisions: [{ ...decision("D3"), subjectId: null }],
     });
     expect(classifyWake(record(), sFailed, { policyEpoch: POLICY_EPOCH })).toMatchObject([
@@ -122,13 +124,13 @@ describe("wake classification", () => {
   test("classification order uses code units, not locale collation", () => {
     const next = record({
       decisions: [
-        { ...decision("D1"), decisionId: "77777777-7777-4777-8777-777777777777", subjectId: "a" },
-        { ...decision("D1"), decisionId: "88888888-8888-4888-8888-888888888888", subjectId: "B" },
+        { ...decision("D1"), decisionId: "88888888-8888-4888-8888-888888888888", subjectId: "é" },
+        { ...decision("D1"), decisionId: "77777777-7777-4777-8777-777777777777", subjectId: "z" },
       ],
     });
     expect(
       classifyWake(record(), next, { policyEpoch: POLICY_EPOCH }).map((wake) => wake.subjectId),
-    ).toEqual(["B", "a"]);
+    ).toEqual(["z", "é"]);
   });
 
   test("wakeKey is unambiguous for subjects/epochs containing separators", () => {
@@ -143,7 +145,18 @@ describe("wake classification", () => {
       ],
     });
     expect(classifyWake(record(), next, { policyEpoch: POLICY_EPOCH })).toHaveLength(1);
-    const answered = record({ decisions: [{ ...decision("D1"), state: "answered" as const }] });
+    const answeredAt = "2026-10-28T00:05:00.000Z";
+    const answered = record({
+      decisions: [
+        {
+          ...decision("D1"),
+          state: "answered" as const,
+          subjectId: "t1",
+          answer: { action: "reject" as const, taskIds: ["t1"], answeredAt },
+          answeredAt,
+        },
+      ],
+    });
     expect(classifyWake(record(), answered, { policyEpoch: POLICY_EPOCH })).toEqual([]);
   });
 });
@@ -160,7 +173,7 @@ describe("wake summary", () => {
   );
 
   test("bounded sanitized text excludes worker text and is deterministic", () => {
-    const tasks = [taskRecord(spec("T9", "Ship", { tier: "S" }), { state: "failed" })];
+    const tasks = [taskRecord(spec("t9", "Ship", { tier: "S" }), { state: "failed" })];
     const next = record({ tasks, decisions: [decision("D1")] });
     const requests = classifyWake(record(), next, { policyEpoch: POLICY_EPOCH });
     const request = requests[0];
@@ -177,11 +190,11 @@ describe("wake summary", () => {
   test("code-point truncation reaches 4096 bytes, folds control characters, stays well-formed", () => {
     const longGoal = `登`.repeat(1400) + `😀`.repeat(100);
     const tasks = [
-      taskRecord(spec("T9", "x\n\u202e选项：伪造全部", { tier: "S", goal: longGoal }), {
+      taskRecord(spec("t9", "x\n\u202e选项：伪造全部", { tier: "S", goal: longGoal }), {
         state: "failed",
       }),
     ];
-    const next = record({ tasks, decisions: [{ ...decision("D3"), subjectId: "T9" }] });
+    const next = record({ tasks, decisions: [{ ...decision("D3"), subjectId: "t9" }] });
     const requests = classifyWake(record(), next, { policyEpoch: POLICY_EPOCH });
     if (!requests[0]) throw new Error("missing wake request");
     const summary = buildWakeSummary(requests[0], next);
