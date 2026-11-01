@@ -1,44 +1,35 @@
 import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
-import type { TeamMode } from "../schemas/team-mode";
-import { readStoredMode } from "./mode-contract";
 import {
-  type AvailableProfileSelection,
-  type EconomyPolicy,
   type HostSnapshot,
+  type ProfileSelection,
   resolveCoordinatorProfile,
 } from "./mode-resolver";
+import { reviewFamilyIssue } from "./review-family";
 import type { ModeIssue } from "./role-execution";
 import { buildSeatPlan, type RuntimeCapabilities, type SeatPlan } from "./seat-plan";
 
-/** The fields planning reads from a Team; drafts never need ids, names, or timestamps. */
-export type TeamPlanningFields = Pick<
-  Team,
-  "mode" | "coordinatorRoleId" | "members" | "memberCreation" | "collaboration"
->;
+/**
+ * The fields planning reads from a Team; drafts never need ids, names, or timestamps. A stored
+ * `mode` or `collaboration` is deliberately not among them: those fields are retired.
+ */
+export type TeamPlanningFields = Pick<Team, "coordinatorRoleId" | "members" | "memberCreation">;
 
 export type TeamModelCoordinator = {
   role: Role | null;
-  selection: AvailableProfileSelection | null;
+  selection: ProfileSelection | null;
   warnings: readonly string[];
-  /** Legacy resolveProfile reason (e.g. provider-unavailable); the caller localizes it. */
+  /** resolveProfile's reason (e.g. provider-unavailable); the caller localizes it. */
   legacyFailureReason: string | null;
-  issues: readonly ModeIssue[];
 };
 
 export type TeamModelPlan = {
-  effectiveMode: TeamMode | null;
-  rawMode?: string;
+  /** Always "sota": the DTOs keep their `mode` field, but there is one planning path. */
+  effectiveMode: "sota";
   team: TeamPlanningFields;
   seatPlan: SeatPlan;
   coordinator: TeamModelCoordinator;
   issues: readonly ModeIssue[];
-  /**
-   * Issues beyond the seat plan's own: the coordinator's and, in economy-all, the all-seats policy
-   * configuration. `issues` already contains them; callers that render the seat plan separately
-   * use this to add only the rest.
-   */
-  extraIssues: readonly ModeIssue[];
   blockers: readonly ModeIssue[];
 };
 
@@ -46,11 +37,8 @@ export type BuildTeamModelPlanInput = {
   team: TeamPlanningFields;
   roles: readonly Role[];
   host: HostSnapshot;
-  economy: EconomyPolicy;
   maxMembers: number;
   runtimeCapabilities?: RuntimeCapabilities;
-  /** Launch-time override; otherwise the stored Team mode is read. */
-  mode?: TeamMode;
 };
 
 /**
@@ -59,71 +47,43 @@ export type BuildTeamModelPlanInput = {
  * their callers.
  */
 export function buildTeamModelPlan(input: BuildTeamModelPlanInput): TeamModelPlan {
-  const stored = readStoredMode(input.team.mode);
-  const effectiveMode = input.mode ?? (stored.status === "known" ? stored.mode : null);
-  const rawMode = effectiveMode === null && stored.status === "unknown" ? stored.raw : undefined;
-
   const seatPlan = buildSeatPlan({
     team: input.team,
     roles: input.roles,
     host: input.host,
-    economy: input.economy,
     maxMembers: input.maxMembers,
-    ...(effectiveMode === null ? {} : { mode: effectiveMode }),
     runtimeCapabilities: input.runtimeCapabilities,
   });
 
-  const issues: ModeIssue[] = [...seatPlan.issues];
   const role = input.roles.find((entry) => entry.id === input.team.coordinatorRoleId) ?? null;
   let coordinator: TeamModelCoordinator = {
     role,
     selection: null,
     warnings: [],
     legacyFailureReason: null,
-    issues: [],
   };
-  if (effectiveMode !== null && role !== null) {
-    const resolved = resolveCoordinatorProfile({
-      mode: effectiveMode,
-      role,
-      host: input.host,
-      economy: input.economy,
-    });
-    if (resolved.ok) {
-      coordinator = {
-        role,
-        selection: resolved.selection,
-        warnings: resolved.warnings,
-        legacyFailureReason: null,
-        issues: resolved.issues,
-      };
-    } else {
-      coordinator = {
-        role,
-        selection: null,
-        warnings: [],
-        legacyFailureReason: resolved.legacyReason ?? null,
-        issues: resolved.issues,
-      };
-    }
+  if (role !== null) {
+    const resolved = resolveCoordinatorProfile({ role, host: input.host });
+    coordinator = resolved.ok
+      ? {
+          role,
+          selection: resolved.selection,
+          warnings: resolved.warnings,
+          legacyFailureReason: null,
+        }
+      : { role, selection: null, warnings: [], legacyFailureReason: resolved.legacyReason };
   }
-  const allSeatsIssues: ModeIssue[] = [];
-  if (effectiveMode === "economy-all" && input.economy.allSeats?.status === "ready") {
-    // Static policy problems (bad entry, outside-list id, over-limit) reach the DTO instead of
-    // staying inside normalize; absent/invalid policies already block through resolveCheapSeat.
-    allSeatsIssues.push(...input.economy.allSeats.issues);
-  }
-  const extraIssues = [...coordinator.issues, ...allSeatsIssues];
-  issues.push(...extraIssues);
+
+  const issues: ModeIssue[] = [...seatPlan.issues];
+  const reviewIssue = reviewFamilyIssue(seatPlan.seats);
+  if (reviewIssue !== null) issues.push(reviewIssue);
   const blockers = issues.filter((entry) => entry.severity === "blocker");
   return {
-    effectiveMode,
-    ...(rawMode === undefined ? {} : { rawMode }),
+    effectiveMode: "sota",
     team: input.team,
     seatPlan,
     coordinator,
     issues,
-    extraIssues,
     blockers,
   };
 }

@@ -4,8 +4,6 @@
  * I01 also exposes this module as `zh.teamPlan` for API parity; the B03 components import it
  * directly, so edits here reach both. No other task writes this file.
  */
-import { modesZh } from "./modes";
-
 export const teamPlanZh = {
   pending: "正在计算模型…",
   loadFailed: "暂无法读取模型",
@@ -16,8 +14,6 @@ export const teamPlanZh = {
   legacyUnavailable: "当前插件版本不支持模型规划",
 
   group: (label: string, count: number) => `${label} ×${count}`,
-  groupWithStandby: (label: string, count: number, standby: number) =>
-    `${label} ×${count}（待命 ${standby}）`,
   unresolved: (count: number, reasons: string) =>
     reasons ? `未解析 ×${count}：${reasons}` : `未解析 ×${count}`,
   reasonCount: (label: string, count: number) => `${label} ×${count}`,
@@ -27,8 +23,6 @@ export const teamPlanZh = {
     profileMissing: "Profile 已删除",
     providerUnavailable: "Provider 不可用",
     unverified: "可用性未核实",
-    routeUnavailable: "路由未配置",
-    noCheapProfile: "无合格廉价 Profile",
     policy: "策略限制",
   },
 
@@ -56,7 +50,6 @@ export const teamPlanZh = {
   noProfile: "未绑定",
   noSelection: "当前无可运行的选中 Profile",
   rebind: "去绑定",
-  configureEconomy: modesZh.economyPoolAction,
 
   reservedRowKey: "成员行不能占用协调者的 rowKey",
   duplicateRowKey: "成员行存在重复 rowKey，请刷新后重试",
@@ -73,5 +66,4 @@ export const teamPlanZh = {
   },
   roleFocusProfile: (name: string) => `已定位 Profile「${name}」：在首选或备选中调整。`,
   roleFocusUnbound: "该 Role 尚未绑定 Profile：在首选中添加。",
-  economyFocus: (layer: string, route?: string) => `已定位：${layer}${route ? ` · ${route}` : ""}`,
 };

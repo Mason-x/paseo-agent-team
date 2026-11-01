@@ -3,7 +3,8 @@ import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
 import { canonicalize } from "./catalog-content";
 import type { LaunchPlan } from "./launch-plan";
-import type { EconomyPolicy, HostSnapshot } from "./mode-resolver";
+import type { HostSnapshot } from "./mode-resolver";
+import { omitRetired } from "./retired-fields";
 import { MAX_RUNTIME_MEMBERS, type RuntimeCapabilities } from "./seat-plan";
 
 export type LaunchHashTarget =
@@ -15,12 +16,17 @@ export type LaunchPlanHashInput = {
   roles: readonly Role[];
   plan: LaunchPlan;
   host: HostSnapshot;
-  economy: EconomyPolicy;
   target: LaunchHashTarget;
   task: string;
   maxMembers: number;
   runtimeCapabilities: RuntimeCapabilities;
 };
+
+/**
+ * Bumped when the planner's inputs change shape. A preview made before the single-path planner
+ * (no version, or 2) can never match a fingerprint made by this one, so it asks for a new preview.
+ */
+export const LAUNCH_PLANNER_VERSION = 3;
 
 function profileTuple(profile: PaseoProfile): Record<string, unknown> {
   return {
@@ -34,35 +40,20 @@ function profileTuple(profile: PaseoProfile): Record<string, unknown> {
   };
 }
 
-function selectedProfileIds(plan: LaunchPlan, economy: EconomyPolicy): Set<string> {
+function selectedProfileIds(plan: LaunchPlan): Set<string> {
   const ids = new Set<string>();
-  if (plan.mode === "economy-all") {
-    const allSeats = economy.allSeats;
-    if (allSeats?.status === "ready") {
-      for (const routeIds of Object.values(allSeats.routes)) {
-        for (const id of routeIds ?? []) ids.add(id);
-      }
-      for (const orderIds of Object.values(allSeats.executionTaskOrder)) {
-        for (const id of orderIds ?? []) ids.add(id);
-      }
-    }
-  } else {
-    for (const entry of economy.pool) ids.add(entry.profileId);
-  }
   if (plan.coordinator.profile.id !== "missing") ids.add(plan.coordinator.profile.id);
-  for (const seat of plan.seats) {
-    if (seat.selected.unavailable) continue;
-    ids.add(seat.selected.profile.id);
-    for (const alternate of seat.selected.alternates ?? []) ids.add(alternate);
-  }
+  for (const seat of plan.seats) ids.add(seat.selected.profile.id);
   return ids;
 }
 
 /**
  * Canonical launch fingerprint input. The hash covers only what can change this launch plan: the
- * selected Team, its referenced Roles, selected Profile runtime tuples, economy policy, maxMembers,
- * availability, mode, runtime capabilities, target, and task. Seat ids, run ids, unrelated Roles
- * or Teams, document revisions, Profile notes, and other preference fields are deliberately absent.
+ * selected Team, its referenced Roles, selected Profile runtime tuples, maxMembers, availability,
+ * runtime capabilities, target, and task. Retired settings keys (a Team's mode and collaboration, a
+ * Role's executionPolicy) are left out: planning ignores them, so saving them away cannot change a
+ * launch. Seat ids, run ids, unrelated Roles or Teams, document revisions, Profile notes, and other
+ * preference fields are deliberately absent.
  */
 export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
   const referencedRoleIds = new Set<string>([
@@ -71,10 +62,10 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
   ]);
   const roles = input.roles
     .filter((role) => referencedRoleIds.has(role.id))
-    .map((role) => canonicalize(role as unknown as Record<string, unknown>))
+    .map((role) => canonicalize(omitRetired("role", role) as unknown as Record<string, unknown>))
     .sort();
 
-  const profileIds = selectedProfileIds(input.plan, input.economy);
+  const profileIds = selectedProfileIds(input.plan);
   const profiles =
     input.host.status === "ready"
       ? input.host.profiles
@@ -95,100 +86,21 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
     instanceLabel: seat.instanceLabel ?? null,
     purpose: seat.purpose,
     activation: seat.activation,
-    profileId: seat.selected.unavailable ? null : seat.selected.profile.id,
+    profileId: seat.selected.profile.id,
     source: seat.selected.source,
-    family: seat.selected.family ?? null,
-    ...(seat.selected.route === undefined ? {} : { route: seat.selected.route }),
-    alternates: [...(seat.selected.alternates ?? [])],
-    budget: seat.selected.budget,
-    budgetBasis: seat.selected.budgetBasis,
-    standby: seat.selected.standby,
-    unavailable: seat.selected.unavailable,
   }));
 
-  const economyAll = input.plan.mode === "economy-all";
-  const allSeats = input.economy.allSeats;
-  const referencedIds = new Set<string>();
-  if (allSeats?.status === "ready") {
-    for (const ids of Object.values(allSeats.routes)) {
-      for (const id of ids ?? []) referencedIds.add(id);
-    }
-    for (const ids of Object.values(allSeats.executionTaskOrder)) {
-      for (const id of ids ?? []) referencedIds.add(id);
-    }
-  }
-  const referencedBudget = Object.fromEntries(
-    [...referencedIds]
-      .filter((profileId) => input.economy.profileBudget[profileId] !== undefined)
-      .sort()
-      .map((profileId) => [profileId, input.economy.profileBudget[profileId]]),
-  );
-  const allSeatsPayload =
-    allSeats === undefined || allSeats.status === "absent"
-      ? { status: "absent" }
-      : allSeats.status === "invalid"
-        ? {
-            status: "invalid",
-            reason: allSeats.reason,
-            ...(allSeats.version === undefined ? {} : { version: allSeats.version }),
-          }
-        : {
-            status: "ready",
-            version: allSeats.version,
-            profiles: [...allSeats.profiles]
-              .sort((left, right) => left.profileId.localeCompare(right.profileId))
-              .map((entry) => ({
-                profileId: entry.profileId,
-                enabled: entry.enabled,
-                family: entry.family,
-                boundModel: entry.boundModel,
-                live:
-                  input.host.status === "ready"
-                    ? (() => {
-                        const live = input.host.profiles.find(
-                          (profile) => profile.id === entry.profileId,
-                        );
-                        if (!live) return { tuple: null, availability: "unverified" };
-                        const row = input.host.availability.find(
-                          (candidate) => candidate.provider === live.provider,
-                        );
-                        return {
-                          tuple: profileTuple(live),
-                          availability:
-                            row === undefined
-                              ? "unverified"
-                              : row.available
-                                ? "available"
-                                : "unavailable",
-                        };
-                      })()
-                    : { tuple: null, availability: "unverified" },
-              })),
-            routes: allSeats.routes,
-            executionTaskOrder: allSeats.executionTaskOrder,
-          };
-
   const payload: Record<string, unknown> = {
-    mode: input.plan.mode,
-    team: canonicalize(input.team as unknown as Record<string, unknown>),
+    plannerVersion: LAUNCH_PLANNER_VERSION,
+    team: canonicalize(omitRetired("team", input.team) as unknown as Record<string, unknown>),
     roles,
     coordinator: {
       roleId: input.plan.coordinator.role.id,
       profileId:
         input.plan.coordinator.profile.id === "missing" ? null : input.plan.coordinator.profile.id,
       source: input.plan.coordinator.source,
-      ...(economyAll && input.plan.coordinatorSelected?.route === undefined
-        ? {}
-        : economyAll
-          ? { route: input.plan.coordinatorSelected?.route }
-          : {}),
     },
     seats,
-    economy: {
-      pool: input.economy.pool,
-      taskOrder: input.economy.taskOrder,
-      profileBudget: input.economy.profileBudget,
-    },
     profiles,
     availability,
     target: input.target,
@@ -196,10 +108,5 @@ export function launchPlanFingerprint(input: LaunchPlanHashInput): string {
     maxMembers: Math.min(input.maxMembers, MAX_RUNTIME_MEMBERS),
     runtimeCapabilities: input.runtimeCapabilities,
   };
-  if (economyAll) {
-    payload.plannerVersion = 2;
-    payload.allSeats = allSeatsPayload;
-    payload.economy = { profileBudget: referencedBudget };
-  }
   return canonicalize(payload);
 }

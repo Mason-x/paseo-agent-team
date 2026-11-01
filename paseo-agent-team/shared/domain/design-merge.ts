@@ -101,14 +101,9 @@ function sameContent(left: unknown, right: unknown): boolean {
 }
 
 function teamRoleIds(team: Team): string[] {
+  // A retired collaboration block may still ride on an old result; planning ignores it, so the
+  // Roles it names are not part of what the Team needs.
   const ids = [team.coordinatorRoleId, ...team.members.map((member) => member.roleId)];
-  const collaboration = team.collaboration;
-  if (collaboration) {
-    if (typeof collaboration.judgeRoleId === "string") ids.push(collaboration.judgeRoleId);
-    if (typeof collaboration.escalationRoleId === "string") {
-      ids.push(collaboration.escalationRoleId);
-    }
-  }
   return [...new Set(ids)];
 }
 

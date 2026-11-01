@@ -2,11 +2,8 @@ import type { PaseoProfile, ProviderAvailability } from "../paseo/adapter";
 import { teamLabels } from "../paseo/labels";
 import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
-import type { TeamMode } from "../schemas/team-mode";
 import { zh } from "../zh";
-import { cheapIssueText } from "../zh/mode-plan";
-import type { EconomyPolicy, HostSnapshot, ProfileSelection } from "./mode-resolver";
-import { resolveCoordinatorProfile } from "./mode-resolver";
+import type { HostSnapshot } from "./mode-resolver";
 import { resolveProfile } from "./profile-resolver";
 import {
   type CoordinatorRosterEntry,
@@ -22,9 +19,7 @@ import { coordinatorToolsBlocker } from "./tools-readiness";
 export type { RuntimeCapabilities } from "./seat-plan";
 export { MAX_RUNTIME_MEMBERS } from "./seat-plan";
 
-const EMPTY_ECONOMY_POLICY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
-
-export type PlannedSource = "role-preferred" | "role-fallback" | "economy-pool";
+export type PlannedSource = "role-preferred" | "role-fallback";
 
 export type PlannedAgent = {
   kind: "coordinator" | "member";
@@ -41,7 +36,8 @@ export type PlannedAgent = {
 
 export type LaunchPlan = {
   runId: string;
-  mode: TeamMode;
+  /** Always "sota": the DTOs keep a `mode` field, but there is one planning path. */
+  mode: "sota";
   team: Team;
   workspaceId: string;
   task: string;
@@ -51,13 +47,6 @@ export type LaunchPlan = {
   seatCounts: SeatCounts;
   seatBudget: SeatBudgetCounts;
   seatIssues: ModeIssue[];
-  /** The same selection the coordinator was built from; preview uses it for the new mode. */
-  coordinatorSelected?: ProfileSelection;
-  /**
-   * The stored Team.mode this version cannot read. `mode` above is then only an internal
-   * placeholder (planning is blocked by MODE_UNKNOWN); consumers must not present it as resolved.
-   */
-  rawMode?: string;
   kickoffMessage: string;
   warnings: string[];
   blockers: string[];
@@ -99,10 +88,6 @@ function seatBlockerText(
   const value = entry.params.value === undefined ? "" : String(entry.params.value);
 
   switch (entry.code) {
-    case "MODE_CHEAP_POLICY_REQUIRED":
-    case "MODE_CHEAP_PROFILE_INVALID":
-    case "MODE_CHEAP_ROUTE_UNAVAILABLE":
-      return cheapIssueText(entry);
     case "MODE_MEMBER_LIMIT":
       return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
     case "MODE_SEAT_DUPLICATE":
@@ -122,14 +107,6 @@ function seatBlockerText(
       const detail = [field, value].filter(Boolean).join("=");
       return zh.modes.unknown(detail);
     }
-    case "MODE_ROLE_POLICY_UNKNOWN":
-      return zh.modes.rolePolicyUnknown(label);
-    case "MODE_ESCALATION_INVALID":
-      return zh.modes.escalationInvalid(label, reason);
-    case "MODE_ESCALATION_UNAVAILABLE":
-      return zh.modes.escalationUnavailable(label, reason);
-    case "MODE_JUDGE_REQUIRED":
-      return zh.modes.judgeRequired(reason);
     case "MODE_ONDEMAND_UNAVAILABLE":
       return zh.modes.onDemandUnavailable;
     default:
@@ -155,16 +132,8 @@ export function warningIssueText(entry: ModeIssue, seats: readonly PlannedSeat[]
   const reason = typeof entry.params.reason === "string" ? entry.params.reason : "";
   const field = typeof entry.params.field === "string" ? entry.params.field : "";
   const value = entry.params.value === undefined ? "" : String(entry.params.value);
-  const profileId = typeof entry.params.profileId === "string" ? entry.params.profileId : "";
-  const requested = Number(entry.params.requested);
-  const families = Number(entry.params.families);
-  const provider = typeof entry.params.provider === "string" ? entry.params.provider : undefined;
 
   switch (entry.code) {
-    case "MODE_CHEAP_POLICY_REQUIRED":
-    case "MODE_CHEAP_PROFILE_INVALID":
-    case "MODE_CHEAP_ROUTE_UNAVAILABLE":
-      return cheapIssueText(entry);
     case "MODE_MEMBER_LIMIT":
       return zh.exceedMax(Number(entry.params.members), Number(entry.params.limit));
     case "MODE_SEAT_DUPLICATE":
@@ -184,40 +153,12 @@ export function warningIssueText(entry: ModeIssue, seats: readonly PlannedSeat[]
         : zh.modes.contextUnavailable;
     case "MODE_UNKNOWN":
       return zh.modes.unknown([field, value].filter(Boolean).join("="));
-    case "MODE_ROLE_POLICY_UNKNOWN":
-      return zh.modes.rolePolicyWarning(label);
-    case "MODE_ESCALATION_INVALID":
-      return zh.modes.escalationInvalid(label, reason);
-    case "MODE_ESCALATION_UNAVAILABLE":
-      return zh.modes.escalationUnavailable(label, reason);
-    case "MODE_JUDGE_REQUIRED":
-      return zh.modes.judgeRequired(reason);
-    case "MODE_ONDEMAND_FALLBACK_EAGER":
-      return zh.modes.onDemandFallbackEager;
     case "MODE_ONDEMAND_UNAVAILABLE":
       return zh.modes.onDemandUnavailable;
-    case "MODE_POOL_EMPTY":
-      return zh.modes.poolEmpty;
-    case "MODE_POOL_UNAVAILABLE":
-      return zh.modes.poolUnavailable(provider);
-    case "MODE_POOL_ENTRY_MISSING":
-      return zh.modes.poolEntryMissing(profileId || label);
-    case "MODE_POOL_CONFIG_INVALID":
-      return zh.modes.poolConfigInvalid(field);
-    case "MODE_POOL_DUPLICATE":
-      return zh.modes.poolDuplicate(profileId || label);
-    case "MODE_POOL_ORDER_IGNORED":
-      return zh.modes.poolOrderIgnored(profileId || label);
-    case "MODE_FAMILY_MISSING":
-      return zh.modes.familyMissing(profileId || label);
-    case "MODE_FAMILIES_REDUCED":
-      return zh.modes.familiesReduced(requested, families);
-    case "MODE_COLLAB_UNAVAILABLE":
-      return zh.modes.collaborationUnavailable;
-    case "MODE_NO_EXECUTION_COHORT":
-      return zh.modes.noExecutionCohort;
     case "MODE_LIMIT_CLAMPED":
       return zh.modes.limitClamped(Number(entry.params.limit));
+    case "MODE_REVIEW_FAMILY_SAME":
+      return zh.modes.reviewFamilySame(String(entry.params.family ?? ""));
     default:
       return zh.modes.unknownFallback(entry.code);
   }
@@ -232,13 +173,9 @@ export function buildLaunchPlan(input: {
   task: string;
   runId: string;
   maxMembers: number;
-  /** Launch-time mode override; otherwise the Team's stored mode (default sota). */
-  mode?: TeamMode;
-  /** Host snapshot for mode planning. Falls back to a ready snapshot from profiles/availability. */
+  /** Host snapshot for planning. Falls back to a ready snapshot from profiles/availability. */
   host?: HostSnapshot;
-  /** Host economy pool. Empty by default, so non-SOTA modes fall back to original bindings. */
-  economy?: EconomyPolicy;
-  /** Runtime capability flags; absent means this version supports no deferred or collaborative work. */
+  /** Runtime capability flags; absent means this version supports no deferred work. */
   runtimeCapabilities?: RuntimeCapabilities;
   /** Raw daemon config, used to confirm the coordinator can reach Paseo's delegation tools. */
   daemonConfig?: unknown;
@@ -324,34 +261,16 @@ export function buildLaunchPlan(input: {
     team,
     roles: input.roles,
     host,
-    economy: input.economy ?? EMPTY_ECONOMY_POLICY,
     maxMembers: input.maxMembers,
-    ...(input.mode === undefined ? {} : { mode: input.mode }),
     runtimeCapabilities: capabilities,
   });
   const seatPlan = modelPlan.seatPlan;
   for (const entry of seatPlan.blockers) {
-    if (
-      entry.code === "MODE_ONDEMAND_UNAVAILABLE" &&
-      seatPlan.mode === "collaborative" &&
-      !capabilities.collaboration
-    ) {
-      // The collaboration capability blocker below explains the same situation; keep one copy.
-      continue;
-    }
     blockers.push(seatBlockerText(entry, input.roles, seatPlan.seats));
   }
-  for (const entry of seatPlan.issues) {
+  for (const entry of modelPlan.issues) {
     if (entry.severity !== "warning") continue;
     warnings.push(warningIssueText(entry, seatPlan.seats));
-  }
-  // Coordinator policy warnings and (economy-all) all-seats configuration problems.
-  for (const entry of modelPlan.extraIssues) {
-    if (entry.severity !== "warning") continue;
-    warnings.push(warningIssueText(entry, seatPlan.seats));
-  }
-  if (seatPlan.mode === "collaborative" && !capabilities.collaboration) {
-    blockers.push(zh.modes.collaborationRuntimeUnavailable);
   }
 
   let enabledCount = 0;
@@ -371,26 +290,10 @@ export function buildLaunchPlan(input: {
   }
 
   let coordinator: PlannedAgent = emptyCoordinator;
-  let coordinatorSelected: ProfileSelection | undefined;
   if (coordinatorRole) {
-    // An unreadable stored mode is blocked by MODE_UNKNOWN, but the coordinator is still shown as
-    // the baseline did: the Role's own binding through the legacy resolver. Nothing starts.
-    const selection =
-      modelPlan.coordinator.selection ??
-      (modelPlan.effectiveMode === null
-        ? (() => {
-            const legacy = resolveCoordinatorProfile({
-              mode: "sota",
-              role: coordinatorRole,
-              host,
-              economy: input.economy ?? EMPTY_ECONOMY_POLICY,
-            });
-            return legacy.ok ? legacy.selection : null;
-          })()
-        : null);
+    const selection = modelPlan.coordinator.selection;
     if (selection) {
       warnings.push(...modelPlan.coordinator.warnings);
-      coordinatorSelected = selection;
       const title = coordinatorTitle(team, task);
       coordinator = {
         kind: "coordinator",
@@ -412,7 +315,7 @@ export function buildLaunchPlan(input: {
           team,
           escalationAvailable: capabilities.expansion,
           ...(seatPlan.seats.length === 0 ||
-          (seatPlan.mode === "sota" && seatPlan.seats.every((seat) => seat.activation === "eager"))
+          seatPlan.seats.every((seat) => seat.activation === "eager")
             ? {}
             : {
                 roster: seatPlan.seats.reduce<CoordinatorRosterEntry[]>((rows, seat) => {
@@ -422,13 +325,11 @@ export function buildLaunchPlan(input: {
                     seatId: seat.seatId,
                     role,
                     instanceLabel: seat.instanceLabel,
-                    profile: seat.selected.unavailable
-                      ? null
-                      : {
-                          name: seat.selected.profile.name,
-                          provider: seat.selected.profile.provider,
-                          model: seat.selected.profile.model,
-                        },
+                    profile: {
+                      name: seat.selected.profile.name,
+                      provider: seat.selected.profile.provider,
+                      model: seat.selected.profile.model,
+                    },
                     activation: seat.activation,
                   });
                   return rows;
@@ -440,10 +341,6 @@ export function buildLaunchPlan(input: {
       if (toolsBlocker) blockers.push(toolsBlocker);
     } else if (modelPlan.coordinator.legacyFailureReason !== null) {
       blockers.push(zh.coordinatorProfileFail(modelPlan.coordinator.legacyFailureReason));
-    } else {
-      for (const entry of modelPlan.coordinator.issues) {
-        blockers.push(seatBlockerText(entry, input.roles, seatPlan.seats));
-      }
     }
   }
 
@@ -451,7 +348,7 @@ export function buildLaunchPlan(input: {
   // Preview fidelity: materialize eager seats even when the plan is blocked. Launch safety stays
   // with launch-service, which rejects every plan with a non-empty blocker list before creating.
   for (const seat of seatPlan.seats) {
-    if (seat.activation !== "eager" || seat.selected.unavailable) continue;
+    if (seat.activation !== "eager") continue;
     const role = roleById.get(seat.roleId);
     if (!role) continue;
     members.push({
@@ -480,23 +377,12 @@ export function buildLaunchPlan(input: {
     });
   }
 
-  // Restore the legacy per-Role Profile warnings (missing/unavailable/fallback) for seats that
-  // actually use the original binding; economy-pool seats never consulted it.
+  // Per-Role Profile warnings (missing / provider unavailable / fallback in use) for every seat.
   for (const seat of seatPlan.seats) {
-    if (seat.selected.unavailable || seat.selected.source === "economy-pool") continue;
     const role = roleById.get(seat.roleId);
     if (!role) continue;
     const resolved = resolveProfile(role, hostProfiles, hostAvailability);
     if (resolved.ok) warnings.push(...resolved.warnings);
-  }
-
-  if (
-    seatPlan.seats.length > 0 &&
-    members.length === 0 &&
-    !capabilities.onDemand &&
-    seatPlan.blockers.length === 0
-  ) {
-    blockers.push(zh.modes.staleEscalationOnly);
   }
 
   const kickoffMessage = compileKickoffMessage({
@@ -519,7 +405,7 @@ export function buildLaunchPlan(input: {
 
   return {
     runId: input.runId,
-    mode: seatPlan.mode,
+    mode: "sota",
     team,
     workspaceId: input.workspaceId,
     task,
@@ -529,8 +415,6 @@ export function buildLaunchPlan(input: {
     seatCounts: seatPlan.counts,
     seatBudget: seatPlan.budget,
     seatIssues: [...modelPlan.issues],
-    ...(coordinatorSelected === undefined ? {} : { coordinatorSelected }),
-    ...(modelPlan.rawMode === undefined ? {} : { rawMode: modelPlan.rawMode }),
     kickoffMessage,
     warnings: [...new Set(warnings)],
     blockers: [...new Set(blockers)],

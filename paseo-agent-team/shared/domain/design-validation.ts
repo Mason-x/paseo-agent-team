@@ -19,6 +19,7 @@ import {
   DesignResultSchema,
   DesignRoleGapProposalSchema,
   DesignTimeSchema,
+  RETIRED_GAP_EXECUTION_POLICY,
 } from "../schemas/design";
 import type { Preferences } from "../schemas/preferences";
 import type { Role } from "../schemas/role";
@@ -32,15 +33,15 @@ import { utf8ByteLength } from "./design-output";
 import type { DesignPlanCheck, DesignPlanningPort } from "./design-planning";
 import { designNewRoleLimit } from "./design-planning";
 import type { HostSnapshot } from "./mode-resolver";
-import { identifyModelFamily, namesHighCostFamily } from "./model-family";
 import type { ModeIssue, ModeIssueCode } from "./role-execution";
-import { isRoleTier, isTaskKind } from "./role-execution";
 
 export type DesignPlanSuccess = Extract<DesignPlanCheck, { ok: true }>;
 
+/** Every design job plans on the one path; the DTOs and ledgers still record this value. */
+const DESIGN_MODE: TeamMode = "sota";
+
 export type DesignValidationContext = {
   request: string;
-  mode: TeamMode;
   jobId: string;
   attempt: 1 | 2 | 3;
   nonce: string;
@@ -207,19 +208,9 @@ function schemaIssues(
 function modeAction(code: ModeIssueCode): DesignIssueAction {
   switch (code) {
     case "MODE_CONTEXT_UNAVAILABLE":
-    case "MODE_POOL_EMPTY":
-    case "MODE_POOL_UNAVAILABLE":
-    case "MODE_POOL_ENTRY_MISSING":
     case "MODE_PROFILE_UNRESOLVED":
-    case "MODE_FAMILY_MISSING":
-    case "MODE_FAMILIES_REDUCED":
-    case "MODE_ESCALATION_UNAVAILABLE":
-    case "MODE_NO_EXECUTION_COHORT":
       return "refresh";
     case "MODE_UNKNOWN":
-    case "MODE_POOL_CONFIG_INVALID":
-    case "MODE_POOL_DUPLICATE":
-    case "MODE_POOL_ORDER_IGNORED":
       return "inspect";
     default:
       return "repair";
@@ -250,11 +241,6 @@ function normalizeRoleName(name: string): string {
 
 function expectedRolePrefix(roleId: string): string | undefined {
   return ROLE_PREFIXES.find(([prefix]) => roleId.startsWith(prefix))?.[1];
-}
-
-function memberCreationFor(mode: TeamMode, onDemand: boolean): string {
-  if (mode === "sota" || !onDemand) return "eager";
-  return "on-demand";
 }
 
 function materializedProfileRef(profile: PaseoProfile): {
@@ -308,7 +294,6 @@ function buildNewRole(
     fallbackProfiles: refs(role.fallbackProfiles),
     ...(role.color !== undefined ? { color: role.color } : {}),
     ...(role.icon !== undefined ? { icon: role.icon } : {}),
-    executionPolicy: role.executionPolicy,
     noveltyReason: role.noveltyReason,
     enabled: true,
     createdAt: identity.createdAt,
@@ -337,11 +322,7 @@ function buildTeam(
     id: identity.teamId,
     name: proposal.team.name,
     ...(proposal.team.description !== undefined ? { description: proposal.team.description } : {}),
-    mode: context.mode,
-    memberCreation: memberCreationFor(context.mode, context.capabilities.onDemand),
-    ...(proposal.team.collaboration !== undefined
-      ? { collaboration: proposal.team.collaboration }
-      : {}),
+    memberCreation: "eager",
     coordinatorRoleId: proposal.team.coordinatorRoleId,
     members,
     ...(proposal.team.operatingRules !== undefined
@@ -426,24 +407,15 @@ function coordinatorLogicalSeatId(plan: DesignPlanSuccess): string {
   return seat?.logicalSeatId ?? COORDINATOR_LOGICAL_SEAT_ID;
 }
 
-function targetRoleId(team: Team, target: DesignChoiceTarget): string | undefined {
-  if (target === "coordinator") return team.coordinatorRoleId;
-  const index = Number(target.slice(1)) - 1;
-  return team.members[index]?.roleId;
-}
-
 type ExpectedProfileIds =
   | { kind: "profiles"; profileIds: string[] }
   | { kind: "missing"; reason: "missing-seat" | "missing-coordinator" }
-  | { kind: "invalid"; reason: "missing-profile" }
-  | { kind: "optional-empty" };
+  | { kind: "invalid"; reason: "missing-profile" };
 
 /**
- * T4 seam: ordered Profile IDs for one logical target. The model's mN key is not a logical seat
- * id: members first map through identity.logicalSeatIds to the real logicalSeatId, then match
- * member/candidate seats for that logical seat. Coordinator comes from T4's independent field.
- * Automatic judge/standby seats are excluded; only an explicitly unavailable escalation seat may
- * produce an empty choice.
+ * Planner seam: ordered Profile IDs for one logical target. The model's mN key is not a logical
+ * seat id: members first map through identity.logicalSeatIds to the real logicalSeatId, then match
+ * the member seat for that logical seat. Coordinator comes from the preview's independent field.
  */
 function expectedProfileIdsForTarget(
   plan: DesignPlanSuccess,
@@ -461,37 +433,15 @@ function expectedProfileIdsForTarget(
 
   const logicalSeatId = logicalSeatIds[target];
   if (!logicalSeatId) return { kind: "missing", reason: "missing-seat" };
-  const roleId = targetRoleId(team, target);
-  const candidates = plan.preview.seats
+  const matching = plan.preview.seats
     .map(asPreviewSeat)
     .filter((seat): seat is PreviewSeatView => seat !== undefined)
-    .filter((seat) => {
-      const sameLogicalSeat =
-        seat.logicalSeatId !== undefined
-          ? seat.logicalSeatId === logicalSeatId
-          : seat.seatId === logicalSeatId;
-      return sameLogicalSeat;
-    });
-  // A same-Role standby escalation channel may share the member's logical seat. Use it only
-  // when there is no primary member/candidate seat to choose from.
-  const primary = candidates.filter(
-    (seat) => seat.activation !== "escalation-only" && seat.purpose !== "judge",
-  );
-  const matching =
-    primary.length > 0
-      ? primary
-      : candidates.filter(
-          (seat) =>
-            (seat.purpose === "judge" || seat.purpose === "escalation") && seat.roleId === roleId,
-        );
+    .filter((seat) =>
+      seat.logicalSeatId !== undefined
+        ? seat.logicalSeatId === logicalSeatId
+        : seat.seatId === logicalSeatId,
+    );
   if (matching.length === 0) return { kind: "missing", reason: "missing-seat" };
-  if (
-    matching.every((seat) => seat.purpose === "escalation") &&
-    matching.every((seat) => seat.profileId === undefined) &&
-    matching.every((seat) => seat.source === "unavailable" || seat.activation === "escalation-only")
-  ) {
-    return { kind: "optional-empty" };
-  }
   if (matching.some((seat) => seat.profileId === undefined)) {
     return { kind: "invalid", reason: "missing-profile" };
   }
@@ -534,17 +484,6 @@ export function describeProfileChoiceMismatches(
     const expected = expectedProfileIdsForTarget(plan, target, team, logicalSeatIds);
     const expectedProfileIds = expected.kind === "profiles" ? expected.profileIds : [];
     const actualProfileIds = choices.get(target)?.profileIds ?? [];
-    if (expected.kind === "optional-empty") {
-      if (actualProfileIds.length > 0) {
-        mismatches.push({
-          target,
-          actualProfileIds,
-          expectedProfileIds: [],
-          reason: "mismatch",
-        });
-      }
-      continue;
-    }
     if (expected.kind === "missing" || expected.kind === "invalid") {
       mismatches.push({
         target,
@@ -594,7 +533,6 @@ export type DesignContentCheckInput = {
   roles: readonly Role[];
   profiles: readonly PaseoProfile[];
   jobId: string;
-  mode: TeamMode;
   logicalSeatIds: Readonly<Record<string, string>>;
   hasher?: (canonicalContent: string) => string;
   allowExistingOwnRows?: boolean;
@@ -676,19 +614,6 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
     if (!completeOrigin(role, input.jobId)) {
       issues.push(
         error("DESIGN_INPUT_INVALID", ["newRoles", index, "source"], { roleId: role.id }),
-      );
-    }
-    if (
-      typeof role.executionPolicy?.tier !== "string" ||
-      !isRoleTier(role.executionPolicy.tier) ||
-      typeof role.executionPolicy.taskKind !== "string" ||
-      !isTaskKind(role.executionPolicy.taskKind)
-    ) {
-      issues.push(
-        error("DESIGN_MODE_PLAN_INVALID", ["newRoles", index, "executionPolicy"], {
-          modeCode: "MODE_ROLE_POLICY_UNKNOWN",
-          roleId: role.id,
-        }),
       );
     }
     if (role.preferredProfiles.length === 0 || role.preferredProfiles.length > 5) {
@@ -796,9 +721,6 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
 
   if (!isSlug(input.team.id)) {
     issues.push(error("DESIGN_TEAM_INVALID", ["team", "id"], { teamId: input.team.id }));
-  }
-  if (input.team.mode !== input.mode) {
-    issues.push(error("DESIGN_TEAM_INVALID", ["team", "mode"], { mode: String(input.team.mode) }));
   }
   if (!completeOrigin(input.team, input.jobId)) {
     issues.push(error("DESIGN_INPUT_INVALID", ["team", "source"], {}));
@@ -916,29 +838,6 @@ export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[
       labels.add(normalized);
     }
   }
-  if (input.team.collaboration && input.mode !== "collaborative") {
-    issues.push(
-      error("DESIGN_TEAM_INVALID", ["team", "collaboration"], { reason: "mode-not-collaborative" }),
-    );
-  }
-  if (input.team.collaboration) {
-    const memberRoleIds = new Set(input.team.members.map((member) => member.roleId));
-    for (const field of ["judgeRoleId", "escalationRoleId"] as const) {
-      const value = input.team.collaboration[field];
-      if (value === undefined) continue;
-      if (
-        typeof value !== "string" ||
-        !memberRoleIds.has(value) ||
-        value === input.team.coordinatorRoleId
-      ) {
-        issues.push(
-          error("DESIGN_TEAM_INVALID", ["team", "collaboration", field], {
-            roleId: String(value),
-          }),
-        );
-      }
-    }
-  }
 
   if (input.memberReasons) {
     const targets: DesignChoiceTarget[] = [
@@ -978,7 +877,6 @@ function planningInput(team: Team, roles: readonly Role[], context: DesignValida
     host: context.host,
     preferences: context.preferences,
     daemonConfig: context.daemonConfig,
-    mode: context.mode,
     workspaceId: context.targetWorkspaceId ?? context.carrierWorkspaceId,
     request: context.request,
   };
@@ -1102,19 +1000,6 @@ export function validateDesign(
       );
     }
     newNames.add(normalizedName);
-    if (
-      typeof role.executionPolicy?.tier !== "string" ||
-      !isRoleTier(role.executionPolicy.tier) ||
-      typeof role.executionPolicy.taskKind !== "string" ||
-      !isTaskKind(role.executionPolicy.taskKind)
-    ) {
-      issues.push(
-        error("DESIGN_MODE_PLAN_INVALID", ["newRoles", index, "executionPolicy"], {
-          modeCode: "MODE_ROLE_POLICY_UNKNOWN",
-          roleId: role.id,
-        }),
-      );
-    }
   });
 
   // Step 3: reuse set exactness.
@@ -1192,10 +1077,8 @@ export function validateDesign(
     }
   });
 
-  // Step 5: Team structure.
-  if (proposal.team.mode !== context.mode) {
-    issues.push(error("DESIGN_TEAM_INVALID", ["team", "mode"], { mode: proposal.team.mode }));
-  }
+  // Step 5: Team structure. A `mode` or `collaboration` block on the proposal is a retired field
+  // an older model output may still carry; it is neither required nor checked.
   if (proposal.team.members.length === 0) {
     issues.push(error("DESIGN_TEAM_INVALID", ["team", "members"], { reason: "empty" }));
   }
@@ -1247,32 +1130,6 @@ export function validateDesign(
         );
       }
       labels.add(normalized);
-    }
-  }
-  if (proposal.team.collaboration && context.mode !== "collaborative") {
-    issues.push(
-      error("DESIGN_TEAM_INVALID", ["team", "collaboration"], { reason: "mode-not-collaborative" }),
-    );
-  }
-  if (context.mode === "collaborative" && !context.capabilities.collaboration) {
-    issues.push(error("DESIGN_MODE_UNAVAILABLE", ["mode"], { mode: context.mode }));
-  }
-  if (proposal.team.collaboration) {
-    const memberRoleIds = new Set(proposal.team.members.map((member) => member.roleId));
-    for (const field of ["judgeRoleId", "escalationRoleId"] as const) {
-      const roleId = proposal.team.collaboration[field];
-      if (roleId === undefined) continue;
-      if (
-        typeof roleId !== "string" ||
-        !memberRoleIds.has(roleId) ||
-        roleId === proposal.team.coordinatorRoleId
-      ) {
-        issues.push(
-          error("DESIGN_TEAM_INVALID", ["team", "collaboration", field], {
-            roleId: String(roleId),
-          }),
-        );
-      }
     }
   }
   const coordinatorIsNew = newRoleIds.has(proposal.team.coordinatorRoleId);
@@ -1385,7 +1242,6 @@ export function validateDesign(
     roles: context.roles,
     profiles: liveProfiles,
     jobId: context.jobId,
-    mode: context.mode,
     logicalSeatIds: identity.logicalSeatIds,
     existingRolesOnly: rules?.existingRolesOnly,
   });
@@ -1436,10 +1292,9 @@ export function validateDesign(
     const expected = expectedProfileIdsForTarget(plan, target, team, identity.logicalSeatIds);
     const expectedProfileIds = expected.kind === "profiles" ? expected.profileIds : [];
     const matches =
-      expected.kind === "profiles"
-        ? choice.profileIds.length === expectedProfileIds.length &&
-          choice.profileIds.every((profileId, index) => profileId === expectedProfileIds[index])
-        : expected.kind === "optional-empty" && choice.profileIds.length === 0;
+      expected.kind === "profiles" &&
+      choice.profileIds.length === expectedProfileIds.length &&
+      choice.profileIds.every((profileId, index) => profileId === expectedProfileIds[index]);
     if (!matches) {
       const params: DesignIssue["params"] = {
         target,
@@ -1448,8 +1303,6 @@ export function validateDesign(
       };
       if (expected.kind === "missing" || expected.kind === "invalid") {
         params.reason = expected.reason;
-      } else if (expected.kind === "optional-empty") {
-        params.reason = "optional-empty";
       }
       issues.push(
         error("DESIGN_PROFILE_CHOICE", ["profileChoices", choice.index, "profileIds"], params),
@@ -1526,7 +1379,7 @@ export function materializeDesign(
     attempt: context.attempt,
     materializedAt: identity.createdAt,
     request: context.request,
-    mode: context.mode,
+    mode: DESIGN_MODE,
     summary: validated.proposal.summary,
     carrierWorkspaceId: context.carrierWorkspaceId,
     targetWorkspaceId: context.targetWorkspaceId,
@@ -1578,7 +1431,6 @@ export function validateMaterializedDesign(
     roles: context.roles,
     profiles: context.host.profiles,
     jobId: context.jobId,
-    mode: context.mode,
     logicalSeatIds,
     hasher: context.hasher,
     allowExistingOwnRows: true,
@@ -1590,12 +1442,6 @@ export function validateMaterializedDesign(
   }
   if (value.attempt !== context.attempt) {
     issues.push(error("DESIGN_INPUT_INVALID", ["attempt"], {}, "inspect"));
-  }
-  if (value.mode !== context.mode) {
-    issues.push(error("DESIGN_INPUT_INVALID", ["mode"], {}, "inspect"));
-  }
-  if (value.team.mode !== context.mode) {
-    issues.push(error("DESIGN_TEAM_INVALID", ["team", "mode"], { mode: String(value.team.mode) }));
   }
   if (value.request !== context.request.trim()) {
     issues.push(error("DESIGN_INPUT_INVALID", ["request"], {}, "inspect"));
@@ -1649,12 +1495,11 @@ export function validateMaterializedDesign(
     const expected = expectedProfileIdsForTarget(plan, target, value.team, logicalSeatIds);
     const expectedProfileIds = expected.kind === "profiles" ? expected.profileIds : [];
     const matches =
-      expected.kind === "profiles"
-        ? reason.expectedProfileIds.length === expectedProfileIds.length &&
-          reason.expectedProfileIds.every(
-            (profileId, index) => profileId === expectedProfileIds[index],
-          )
-        : expected.kind === "optional-empty" && reason.expectedProfileIds.length === 0;
+      expected.kind === "profiles" &&
+      reason.expectedProfileIds.length === expectedProfileIds.length &&
+      reason.expectedProfileIds.every(
+        (profileId, index) => profileId === expectedProfileIds[index],
+      );
     if (!matches) {
       const params: DesignIssue["params"] = {
         target,
@@ -1663,8 +1508,6 @@ export function validateMaterializedDesign(
       };
       if (expected.kind === "missing" || expected.kind === "invalid") {
         params.reason = expected.reason;
-      } else if (expected.kind === "optional-empty") {
-        params.reason = "optional-empty";
       }
       issues.push(error("DESIGN_PROFILE_CHOICE", ["memberReasons"], params));
     }
@@ -1782,27 +1625,7 @@ export function validateRoleGap(
           issues.push(error("DESIGN_PROFILE_MISSING", at, { profileId }));
           return;
         }
-        // Only the all-seats cheap mode restricts suggestions to low-cost families this build can
-        // verify (full eligibility and route membership stay with C02). Flagship, standard, and
-        // collaborative keep their original semantics: a Profile that exists on the host is fine.
-        if (context.mode === "economy-all") {
-          const family = identifyModelFamily({ model: profile.model });
-          const familyReason = namesHighCostFamily(family)
-            ? "high-cost-family"
-            : family.status === "identified" && family.cost === "low"
-              ? null
-              : "family-unverified";
-          if (familyReason) {
-            issues.push(
-              error("DESIGN_OUTPUT_SCHEMA", at, {
-                path: at.join("."),
-                reason: familyReason,
-                profileId,
-              }),
-            );
-            return;
-          }
-        }
+        // A Profile that exists on the host is a valid suggestion: there is no cost restriction.
         report.profiles.push(gapProfileSummary(profile));
       });
     } else {
@@ -1841,7 +1664,8 @@ export function validateRoleGap(
         id: suggested.id,
         name: suggested.name,
         responsibilities: [...suggested.responsibilities],
-        executionPolicy: { ...suggested.executionPolicy },
+        // Retired field kept in the report DTO for older pages; a fixed value, never the model's.
+        executionPolicy: { ...RETIRED_GAP_EXECUTION_POLICY },
       };
     } else {
       const role = roleById.get(gap.roleId);

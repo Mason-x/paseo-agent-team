@@ -1,6 +1,5 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { isLegacyTeamMode, requestContractVersion } from "./domain/mode-contract";
 import {
   DefaultCatalogPreviewInputSchema,
   DefaultCatalogPreviewResultSchema,
@@ -9,7 +8,6 @@ import { LaunchPreviewResultSchema } from "./schemas/launch-preview";
 import { RoleSchema } from "./schemas/role";
 import { TeamSchema } from "./schemas/team";
 import { TeamModeSchema } from "./schemas/team-mode";
-import { launchContractZh } from "./zh/launch-contract";
 
 export const LaunchTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: z.string().min(1) }),
@@ -29,15 +27,16 @@ const LaunchRequestShape = {
 export const LaunchStartInputSchema = z.object({
   ...LaunchRequestShape,
   /**
-   * Advanced override: the App never sends it; scripts and tests may. Normal launches plan from
-   * the saved Team.mode and never persist an override.
+   * Retired. There is one planning path, so an absent value and `sota` run it and every other
+   * mode is refused with a retired-mode blocker and a refresh hint. The field stays in the schema
+   * so a page or script that was not updated still gets that answer instead of a schema error.
    */
   mode: TeamModeSchema.optional(),
   /**
-   * Mode-contract negotiation. Any integer is accepted and normalized by
-   * `requestContractVersion` (only 2 is v2; absent, 1, 3, … are legacy), so an explicit `1` from a
-   * copy of the old client stays a legacy request instead of becoming a schema error. It is not a
-   * semantic request field and never enters the plan hash.
+   * Mode-contract negotiation, accepted for older pages. Any integer is accepted and normalized
+   * by `requestContractVersion` (only 2 is v2; absent, 1, 3, … are legacy), so an explicit `1`
+   * from a copy of the old client stays a legacy request instead of becoming a schema error. It is
+   * not a semantic request field and never enters the plan hash.
    */
   contractVersion: z.number().int().optional(),
   /**
@@ -52,7 +51,7 @@ export const LaunchStartInputSchema = z.object({
 
 export const LaunchPreviewInputSchema = z.object({
   ...LaunchRequestShape,
-  /** Advanced override for scripts and tests only; the App never sends it. */
+  /** Retired; see `LaunchStartInputSchema.mode`. */
   mode: TeamModeSchema.optional(),
   /** See `LaunchStartInputSchema.contractVersion`. */
   contractVersion: z.number().int().optional(),
@@ -84,8 +83,9 @@ export const LaunchJobSchema = z.object({
     .optional(),
   startedAt: z.string(),
   finishedAt: z.string().optional(),
+  /** Always `sota` in this version; the field stays so an older page parses the job. */
   mode: TeamModeSchema.optional(),
-  /** Present instead of `mode` when the stored Team mode could not be read (FIX1 contract). */
+  /** Never set by this version (the stored Team mode is not read); kept for older pages. */
   rawMode: z.string().optional(),
   planHash: z.string().optional(),
 });
@@ -95,27 +95,6 @@ export type LaunchStartInput = z.infer<typeof LaunchStartInputSchema>;
 export type LaunchPreviewInput = z.infer<typeof LaunchPreviewInputSchema>;
 export type LaunchJob = z.infer<typeof LaunchJobSchema>;
 
-/**
- * AC-0d.20: a stale page polls `launch.status` with the baseline DTO, whose `mode` enum only
- * knows the three legacy values. A job started in a new mode is projected to the keys that page
- * can parse: drop `mode`/`rawMode`, keep the real run state, and append the refresh hint once.
- * The stored job is never mutated; v2 callers, legacy-mode jobs, and `null` pass through.
- */
-export function projectLaunchJobForLegacyPeer(
-  job: LaunchJob | null,
-  contractVersion?: number,
-): LaunchJob | null {
-  if (job === null) return null;
-  if (requestContractVersion({ contractVersion }) === 2) return job;
-  if (job.mode === undefined || isLegacyTeamMode(job.mode)) return job;
-  const warnings = job.warnings.includes(launchContractZh.refreshHint)
-    ? job.warnings
-    : [...job.warnings, launchContractZh.refreshHint];
-  const projected: LaunchJob = { ...job, warnings };
-  delete projected.mode;
-  delete projected.rawMode;
-  return projected;
-}
 export {
   designCancelRpc,
   designContinueRpc,
@@ -172,8 +151,8 @@ export const launchStartRpc = defineRpc({
 });
 
 /**
- * Read-only mode/seat preview. It resolves the same settings, Team, Roles, Profiles, and economy
- * policy as start, but never creates a workspace or an agent.
+ * Read-only seat preview. It resolves the same settings, Team, Roles, and Profiles as start, but
+ * never creates a workspace or an agent.
  */
 export const launchPreviewRpc = defineRpc({
   name: "agent-team.launch.preview",
@@ -186,7 +165,7 @@ export const launchStatusRpc = defineRpc({
   name: "agent-team.launch.status",
   input: z.object({
     runId: z.string().min(1),
-    /** See `LaunchStartInputSchema.contractVersion`; absent is a legacy caller. */
+    /** See `LaunchStartInputSchema.contractVersion`; accepted and ignored. */
     contractVersion: z.number().int().optional(),
   }),
   output: z.object({ job: LaunchJobSchema.nullable() }),
