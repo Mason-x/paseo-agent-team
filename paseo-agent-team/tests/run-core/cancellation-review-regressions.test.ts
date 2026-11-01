@@ -1,45 +1,35 @@
 import { describe, expect, test } from "vitest";
+import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { type ReduceResult, reduceRun } from "../../shared/domain/run-engine/reducer";
-import type { RunCancellationEvidence, RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type {
+  CancellationObservation,
+  RunReducerEvent,
+} from "../../shared/domain/run-engine/transitions";
+import { type RunRecord, RunRecordSchema } from "../../shared/schemas/run-engine/ledger";
 import {
   AT_UPDATED,
   CANCELLATION_AUTHORIZED_FROZEN_LEDGER,
-  dispatchIntent,
   INTENT_CANCEL,
-  MESSAGE_CANCEL,
-  NORMAL_RUN_LEDGER,
   QUIESCENT_CANCELLATION,
 } from "../fixtures/run-engine";
 
 const facts = { now: AT_UPDATED, newId: () => "90000000-0000-4000-8000-000000000001" };
 
 function cancellation() {
-  const record: RunRecord = structuredClone(NORMAL_RUN_LEDGER);
-  record.decisions = structuredClone(CANCELLATION_AUTHORIZED_FROZEN_LEDGER.decisions);
-  const owner = record.tasks.find((entry) => entry.spec.id === "T2");
+  const record: RunRecord = structuredClone(CANCELLATION_AUTHORIZED_FROZEN_LEDGER);
+  expect(RunRecordSchema.safeParse(record).success).toBe(true);
+  expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+  const owner = record.tasks.find((entry) => entry.spec.id === "t2");
   if (!owner) throw new Error("task");
-  Object.assign(owner, { state: "blocked", phase: "frozen", frozenClaimId: "claim-t2" });
-  for (const claim of record.resources) claim.frozen = true;
   const decision = record.decisions[0];
-  const assignment = record.assignments.find((entry) => entry.taskId === "T2");
-  if (!decision || !assignment) throw new Error("missing cancellation fixture");
+  const assignment = record.assignments.find((entry) => entry.taskId === "t2");
+  const intent = record.outbox.find((entry) => entry.id === INTENT_CANCEL);
+  if (!decision || !assignment || !intent) throw new Error("missing cancellation fixture");
   assignment.turnId = "turn-7";
-  decision.cancelIntentId = INTENT_CANCEL;
-  const intent = dispatchIntent({
-    id: INTENT_CANCEL,
-    kind: "archive",
-    taskId: "T2",
-    assignmentId: assignment.assignmentId,
-    recipient: assignment.agentId,
-    messageId: MESSAGE_CANCEL,
-    state: "confirmed",
-    confirmedAt: AT_UPDATED,
-  });
-  record.outbox.push(intent);
-  const evidence = structuredClone(QUIESCENT_CANCELLATION);
-  const event = {
-    kind: "cancellation-checked" as const,
-    taskId: "T2",
+  const evidence: CancellationObservation = structuredClone(QUIESCENT_CANCELLATION);
+  const event: Extract<RunReducerEvent, { kind: "cancellation-checked" }> = {
+    kind: "cancellation-checked",
+    taskId: "t2",
     decisionId: decision.decisionId,
     evidence,
   };
@@ -64,7 +54,7 @@ describe("167 cancellation proof and authorization", () => {
       expect(first).toEqual(reduceRun(c.record, c.event, facts));
       expect(c.record).toEqual(snapshot);
       const result = accepted(first);
-      expect(result.tasks.find((entry) => entry.spec.id === "T2")).toMatchObject({
+      expect(result.tasks.find((entry) => entry.spec.id === "t2")).toMatchObject({
         state: "cancelled",
         releaseDecisionId: c.decision.decisionId,
         currentAssignmentId: null,
@@ -73,7 +63,7 @@ describe("167 cancellation proof and authorization", () => {
       expect(result.decisions[0]?.answer).toEqual(c.decision.answer);
       expect(
         result.nonceRegistry
-          .filter((entry) => entry.taskId === "T2")
+          .filter((entry) => entry.taskId === "t2")
           .every((entry) => entry.revokedAt !== null),
       ).toBe(true);
     },
@@ -89,7 +79,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong authorization task",
       (c) => {
-        if (c.decision.answer) c.decision.answer.taskIds = ["T3"];
+        if (c.decision.answer) c.decision.answer.taskIds = ["t3"];
       },
     ],
     [
@@ -113,7 +103,7 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong intent task",
       (c) => {
-        c.intent.taskId = "T3";
+        c.intent.taskId = "t3";
       },
     ],
     [
@@ -150,12 +140,14 @@ describe("167 cancellation proof and authorization", () => {
     [
       "wrong refresh actor",
       (c) => {
+        if (c.evidence.refresh === null) throw new Error("refresh");
         c.evidence.refresh.agentId = "other-agent";
       },
     ],
     [
       "refresh before end",
       (c) => {
+        if (c.evidence.refresh === null) throw new Error("refresh");
         c.evidence.refresh.observedAt = "2020-01-01T00:00:00.000Z";
       },
     ],
@@ -200,7 +192,9 @@ describe("167 cancellation proof and authorization", () => {
     [
       "missing ended receipt",
       (c) => {
-        c.record.eventReceipts = [];
+        c.record.eventReceipts = c.record.eventReceipts.filter(
+          (receipt) => receipt.eventKey !== c.evidence.endedEventKey,
+        );
       },
     ],
     [
@@ -225,11 +219,32 @@ describe("167 cancellation proof and authorization", () => {
       },
     ],
   ];
+  const rejectCases = new Map([
+    ["wrong recipient", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
+    ["wrong intent assignment", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
+    ["wrong intent task", ["RUN_INVARIANT_VIOLATION", "cancel-intent-binding"]],
+    ["wrong evidence assignment", ["RUN_EVENT_INVALID", "unknown-binding"]],
+  ]);
   test.each(cases)("%s keeps the frozen claims", (_label, mutate) => {
     const c = cancellation();
     mutate(c);
+    if (rejectCases.has(_label)) {
+      expect(RunRecordSchema.safeParse(c.record).success).toBe(true);
+      const result = reduceRun(c.record, c.event, facts);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        const [code, reason] = rejectCases.get(_label) ?? [];
+        expect(result.code).toBe(code);
+        expect(result.params.reason).toBe(reason);
+      }
+      expect(c.record.tasks.find((entry) => entry.spec.id === "t2")).toMatchObject({
+        state: "blocked",
+        phase: "frozen",
+      });
+      return;
+    }
     const result = accepted(reduceRun(c.record, c.event, facts));
-    expect(result.tasks.find((entry) => entry.spec.id === "T2")).toMatchObject({
+    expect(result.tasks.find((entry) => entry.spec.id === "t2")).toMatchObject({
       state: "blocked",
       phase: "frozen",
     });
@@ -261,7 +276,7 @@ describe("167 cancellation proof and authorization", () => {
     expect(observed.eventReceipts.at(-1)?.seq).toBe(c.record.counters.observationSeq + 1);
     const result = accepted(reduceRun(observed, c.event, facts));
     expect(result.resources).toEqual(c.record.resources);
-    expect(result.tasks.find((entry) => entry.spec.id === "T2")?.state).toBe("blocked");
+    expect(result.tasks.find((entry) => entry.spec.id === "t2")?.state).toBe("blocked");
   });
 
   test("evidence registered before authorization stays frozen and is usable after an authorized seed", () => {
@@ -285,8 +300,8 @@ describe("167 cancellation proof and authorization", () => {
     const c = cancellation();
     c.event.evidence = {
       ...c.evidence,
-      refresh: { ...c.evidence.refresh, activeTurn: true },
-    } as unknown as RunCancellationEvidence;
+      refresh: c.evidence.refresh === null ? null : { ...c.evidence.refresh, activeTurn: true },
+    };
     const result = accepted(reduceRun(c.record, c.event, facts));
     expect(result.resources).toEqual(c.record.resources);
     expect(
@@ -297,20 +312,26 @@ describe("167 cancellation proof and authorization", () => {
 
   test("a new active refresh invalidates an older idle proof before another cancellation event", () => {
     const c = cancellation();
-    c.assignment.cancellation = structuredClone(c.evidence);
+    c.assignment.cancellation = structuredClone(QUIESCENT_CANCELLATION);
     c.event.evidence = {
       ...c.evidence,
-      refresh: { ...c.evidence.refresh, activeTurn: true },
-    } as unknown as RunCancellationEvidence;
+      refresh: c.evidence.refresh === null ? null : { ...c.evidence.refresh, activeTurn: true },
+    };
     const pending = accepted(reduceRun(c.record, c.event, facts));
     const result = accepted(
       reduceRun(
         pending,
-        { kind: "run-cancelled", reason: "cancel", controlNonceDigest: "9".repeat(64) },
+        {
+          kind: "run-cancelled",
+          cancelIntents: pending.decisions[0]?.cancelIntents ?? [],
+          preparedCancelIntents: [],
+          reason: "cancel",
+          controlNonceDigest: "9".repeat(64),
+        },
         facts,
       ),
     );
     expect(result.resources).toEqual(c.record.resources);
-    expect(result.tasks.find((entry) => entry.spec.id === "T2")?.state).toBe("blocked");
+    expect(result.tasks.find((entry) => entry.spec.id === "t2")?.state).toBe("blocked");
   });
 });
