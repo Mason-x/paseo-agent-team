@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../shared/domain/catalog-content";
-import { routeOf } from "../shared/domain/cheap-routing";
 import { LAUNCH_RUNTIME_CAPABILITIES } from "../shared/domain/launch-runtime";
-import { MODE_CONTRACT_VERSION, TEAM_MODES } from "../shared/domain/mode-contract";
-import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
-import { type ModeIssue, resolveRoleExecution } from "../shared/domain/role-execution";
+import { MODE_CONTRACT_VERSION, SUPPORTED_TEAM_MODES } from "../shared/domain/mode-contract";
+import { FIXED_BUDGET, type HostSnapshot } from "../shared/domain/mode-resolver";
+import type { ModeIssue } from "../shared/domain/role-execution";
 import type { PlannedSeat } from "../shared/domain/seat-plan";
 import { buildTeamModelPlan, type TeamPlanningFields } from "../shared/domain/team-model-plan";
 import { createPaseoAdapter, type PaseoProfile } from "../shared/paseo/adapter";
 import type { PaseoPort } from "../shared/paseo/port";
 import type { Role } from "../shared/schemas/role";
-import type { RoleTier, TaskKind } from "../shared/schemas/team-mode";
 import {
   TEAM_PLAN_DESIGN_ROLE_POLICY,
   TEAM_PLAN_MAX_ROWS,
@@ -45,8 +43,10 @@ type RowAvailability = TeamPlanRow["availability"];
 export const TEAM_PLAN_CAPABILITIES: TeamPlanCapabilities = {
   modeContract: MODE_CONTRACT_VERSION,
   designRolePolicy: TEAM_PLAN_DESIGN_ROLE_POLICY,
-  supportedModes: [...TEAM_MODES],
+  supportedModes: [...SUPPORTED_TEAM_MODES],
   runtimeCapabilities: { ...LAUNCH_RUNTIME_CAPABILITIES },
+  // This daemon ignores the retired settings keys, so a client may delete them on save (E2).
+  retiresLegacyFields: true,
 };
 
 function capabilities(): TeamPlanCapabilities {
@@ -55,6 +55,7 @@ function capabilities(): TeamPlanCapabilities {
     designRolePolicy: TEAM_PLAN_CAPABILITIES.designRolePolicy,
     supportedModes: [...TEAM_PLAN_CAPABILITIES.supportedModes],
     runtimeCapabilities: { ...TEAM_PLAN_CAPABILITIES.runtimeCapabilities },
+    retiresLegacyFields: TEAM_PLAN_CAPABILITIES.retiresLegacyFields === true,
   };
 }
 
@@ -108,17 +109,6 @@ function configuredProfilesFor(role: Role | null, profiles: readonly PaseoProfil
   return rows;
 }
 
-function rolePolicy(
-  role: Role | null,
-  kind: "coordinator" | "member",
-): { tier: RoleTier | null; taskKind?: TaskKind } {
-  if (!role) return { tier: null };
-  const execution = resolveRoleExecution(role, kind);
-  return execution.ok
-    ? { tier: execution.value.tier, taskKind: execution.value.taskKind }
-    : { tier: null };
-}
-
 /** The logical seat id seat-plan derives for each stored member (same rule; pinned by tests). */
 function logicalSeatIds(members: TeamPlanningFields["members"]): string[] {
   const explicit = new Set<string>();
@@ -168,15 +158,14 @@ function coordinatorRow(input: {
   host: HostSnapshot;
 }): TeamPlanRow {
   const { team, role, modelPlan, host } = input;
-  const policy = rolePolicy(role, "coordinator");
   const profiles = host.status === "ready" ? host.profiles : [];
   const base = {
     rowKey: "coordinator",
     kind: "coordinator" as const,
     roleId: role?.id ?? (team.coordinatorRoleId || null),
     roleName: role?.name ?? (team.coordinatorRoleId || zh.missing),
-    tier: policy.tier,
-    ...(policy.taskKind === undefined ? {} : { taskKind: policy.taskKind }),
+    // The Role tier is retired: the row keeps the field for older pages and reports none.
+    tier: null,
     enabled: true,
     configuredProfiles: configuredProfilesFor(role, profiles),
   };
@@ -184,27 +173,18 @@ function coordinatorRow(input: {
   if (selection) {
     return {
       ...base,
-      ...(selection.route === undefined ? {} : { route: selection.route }),
       profile: profileDto(selection.profile),
       source: selection.source,
-      budget: selection.budget,
-      budgetBasis: selection.budgetBasis,
+      ...FIXED_BUDGET,
       availability: availabilityOf(selection.profile, host),
       issues: [...selection.issues],
     };
   }
   const issues = !role
     ? [coordinatorIssue("role-missing", team.coordinatorRoleId || null)]
-    : modelPlan.coordinator.legacyFailureReason !== null
-      ? [coordinatorIssue(modelPlan.coordinator.legacyFailureReason, role.id)]
-      : [...modelPlan.coordinator.issues];
+    : [coordinatorIssue(modelPlan.coordinator.legacyFailureReason ?? "unresolved", role.id)];
   return {
     ...base,
-    // The failed coordinator still belongs to the coordinator route; same routeOf source as the
-    // planner, only when the role policy is readable (otherwise the planner has no route either).
-    ...(modelPlan.effectiveMode === "economy-all" && policy.tier !== null
-      ? { route: routeOf("coordinator", policy.tier) }
-      : {}),
     profile: null,
     source: "unavailable",
     budget: "unknown",
@@ -221,7 +201,6 @@ function seatRow(input: {
   host: HostSnapshot;
 }): TeamPlanRow {
   const { rowKey, seat, role, host } = input;
-  const policy = rolePolicy(role, "member");
   return {
     rowKey,
     seatId: seat.seatId,
@@ -229,19 +208,14 @@ function seatRow(input: {
     kind: "member",
     roleId: seat.roleId,
     roleName: seat.roleName,
-    tier: policy.tier,
-    ...(policy.taskKind === undefined ? {} : { taskKind: policy.taskKind }),
-    ...(seat.selected.route === undefined ? {} : { route: seat.selected.route }),
+    tier: null,
     enabled: true,
     purpose: seat.purpose,
     activation: seat.activation,
-    profile: seat.selected.unavailable ? null : profileDto(seat.selected.profile),
+    profile: profileDto(seat.selected.profile),
     source: seat.selected.source,
-    budget: seat.selected.budget,
-    budgetBasis: seat.selected.budgetBasis,
-    availability: seat.selected.unavailable
-      ? blockedAvailability(host)
-      : availabilityOf(seat.selected.profile, host),
+    ...FIXED_BUDGET,
+    availability: availabilityOf(seat.selected.profile, host),
     configuredProfiles: configuredProfilesFor(role, host.status === "ready" ? host.profiles : []),
     issues: [...seat.selected.issues],
   };
@@ -253,25 +227,17 @@ function memberPlaceholderRow(input: {
   logicalSeatId: string | undefined;
   role: Role | null;
   host: HostSnapshot;
-  mode: TeamPlanResult["effectiveMode"];
   issues: readonly ModeIssue[];
   enabled: boolean;
 }): TeamPlanRow {
-  const { rowKey, member, logicalSeatId, role, host, mode, issues, enabled } = input;
-  const policy = rolePolicy(role, "member");
+  const { rowKey, member, logicalSeatId, role, host, issues, enabled } = input;
   return {
     rowKey,
     ...(logicalSeatId === undefined ? {} : { logicalSeatId }),
     kind: "member",
     roleId: member.roleId === "" ? null : member.roleId,
     roleName: role?.name ?? (member.roleId || zh.missing),
-    tier: policy.tier,
-    ...(policy.taskKind === undefined ? {} : { taskKind: policy.taskKind }),
-    // An enabled economy-all seat has a route even when no cheap candidate resolved; standard,
-    // legacy, and disabled rows keep the previous shape.
-    ...(mode === "economy-all" && enabled && policy.tier !== null
-      ? { route: routeOf("member", policy.tier) }
-      : {}),
+    tier: null,
     enabled,
     profile: null,
     source: "unavailable",
@@ -294,7 +260,6 @@ function fingerprint(input: {
   team: TeamPlanningFields;
   roles: readonly Role[];
   host: HostSnapshot;
-  economy: EconomyPolicy;
   rows: readonly TeamPlanRow[];
 }): string {
   const referenced = new Set<string>();
@@ -309,7 +274,6 @@ function fingerprint(input: {
     .map((role) => ({
       id: role.id,
       enabled: role.enabled,
-      executionPolicy: role.executionPolicy ?? null,
       preferredProfiles: role.preferredProfiles.map((ref) => ref.profileId),
       fallbackProfiles: role.fallbackProfiles.map((ref) => ref.profileId),
     }));
@@ -339,43 +303,6 @@ function fingerprint(input: {
             .sort((left, right) => left.provider.localeCompare(right.provider)),
         }
       : { status: "unavailable" as const, reason: input.host.reason ?? null };
-  const allSeats =
-    input.economy.allSeats === undefined
-      ? null
-      : input.economy.allSeats.status === "ready"
-        ? {
-            status: "ready" as const,
-            version: input.economy.allSeats.version,
-            profiles: input.economy.allSeats.profiles
-              .map((entry) => ({
-                profileId: entry.profileId,
-                enabled: entry.enabled,
-                family: entry.family,
-                boundModel: entry.boundModel,
-              }))
-              .slice()
-              .sort((left, right) => left.profileId.localeCompare(right.profileId)),
-            routes: input.economy.allSeats.routes,
-            executionTaskOrder: input.economy.allSeats.executionTaskOrder,
-          }
-        : {
-            status: input.economy.allSeats.status,
-            reason:
-              input.economy.allSeats.status === "invalid" ? input.economy.allSeats.reason : null,
-          };
-  const economy = {
-    pool: input.economy.pool
-      .map((entry) => ({
-        profileId: entry.profileId,
-        enabled: entry.enabled,
-        family: entry.family ?? null,
-      }))
-      .slice()
-      .sort((left, right) => left.profileId.localeCompare(right.profileId)),
-    taskOrder: input.economy.taskOrder,
-    profileBudget: input.economy.profileBudget,
-    allSeats,
-  };
   const rows = input.rows.map((row) => ({
     rowKey: row.rowKey,
     seatId: row.seatId ?? null,
@@ -387,7 +314,6 @@ function fingerprint(input: {
     budget: row.budget,
     budgetBasis: row.budgetBasis,
     availability: row.availability,
-    route: row.route ?? null,
     profile:
       row.profile === null
         ? null
@@ -412,10 +338,8 @@ function fingerprint(input: {
   return sha256(
     canonicalize({
       planning: {
-        mode: input.team.mode ?? null,
         coordinatorRoleId: input.team.coordinatorRoleId,
         memberCreation: input.team.memberCreation ?? null,
-        collaboration: input.team.collaboration ?? null,
         members: input.team.members.map((member) => ({
           roleId: member.roleId,
           seatId: member.seatId ?? null,
@@ -425,7 +349,6 @@ function fingerprint(input: {
       },
       roles,
       host,
-      economy,
       rows,
     }),
   );
@@ -456,7 +379,6 @@ function planTeam(input: {
     team,
     roles,
     host: snapshot.host,
-    economy: snapshot.economy,
     maxMembers: snapshot.preferences.maxMembers,
     runtimeCapabilities: LAUNCH_RUNTIME_CAPABILITIES,
   });
@@ -526,7 +448,6 @@ function planTeam(input: {
           logicalSeatId: logicalIds[index] || undefined,
           role,
           host: snapshot.host,
-          mode: modelPlan.effectiveMode,
           issues: issuesAttachedTo(modelPlan.issues, logicalIds[index] || undefined),
           enabled: member.enabled,
         }),
@@ -535,7 +456,7 @@ function planTeam(input: {
     }
     for (const seat of group) {
       // A duplicated stored seatId maps several physical seats to one member; each row still needs
-      // its own key. Normal collaboration rows intentionally share the member key.
+      // its own key.
       rows.push(
         seatRow({
           rowKey: uniqueKeys ? claimRowKey(baseRowKey, index) : baseRowKey,
@@ -558,28 +479,17 @@ function planTeam(input: {
   }
 
   const enabledMembers = team.members.filter((member) => member.enabled).length;
-  const eagerRunnable = modelPlan.seatPlan.seats.some(
-    (seat) => seat.activation === "eager" && !seat.selected.unavailable,
-  );
-  const staleEscalationOnly =
-    modelPlan.seatPlan.seats.length > 0 &&
-    !eagerRunnable &&
-    !LAUNCH_RUNTIME_CAPABILITIES.onDemand &&
-    modelPlan.blockers.length === 0;
   const blocked =
-    modelPlan.effectiveMode === null ||
     modelPlan.blockers.length > 0 ||
     modelPlan.coordinator.role === null ||
     modelPlan.coordinator.legacyFailureReason !== null ||
-    enabledMembers === 0 ||
-    staleEscalationOnly;
+    enabledMembers === 0;
 
   if (rows.length > TEAM_PLAN_MAX_ROWS) {
     return {
       key,
       status: "blocked",
       effectiveMode: modelPlan.effectiveMode,
-      ...(modelPlan.rawMode === undefined ? {} : { rawMode: modelPlan.rawMode }),
       selectionFingerprint: null,
       rows: [],
       issues: [
@@ -597,12 +507,10 @@ function planTeam(input: {
     key,
     status: blocked ? "blocked" : "ready",
     effectiveMode: modelPlan.effectiveMode,
-    ...(modelPlan.rawMode === undefined ? {} : { rawMode: modelPlan.rawMode }),
     selectionFingerprint: fingerprint({
       team,
       roles,
       host: snapshot.host,
-      economy: snapshot.economy,
       rows,
     }),
     rows,
@@ -667,10 +575,9 @@ function draftTeam(input: TeamPlanInput["items"][number]): TeamPlanningFields | 
   if (input.kind !== "draft") return null;
   const { draft } = input;
   return {
-    mode: draft.mode,
+    // The retired mode and collaboration inputs of a draft are accepted by the schema and ignored.
     coordinatorRoleId: draft.coordinatorRoleId ?? "",
     memberCreation: draft.memberCreation,
-    collaboration: draft.collaboration,
     // A draft plans with the client's row identity as the seat identity. It never reaches storage
     // and makes every planned row bind back to exactly one draft row.
     members: draft.members.map((member) => ({
