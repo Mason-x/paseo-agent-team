@@ -1,9 +1,6 @@
 import { z } from "zod";
 import {
-  DiffRefShape,
-  GitCommitRefShape,
   RunEvidenceRequirementShape,
-  RunEvidenceShape,
   RunIdRefSchema,
   RunIrreversibleSpecShape,
   RunPathSchema,
@@ -11,6 +8,22 @@ import {
   RunTaskSpecShape,
   refineTaskSpec,
 } from "./ledger";
+import {
+  DiffRefShape,
+  GitCommitRefShape,
+  ReportBlockerShape,
+  ReportCheckShape,
+  ReportCoverageShape,
+  ReportEvidenceFields,
+  ReportIdentityShape,
+  ReportIsolationShape,
+  ReportWorkspaceShape,
+  RUN_PROTOCOL_VERSION,
+  RunDispatchDutiesShape,
+  RunTaskIdSchema,
+} from "./proof-shapes";
+
+export { RUN_PROTOCOL_VERSION } from "./proof-shapes";
 
 /**
  * The five strict protocol blocks (05 §3, AC-RE2.1–2.9).
@@ -27,8 +40,6 @@ import {
  *
  * Field caps here are contract bounds, not the byte budget; byte accounting stays in R02.
  */
-
-export const RUN_PROTOCOL_VERSION = 1;
 
 const ControlTaskIdSchema = z.union([
   z.literal("_dag"),
@@ -53,19 +64,6 @@ const ControlIdentityShape = {
   attempt: z.literal(1),
 };
 
-const ReportIdentityShape = {
-  ...IdentityShape,
-  /** Business task ids never start with the reserved control prefix. */
-  taskId: z
-    .string()
-    .min(1)
-    .max(64)
-    .regex(/^[a-z0-9][a-z0-9-]*$/),
-  assignmentId: RunIdRefSchema,
-  /** Engine-filled after parse; optional on the wire so a model cannot fail a report over it. */
-  messageId: z.string().uuid().optional(),
-};
-
 export const RunTaskDagIdentitySchema = z.strictObject(ControlIdentityShape);
 
 const BudgetRequestShape = {
@@ -74,7 +72,22 @@ const BudgetRequestShape = {
   requestedLimit: z.number().int().min(0).max(1024),
   reason: z.string().min(1).max(600),
 };
-export const RunBudgetRequestSchema = z.strictObject(BudgetRequestShape);
+function refineBudgetSubject(
+  value: { scope: "seat" | "task-attempts" | "strategic-turns"; subjectId: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.scope === "task-attempts" && !RunTaskIdSchema.safeParse(value.subjectId).success) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["subjectId"],
+      message: "task-attempts subjectId must be a lowercase business TaskId",
+    });
+  }
+}
+
+export const RunBudgetRequestSchema = z
+  .strictObject(BudgetRequestShape)
+  .superRefine(refineBudgetSubject);
 export type RunBudgetRequest = z.infer<typeof RunBudgetRequestSchema>;
 
 const TASK_DAG_MAX_TASKS = 64;
@@ -86,20 +99,16 @@ const StrictArtifactRefSchema = z.discriminatedUnion("kind", [
 ]);
 
 const StrictEvidenceSchema = z.strictObject({
-  ...RunEvidenceShape,
+  ...ReportEvidenceFields,
   ref: StrictArtifactRefSchema,
-  coverage: z
-    .strictObject({
-      lines: z.number().min(0).max(100),
-      functions: z.number().min(0).max(100),
-    })
-    .optional(),
-  isolation: z.strictObject({ homePath: RunPathSchema, outsideRealHome: z.boolean() }).optional(),
+  coverage: z.strictObject(ReportCoverageShape).optional(),
+  isolation: z.strictObject(ReportIsolationShape).optional(),
 });
 
 const ProtocolTaskSpecSchema = z
   .strictObject({
     ...RunTaskSpecShape,
+    dispatchDuties: z.strictObject(RunDispatchDutiesShape),
     scopes: z.array(z.strictObject(RunScopeShape)).min(1).max(64),
     evidence: z.array(z.strictObject(RunEvidenceRequirementShape)).min(1).max(64),
     irreversible: z
@@ -116,7 +125,7 @@ export const RunTaskDagBlockSchema = z.strictObject({
   dagRevision: z.number().int().min(1),
   expectedDagRevision: z.number().int().min(0),
   tasks: z.array(ProtocolTaskSpecSchema).min(1).max(TASK_DAG_MAX_TASKS),
-  cancelTaskIds: z.array(z.string().min(1).max(64)).max(TASK_DAG_MAX_TASKS),
+  cancelTaskIds: z.array(RunTaskIdSchema).max(TASK_DAG_MAX_TASKS),
   budgetRequests: z.array(RunBudgetRequestSchema).max(32),
 });
 export type RunTaskDagBlock = z.infer<typeof RunTaskDagBlockSchema>;
@@ -129,11 +138,7 @@ const TaskReportDoneShape = {
   /** A read-only task may legitimately change no file; the evidence gate decides more. */
   changedFiles: z.array(RunPathSchema).max(512),
   ref: StrictArtifactRefSchema,
-  workspace: z.strictObject({
-    id: RunIdRefSchema,
-    branch: z.string().min(1).max(256),
-    baseRef: z.string().min(1).max(256),
-  }),
+  workspace: z.strictObject(ReportWorkspaceShape),
   evidence: z.array(StrictEvidenceSchema).min(1).max(64),
 };
 
@@ -157,15 +162,7 @@ export const RunReviewReportBlockSchema = z.strictObject({
   ...ReportIdentityShape,
   reviewedRef: StrictArtifactRefSchema,
   verdict: z.enum(RUN_REVIEW_VERDICTS),
-  blockers: z
-    .array(
-      z.strictObject({
-        id: z.string().min(1).max(64),
-        summary: z.string().min(1).max(600),
-        path: RunPathSchema.nullable(),
-      }),
-    )
-    .max(40),
+  blockers: z.array(z.strictObject(ReportBlockerShape)).max(40),
   probes: z.array(StrictEvidenceSchema).max(64),
 });
 export type RunReviewReportBlock = z.infer<typeof RunReviewReportBlockSchema>;
@@ -176,17 +173,7 @@ export const RunSmokeReportBlockSchema = z.strictObject({
   devHost: z.string().min(1).max(256),
   devServerId: z.string().min(1).max(128),
   devHome: RunPathSchema,
-  checks: z
-    .array(
-      z.strictObject({
-        id: z.string().min(1).max(64),
-        /** No skip value: an inapplicable check must be removed by a spec revision first. */
-        result: z.enum(["pass", "fail"]),
-        evidencePath: RunPathSchema,
-      }),
-    )
-    .min(1)
-    .max(64),
+  checks: z.array(z.strictObject(ReportCheckShape)).min(1).max(64),
 });
 export type RunSmokeReportBlock = z.infer<typeof RunSmokeReportBlockSchema>;
 
@@ -200,49 +187,53 @@ export const RUN_DECISION_ACTIONS = [
   "resume-seat",
   "reject",
 ] as const;
-export const RunDecisionActionSchema = z.discriminatedUnion("action", [
-  z.strictObject({
-    action: z.literal("replan"),
-    nextDagRevision: z.number().int().min(1),
-  }),
-  z.strictObject({
-    action: z.literal("assign-seat"),
-    taskId: z.string().min(1).max(64),
-    seatId: RunIdRefSchema,
-  }),
-  z.strictObject({
-    action: z.literal("increase-budget"),
-    scope: z.enum(["seat", "task-attempts", "strategic-turns"]),
-    subjectId: RunIdRefSchema,
-    delta: z.number().int().min(1).max(1024),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("retry"),
-    taskId: z.string().min(1).max(64),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("cancel"),
-    taskIds: z.array(z.string().min(1).max(64)).min(1).max(64),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("defer-channel"),
-    channelId: z.string().min(1).max(128),
-    until: z.string().datetime(),
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("resume-seat"),
-    seatId: RunIdRefSchema,
-    reason: z.string().min(1).max(600),
-  }),
-  z.strictObject({
-    action: z.literal("reject"),
-    reason: z.string().min(1).max(600),
-  }),
-]);
+export const RunDecisionActionSchema = z
+  .discriminatedUnion("action", [
+    z.strictObject({
+      action: z.literal("replan"),
+      nextDagRevision: z.number().int().min(1),
+    }),
+    z.strictObject({
+      action: z.literal("assign-seat"),
+      taskId: RunTaskIdSchema,
+      seatId: RunIdRefSchema,
+    }),
+    z.strictObject({
+      action: z.literal("increase-budget"),
+      scope: z.enum(["seat", "task-attempts", "strategic-turns"]),
+      subjectId: RunIdRefSchema,
+      delta: z.number().int().min(1).max(1024),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("retry"),
+      taskId: RunTaskIdSchema,
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("cancel"),
+      taskIds: z.array(RunTaskIdSchema).min(1).max(64),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("defer-channel"),
+      channelId: z.string().min(1).max(128),
+      until: z.string().datetime(),
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("resume-seat"),
+      seatId: RunIdRefSchema,
+      reason: z.string().min(1).max(600),
+    }),
+    z.strictObject({
+      action: z.literal("reject"),
+      reason: z.string().min(1).max(600),
+    }),
+  ])
+  .superRefine((action, ctx) => {
+    if (action.action === "increase-budget") refineBudgetSubject(action, ctx);
+  });
 export type RunDecisionAction = z.infer<typeof RunDecisionActionSchema>;
 
 export const RunDecisionBlockSchema = z.strictObject({

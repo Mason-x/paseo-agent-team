@@ -95,7 +95,7 @@ describe("budget status and reservation", () => {
           messageId: request().messageId,
           idempotencyKey: request().intentKey,
           kind: "dispatch",
-          taskId: "T1",
+          taskId: "t1",
           assignmentId: "assignment-1",
           semanticArgs: {},
           payloadHash: "a".repeat(64),
@@ -104,6 +104,7 @@ describe("budget status and reservation", () => {
           recoverySendCount: 0,
           createdAt: "2026-10-28T00:00:00.000Z",
           confirmedAt: null,
+          localCancellation: null,
         } as RunRecord["outbox"][number],
       ],
     });

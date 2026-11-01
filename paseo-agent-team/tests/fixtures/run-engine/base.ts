@@ -31,13 +31,17 @@ export const DIGEST_2 = "2".repeat(64);
 export const NONCE_T1 = "6f1c2a44-3b7e-4f0a-9a11-000000000001";
 export const NONCE_T2 = "6f1c2a44-3b7e-4f0a-9a11-000000000002";
 export const NONCE_T3 = "6f1c2a44-3b7e-4f0a-9a11-000000000003";
+export const NONCE_T1_REVIEW = "6f1c2a44-3b7e-4f0a-9a11-000000000004";
+export const NONCE_T2_REVIEW = "6f1c2a44-3b7e-4f0a-9a11-000000000005";
 export const NONCE_PROBE = "6f1c2a44-3b7e-4f0a-9a11-000000000006";
 
 export const MESSAGE_T1 = "11111111-1111-4111-8111-111111111111";
 export const MESSAGE_T2 = "22222222-2222-4222-8222-222222222222";
+export const MESSAGE_T3 = "23232323-2323-4232-8232-232323232323";
 export const MESSAGE_CANCEL = "33333333-3333-4333-8333-333333333333";
 export const MESSAGE_PROBE = "44444444-4444-4444-8444-444444444444";
 export const MESSAGE_REOPEN = "55555555-5555-4555-8555-555555555555";
+export const MESSAGE_T1_REVIEW = "66666666-6666-4666-8666-666666666668";
 export const DECISION_D1 = "66666666-6666-4666-8666-666666666666";
 export const DECISION_D4 = "77777777-7777-4777-8777-777777777777";
 export const DECISION_D6 = "88888888-8888-4888-8888-888888888888";
@@ -62,7 +66,7 @@ export function spec(
   title: string,
   overrides: Record<string, unknown> = {},
 ): RunTaskSpec {
-  return {
+  const merged = {
     id,
     title,
     goal: `Deliver ${id} within the declared scope.`,
@@ -90,6 +94,14 @@ export function spec(
     implementationPolicy: "default",
     architectureTaskId: null,
     ...overrides,
+  } as Record<string, unknown>;
+  return {
+    ...merged,
+    dispatchDuties: overrides.dispatchDuties ?? {
+      produce: "implement",
+      review: "review",
+      smoke: merged.devSmoke ? "smoke" : null,
+    },
   } as RunTaskSpec;
 }
 
@@ -144,7 +156,7 @@ export function assignment(
 ): RunAssignment {
   return {
     assignmentId: ASSIGNMENT_T2,
-    taskId: "T2",
+    taskId: "t2",
     seatId: "seat-b1",
     agentId: "agent-b1",
     profileId: PROFILE_HAIKU.id,
@@ -160,6 +172,9 @@ export function assignment(
     attempt: 1,
     nonce: NONCE_T2,
     messageId: MESSAGE_T2,
+    delivery: null,
+    acceptedProof: null,
+    endedEventKey: null,
     turnId: null,
     state: "assigned",
     createdAt: AT_CREATED,
@@ -177,14 +192,15 @@ export function dispatchIntent(
     kind: "dispatch",
     recipient: "agent-b1",
     messageId: MESSAGE_T2,
-    idempotencyKey: "dispatch-T2-a1",
+    idempotencyKey: "dispatch-t2-a1",
     payloadHash: DIGEST_A,
     templateVersion: 1,
     state: "confirmed",
     recoverySendCount: 0,
     createdAt: AT_CREATED,
     confirmedAt: AT_CREATED,
-    taskId: "T2",
+    localCancellation: null,
+    taskId: "t2",
     assignmentId: ASSIGNMENT_T2,
     semanticArgs: { promptBytes: 4096 },
     ...overrides,
@@ -206,6 +222,7 @@ export function probeIntent(
     recoverySendCount: 0,
     createdAt: AT_CREATED,
     confirmedAt: null,
+    localCancellation: null,
     controlAttempt: 1,
     semanticArgs: { channelId: "claude", controlNonce: NONCE_PROBE, noBusinessWrites: true },
     ...overrides,
@@ -220,14 +237,15 @@ export function reopenIntent(
     kind: "reopen",
     recipient: "agent-b1",
     messageId: MESSAGE_REOPEN,
-    idempotencyKey: "reopen-T2-1",
+    idempotencyKey: "reopen-t2-1",
     payloadHash: DIGEST_C,
     templateVersion: 1,
     state: "prepared",
     recoverySendCount: 0,
     createdAt: AT_UPDATED,
     confirmedAt: null,
-    taskId: "T2",
+    localCancellation: null,
+    taskId: "t2",
     assignmentId: ASSIGNMENT_T2,
     controlAttempt: 1,
     semanticArgs: { reason: "closed-while-assigned" },
@@ -240,7 +258,8 @@ export function claim(
 ): RunResourceClaim {
   return {
     claimId: CLAIM_T2,
-    taskId: "T2",
+    taskId: "t2",
+    originAssignmentId: ASSIGNMENT_T2,
     repoId: REPO_ID,
     kind: "file",
     path: "src/t2.ts",
@@ -352,34 +371,25 @@ export const PARTIAL_CANCELLATION: RunCancellationEvidence = {
   receipt: { kind: "none", confirmedAt: null, externalId: null },
 };
 
-const T1 = taskRecord(spec("T1", "Core API surface"), {
+const t1 = taskRecord(spec("t1", "Core API surface"), {
   state: "done",
   ref: { kind: "git-commit", value: "9f3c1a7" },
   changedFiles: ["src/t1.ts"],
   attempts: 1,
-  reviews: [
-    {
-      reviewerAgentId: "agent-b2",
-      reviewerSeatId: "seat-b2",
-      verdict: "可合入",
-      reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
-      blockers: [],
-    },
-  ],
 });
 
-const T2 = taskRecord(spec("T2", "Core implementation"), {
+const t2 = taskRecord(spec("t2", "Core implementation"), {
   state: "in_progress",
   phase: "implementation",
   currentAssignmentId: ASSIGNMENT_T2,
   attempts: 1,
 });
 
-const T3 = taskRecord(spec("T3", "Operator docs", { group: "docs", deps: ["T2"] }), {
+const t3 = taskRecord(spec("t3", "Operator docs", { group: "docs", deps: ["t2"] }), {
   state: "pending",
 });
 
-export { T1, T2, T3 };
+export { t1, t2, t3 };
 
 export const NORMAL_RUN_LEDGER: RunRecord = {
   schemaVersion: 1,
@@ -425,7 +435,7 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
     },
     {
       seatId: "seat-b2",
-      tier: "B",
+      tier: "A",
       agentId: "agent-b2",
       channelId: "claude",
       duties: ["review"],
@@ -433,17 +443,98 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
     },
   ],
   dagRevision: 1,
-  tasks: [T1, T2, T3],
+  tasks: [t1, t2, t3],
   resources: [claim()],
-  assignments: [assignment()],
+  assignments: [
+    assignment({
+      assignmentId: "assignment-t1-a1",
+      taskId: "t1",
+      attempt: 1,
+      nonce: NONCE_T1,
+      messageId: MESSAGE_T1,
+      state: "ended",
+      turnId: "turn-6",
+      startedAt: AT_CREATED,
+      endedAt: AT_UPDATED,
+      endedEventKey: "agent-b1|turn-6|turn_ended",
+      workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: RUN_ID,
+        taskId: "t1",
+        attempt: 1,
+        nonce: NONCE_T1,
+        assignmentId: "assignment-t1-a1",
+        messageId: MESSAGE_T1,
+        status: "done",
+        changedFiles: ["src/t1.ts"],
+        ref: { kind: "git-commit", value: "9f3c1a7" },
+        workspace: { id: "ws-run-rec0re-a1-t1", branch: "re-rec0rea1-t1-a1-1", baseRef: "main" },
+        evidence: [
+          {
+            id: "five-gates",
+            command: "npm run check && npm run typecheck && npm test",
+            exitCode: 0,
+            summary: "all gates passed",
+            artifactPath: "evidence/t1.log",
+            ref: { kind: "git-commit", value: "9f3c1a7" },
+            isolation: {
+              homePath: "C:/Users/cc/AppData/Local/Temp/run-home",
+              outsideRealHome: true,
+            },
+          },
+        ],
+      },
+    }),
+    assignment({
+      assignmentId: "assignment-t1-r1",
+      taskId: "t1",
+      seatId: "seat-b2",
+      agentId: "agent-b2",
+      tier: "A",
+      reason: "L2/A: reviewer",
+      purpose: "reviewer",
+      attempt: 1,
+      nonce: NONCE_T1_REVIEW,
+      messageId: MESSAGE_T1_REVIEW,
+      delivery: { producerAssignmentId: "assignment-t1-a1" },
+      acceptedProof: {
+        protocolVersion: 1,
+        runId: RUN_ID,
+        taskId: "t1",
+        attempt: 1,
+        nonce: NONCE_T1_REVIEW,
+        assignmentId: "assignment-t1-r1",
+        messageId: MESSAGE_T1_REVIEW,
+        reviewedRef: { kind: "git-commit", value: "9f3c1a7" },
+        verdict: "可合入",
+        blockers: [],
+        probes: [],
+      },
+      state: "ended",
+      turnId: "turn-8",
+      startedAt: AT_UPDATED,
+      endedAt: AT_UPDATED,
+      endedEventKey: "agent-b2|turn-8|turn_ended",
+    }),
+    assignment(),
+  ],
   reopenGrants: [],
   outbox: [
     dispatchIntent({
       id: INTENT_T1,
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-a1",
       messageId: MESSAGE_T1,
-      idempotencyKey: "dispatch-T1-a1",
+      idempotencyKey: "dispatch-t1-a1",
+    }),
+    dispatchIntent({
+      id: "intent-t1-r1",
+      taskId: "t1",
+      assignmentId: "assignment-t1-r1",
+      recipient: "agent-b2",
+      messageId: MESSAGE_T1_REVIEW,
+      idempotencyKey: "dispatch-t1-r1",
     }),
     dispatchIntent(),
   ],
@@ -451,22 +542,37 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
     {
       nonce: NONCE_T1,
       runId: RUN_ID,
-      taskId: "T1",
+      taskId: "t1",
       assignmentId: "assignment-t1-a1",
       attempt: 1,
       phase: "implementation",
       agentId: "agent-b1",
       seatId: "seat-b1",
       issuedAt: AT_CREATED,
-      acceptedAt: AT_CREATED,
-      acceptedEventKey: "agent-b1|turn-6|turn_ended",
+      acceptedAt: AT_UPDATED,
+      acceptedEventKey: "proof:assignment-t1-a1",
+      revokedAt: null,
+      revokeReason: null,
+    },
+    {
+      nonce: NONCE_T1_REVIEW,
+      runId: RUN_ID,
+      taskId: "t1",
+      assignmentId: "assignment-t1-r1",
+      attempt: 1,
+      phase: "review",
+      agentId: "agent-b2",
+      seatId: "seat-b2",
+      issuedAt: AT_CREATED,
+      acceptedAt: AT_UPDATED,
+      acceptedEventKey: "proof:assignment-t1-r1",
       revokedAt: null,
       revokeReason: null,
     },
     {
       nonce: NONCE_T2,
       runId: RUN_ID,
-      taskId: "T2",
+      taskId: "t2",
       assignmentId: ASSIGNMENT_T2,
       attempt: 1,
       phase: "implementation",
@@ -481,6 +587,26 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   ],
   eventReceipts: [
     {
+      eventKey: "agent-b1|turn-6|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b1",
+      turnId: "turn-6",
+      seq: 6,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b1|turn-6|turn_ended",
+      disposition: "accepted",
+    },
+    {
+      eventKey: "agent-b2|turn-8|turn_ended",
+      kind: "turn_ended",
+      agentId: "agent-b2",
+      turnId: "turn-8",
+      seq: 8,
+      receivedAt: AT_UPDATED,
+      dedupeKey: "agent-b2|turn-8|turn_ended",
+      disposition: "accepted",
+    },
+    {
       eventKey: "agent-b1|turn-7|turn_ended",
       kind: "turn_ended",
       agentId: "agent-b1",
@@ -494,13 +620,13 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   events: [
     { seq: 1, kind: "run_created", at: AT_CREATED, payload: {} },
     { seq: 2, kind: "dag_accepted", at: AT_CREATED, payload: { dagRevision: 1 } },
-    { seq: 3, kind: "task_assigned", at: AT_CREATED, payload: { taskId: "T1" } },
-    { seq: 4, kind: "task_transition", at: AT_CREATED, payload: { taskId: "T1", to: "done" } },
-    { seq: 5, kind: "task_assigned", at: AT_UPDATED, payload: { taskId: "T2" } },
-    { seq: 6, kind: "turn_started", at: AT_UPDATED, payload: { taskId: "T2", turnId: "turn-7" } },
-    { seq: 7, kind: "turn_ended", at: AT_UPDATED, payload: { taskId: "T2", turnId: "turn-7" } },
+    { seq: 3, kind: "task_assigned", at: AT_CREATED, payload: { taskId: "t1" } },
+    { seq: 4, kind: "task_transition", at: AT_CREATED, payload: { taskId: "t1", to: "done" } },
+    { seq: 5, kind: "task_assigned", at: AT_UPDATED, payload: { taskId: "t2" } },
+    { seq: 6, kind: "turn_started", at: AT_UPDATED, payload: { taskId: "t2", turnId: "turn-7" } },
+    { seq: 7, kind: "turn_ended", at: AT_UPDATED, payload: { taskId: "t2", turnId: "turn-7" } },
   ],
-  counters: { observationSeq: 7, eventsThroughSeq: 7, probeAttempts: 0, reopenAttempts: 0 },
+  counters: { observationSeq: 8, eventsThroughSeq: 7, probeAttempts: 0, reopenAttempts: 0 },
   budgets: {
     entries: [
       {
@@ -561,18 +687,31 @@ export const NORMAL_RUN_LEDGER: RunRecord = {
   },
 };
 
-/** Copy the normal ledger with top-level overrides; nested arrays are replaced, not merged. */
+/** Explicitly rebind the known base assignments/proof run id to a fixture Run. */
+export function assignmentsForRun(runId: string) {
+  return NORMAL_RUN_LEDGER.assignments.map((entry) => ({
+    ...entry,
+    acceptedProof: entry.acceptedProof === null ? null : { ...entry.acceptedProof, runId },
+  }));
+}
+
+export const T3_ASSIGNMENT: RunAssignment = assignment({
+  assignmentId: "assignment-t3-a1",
+  taskId: "t3",
+  attempt: 1,
+  nonce: NONCE_T3,
+  messageId: MESSAGE_T3,
+  workspace: { id: "ws-run-rec0re-a1-t3", branch: "re-rec0rea1-t3-a1-1", baseRef: "main" },
+});
+
+/** Explicitly rebind the known nonce registrations to a fixture Run. */
+export function noncesForRun(runId: string) {
+  return NORMAL_RUN_LEDGER.nonceRegistry.map((entry) => ({ ...entry, runId }));
+}
+
+/** Copy the normal ledger with explicit top-level overrides; no legacy-key migration or inference. */
 export function withLedger(overrides: Partial<RunRecord> & Record<string, unknown>): RunRecord {
-  const next = { ...NORMAL_RUN_LEDGER, ...overrides };
-  // A rebased sample belongs to its own Run: inherited nonce registrations must not keep the
-  // NORMAL runId (strict I5 run binding). Explicit nonceRegistry overrides stay intentional.
-  if (typeof overrides.runId === "string" && overrides.nonceRegistry === undefined) {
-    next.nonceRegistry = next.nonceRegistry.map((entry) => ({
-      ...entry,
-      runId: overrides.runId as string,
-    }));
-  }
-  return next;
+  return structuredClone({ ...NORMAL_RUN_LEDGER, ...overrides });
 }
 
 export const POLICY = policy();

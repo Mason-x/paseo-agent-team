@@ -4,12 +4,13 @@ export const RUN_ENGINE_FIXTURE_MANIFEST = {
   fixtureVersion: 1,
   groups: {
     ledgers: {
-      count: 8,
+      count: 9,
       ids: [
         "normal-ledger",
         "outcome-unknown-ledger",
         "cancelling-ledger",
         "quiescent-cancelled-ledger",
+        "local-never-sent-cancelled-ledger",
         "blocked-ledger",
         "unknown-schema-version-ledger",
         "oversized-ledger",
@@ -118,5 +119,5 @@ export const RUN_ENGINE_FIXTURE_MANIFEST = {
       ],
     },
   },
-  totals: { files: 14, samples: 78 },
+  totals: { files: 14, samples: 79 },
 } as const;

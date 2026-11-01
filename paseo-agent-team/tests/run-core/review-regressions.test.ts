@@ -30,12 +30,12 @@ const A_TO_S = escalation({ fromTier: "A", toTier: "S", atAttempt: 6, qualityFai
 function record(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     ...NORMAL_RUN_LEDGER,
-    tasks: [taskRecord(spec("T1", "Ship"), { state: "ready" })],
+    tasks: [taskRecord(spec("t1", "Ship"), { state: "ready" })],
     roster: (["B", "A", "S"] as const).map((tier) => ({
-      seatId: `seat-${tier}`,
+      seatId: `seat-${tier.toLowerCase()}`,
       tier,
-      agentId: `agent-${tier}`,
-      channelId: `channel-${tier}`,
+      agentId: `agent-${tier.toLowerCase()}`,
+      channelId: `channel-${tier.toLowerCase()}`,
       enabled: true,
       duties: ["implement"],
     })),
@@ -47,9 +47,9 @@ function record(overrides: Partial<RunRecord> = {}): RunRecord {
 
 function live(tier: "B" | "A" | "S", patch: Partial<SeatRuntime> = {}): SeatRuntime {
   return {
-    seatId: `seat-${tier}`,
-    profileId: `profile-${tier}`,
-    agentId: `agent-${tier}`,
+    seatId: `seat-${tier.toLowerCase()}`,
+    profileId: `profile-${tier.toLowerCase()}`,
+    agentId: `agent-${tier.toLowerCase()}`,
     enabled: true,
     idle: true,
     permissionPending: false,
@@ -79,6 +79,8 @@ function decision(category: WakeCategory, subjectId: string | null) {
     summary: "SECRET_WORKER_TEXT nonce payload",
     createdAt: NOW,
     answeredAt: null,
+    cancelIntents: null,
+    resolution: null,
   };
 }
 
@@ -93,7 +95,7 @@ describe("156 scheduler regressions", () => {
   ] as const)("B1 dispatches %s at the applied execution tier", (_label, escalations, tier) => {
     const next = record({
       tasks: [
-        taskRecord(spec("T1", "Ship"), {
+        taskRecord(spec("t1", "Ship"), {
           state: "ready",
           escalations: [...escalations],
           qualityFailures: escalations.at(-1)?.qualityFailures ?? 0,
@@ -101,8 +103,8 @@ describe("156 scheduler regressions", () => {
         }),
       ],
     });
-    expect(eligibleSeats(next, "T1", context()).candidates.map((seat) => seat.seatId)).toEqual([
-      `seat-${tier}`,
+    expect(eligibleSeats(next, "t1", context()).candidates.map((seat) => seat.seatId)).toEqual([
+      `seat-${tier.toLowerCase()}`,
     ]);
   });
 
@@ -111,7 +113,7 @@ describe("156 scheduler regressions", () => {
       tasks: [
         taskRecord(spec("plan", "Plan", { level: "L4", tier: "S" }), { state: "done" }),
         taskRecord(
-          spec("T1", "Implement", {
+          spec("t1", "Implement", {
             level: "L4",
             tier: "A",
             implementationPolicy: "a-with-s-plan",
@@ -122,12 +124,12 @@ describe("156 scheduler regressions", () => {
       ],
     });
     expect(planDispatchWithReasons(next, context()).proposals).toMatchObject([
-      { taskId: "T1", seatId: "seat-A" },
+      { taskId: "t1", seatId: "seat-a" },
     ]);
   });
 
   test("B1 quality classification uses the last epoch baseline, not escalation count", () => {
-    const task = taskRecord(spec("T1", "Ship"), {
+    const task = taskRecord(spec("t1", "Ship"), {
       qualityFailures: 9,
       attempts: 9,
       escalations: [B_TO_A, { ...A_TO_S, qualityFailures: 8, atAttempt: 8 }],
@@ -154,7 +156,7 @@ describe("156 scheduler regressions", () => {
       const policy = record().policy;
       for (const failures of [1, 2, 3]) {
         const task = taskRecord(
-          spec("T1", "Ship", {
+          spec("t1", "Ship", {
             tier: initial,
             level: initial === "S" ? "L4" : initial === "A" ? "L3" : "L2",
           }),
@@ -181,11 +183,11 @@ describe("156 scheduler regressions", () => {
 
   test("I1 ready with an old seat-busy explanation dispatches once the seat recovers", () => {
     const next = record({
-      tasks: [taskRecord(spec("T1", "Ship"), { state: "ready", waitingReason: "seat-busy" })],
+      tasks: [taskRecord(spec("t1", "Ship"), { state: "ready", waitingReason: "seat-busy" })],
     });
-    expect(eligibleSeats(next, "T1", context()).blocked).toBeNull();
+    expect(eligibleSeats(next, "t1", context()).blocked).toBeNull();
     expect(planDispatchWithReasons(next, context())).toMatchObject({
-      proposals: [{ taskId: "T1", seatId: "seat-B" }],
+      proposals: [{ taskId: "t1", seatId: "seat-b" }],
       blocked: [],
     });
   });
@@ -205,12 +207,22 @@ describe("156 scheduler regressions", () => {
   );
   test.each(temporary)("I2 structural duty/mode/profile filters precede %s", (_name, patch) => {
     const next = record();
+    const dutyRecord = record({
+      tasks: [
+        taskRecord(
+          spec("t1", "Ship", {
+            dispatchDuties: { produce: "review", review: "review", smoke: null },
+          }),
+          { state: "ready" },
+        ),
+      ],
+    });
     const ctx = context([live("B", patch)]);
     const scenarios: Array<[RunRecord, SchedulerContext, string]> = [
-      [next, { ...ctx, requiredDuty: "review" }, "duty"],
+      [dutyRecord, ctx, "duty"],
       [next, { ...ctx, mode: "economy-all", profileAllowed: () => false }, "mode"],
       [
-        { ...next, policy: { ...next.policy, disabledProfileIds: ["profile-B"] } },
+        { ...next, policy: { ...next.policy, disabledProfileIds: ["profile-b"] } },
         ctx,
         "disabled-profile",
       ],
@@ -240,7 +252,7 @@ describe("156 scheduler regressions", () => {
 
   test.each([{}, { idle: false }])("I3 policy-disabled channel is a hard veto: %j", (patch) => {
     const next = record();
-    next.policy = { ...next.policy, disabledChannels: ["channel-B"] };
+    next.policy = { ...next.policy, disabledChannels: ["channel-b"] };
     expect(planDispatchWithReasons(next, context([live("B", patch)]))).toMatchObject({
       proposals: [],
       blocked: [{ decision: "D1", reasons: [{ reason: "disabled-channel" }] }],
@@ -249,10 +261,11 @@ describe("156 scheduler regressions", () => {
 });
 
 describe("156 lock regressions", () => {
-  test.each(["T1", "T2"])("I4 frozen read prevents new read grants to %s", (taskId) => {
+  test.each(["t1", "t2"])("I4 frozen read prevents new read grants to %s", (taskId) => {
     const claim = {
       claimId: "frozen-read",
-      taskId: "T1",
+      taskId: "t1",
+      originAssignmentId: "assignment-t1-a1",
       repoId: "repo",
       kind: "file" as const,
       path: "src/a.ts",
@@ -300,7 +313,7 @@ describe("156 lock regressions", () => {
 
 describe("156 wake regressions", () => {
   test("I6 first S quality failure alone does not fabricate D3", () => {
-    const task = taskRecord(spec("T1", "Ship", { level: "L4", tier: "S" }), {
+    const task = taskRecord(spec("t1", "Ship", { level: "L4", tier: "S" }), {
       state: "failed",
       qualityFailures: 1,
       attempts: 1,
@@ -310,25 +323,25 @@ describe("156 wake regressions", () => {
   });
   test("I6 S infrastructure failure with D1 never emits a second D3", () => {
     const next = record({
-      tasks: [taskRecord(spec("T1", "Ship", { level: "L4", tier: "S" }), { state: "failed" })],
-      decisions: [decision("D1", "T1")],
+      tasks: [taskRecord(spec("t1", "Ship", { level: "L4", tier: "S" }), { state: "failed" })],
+      decisions: [decision("D1", "t1")],
     });
     expect(classifyWake(record(), next, EPOCH).map((wake) => wake.category)).toEqual(["D1"]);
   });
   test("I6 an escalated B task's explicit D3 is the only wake", () => {
     const next = record({
       tasks: [
-        taskRecord(spec("T1", "Ship"), {
+        taskRecord(spec("t1", "Ship"), {
           state: "failed",
           escalations: [B_TO_A, A_TO_S],
           qualityFailures: 9,
           attempts: 9,
         }),
       ],
-      decisions: [decision("D3", "T1")],
+      decisions: [decision("D3", "t1")],
     });
     expect(classifyWake(record(), next, EPOCH)).toMatchObject([
-      { category: "D3", taskId: "T1", source: "decision" },
+      { category: "D3", taskId: "t1", source: "decision" },
     ]);
   });
 
@@ -380,7 +393,7 @@ describe("156 wake regressions", () => {
   });
 
   test("I8 task decision keeps decision id and safe current-tier task context", () => {
-    const task: RunTaskRecord = taskRecord(spec("T1", "Ship"), {
+    const task: RunTaskRecord = taskRecord(spec("t1", "Ship"), {
       state: "ready",
       escalations: [B_TO_A],
       attempts: 4,
@@ -389,14 +402,14 @@ describe("156 wake regressions", () => {
       waitingReason: "SECRET_WAITING_REASON",
       workerReport: "SECRET_WORKER_REPORT",
     });
-    const next = record({ tasks: [task], decisions: [decision("D1", "T1")] });
+    const next = record({ tasks: [task], decisions: [decision("D1", "t1")] });
     const wakes = classifyWake(record(), next, EPOCH);
-    expect(wakes[0]).toMatchObject({ taskId: "T1", decisionId: DECISION_ID });
+    expect(wakes[0]).toMatchObject({ taskId: "t1", decisionId: DECISION_ID });
     const wake = wakes[0];
     if (!wake) throw new Error("missing task wake");
     const summary = buildWakeSummary(wake, next);
     for (const text of [
-      "任务 T1",
+      "任务 t1",
       "状态=ready",
       "当前层=A",
       "尝试=4",
@@ -423,18 +436,18 @@ describe("156 wake regressions", () => {
     const control = String.fromCodePoint(code);
     const next = record({
       tasks: [
-        taskRecord(spec("T1", `Ship${control}title`, { goal: `Safe${control}goal` }), {
+        taskRecord(spec("t1", `Ship${control}title`, { goal: `Safe${control}goal` }), {
           state: "ready",
         }),
       ],
-      decisions: [decision("D1", "T1")],
+      decisions: [decision("D1", "t1")],
     });
     // Set the resolved task explicitly so this matrix tests I9 independently of I8.
     const summary = buildWakeSummary(
       {
         category: "D1",
-        subjectId: "T1",
-        taskId: "T1",
+        subjectId: "t1",
+        taskId: "t1",
         source: "decision",
         dedupeKey: "bidi-probe",
         decisionId: DECISION_ID,
@@ -461,7 +474,7 @@ test("156 fixes stay pure and deterministic with deeply frozen input and long sa
   const next = deepFreeze(
     record({
       tasks: [
-        taskRecord(spec("T1", "Safe title", { goal: "😀".repeat(2000) }), {
+        taskRecord(spec("t1", "Safe title", { goal: "😀".repeat(2000) }), {
           state: "ready",
           waitingReason: "SECRET_WAITING_REASON",
           ref: { kind: "git-commit", value: "abc123" },
@@ -469,7 +482,7 @@ test("156 fixes stay pure and deterministic with deeply frozen input and long sa
       ],
       budgets: { entries: [budget("seat", "b")] },
       decisions: [
-        decision("D1", "T1"),
+        decision("D1", "t1"),
         { ...decision("D4", "b"), decisionId: "33333333-3333-4333-8333-333333333333" },
       ],
     }),

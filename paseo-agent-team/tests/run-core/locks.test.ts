@@ -24,9 +24,11 @@ function record(resources: RunRecord["resources"] = []): Pick<RunRecord, "resour
 }
 
 function claim(overrides: Record<string, unknown> = {}) {
+  const taskId = typeof overrides.taskId === "string" ? overrides.taskId : "t1";
   return {
     claimId: "claim-1",
-    taskId: "T1",
+    taskId,
+    originAssignmentId: `assignment-${taskId}-a1`,
     repoId: "repo-1",
     kind: "file" as const,
     path: "src/a.ts",
@@ -83,7 +85,7 @@ describe("logical path and scope rules", () => {
       expect(lockConflicts(claim({ path: held }), scope({ path: requested }))).toBe("write");
       expect(
         findLockConflicts(record([claim({ path: held })]), {
-          taskId: "T2",
+          taskId: "t2",
           scopes: [scope({ path: requested })],
         }),
       ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
@@ -137,8 +139,8 @@ describe("logical path and scope rules", () => {
 describe("findLockConflicts", () => {
   test("returns path evidence and rejects unverified/invalid scopes", () => {
     expect(
-      findLockConflicts(record([claim({ claimId: "claim-2", taskId: "T2" })]), {
-        taskId: "T1",
+      findLockConflicts(record([claim({ claimId: "claim-2", taskId: "t2" })]), {
+        taskId: "t1",
         scopes: [scope()],
       }),
     ).toEqual({
@@ -146,7 +148,7 @@ describe("findLockConflicts", () => {
       conflicts: [
         {
           claimId: "claim-2",
-          taskId: "T2",
+          taskId: "t2",
           repoId: "repo-1",
           path: "src/a.ts",
           kind: "file",
@@ -156,10 +158,10 @@ describe("findLockConflicts", () => {
       ],
     });
     expect(
-      findLockConflicts(record(), { taskId: "T1", scopes: [scope({ verified: false })] }),
+      findLockConflicts(record(), { taskId: "t1", scopes: [scope({ verified: false })] }),
     ).toEqual({ ok: false, reason: "unverified-scope", path: "src/a.ts" });
     expect(
-      findLockConflicts(record(), { taskId: "T1", scopes: [scope({ path: "/abs" })] }),
+      findLockConflicts(record(), { taskId: "t1", scopes: [scope({ path: "/abs" })] }),
     ).toEqual({ ok: false, reason: "invalid-path", path: "/abs" });
   });
 
@@ -167,7 +169,7 @@ describe("findLockConflicts", () => {
     const frozen = claim({ frozen: true });
     expect(
       findLockConflicts(record([frozen]), {
-        taskId: "T1",
+        taskId: "t1",
         phase: "review",
         scopes: [scope()],
       }),
@@ -175,14 +177,14 @@ describe("findLockConflicts", () => {
     const open = claim({ frozen: false });
     expect(
       findLockConflicts(record([open]), {
-        taskId: "T1",
+        taskId: "t1",
         phase: "review",
         scopes: [scope()],
       }),
     ).toEqual({ ok: true, conflicts: [] });
     expect(
       findLockConflicts(record([open]), {
-        taskId: "T1",
+        taskId: "t1",
         phase: "implementation",
         scopes: [scope()],
       }),
@@ -192,13 +194,13 @@ describe("findLockConflicts", () => {
   test("default case-fold and claim-side normalization are applied", () => {
     expect(
       findLockConflicts(record([claim({ path: "SRC\\A.ts" })]), {
-        taskId: "T2",
+        taskId: "t2",
         scopes: [scope({ path: "src/a.ts" })],
       }),
     ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
     expect(
       findLockConflicts(record([claim({ path: "src\\a.ts" })]), {
-        taskId: "T2",
+        taskId: "t2",
         scopes: [scope({ path: "src/a.ts" })],
       }),
     ).toMatchObject({ ok: true, conflicts: [{ claimId: "claim-1" }] });
@@ -210,7 +212,7 @@ describe("findLockConflicts", () => {
     expect(
       findLockConflicts(
         input,
-        { taskId: "T2", scopes: [scope({ path: "src/a.ts" })] },
+        { taskId: "t2", scopes: [scope({ path: "src/a.ts" })] },
         {
           caseFold: true,
         },
