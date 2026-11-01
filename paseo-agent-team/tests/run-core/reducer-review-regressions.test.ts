@@ -698,6 +698,43 @@ describe("157 remaining dispatch and receipt guards", () => {
     expect(task(ready).qualityFailures).toBe(0);
   });
 
+  // Lexical layer, isolated from scope coverage: the stored ledger and claim shape are identical
+  // and only the hazard character differs, so I3 invalid-path is the sole possible difference.
+  // The scope-guard test below proves these paths can never be claimed through dispatch; that
+  // refusal is scope-not-covered and does not by itself show the path is lexically invalid.
+  test.each([
+    ["src/a.ts:stream", "src/a.ts-stream", "ads"],
+    ["src/COM\u00b9", "src/CAM\u00b9", "reserved"],
+    ["src/a.ts.", "src/a.tsx", "trailing-dot-space"],
+  ] as const)(
+    "stored claim path %s is lexically invalid while its twin %s is valid",
+    (invalidPath, validPath, reason) => {
+      expect(normalizeLogicalPath(validPath)).toMatchObject({ ok: true, path: validPath });
+      expect(normalizeLogicalPath(invalidPath)).toEqual({ ok: false, reason });
+      const stored = (path: string) => {
+        const record = next(reduceRun(fresh(), dispatch(), facts));
+        const producer = record.assignments.find((entry) => entry.taskId === "t1");
+        if (!producer) throw new Error("missing t1 producer");
+        record.resources = [
+          claim({
+            taskId: "t1",
+            kind: "file",
+            path,
+            originAssignmentId: producer.assignmentId,
+          }),
+        ];
+        return record;
+      };
+      expect(checkLedgerInvariants(stored(validPath))).toEqual({ ok: true });
+      expect(checkLedgerInvariants(stored(invalidPath))).toEqual({
+        ok: false,
+        violations: [
+          { invariant: "I3", path: ["resources", 0, "path"], params: { reason: "invalid-path" } },
+        ],
+      });
+    },
+  );
+
   test.each(["src/a.ts:stream", "src/COM\u00b9", "src/a.ts."])(
     "dispatch rejects invalid path %s at the shared scope guard",
     (path) => {
@@ -1107,12 +1144,23 @@ describe("146 quality ladder wiring", () => {
 
   test("an unqualified negative review cannot spend a quality failure", () => {
     const { ready, block } = qualityReview("B", 0, [], 6);
+    // The source is sound before the tier is lowered, so the refusal below is the review
+    // eligibility gate and not an earlier roster, actor or source-invariant rejection.
+    expect(RunRecordSchema.safeParse(ready).success).toBe(true);
+    expect(checkLedgerInvariants(ready)).toEqual({ ok: true });
     const reviewer = ready.assignments.find((entry) => entry.purpose === "reviewer");
     if (!reviewer) throw new Error("missing reviewer");
     reviewer.tier = "B";
-    // 31317 product red: the reducer accepts a reviewer below reviewRequirement and spends
-    // one quality failure instead of rejecting the report.
-    expect(reduceRun(ready, { kind: "review-report", block }, facts)).toMatchObject({ ok: false });
+    // Regression: the reducer once accepted a reviewer below reviewRequirement and spent one
+    // quality failure instead of rejecting the report.
+    const before = structuredClone(ready);
+    expect(reduceRun(ready, { kind: "review-report", block }, facts)).toMatchObject({
+      ok: false,
+      code: "RUN_EVENT_INVALID",
+      path: ["review-report", "t1"],
+      params: { reason: "no-valid-review" },
+    });
+    expect(ready).toEqual(before);
     expect(task(ready).qualityFailures).toBe(0);
   });
 

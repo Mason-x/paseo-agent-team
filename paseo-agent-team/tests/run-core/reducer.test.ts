@@ -10,6 +10,7 @@ import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine
 import { RunRecordSchema } from "../../shared/schemas/run-engine/ledger";
 import type {
   RunReviewReportBlock,
+  RunSmokeReportBlock,
   RunTaskReportBlock,
 } from "../../shared/schemas/run-engine/protocol";
 import {
@@ -85,6 +86,22 @@ function report(overrides: Partial<RunTaskReportBlock> = {}): RunTaskReportBlock
     ],
     ...overrides,
   } as RunTaskReportBlock;
+}
+
+/** A legal blocked/failed report: unlike done, it carries no ref, workspace or changedFiles. */
+function notDoneReport(status: "blocked" | "failed"): RunTaskReportBlock {
+  return {
+    protocolVersion: 1,
+    runId: NORMAL_RUN_LEDGER.runId,
+    taskId: "t2",
+    attempt: 1,
+    nonce: NONCE_T2,
+    assignmentId: ASSIGNMENT_T2,
+    status,
+    reasonCode: "needs-help",
+    summary: "stuck",
+    evidence: [],
+  };
 }
 
 function reviewerAssignment() {
@@ -406,7 +423,7 @@ function dispatchSmoker(record: RunRecord): RunRecord {
   });
 }
 
-function smokeBlock(overrides: Record<string, unknown> = {}) {
+function smokeBlock(overrides: Partial<RunSmokeReportBlock> = {}): RunSmokeReportBlock {
   return {
     protocolVersion: 1,
     runId: NORMAL_RUN_LEDGER.runId,
@@ -420,7 +437,7 @@ function smokeBlock(overrides: Record<string, unknown> = {}) {
     devHome: "/tmp/dev-home",
     checks: [{ id: "open runs", result: "pass", evidencePath: "evidence/smoke.png" }],
     ...overrides,
-  } as never;
+  };
 }
 
 function smokePhaseFlow(): { record: RunRecord; smokerId: string } {
@@ -711,15 +728,7 @@ describe("reduceRun", () => {
         agentId: "agent-b1",
         turnId: "turn-producer",
       });
-      record = reduceOrThrow(record, {
-        kind: "task-report",
-        block: report({
-          status,
-          reasonCode: "needs-help",
-          summary: "stuck",
-          evidence: [],
-        } as never),
-      });
+      record = reduceOrThrow(record, { kind: "task-report", block: notDoneReport(status) });
       const task = taskOf(record, "t2");
       expect(task.state).toBe(status);
       expect(record.resources).toHaveLength(1);
