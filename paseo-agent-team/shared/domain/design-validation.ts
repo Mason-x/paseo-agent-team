@@ -33,6 +33,7 @@ import { utf8ByteLength } from "./design-output";
 import type { DesignPlanCheck, DesignPlanningPort } from "./design-planning";
 import { designNewRoleLimit } from "./design-planning";
 import type { HostSnapshot } from "./mode-resolver";
+import { hasRetiredFields, omitRetired } from "./retired-fields";
 import type { ModeIssue, ModeIssueCode } from "./role-execution";
 
 export type DesignPlanSuccess = Extract<DesignPlanCheck, { ok: true }>;
@@ -503,8 +504,15 @@ export function describeProfileChoiceMismatches(
   return mismatches;
 }
 
-function sameContent(left: unknown, right: unknown): boolean {
-  return canonicalDesignContent(left) === canonicalDesignContent(right);
+/** Permit only the retirement of old result keys, never changes to the saved Role's other fields. */
+function sameContent(saved: Role, expected: Role): boolean {
+  const savedContent = canonicalDesignContent(saved);
+  return (
+    savedContent === canonicalDesignContent(expected) ||
+    (hasRetiredFields("role", expected) &&
+      !hasRetiredFields("role", saved) &&
+      savedContent === canonicalDesignContent(omitRetired("role", expected)))
+  );
 }
 
 function completeOrigin(value: unknown, jobId: string): boolean {
@@ -545,8 +553,8 @@ export type DesignContentCheckInput = {
 
 /**
  * Content invariants shared by the initial validation and the save-time revalidation. The latter
- * passes allowExistingOwnRows so a partially written, byte-identical row from this job is not
- * mistaken for an id collision. Callers must supply a ready host; the planner remains responsible
+ * passes allowExistingOwnRows so a partially written row from this job is not mistaken for an id
+ * collision; only retired keys may differ. Callers must supply a ready host; the planner is responsible
  * for mode selection and launch readiness.
  */
 export function checkDesignContent(input: DesignContentCheckInput): DesignIssue[] {

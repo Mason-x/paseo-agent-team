@@ -10,7 +10,7 @@ import { designZh } from "../../shared/zh/design";
 import { designGapZh } from "../../shared/zh/design-gap";
 import { DesignJobCard } from "./DesignJobCard";
 import { DesignResultCard } from "./DesignResultCard";
-import type { DesignGapConfigureEconomy, DesignGapOpenRole } from "./DesignRoleGapCard";
+import type { DesignGapOpenRole } from "./DesignRoleGapCard";
 import type { DesignerPrefill, DesignLaunchSeed } from "./design-screen-state";
 import {
   designLaunchSeed,
@@ -39,7 +39,6 @@ export type DesignJobsPanelProps = {
    */
   onGapRetry?: (prefill: DesignerPrefill) => void;
   onOpenRole?: (target: DesignGapOpenRole) => void;
-  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
   onCreateRole?: () => void;
 };
 
@@ -60,7 +59,6 @@ function DesignJobSection({
   onPreviewLaunch,
   onGapRetry,
   onOpenRole,
-  onConfigureEconomy,
   onCreateRole,
 }: {
   theme: PluginScreenProps["theme"];
@@ -79,7 +77,6 @@ function DesignJobSection({
   onPreviewLaunch: (seed: DesignLaunchSeed) => void;
   onGapRetry?: (prefill: DesignerPrefill) => void;
   onOpenRole?: (target: DesignGapOpenRole) => void;
-  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
   onCreateRole?: () => void;
 }) {
   const [actionPending, setActionPending] = useState(false);
@@ -250,7 +247,6 @@ function DesignJobSection({
         gapRetryBusy={gapRetry.busy}
         gapRetryNotice={gapRetry.notice}
         onOpenRole={onOpenRole}
-        onConfigureEconomy={onConfigureEconomy}
         onCreateRole={onCreateRole}
       />
       {saveNotice ? <Text style={warning}>{saveNotice}</Text> : null}
@@ -284,7 +280,6 @@ export function DesignJobsPanel({
   modeContract,
   onGapRetry,
   onOpenRole,
-  onConfigureEconomy,
   onCreateRole,
 }: DesignJobsPanelProps) {
   const toast = useToast();
@@ -352,7 +347,6 @@ export function DesignJobsPanel({
           onPreviewLaunch={onPreviewLaunch}
           onGapRetry={onGapRetry}
           onOpenRole={onOpenRole}
-          onConfigureEconomy={onConfigureEconomy}
           onCreateRole={onCreateRole}
         />
       ))}

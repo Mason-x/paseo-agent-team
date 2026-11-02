@@ -93,7 +93,6 @@ export const designZh = {
   sources: {
     "role-preferred": "Role 首选",
     "role-fallback": "Role 备选",
-    "economy-pool": "经济池（已取消）",
     unavailable: "待命",
   },
   permissionKinds: {
@@ -143,15 +142,11 @@ export const designZh = {
   resultPreviewUnavailable: "预览数据不完整，无法展示席位",
   seatPurposes: {
     member: "成员",
-    candidate: "候选",
-    judge: "裁判",
-    escalation: "升级",
-  } satisfies Record<SeatPreview["purpose"], string>,
+  } satisfies Partial<Record<SeatPreview["purpose"], string>>,
   seatActivations: {
     eager: "启动时创建",
     "on-demand": "首次派活时创建",
-    "escalation-only": "待命",
-  } satisfies Record<SeatPreview["activation"], string>,
+  } satisfies Partial<Record<SeatPreview["activation"], string>>,
   resultWarnings: "警告",
   resultSeatProfile: "Profile",
   resultSeatRuntime: "运行配置",

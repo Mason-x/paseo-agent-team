@@ -1,12 +1,10 @@
 import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { AllSeatsRoute } from "../../shared/schemas/team-mode";
 import { designGapZh } from "../../shared/zh/design-gap";
 import type { PluginTheme } from "../shared/theme";
 import type { DesignGapAction, DesignGapView } from "./submission-state";
 
 export type DesignGapOpenRole = { roleId: string; profileId?: string };
-export type DesignGapConfigureEconomy = { layer: "allSeats"; route?: AllSeatsRoute };
 
 export type DesignRoleGapCardProps = {
   theme: PluginTheme;
@@ -15,7 +13,6 @@ export type DesignRoleGapCardProps = {
   rulesLabel: string;
   /** An exit renders only when its callback exists: the card never shows a dead button. */
   onOpenRole?: (target: DesignGapOpenRole) => void;
-  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
   onCreateRole?: () => void;
   /** "Close the switch and retry". Prefills only; it never starts anything. */
   onRetry?: () => void;
@@ -25,8 +22,6 @@ export type DesignRoleGapCardProps = {
 
 function actionLabel(action: DesignGapAction): string {
   switch (action.kind) {
-    case "configure-economy":
-      return designGapZh.actionConfigureEconomy;
     case "open-role":
       return designGapZh.actionOpenRole;
     case "create-role":
@@ -43,7 +38,6 @@ export function DesignRoleGapCard({
   gaps,
   rulesLabel,
   onOpenRole,
-  onConfigureEconomy,
   onCreateRole,
   onRetry,
   retryBusy = false,
@@ -87,12 +81,7 @@ export function DesignRoleGapCard({
   );
 
   function run(action: DesignGapAction) {
-    if (action.kind === "configure-economy") {
-      onConfigureEconomy?.({
-        layer: action.layer,
-        ...(action.route === undefined ? {} : { route: action.route }),
-      });
-    } else if (action.kind === "open-role") {
+    if (action.kind === "open-role") {
       onOpenRole?.({
         roleId: action.roleId,
         ...(action.profileId === undefined ? {} : { profileId: action.profileId }),
@@ -104,7 +93,6 @@ export function DesignRoleGapCard({
 
   function available(action: DesignGapAction | null): action is DesignGapAction {
     if (action === null) return false;
-    if (action.kind === "configure-economy") return onConfigureEconomy !== undefined;
     if (action.kind === "open-role") return onOpenRole !== undefined;
     return onCreateRole !== undefined;
   }
@@ -129,14 +117,11 @@ export function DesignRoleGapCard({
     );
   }
 
-  const economy = gaps.some((gap) => gap.primary?.kind === "configure-economy");
-
   return (
     <View style={styles.card}>
       <Text style={styles.title}>{designGapZh.gapTitle}</Text>
       <Text style={styles.muted}>{rulesLabel}</Text>
       <Text style={styles.muted}>{designGapZh.gapIntro}</Text>
-      {economy ? <Text style={styles.warning}>{designGapZh.economyHint}</Text> : null}
       <Text style={styles.muted}>{designGapZh.gapCount(gaps.length)}</Text>
       {gaps.map((gap) => (
         <View key={gap.key} style={styles.gap}>
@@ -155,7 +140,6 @@ export function DesignRoleGapCard({
               <Text selectable style={styles.value}>
                 {designGapZh.suggestedRoleLine(gap.suggestedRole.id, gap.suggestedRole.name)}
               </Text>
-              <Text style={styles.muted}>{gap.suggestedRole.policyLabel}</Text>
               {gap.suggestedRole.responsibilities.map((line) => (
                 <Text key={line} selectable style={styles.muted}>
                   {`· ${line}`}

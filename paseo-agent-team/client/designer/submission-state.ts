@@ -1,4 +1,3 @@
-import { routeOf } from "../../shared/domain/cheap-routing";
 import { formatDesignIssue } from "../../shared/domain/design-output";
 import { checkDesignRequest } from "../../shared/domain/design-request";
 import type {
@@ -15,10 +14,9 @@ import type {
   SeatProfileDto,
 } from "../../shared/schemas/launch-preview";
 import { ModeLaunchPreviewSchema } from "../../shared/schemas/launch-preview";
-import type { AllSeatsRoute, TeamMode } from "../../shared/schemas/team-mode";
+import type { TeamMode } from "../../shared/schemas/team-mode";
 import { designZh } from "../../shared/zh/design";
 import { designGapZh } from "../../shared/zh/design-gap";
-import { formatLaunchBudget } from "../shared/budget-format";
 
 /** Copy limits shared with the Card; the server validates the same schema. */
 export const DESIGN_JOB_MAX_ATTEMPTS = 3;
@@ -46,7 +44,6 @@ const RUNNING_STATES: Record<DesignJob["state"], boolean> = {
  */
 export type DesignDraft = {
   request: string;
-  mode: TeamMode;
   workspaceId: string;
   profileChoice: string | null;
   /**
@@ -127,7 +124,6 @@ export function createDesignClientRequestId(): string {
 function normalizeDraft(draft: Partial<DesignDraft>): DesignDraft {
   return {
     request: draft.request ?? "",
-    mode: draft.mode ?? "sota",
     workspaceId: draft.workspaceId ?? "",
     profileChoice: draft.profileChoice ?? null,
     existingRolesOnly: draft.existingRolesOnly ?? true,
@@ -137,7 +133,6 @@ function normalizeDraft(draft: Partial<DesignDraft>): DesignDraft {
 function sameDraft(left: DesignDraft, right: DesignDraft): boolean {
   return (
     left.request === right.request &&
-    left.mode === right.mode &&
     left.workspaceId === right.workspaceId &&
     left.profileChoice === right.profileChoice &&
     left.existingRolesOnly === right.existingRolesOnly
@@ -210,16 +205,14 @@ export function clearDesignRequest(state: DesignSubmissionState): DesignSubmissi
 }
 
 /**
- * Applies a one-shot `/team-design` prefill. The command only carries what it knows: an omitted
- * mode follows the draft, a null workspace clears the target, and the designer Profile choice
- * stays unless the command explicitly replaces it.
+ * Applies a one-shot `/team-design` prefill. A null workspace clears the target, and the designer
+ * Profile choice stays unless the command explicitly replaces it.
  */
 export function applyDesignPrefill(
   state: DesignSubmissionState,
   prefill: {
     request: string;
     workspaceId: string | null;
-    mode?: TeamMode;
     profileChoice?: string | null;
     /** Only the close-the-switch retry sets this (false); every other prefill starts a new draft. */
     existingRolesOnly?: boolean;
@@ -228,7 +221,6 @@ export function applyDesignPrefill(
   return replaceDesignDraft(state, {
     request: prefill.request,
     workspaceId: prefill.workspaceId ?? "",
-    mode: prefill.mode ?? state.draftState.draft.mode,
     profileChoice:
       prefill.profileChoice === undefined
         ? state.draftState.draft.profileChoice
@@ -279,7 +271,6 @@ export function buildDesignStartInput(
     input: {
       clientRequestId,
       request: check.request,
-      mode: draft.mode,
       ...(draft.workspaceId ? { workspaceId: draft.workspaceId } : {}),
       ...profile,
       // Always an explicit boolean: the server keeps "omitted" for old callers only.
@@ -456,14 +447,10 @@ export type DesignSeatRow = {
   purposeLabel: string;
   activation: SeatPreview["activation"];
   activationLabel: string;
-  cohortId: string | null;
   profileLabel: string;
   runtimeLabel: string | null;
   sourceLabel: string | null;
-  familyLabel: string | null;
-  budgetLabel: string;
   reasonLabel: string | null;
-  standby: boolean;
   unavailable: boolean;
 };
 
@@ -473,13 +460,11 @@ export type DesignCoordinatorRow = {
   profileLabel: string;
   runtimeLabel: string | null;
   sourceLabel: string | null;
-  budgetLabel: string;
   reasonLabel: string | null;
   unavailable: boolean;
 };
 
 export type DesignResultView = {
-  modeLabel: string;
   summary: string;
   teamId: string;
   teamLabel: string;
@@ -521,7 +506,6 @@ export type DesignPermissionRow = {
 
 export type DesignJobView = {
   title: string;
-  modeLabel: string;
   phase: string;
   tone: "neutral" | "attention" | "danger";
   attemptLabel: string | null;
@@ -544,7 +528,6 @@ export type DesignJobView = {
 };
 
 export type DesignGapAction =
-  | { kind: "configure-economy"; layer: "allSeats"; route?: AllSeatsRoute; profileIds: string[] }
   | { kind: "open-role"; roleId: string; profileId?: string }
   | { kind: "create-role" };
 
@@ -561,24 +544,19 @@ export type DesignGapView = {
     id: string;
     name: string;
     responsibilities: readonly string[];
-    policyLabel: string;
   } | null;
   unlaunchable: {
     roleId: string;
     roleName: string;
     unavailableProfileNames: readonly string[];
   } | null;
-  /** Decided by the job's own mode: an economy-all job is repaired in the route list. */
+  /** Available actions to repair a missing Role or Profile binding. */
   primary: DesignGapAction | null;
   secondary: DesignGapAction | null;
 };
 
 function recordOf(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-}
-
-function textOf(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 /** Identical localized messages are shown once; the server may repeat a code for several seats. */
@@ -592,28 +570,6 @@ function uniqueIssues(issues: readonly DesignIssue[]): DesignIssue[] {
     unique.push(issue);
   }
   return unique;
-}
-
-function asBudget(value: string | undefined): SeatPreview["budget"] | undefined {
-  return value === "economy" || value === "sota" || value === "unknown" ? value : undefined;
-}
-
-function asBudgetBasis(value: string | undefined): SeatPreview["budgetBasis"] | undefined {
-  return value === "host" ||
-    value === "pool" ||
-    value === "route" ||
-    value === "conservative-default"
-    ? value
-    : undefined;
-}
-
-export function formatDesignBudget(budget: unknown, basis?: unknown): string {
-  const record = recordOf(budget);
-  const label =
-    typeof budget === "string" ? budget : (textOf(record.budget) ?? textOf(record.label));
-  const basisLabel =
-    typeof basis === "string" ? basis : (textOf(record.basis) ?? textOf(record.budgetBasis));
-  return formatLaunchBudget(asBudget(label), asBudgetBasis(basisLabel));
 }
 
 function formatSource(source: string | undefined): string | null {
@@ -659,17 +615,16 @@ export function buildDesignSeatRows(input: {
       roleLabel: seat.roleName || roleNames.get(seat.roleId) || seat.roleId,
       instanceLabel: seat.instanceLabel ?? null,
       purpose: seat.purpose,
-      purposeLabel: designZh.seatPurposes[seat.purpose],
+      purposeLabel: seat.purpose === "member" ? designZh.seatPurposes.member : seat.purpose,
       activation: seat.activation,
-      activationLabel: designZh.seatActivations[seat.activation],
-      cohortId: seat.cohortId ?? null,
+      activationLabel:
+        seat.activation === "eager" || seat.activation === "on-demand"
+          ? designZh.seatActivations[seat.activation]
+          : seat.activation,
       profileLabel: profile.label,
       runtimeLabel: profile.runtimeLabel,
       sourceLabel: formatSource(seat.source),
-      familyLabel: seat.family ?? null,
-      budgetLabel: formatDesignBudget(seat.budget, seat.budgetBasis),
       reasonLabel: reasons.get(seat.logicalSeatId) ?? null,
-      standby: seat.standby,
       unavailable: seat.unavailable || seat.profile === null,
     };
   });
@@ -683,16 +638,12 @@ export function buildDesignCoordinatorRow(input: {
   const coordinator = input.preview.coordinator;
   const profile = profileView(coordinator.profile);
   const reason = input.memberReasons.find((entry) => entry.target === "coordinator")?.reason;
-  // T4 does not project a coordinator budget today. Read it if a later projection adds it,
-  // otherwise report it as unknown rather than inventing a SOTA/host claim.
-  const record = recordOf(coordinator);
   return {
     roleId: coordinator.roleId,
     roleLabel: coordinator.roleName || coordinator.roleId,
     profileLabel: profile.label,
     runtimeLabel: profile.runtimeLabel,
     sourceLabel: formatSource(coordinator.source),
-    budgetLabel: formatDesignBudget(record.budget, record.budgetBasis),
     reasonLabel: reason ?? null,
     unavailable: coordinator.profile === null,
   };
@@ -739,7 +690,6 @@ export function resolveDesignResultView(
   ];
   if (!preview) warnings.unshift(designZh.resultPreviewUnavailable);
   return {
-    modeLabel: designZh.modes[result.mode],
     summary: result.summary,
     teamId: result.team.id,
     teamLabel: result.team.name,
@@ -798,7 +748,6 @@ export function resolveDesignJobView(job: DesignJob): DesignJobView {
 
   return {
     title: job.requestExcerpt || designZh.jobUntitled,
-    modeLabel: designZh.modes[job.mode],
     phase: designZh.phases[job.state],
     tone: danger ? "danger" : attention ? "attention" : "neutral",
     attemptLabel:
@@ -836,34 +785,10 @@ export function designJobRulesLabel(job: Pick<DesignJob, "existingRolesOnly">): 
   return designGapZh.rulesLegacy;
 }
 
-function gapRoute(gap: RoleGapReport): AllSeatsRoute | undefined {
-  if (gap.use === "coordinator") return routeOf("coordinator", "decision");
-  const tier = gap.suggestedRole?.executionPolicy.tier;
-  return tier === undefined ? undefined : routeOf("member", tier);
-}
-
-function gapActions(
-  job: Pick<DesignJob, "mode">,
-  gap: RoleGapReport,
-): { primary: DesignGapAction | null; secondary: DesignGapAction | null } {
-  const profileIds = [
-    ...gap.profiles.map((profile) => profile.id),
-    ...(gap.unlaunchableRole?.unavailableProfileIds ?? []),
-  ];
-  if (job.mode === "economy-all") {
-    // The mode decides the way out: an economy-all job never reaches a cheap seat through a
-    // Role's own binding, so the route list is the primary action for either kind of gap.
-    const route = gapRoute(gap);
-    return {
-      primary: {
-        kind: "configure-economy",
-        layer: "allSeats",
-        ...(route === undefined ? {} : { route }),
-        profileIds,
-      },
-      secondary: gap.suggestedRole ? { kind: "create-role" } : null,
-    };
-  }
+function gapActions(gap: RoleGapReport): {
+  primary: DesignGapAction | null;
+  secondary: DesignGapAction | null;
+} {
   if (gap.unlaunchableRole) {
     const profileId = gap.unlaunchableRole.unavailableProfileIds[0];
     return {
@@ -885,7 +810,7 @@ function gapActions(
 export function buildDesignRoleGapViews(job: Pick<DesignJob, "mode" | "roleGap">): DesignGapView[] {
   const gaps = Array.isArray(job.roleGap) ? job.roleGap : [];
   return gaps.map((gap, index) => {
-    const { primary, secondary } = gapActions(job, gap);
+    const { primary, secondary } = gapActions(gap);
     return {
       key: `${index}:${gap.responsibility}`,
       responsibility: gap.responsibility,
@@ -906,10 +831,6 @@ export function buildDesignRoleGapViews(job: Pick<DesignJob, "mode" | "roleGap">
             id: gap.suggestedRole.id,
             name: gap.suggestedRole.name,
             responsibilities: gap.suggestedRole.responsibilities,
-            policyLabel: designGapZh.suggestedRolePolicy(
-              gap.suggestedRole.executionPolicy.tier,
-              gap.suggestedRole.executionPolicy.taskKind,
-            ),
           }
         : null,
       unlaunchable: gap.unlaunchableRole
@@ -956,7 +877,6 @@ export type DesignGapRetryPrefill = {
   nonce: string;
   text: string;
   workspaceId: string;
-  mode: TeamMode;
   profileChoice: string | null;
   existingRolesOnly: false;
   /** Replacing a draft the user typed needs a yes first. */
@@ -986,7 +906,6 @@ export function planDesignGapRetry(
       nonce: nextNonce(),
       text: source.request,
       workspaceId: job.targetWorkspaceId ?? "",
-      mode: job.mode,
       profileChoice:
         source.profileId !== null ? source.profileId : source.useDefaultProfileHints ? "" : null,
       existingRolesOnly: false,
