@@ -1,4 +1,5 @@
 import { retiredModeLabel } from "../../shared/domain/mode-contract";
+import { hasRetiredFields } from "../../shared/domain/retired-fields";
 import type { Role } from "../../shared/schemas/role";
 import type { Team, TeamMember } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
@@ -30,34 +31,25 @@ export type RetiredTeamNotice = { modeLabel: string | null; collaboration: boole
 export function readRetiredTeamNotice(
   team: Pick<Team, "mode" | "collaboration"> | null | undefined,
 ): RetiredTeamNotice | null {
-  if (!team) return null;
-  const modeLabel = retiredModeLabel(team.mode);
-  const collaboration = team.collaboration !== undefined;
-  return modeLabel === null && !collaboration ? null : { modeLabel, collaboration };
+  if (!team || !hasRetiredFields("team", team)) return null;
+  return {
+    modeLabel: retiredModeLabel(team.mode),
+    collaboration: Object.hasOwn(team, "collaboration"),
+  };
 }
 
-/**
- * The one-line notices (E1); empty when the Team carries nothing retired. A Team that carries
- * retired settings always gets its line. `hostRetires` is the target host's answer: true says the
- * settings are deleted on save, false says that host's plugin is not upgraded so this save keeps
- * them, and null (probe still running) shows nothing yet rather than promise either.
- */
+/** A single E1 notice for every Team carrying either retired key, including during probing. */
 export function retiredTeamNoticeLines(
   notice: RetiredTeamNotice | null,
   hostRetires: boolean | null,
 ): string[] {
-  if (notice === null || hostRetires === null) return [];
+  if (notice === null) return [];
   return [
-    ...(notice.modeLabel === null
-      ? []
-      : [
-          hostRetires
-            ? zh.retiredTeamMode(notice.modeLabel)
-            : zh.retiredTeamModeKept(notice.modeLabel),
-        ]),
-    ...(notice.collaboration
-      ? [hostRetires ? zh.retiredTeamCollaboration : zh.retiredTeamCollaborationKept]
-      : []),
+    hostRetires === null
+      ? zh.retiredTeamProbePending(notice.modeLabel)
+      : hostRetires
+        ? zh.retiredTeamMode(notice.modeLabel)
+        : zh.retiredTeamModeKept(notice.modeLabel),
   ];
 }
 

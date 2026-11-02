@@ -62,9 +62,10 @@ export function PresetSyncDialog({
   // E1: a sync over preferences that still hold the retired economy block always says what happens
   // to it; the wording follows the target host (deleted, or kept until its plugin is upgraded).
   const hostRetires = useRetirement(retirementProbe, open && legacyEconomy);
-  const retiredLine =
-    !legacyEconomy || hostRetires === null
-      ? null
+  const retiredLine = !legacyEconomy
+    ? null
+    : hostRetires === null
+      ? zh.retiredPresetSyncProbePending
       : hostRetires
         ? zh.retiredPresetSync
         : zh.retiredPresetSyncKept;
