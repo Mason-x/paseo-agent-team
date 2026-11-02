@@ -1,27 +1,24 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type {
-  CoordinatorPreview,
-  LaunchPreviewResult,
-  SeatPreview,
-} from "../../shared/schemas/launch-preview";
+import type { LaunchPreviewResult, SeatPreview } from "../../shared/schemas/launch-preview";
 import { zh } from "../../shared/zh";
-import { formatLaunchBudget } from "../shared/budget-format";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { launchSeatStatus, previewBlockers, previewWarnings } from "./launch-preview-state";
 
-function sourceText(source: SeatPreview["source"] | CoordinatorPreview["source"]): string {
-  if (source === "role-fallback") return zh.modes.sourceFallback;
-  if (source === "economy-pool") return zh.modes.sourceEconomyPool;
-  if (source === "unavailable") return zh.modes.sourceUnavailable;
-  return zh.modes.sourcePreferred;
+// The source is the planner's word. A value this page has no wording for (an earlier host still
+// sends "economy-pool") is shown as its own id instead of being relabeled as a known source.
+const SOURCE_LABELS: Readonly<Record<string, string>> = {
+  "role-preferred": zh.modes.sourcePreferred,
+  "role-fallback": zh.modes.sourceFallback,
+  unavailable: zh.modes.sourceUnavailable,
+};
+
+function sourceText(source: string): string {
+  return Object.hasOwn(SOURCE_LABELS, source) ? (SOURCE_LABELS[source] as string) : source;
 }
 
 function purposeText(purpose: SeatPreview["purpose"]): string {
-  if (purpose === "candidate") return zh.modes.purposeCandidate;
-  if (purpose === "judge") return zh.modes.purposeJudge;
-  if (purpose === "escalation") return zh.modes.purposeEscalation;
-  return zh.modes.purposeMember;
+  return purpose === "member" ? zh.modes.purposeMember : purpose;
 }
 
 function profileText(profile: SeatPreview["profile"]): string {
@@ -38,14 +35,12 @@ function Row({
   title,
   subtitle,
   meta,
-  extra,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
   title: string;
   subtitle: string;
   meta: string;
-  extra?: string;
 }) {
   return (
     <View
@@ -61,9 +56,6 @@ function Row({
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, flexWrap: "wrap" }}>
         {meta}
       </Text>
-      {extra ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{extra}</Text>
-      ) : null}
     </View>
   );
 }
@@ -113,23 +105,16 @@ export function LaunchPreview({
       {preview ? (
         <>
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-            {`${zh.modes.logicalSeats} ${preview.counts.logical} · ${zh.modes.physicalSeats} ${preview.counts.physical} · ${zh.modes.eagerSeats} ${preview.counts.eager} · ${zh.modes.deferredSeats} ${preview.counts.deferred} · ${zh.modes.escalationSeats} ${preview.counts.escalation}`}
-          </Text>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-            {`${zh.modes.budgetEconomy} ${preview.budget.economy} · ${zh.modes.budgetSota} ${preview.budget.sota} · ${zh.modes.budgetUnknown} ${preview.budget.unknown} · ${zh.modes.sotaPotentialSeats} ${preview.counts.sotaPotential}`}
+            {`${zh.modes.logicalSeats} ${preview.counts.logical} · ${zh.modes.physicalSeats} ${preview.counts.physical} · ${zh.modes.eagerSeats} ${preview.counts.eager} · ${zh.modes.deferredSeats} ${preview.counts.deferred}`}
           </Text>
           <Row
             theme={theme}
             layout={layout}
             title={`${zh.coordinator} · ${preview.coordinator.roleName}`}
             subtitle={profileText(preview.coordinator.profile)}
-            meta={[
-              `${zh.modes.seatSource}：${sourceText(preview.coordinator.source)}`,
-              `${zh.modes.seatBudget}：${formatLaunchBudget(preview.coordinator.budget, preview.coordinator.budgetBasis)}`,
-            ].join(" · ")}
+            meta={`${zh.modes.seatSource}：${sourceText(preview.coordinator.source)}`}
           />
           {visible.map((seat) => {
-            const status = launchSeatStatus(seat);
             const profile = [
               profileText(seat.profile),
               seat.unavailable && seat.profile ? zh.modes.sourceUnavailable : null,
@@ -145,10 +130,8 @@ export function LaunchPreview({
                 subtitle={profile}
                 meta={[
                   `${zh.modes.seatSource}：${sourceText(seat.source)}`,
-                  `${zh.modes.seatBudget}：${formatLaunchBudget(seat.budget, seat.budgetBasis)}`,
-                  `${zh.modes.seatStatus}：${status}`,
+                  `${zh.modes.seatStatus}：${launchSeatStatus(seat)}`,
                 ].join(" · ")}
-                extra={seat.family ? `${zh.modes.seatFamily}：${seat.family}` : undefined}
               />
             );
           })}
