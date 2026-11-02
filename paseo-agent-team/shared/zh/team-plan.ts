@@ -33,18 +33,13 @@ export const teamPlanZh = {
   },
   purpose: {
     member: "成员",
-    candidate: "候选",
-    judge: "评审",
-    escalation: "升级",
   },
   activation: {
     eager: "立即创建",
     onDemand: "按需创建",
-    escalationOnly: "待命",
   },
 
   disabled: "已停用",
-  standby: "待命",
   otherSeats: "其他席位",
   configured: (names: string) => `候选：${names}`,
   noProfile: "未绑定",

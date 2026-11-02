@@ -1,7 +1,6 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
-import type { ModelFamilyHint } from "../../shared/domain/model-summary";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import { teamPlanRpc } from "../../shared/rpc/team-plan";
 import type { Team } from "../../shared/schemas/team";
@@ -34,8 +33,6 @@ export type UseTeamPlansOptions = {
   teams: readonly Team[];
   /** A hidden tab must not poll or plan. */
   active: boolean;
-  /** Explicit family classifications for summaries; auto/missing models are filtered upstream. */
-  familyHints?: readonly ModelFamilyHint[];
   /** Test seam; the screen leaves this undefined and uses the registered RPC. */
   send?: TeamPlanSend;
 };
@@ -124,9 +121,8 @@ export function useTeamPlans(options: UseTeamPlansOptions): UseTeamPlansResult {
         failedKeys: view.failedKeys,
         hasContext: view.hasContext,
         error: view.error,
-        ...(options.familyHints === undefined ? {} : { hints: options.familyHints }),
       }),
-    [view.results, view.failedKeys, view.hasContext, view.error, options.familyHints],
+    [view.results, view.failedKeys, view.hasContext, view.error],
   );
 
   return {
