@@ -14,10 +14,24 @@ export type TeamDesignRecipe = {
   name: string;
   coordinatorRoleId: string;
   members: readonly TeamDesignRecipeMember[];
+  optionalRoleIds?: readonly string[];
   notes?: string;
 };
 
 export const TEAM_DESIGN_RECIPES = [
+  {
+    id: "default",
+    name: "默认研发团队",
+    coordinatorRoleId: "lead-owner",
+    members: [
+      { roleId: "eng-fullstack", minInstances: 1, maxInstances: 1 },
+      { roleId: "research-codebase", minInstances: 1, maxInstances: 1 },
+      { roleId: "qa-test", minInstances: 1, maxInstances: 1 },
+      { roleId: "qa-review", minInstances: 1, maxInstances: 1 },
+    ],
+    optionalRoleIds: ["eng-expert", "plan-architect"],
+    notes: "排障修复与架构师为按需专家；当前不能按需创建，默认不启动。需要他们时由用户明确启用。",
+  },
   {
     id: "feature",
     name: "功能开发",

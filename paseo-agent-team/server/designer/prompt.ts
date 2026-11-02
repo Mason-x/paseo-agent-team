@@ -541,6 +541,7 @@ function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<s
     return {
       id: recipe.id,
       name: recipe.name,
+      ...(recipe.optionalRoleIds ? { optionalRoleIds: recipe.optionalRoleIds } : {}),
       members: recipe.members.map((member) => ({
         roleId: member.roleId,
         minInstances: member.minInstances,
@@ -554,6 +555,7 @@ function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<s
     name: recipe.name,
     coordinatorRoleId: recipe.coordinatorRoleId,
     members: recipe.members.map((member) => ({ ...member })),
+    ...(recipe.optionalRoleIds ? { optionalRoleIds: recipe.optionalRoleIds } : {}),
     ...(detail.recipeNotes && notes !== undefined ? { notes } : {}),
   };
 }
@@ -729,9 +731,10 @@ function relevantRoleIds(
 ): ReadonlySet<string> {
   if (limit <= 0) return new Set<string>();
   const recipeIds = new Set<string>(
-    TEAM_DESIGN_RECIPES.flatMap((recipe) => [
+    TEAM_DESIGN_RECIPES.flatMap((recipe: TeamDesignRecipe) => [
       recipe.coordinatorRoleId,
       ...recipe.members.map((member) => member.roleId),
+      ...(recipe.optionalRoleIds ?? []),
     ]),
   );
   const terms = new Set<string>();
@@ -833,12 +836,12 @@ function indexRequirement(rules: PromptRules): string {
 
 function recipeInstruction(rules: PromptRules): string {
   if (rules.version === 1) {
-    return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+    return `配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
   }
   if (rules.rolesOnly) {
-    return "配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；覆盖不了就报 role-gap，不要用职责不符的 Role 凑数。复用 Role 时 reason 必须说明它承担的职责；不要新建 Role。";
+    return "配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；覆盖不了就报 role-gap，不要用职责不符的 Role 凑数。复用 Role 时 reason 必须说明它承担的职责；不要新建 Role。";
   }
-  return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。覆盖不了就报缺口，不要用职责不符的 Role 凑数；复用 Role 时 reason 必须说明它承担的职责。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+  return `配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。覆盖不了就报缺口，不要用职责不符的 Role 凑数；复用 Role 时 reason 必须说明它承担的职责。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
 }
 
 function compose(input: DesignPromptInput, detail: PromptDetail): string {
@@ -918,7 +921,7 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     ),
     jsonBlock("期望选择", projectedChoices(context.expectedChoices)),
     "",
-    "## 九配方",
+    "## 参考配方",
     recipeInstruction(rules),
     jsonBlock(
       "配方",
