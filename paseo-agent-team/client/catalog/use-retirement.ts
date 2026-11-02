@@ -17,13 +17,14 @@ export function useRetirementProbe(): RetirementProbe {
 
 /**
  * Whether the target host retires the legacy keys, for the one-line notices (.notes/274 E1) only.
- * It starts false and settles after the probe, so a notice never promises a deletion the host will
- * not perform. Writers do not read this: they await the probe themselves right before saving.
+ * It is null until the probe settles (a notice shows nothing yet, so it never promises a deletion
+ * the host will not perform), then true/false. A failed or slow probe settles false. Writers do not
+ * read this: they await the probe themselves right before saving.
  */
-export function useRetirement(probe: RetirementProbe, active: boolean): boolean {
-  const [retires, setRetires] = useState(false);
+export function useRetirement(probe: RetirementProbe, active: boolean): boolean | null {
+  const [retires, setRetires] = useState<boolean | null>(null);
   useEffect(() => {
-    setRetires(false);
+    setRetires(null);
     if (!active) return;
     let live = true;
     void probe().then((value) => {

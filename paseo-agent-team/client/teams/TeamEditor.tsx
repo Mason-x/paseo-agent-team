@@ -124,9 +124,10 @@ export function TeamEditor({
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
 
-  // E1: the notice only promises a deletion when the target host will really perform it.
+  // E1: a Team that carries retired settings always shows a line; its wording follows the target
+  // host (deleted on save, or kept because that host's plugin is not upgraded yet).
   const hostRetires = useRetirement(retirementProbe, open && retiredNotice !== null);
-  const retiredLines = hostRetires ? retiredTeamNoticeLines(retiredNotice) : [];
+  const retiredLines = retiredTeamNoticeLines(retiredNotice, hostRetires);
 
   const planSessionToken = useRef<string | null>(null);
   if (planSessionToken.current === null) {

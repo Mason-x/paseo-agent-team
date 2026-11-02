@@ -16,6 +16,7 @@ import {
   defaultPresetSelection,
   selectionNeedsRoleWrite,
 } from "./preset-state";
+import { type RetirementProbe, shouldRetire, shouldRetireAny } from "./retirement";
 
 export type PreviewSuccess = Extract<DefaultCatalogPreviewResult, { ok: true }>;
 
@@ -55,15 +56,45 @@ export function withPreferencesRevision(preview: PreviewSuccess, revision: strin
   return { ...preview, revisions: { ...preview.revisions, preferences: revision } };
 }
 
+/** The stored Roles the selection rewrites by adoption: only those can lose a retired key. */
+function adoptedRoles(
+  roles: readonly Role[],
+  preview: PreviewSuccess,
+  selection: PresetSelection,
+): Role[] {
+  const ids = new Set(
+    preview.roles
+      .filter((row) => (selection[row.id] ?? row.defaultAction) === "adopt")
+      .map((row) => row.id),
+  );
+  return roles.filter((role) => ids.has(role.id));
+}
+
+/** E2: ask the target host now, and only if an adopted Role still carries a retired key. */
+async function retireAdoptedRoles(
+  probe: RetirementProbe | undefined,
+  roles: readonly Role[],
+  preview: PreviewSuccess,
+  selection: PresetSelection,
+): Promise<boolean> {
+  if (!probe) return false;
+  return shouldRetireAny(probe, "role", adoptedRoles(roles, preview, selection));
+}
+
 async function savePreferencesOnly(
   gateway: PresetGateway,
   preview: PreviewSuccess,
   roles: readonly Role[],
   now: string,
+  probe?: RetirementProbe,
 ): Promise<WriteResult> {
   for (let attempt = 0; attempt < MAX_PREFERENCE_ATTEMPTS; attempt += 1) {
     const preferences = await gateway.readPreferences();
     if (preferences.status !== "ready") return "invalid";
+    // E2: the preferences are the object being saved; ask only if they still carry `economy`.
+    const retireLegacyFields = probe
+      ? await shouldRetire(probe, "preferences", preferences.values)
+      : false;
     let values: Preferences;
     try {
       values = recordPresetSync(
@@ -72,6 +103,7 @@ async function savePreferencesOnly(
         roles,
         preview.catalogRevision,
         now,
+        { retireLegacyFields },
       );
     } catch {
       return "invalid";
@@ -97,8 +129,9 @@ export function retryPresetPreferences(
   preview: PreviewSuccess,
   roles: readonly Role[],
   now: string,
+  probe?: RetirementProbe,
 ): Promise<WriteResult> {
-  return savePreferencesOnly(gateway, preview, roles, now);
+  return savePreferencesOnly(gateway, preview, roles, now, probe);
 }
 
 export type PresetImportResult =
@@ -115,7 +148,13 @@ export type PresetImportResult =
  */
 export async function importDefaultPresets(
   gateway: PresetGateway,
-  options: { allowUnbound: boolean; onlyWhenUnimported: boolean; now: string },
+  options: {
+    allowUnbound: boolean;
+    onlyWhenUnimported: boolean;
+    now: string;
+    /** E2 capability probe of the target host; absent means retired keys are never dropped. */
+    probe?: RetirementProbe;
+  },
 ): Promise<PresetImportResult> {
   let previewResult = await gateway.preview(options.allowUnbound);
   if (!previewResult.ok) {
@@ -158,13 +197,21 @@ export async function importDefaultPresets(
       continue;
     }
 
+    const importSelection = defaultPresetSelection(preview.roles);
+    const retireLegacyFields = await retireAdoptedRoles(
+      options.probe,
+      rolesState.values.roles,
+      preview,
+      importSelection,
+    );
     let selectionResult: { roles: Role[]; document: Record<string, unknown> };
     try {
       selectionResult = applyPresetSelectionDocument(
         { roles: rolesState.values.roles, raw: rolesState.raw, revision: rolesState.revision },
         preview,
-        defaultPresetSelection(preview.roles),
+        importSelection,
         options.now,
+        { retireLegacyFields },
       );
     } catch {
       if (attempt + 1 >= MAX_PREVIEW_ATTEMPTS) {
@@ -213,7 +260,13 @@ export async function importDefaultPresets(
       // The write already succeeded; the host event will refresh the hook.
     }
 
-    const preferencesWrite = await savePreferencesOnly(gateway, preview, roles, options.now);
+    const preferencesWrite = await savePreferencesOnly(
+      gateway,
+      preview,
+      roles,
+      options.now,
+      options.probe,
+    );
     if (preferencesWrite !== "saved") {
       return {
         kind: "preferences-failed",
@@ -269,7 +322,13 @@ async function repreviewForConfirmation(
  */
 export async function syncDefaultPresets(
   gateway: PresetGateway,
-  input: { preview: PreviewSuccess; selection: PresetSelection; now: string },
+  input: {
+    preview: PreviewSuccess;
+    selection: PresetSelection;
+    now: string;
+    /** E2 capability probe of the target host; absent means retired keys are never dropped. */
+    probe?: RetirementProbe;
+  },
 ): Promise<PresetSyncResult> {
   const rolesState = await gateway.readRoles();
   if (rolesState.status !== "ready") {
@@ -282,6 +341,12 @@ export async function syncDefaultPresets(
   let roles = rolesState.values.roles;
   let wroteRoles = false;
   if (selectionNeedsRoleWrite(input.preview.roles, input.selection)) {
+    const retireLegacyFields = await retireAdoptedRoles(
+      input.probe,
+      rolesState.values.roles,
+      input.preview,
+      input.selection,
+    );
     let selectionResult: { roles: Role[]; document: Record<string, unknown> };
     try {
       selectionResult = applyPresetSelectionDocument(
@@ -289,6 +354,7 @@ export async function syncDefaultPresets(
         input.preview,
         input.selection,
         input.now,
+        { retireLegacyFields },
       );
     } catch {
       return repreviewForConfirmation(gateway, input.selection, zh.defaultPresetsCatalogChanged);
@@ -312,7 +378,13 @@ export async function syncDefaultPresets(
     wroteRoles = true;
   }
 
-  const preferencesWrite = await savePreferencesOnly(gateway, input.preview, roles, input.now);
+  const preferencesWrite = await savePreferencesOnly(
+    gateway,
+    input.preview,
+    roles,
+    input.now,
+    input.probe,
+  );
   if (preferencesWrite !== "saved") {
     return {
       kind: "failed",

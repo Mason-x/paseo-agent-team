@@ -56,3 +56,13 @@ export async function shouldRetire(
   }
   return probe();
 }
+
+/** The same rule for objects written together (adopted Roles): one question, only if one still carries a retired key. */
+export async function shouldRetireAny(
+  probe: RetirementProbe,
+  kind: RetiredFieldsKind,
+  originals: readonly object[],
+): Promise<boolean> {
+  if (!originals.some((original) => hasRetiredFields(kind, original))) return false;
+  return probe();
+}

@@ -635,6 +635,13 @@ export const zh = {
   retiredTeamCollaboration: "此 Team 含已取消的协作配置，不再生效；保存后删除。",
   retiredPreferences: "本次保存会同时删除旧的经济池与全席位配置。",
   retiredPresetSync: "本次同步会删除旧的经济池与全席位配置。",
+  // 同一提示在目标 host 的插件还没升级时的说法：这次保存不删除，升级后再保存才会清理。
+  retiredTeamModeKept: (label: string) =>
+    `此 Team 原为「${label}」模式，现按各 Role 的绑定运行；该 host 的插件还没升级，这次保存不删除该设置，升级后再保存会清理。`,
+  retiredTeamCollaborationKept:
+    "此 Team 含已取消的协作配置，不再生效；该 host 的插件还没升级，这次保存不删除，升级后再保存会清理。",
+  retiredPresetSyncKept:
+    "偏好里仍有旧的经济池与全席位配置；该 host 的插件还没升级，本次同步不删除，升级后再同步会清理。",
   maxMembers: "成员上限",
   maxMembersTitle: "成员上限设置",
   maxMembersIntro: "只保存到本 host 的插件偏好；每次启动最多创建这么多成员。",

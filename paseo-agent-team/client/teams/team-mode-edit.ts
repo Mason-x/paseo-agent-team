@@ -36,12 +36,28 @@ export function readRetiredTeamNotice(
   return modeLabel === null && !collaboration ? null : { modeLabel, collaboration };
 }
 
-/** The one-line notices (E1); empty when the Team carries nothing retired. */
-export function retiredTeamNoticeLines(notice: RetiredTeamNotice | null): string[] {
-  if (notice === null) return [];
+/**
+ * The one-line notices (E1); empty when the Team carries nothing retired. A Team that carries
+ * retired settings always gets its line. `hostRetires` is the target host's answer: true says the
+ * settings are deleted on save, false says that host's plugin is not upgraded so this save keeps
+ * them, and null (probe still running) shows nothing yet rather than promise either.
+ */
+export function retiredTeamNoticeLines(
+  notice: RetiredTeamNotice | null,
+  hostRetires: boolean | null,
+): string[] {
+  if (notice === null || hostRetires === null) return [];
   return [
-    ...(notice.modeLabel === null ? [] : [zh.retiredTeamMode(notice.modeLabel)]),
-    ...(notice.collaboration ? [zh.retiredTeamCollaboration] : []),
+    ...(notice.modeLabel === null
+      ? []
+      : [
+          hostRetires
+            ? zh.retiredTeamMode(notice.modeLabel)
+            : zh.retiredTeamModeKept(notice.modeLabel),
+        ]),
+    ...(notice.collaboration
+      ? [hostRetires ? zh.retiredTeamCollaboration : zh.retiredTeamCollaborationKept]
+      : []),
   ];
 }
 
