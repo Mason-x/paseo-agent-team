@@ -3,6 +3,7 @@ import {
   type PresetSelection,
   recordPresetSync,
 } from "../../shared/domain/catalog-content";
+import { omitRetired } from "../../shared/domain/retired-fields";
 import type {
   CatalogBlocker,
   DefaultCatalogPreviewResult,
@@ -93,11 +94,17 @@ async function savePreferencesOnly(
     if (preferences.status !== "ready") return "invalid";
     // E2: the preferences are the object being saved; ask only if they still carry `economy`.
     const retireLegacyFields = probe
-      ? await shouldRetire(probe, "preferences", preferences.values)
+      ? await shouldRetire(
+          probe,
+          "preferences",
+          preferences.raw && typeof preferences.raw === "object"
+            ? preferences.raw
+            : preferences.values,
+        )
       : false;
     let values: Preferences;
     try {
-      values = recordPresetSync(
+      const recorded = recordPresetSync(
         preferences,
         withPreferencesRevision(preview, preferences.revision),
         roles,
@@ -105,6 +112,25 @@ async function savePreferencesOnly(
         now,
         { retireLegacyFields },
       );
+      // The schema decodes with defaults and tolerant transformations. Preserve the raw document
+      // for every preference this flow does not own, including unknown nested extension keys.
+      const raw =
+        preferences.raw && typeof preferences.raw === "object" && !Array.isArray(preferences.raw)
+          ? (preferences.raw as Record<string, unknown>)
+          : preferences.values;
+      const merged = {
+        ...raw,
+        templatesImportedAt: recorded.templatesImportedAt,
+        defaultPresets: {
+          ...(raw.defaultPresets &&
+          typeof raw.defaultPresets === "object" &&
+          !Array.isArray(raw.defaultPresets)
+            ? raw.defaultPresets
+            : {}),
+          ...recorded.defaultPresets,
+        },
+      };
+      values = (retireLegacyFields ? omitRetired("preferences", merged) : merged) as Preferences;
     } catch {
       return "invalid";
     }

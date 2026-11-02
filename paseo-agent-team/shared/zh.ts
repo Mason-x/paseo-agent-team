@@ -633,13 +633,17 @@ export const zh = {
   retiredTeamMode: (label: string | null) =>
     `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}旧模式已停用，现按各 Role 的绑定运行；保存时删除旧设置，回滚到旧版本将按旗舰运行。`,
   retiredTeamModeKept: (label: string | null) =>
-    `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}新版已停用旧模式。该 host 的插件还没升级或无法确认升级，这次保存不删除，升级后再保存会清理。`,
+    `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}新版已停用旧模式。无法确认该 host 的插件支持清理，这次保存不删除；升级后再保存会清理。`,
   retiredTeamProbePending: (label: string | null) =>
     `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}新版已停用旧模式，正在检查该 host 是否会在保存时清理旧设置。`,
-  retiredPreferences: "本次保存会同时删除旧的经济池与全席位配置。",
+  retiredPreferences: "更改成员上限并保存时，会同时删除旧的经济池与全席位配置。",
+  retiredPreferencesKept:
+    "偏好里仍有旧的经济池与全席位配置；该 host 的插件可能尚未升级或探测失败，本次保存不删除，升级后再保存会清理。",
+  retiredPreferencesProbePending:
+    "偏好里仍有旧的经济池与全席位配置；正在检查该 host 是否会在保存时清理。",
   retiredPresetSync: "本次同步会删除旧的经济池与全席位配置。",
   retiredPresetSyncKept:
-    "偏好里仍有旧的经济池与全席位配置；该 host 的插件还没升级或无法确认升级，本次同步不删除，升级后再同步会清理。",
+    "偏好里仍有旧的经济池与全席位配置；无法确认该 host 的插件支持清理，本次同步不删除，升级后再同步会清理。",
   retiredPresetSyncProbePending:
     "偏好里仍有旧的经济池与全席位配置；正在检查该 host 是否会在同步时清理。",
   maxMembers: "成员上限",
@@ -652,7 +656,8 @@ export const zh = {
   maxMembersLoading: "正在读取偏好…",
   maxMembersLoadFail: "无法读取偏好。",
   maxMembersSaveFail: "无法保存成员上限。",
-  maxMembersSaveConflict: "偏好已被其他窗口更新，请重试。",
+  maxMembersSaveConflict: "偏好已被其他窗口更新，未保存。",
+  maxMembersReloadHint: "请关闭后重新打开，读取最新值再编辑。",
   maxMembersConflictBody:
     "其他窗口已修改偏好。覆盖保存会以打开时的内容为基础；也可重新加载最新值后再编辑。",
   maxMembersOverwrite: "覆盖保存",

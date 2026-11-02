@@ -56,6 +56,7 @@ export function PresetSyncDialog({
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [legacyEconomy, setLegacyEconomy] = useState(false);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const gatewayRef = useRef(gateway);
   gatewayRef.current = gateway;
   const retirementProbe = useRetirementProbe();
@@ -79,17 +80,25 @@ export function PresetSyncDialog({
     setPromptOpen(null);
     setMessage(null);
     setLegacyEconomy(false);
+    setPreferencesReady(false);
     void gatewayRef.current
       .readPreferences()
       .then((snapshot) => {
-        if (!active || snapshot.status !== "ready") return;
+        if (!active) return;
+        if (snapshot.status !== "ready") {
+          setMessage(zh.defaultPresetsSettingsUnavailable);
+          return;
+        }
+        setPreferencesReady(true);
         const raw = snapshot.raw;
         setLegacyEconomy(
           hasRetiredFields("preferences", snapshot.values) ||
             (typeof raw === "object" && raw !== null && hasRetiredFields("preferences", raw)),
         );
       })
-      .catch(() => {});
+      .catch(() => {
+        if (active) setMessage(zh.defaultPresetsSettingsUnavailable);
+      });
     void gatewayRef.current
       .preview(false)
       .then((preview) => {
@@ -198,7 +207,7 @@ export function PresetSyncDialog({
   }
 
   async function confirm() {
-    if (state.kind !== "ready" || submitting) return;
+    if (state.kind !== "ready" || !preferencesReady || submitting) return;
     setSubmitting(true);
     setMessage(null);
     let result: PresetSyncResult;
@@ -406,7 +415,7 @@ export function PresetSyncDialog({
               <ModalActions
                 theme={theme}
                 confirmLabel={submitting ? zh.saving : zh.defaultPresetsApply}
-                confirmDisabled={submitting}
+                confirmDisabled={submitting || !preferencesReady}
                 onCancel={onClose}
                 onConfirm={() => void confirm()}
               />
