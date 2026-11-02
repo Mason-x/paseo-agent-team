@@ -24,20 +24,16 @@ import {
   loadEditorSnapshot,
   saveEditorRow,
 } from "../catalog/editor-save";
-import { keepRoleMetadata, mergeRoleExecutionPolicy } from "../catalog/preset-metadata";
+import { keepRoleMetadata } from "../catalog/preset-metadata";
+import { shouldRetire } from "../catalog/retirement";
+import { useRetirementProbe } from "../catalog/use-retirement";
 import { AppearanceField } from "../shared/AppearanceField";
 import { resolveIdentityColor, storedIdentityColor, storedRoleIcon } from "../shared/appearance";
 import { ModalActions } from "../shared/buttons";
-import { CompactPicker } from "../shared/CompactPicker";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { Field, TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import { SlugInput } from "../shared/SlugInput";
-import {
-  applyRolePolicyChoice,
-  ROLE_TIER_OPTIONS,
-  TASK_KIND_OPTIONS,
-} from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { ListEditor } from "./ListEditor";
 import { ProfilePicker } from "./ProfilePicker";
@@ -69,10 +65,6 @@ export type RoleDraft = {
   color: string;
   icon: string;
   enabled: boolean;
-  executionTier: string;
-  executionTaskKind: string;
-  executionTierTouched: boolean;
-  executionTaskKindTouched: boolean;
 };
 
 function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
@@ -92,10 +84,6 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
       color: "",
       icon: "",
       enabled: true,
-      executionTier: "",
-      executionTaskKind: "",
-      executionTierTouched: false,
-      executionTaskKindTouched: false,
     };
   }
   return {
@@ -113,11 +101,6 @@ function toDraft(role: Role | null, nameSeed = ""): RoleDraft {
     color: role.color ?? "",
     icon: role.icon ?? "",
     enabled: role.enabled,
-    executionTier: typeof role.executionPolicy?.tier === "string" ? role.executionPolicy.tier : "",
-    executionTaskKind:
-      typeof role.executionPolicy?.taskKind === "string" ? role.executionPolicy.taskKind : "",
-    executionTierTouched: false,
-    executionTaskKindTouched: false,
   };
 }
 
@@ -165,6 +148,7 @@ export function RoleEditor({
   const readRolesDoc = useRpc(rolesRead);
   const writeRolesDoc = useRpc(rolesWrite);
   const roleState = useSettings(rolesSettings);
+  const retirementProbe = useRetirementProbe();
   const [draft, setDraft] = useState<RoleDraft>(() => toDraft(role));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState<ConflictKind | null>(null);
@@ -284,12 +268,6 @@ export function RoleEditor({
       ...(mcp ? { mcpServers: mcp } : {}),
       ...(color ? { color } : {}),
       ...(icon ? { icon } : {}),
-      executionPolicy: mergeRoleExecutionPolicy(baseline.current?.executionPolicy, {
-        tier: draft.executionTier,
-        taskKind: draft.executionTaskKind,
-        tierTouched: draft.executionTierTouched,
-        taskKindTouched: draft.executionTaskKindTouched,
-      }),
       enabled: true,
       createdAt: baseline.current?.createdAt ?? now,
       updatedAt: now,
@@ -308,10 +286,12 @@ export function RoleEditor({
     setSaveError(null);
     setSavingHere(true);
     try {
+      // E2: ask the target host now, and only when this Role still carries a retired key.
+      const retireLegacyFields = await shouldRetire(retirementProbe, "role", baseline.current);
       const result = await saveEditorRow({
         mode,
         key: "roles",
-        row: keepRoleMetadata(baseline.current, parsed.data),
+        row: keepRoleMetadata(baseline.current, parsed.data, { retireLegacyFields }),
         baseline: baseline.current,
         opened: snapshot,
         forceOverwrite: overwrite,
@@ -461,59 +441,6 @@ export function RoleEditor({
               revision={formSeed}
               onChange={(outputContract) => setDraft((current) => ({ ...current, outputContract }))}
             />
-            <CompactPicker
-              theme={theme}
-              label={zh.roleExecutionTier}
-              items={[
-                { id: "", name: zh.rolePolicyKeep },
-                ...ROLE_TIER_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
-              ]}
-              selectedId={draft.executionTier}
-              placeholder={zh.rolePolicyKeep}
-              searchPlaceholder={zh.searchOptions}
-              emptyLabel={zh.noMatches}
-              onChange={(executionTier) =>
-                setDraft((current) => applyRolePolicyChoice(current, "tier", executionTier))
-              }
-            />
-            <CompactPicker
-              theme={theme}
-              label={zh.roleExecutionTaskKind}
-              items={[
-                { id: "", name: zh.rolePolicyKeep },
-                ...TASK_KIND_OPTIONS.map((option) => ({ id: option.value, name: option.label })),
-              ]}
-              selectedId={draft.executionTaskKind}
-              placeholder={zh.rolePolicyKeep}
-              searchPlaceholder={zh.searchOptions}
-              emptyLabel={zh.noMatches}
-              onChange={(executionTaskKind) =>
-                setDraft((current) => applyRolePolicyChoice(current, "taskKind", executionTaskKind))
-              }
-            />
-            {draft.executionTier === "" || draft.executionTaskKind === "" ? (
-              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                {zh.rolePolicyKeepHint}
-              </Text>
-            ) : null}
-            {!draft.executionTierTouched &&
-            role?.executionPolicy?.tier !== undefined &&
-            (typeof role.executionPolicy.tier !== "string" ||
-              !ROLE_TIER_OPTIONS.some((option) => option.value === role.executionPolicy?.tier)) ? (
-              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
-                {zh.rolePolicyUnknown(String(role.executionPolicy.tier))}
-              </Text>
-            ) : null}
-            {!draft.executionTaskKindTouched &&
-            role?.executionPolicy?.taskKind !== undefined &&
-            (typeof role.executionPolicy.taskKind !== "string" ||
-              !TASK_KIND_OPTIONS.some(
-                (option) => option.value === role.executionPolicy?.taskKind,
-              )) ? (
-              <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
-                {zh.rolePolicyUnknown(String(role.executionPolicy.taskKind))}
-              </Text>
-            ) : null}
             <ProfilePicker
               theme={theme}
               label={zh.preferredProfiles}
