@@ -156,13 +156,18 @@ describe("MT retired settings compatibility", () => {
       const gateway: PresetGateway = {
         preview: vi.fn(async () => preview),
         readRoles: vi.fn(async () => ({
-          status: "ready",
+          status: "ready" as const,
           values: { roles: [] },
           raw: { roles: [] },
           revision: "r1",
         })),
-        readPreferences: vi.fn(async () => ({ status: "ready", values, raw, revision: "p1" })),
-        saveRolesDocument: vi.fn(async () => "saved"),
+        readPreferences: vi.fn(async () => ({
+          status: "ready" as const,
+          values,
+          raw,
+          revision: "p1",
+        })),
+        saveRolesDocument: vi.fn(async () => "saved" as const),
         savePreferences,
         reloadRoles: vi.fn(async () => {}),
         reloadPreferences: vi.fn(async () => {}),
