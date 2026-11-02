@@ -50,7 +50,6 @@ describe("submission nonce and double click", () => {
     expect(sent).toMatchObject({
       clientRequestId: DESIGN_CLIENT_REQUEST_ID,
       request: "设计一个改版团队",
-      mode: "sota",
     });
     expect(sent?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
 
@@ -117,17 +116,15 @@ describe("submission nonce and double click", () => {
     expect(state.draftState.inputRevision).toBe(1);
   });
 
-  test("a command prefill keeps the mode and designer Profile, and clears a null workspace", () => {
+  test("a command prefill keeps the designer Profile and clears a null workspace", () => {
     let state = createDesignSubmissionState({
       request: "旧",
-      mode: "economy",
       workspaceId: "ws-old",
       profileChoice: "codex-xhigh",
     });
     state = applyDesignPrefill(state, { request: "新需求", workspaceId: null });
     expect(state.draftState.draft).toEqual({
       request: "新需求",
-      mode: "economy",
       workspaceId: "",
       profileChoice: "codex-xhigh",
       existingRolesOnly: true,
@@ -239,7 +236,6 @@ describe("request payload normalization", () => {
     const built = buildDesignStartInput(
       {
         request: "需求",
-        mode: "economy",
         workspaceId: "ws-1",
         profileChoice: null,
         existingRolesOnly: true,
@@ -251,7 +247,6 @@ describe("request payload normalization", () => {
       input: {
         clientRequestId: DESIGN_CLIENT_REQUEST_ID,
         request: "需求",
-        mode: "economy",
         workspaceId: "ws-1",
         existingRolesOnly: true,
       },
@@ -262,7 +257,6 @@ describe("request payload normalization", () => {
     const auto = buildDesignStartInput(
       {
         request: "需求",
-        mode: "sota",
         workspaceId: "",
         profileChoice: "",
         existingRolesOnly: true,
@@ -273,7 +267,6 @@ describe("request payload normalization", () => {
     const explicit = buildDesignStartInput(
       {
         request: "需求",
-        mode: "sota",
         workspaceId: "",
         profileChoice: "codex-xhigh",
         existingRolesOnly: true,
