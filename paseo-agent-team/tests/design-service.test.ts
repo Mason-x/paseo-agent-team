@@ -1728,7 +1728,7 @@ describe("design service", () => {
     expect(correction).toContain("Architect");
     expect(correction).toContain(DESIGNER.id);
     expect(correction).toContain(DESIGNER.name);
-    expect(correction).toContain("未标注");
+    expect(correction).toContain(`${DESIGNER.provider}/${DESIGNER.model}`);
     await service.dispose();
   });
 
