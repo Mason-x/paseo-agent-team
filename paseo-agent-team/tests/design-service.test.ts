@@ -260,7 +260,7 @@ const planner: DesignPlanningPort = {
     return {
       ok: true,
       preview: {
-        requestedMode: input.mode,
+        requestedMode: "sota",
         coordinator: {
           roleId: input.team.coordinatorRoleId,
           roleName: "Coordinator",
@@ -3163,8 +3163,6 @@ describe("design service", () => {
 // eligibility check belong to the second segment and are not exercised here.)
 // ---------------------------------------------------------------------------------------------
 
-const ECONOMY_ALL_V2 = { ...input(), mode: "economy-all" as const, contractVersion: 2 };
-
 function legacyRecordBase() {
   return { ...LEGACY_RECORD_RULES } as const;
 }
@@ -3222,7 +3220,7 @@ async function finishTurn(
 
 describe("design service ledger v2 (C03 first segment)", () => {
   describe("access gate", () => {
-    test("a caller that did not declare contract 2 is refused economy-all with nothing touched", async () => {
+    test("every caller is refused retired modes with nothing touched", async () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       let hashCalls = 0;
@@ -3240,7 +3238,7 @@ describe("design service ledger v2 (C03 first segment)", () => {
           },
         }),
       );
-      for (const contractVersion of [undefined, 0, 1, 3]) {
+      for (const contractVersion of [undefined, 0, 1, 2, 3]) {
         const refused = await service.start({
           ...input(),
           mode: "economy-all",
@@ -3252,7 +3250,7 @@ describe("design service ledger v2 (C03 first segment)", () => {
             {
               code: "DESIGN_MODE_UNAVAILABLE",
               action: "refresh",
-              params: { mode: "economy-all", reason: "contract-required", contractVersion: 2 },
+              params: { mode: "economy-all", reason: "retired", contractVersion: 2 },
             },
           ],
           job: null,
@@ -3265,7 +3263,7 @@ describe("design service ledger v2 (C03 first segment)", () => {
       await service.dispose();
     });
 
-    test("a mode this build does not know is refused too, and legacy modes need no declaration", async () => {
+    test("unknown and retired modes are refused; default and sota remain usable", async () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
@@ -3276,10 +3274,18 @@ describe("design service ledger v2 (C03 first segment)", () => {
       });
       expect(unknown).toMatchObject({ ok: false, issues: [{ code: "DESIGN_MODE_UNAVAILABLE" }] });
       expect(store.records.size).toBe(0);
-      for (const [index, mode] of (["sota", "economy"] as const).entries()) {
+      for (const mode of ["economy", "economy-all", "collaborative"] as const) {
+        const refused = await service.start({ ...input(), mode, contractVersion: 2 });
+        expect(refused).toMatchObject({
+          ok: false,
+          issues: [{ code: "DESIGN_MODE_UNAVAILABLE", params: { reason: "retired", mode } }],
+        });
+      }
+      expect(store.records.size).toBe(0);
+      for (const [index, mode] of [undefined, "sota" as const].entries()) {
         const started = await service.start({
           ...input(),
-          mode,
+          ...(mode === undefined ? {} : { mode }),
           clientRequestId: `11111111-1111-4111-8111-00000000000${index + 1}`,
         });
         expect(started.ok).toBe(true);
@@ -3288,21 +3294,21 @@ describe("design service ledger v2 (C03 first segment)", () => {
     });
   });
 
-  describe("economy-all tasks are written as version 2", () => {
+  describe("version 2 records and historical mode projection", () => {
     test("record, Job DTO copy, hash version, labels, and selection intent", async () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
-      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
       expect(record).toMatchObject({
         schemaVersion: DESIGN_RECORD_VERSION,
-        mode: "economy-all",
+        mode: "sota",
         requestHashVersion: 2,
         outputContractVersion: 2,
         existingRolesOnly: true,
         roleGap: null,
         job: {
-          mode: "economy-all",
+          mode: "sota",
           existingRolesOnly: true,
           outputContractVersion: 2,
           roleGap: null,
@@ -3310,14 +3316,14 @@ describe("design service ledger v2 (C03 first segment)", () => {
       });
       expect(JSON.parse(record.selectionIntent ?? "{}")).toMatchObject({
         payloadVersion: 2,
-        mode: "economy-all",
+        mode: "sota",
         existingRolesOnly: true,
       });
       // The agent label version is a label contract, not the record version: it stays "1".
       const labels = adapter.created[0]?.labels ?? {};
       expect(labels["agent-team.design.version"]).toBe("1");
       expect(labels["agent-team.design.request-hash"]).toBe(record.requestHash);
-      expect(labels["agent-team.design.mode"]).toBe("economy-all");
+      expect(labels["agent-team.design.mode"]).toBe("sota");
       await service.dispose();
     });
 
@@ -3325,7 +3331,12 @@ describe("design service ledger v2 (C03 first segment)", () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
-      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      store.records.set(record.job.jobId, {
+        ...record,
+        mode: "economy-all",
+        job: { ...record.job, mode: "economy-all" },
+      });
       const seen = await service.status({ contractVersion: 2 });
       expect(seen).toMatchObject({
         ok: true,
@@ -3348,7 +3359,12 @@ describe("design service ledger v2 (C03 first segment)", () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
-      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
+      store.records.set(record.job.jobId, {
+        ...record,
+        mode: "economy-all",
+        job: { ...record.job, mode: "economy-all" },
+      });
       const before = JSON.stringify(store.records.get(record.job.jobId));
       const refused = { ok: false, issues: [{ code: "DESIGN_MODE_UNAVAILABLE" }], job: null };
       const clientId = "22222222-2222-4222-8222-222222222222";
@@ -3956,7 +3972,7 @@ describe("design service ledger v2, second segment (C02 wiring)", () => {
       await startAndDesign(service, store, { ...input(), contractVersion: 2 });
       const context = lastCall("kickoff").context;
       expect(context).toMatchObject({ outputContractVersion: 2, existingRolesOnly: true });
-      expect(context.modeRouting).toBeUndefined();
+      expect(context).not.toHaveProperty("modeRouting");
       for (const role of context.roles) {
         expect(typeof role.launchable).toBe("boolean");
         expect(typeof role.coordinatorLaunchable).toBe("boolean");
@@ -3976,17 +3992,6 @@ describe("design service ledger v2, second segment (C02 wiring)", () => {
         expect(lastCall("kickoff").context.existingRolesOnly).toBe(existingRolesOnly);
         await service.dispose();
       }
-    });
-
-    test("an economy-all job gets the snapshot's route evidence, copied as is", async () => {
-      promptCalls.length = 0;
-      const store = new FakeStore();
-      const adapter = new FakeAdapter();
-      const service = createDesignService(serviceDeps(store, adapter));
-      await startAndDesign(service, store, ECONOMY_ALL_V2);
-      // No allSeats policy in the test preferences: the evidence says so and never invents routes.
-      expect(lastCall("kickoff").context.modeRouting).toMatchObject({ status: "absent" });
-      await service.dispose();
     });
 
     test("a version 1 record keeps (1, false) in every prompt, never the default for new requests", async () => {
@@ -4117,34 +4122,11 @@ describe("design service ledger v2, second segment (C02 wiring)", () => {
   });
 
   describe("economy-all gap eligibility", () => {
-    test("a suggested Profile outside the route is a correction round, not a terminal gap", async () => {
-      promptCalls.length = 0;
-      const store = new FakeStore();
-      const adapter = new FakeAdapter();
-      const service = createDesignService(serviceDeps(store, adapter));
-      adapter.profilesValue = [...profiles, CHEAP_PROFILE];
-      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
-      adapter.entries = answerFor(record, existingProfileGap(record, CHEAP_PROFILE.id));
-      await finishTurn(service, adapter, record.job.jobId);
-      await until(() => promptCalls.some((call) => call.kind === "correction"));
-      const after = store.records.get(record.job.jobId);
-      expect(after?.roleGap).toBeNull();
-      expect(after?.job.state).not.toBe("failed");
-      expect(after?.job.issues).toEqual([
-        expect.objectContaining({
-          code: "DESIGN_MODE_PLAN_INVALID",
-          params: expect.objectContaining({ modeCode: "MODE_CHEAP_POLICY_REQUIRED" }),
-        }),
-      ]);
-      expect(lastCall("correction").previousOutputKind).toBe("role-gap");
-      await service.dispose();
-    });
-
     test("naming no Profile (kind none) is always a legal way out", async () => {
       const store = new FakeStore();
       const adapter = new FakeAdapter();
       const service = createDesignService(serviceDeps(store, adapter));
-      const record = await startAndDesign(service, store, ECONOMY_ALL_V2);
+      const record = await startAndDesign(service, store, { ...input(), contractVersion: 2 });
       adapter.entries = answerFor(record, gapOutput(record));
       await finishTurn(service, adapter, record.job.jobId);
       await until(() => store.records.get(record.job.jobId)?.job.state === "failed");
