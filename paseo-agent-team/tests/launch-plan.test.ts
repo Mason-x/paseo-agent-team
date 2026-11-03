@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
-import { normalizeEconomyPolicy } from "../shared/domain/mode-resolver";
 import { LABELS } from "../shared/paseo/labels";
 import {
   allAvailable,
@@ -23,26 +22,6 @@ const base = {
   runId: "run-1",
   maxMembers: 8,
 };
-
-const twoFamilyEconomy = normalizeEconomyPolicy(
-  {
-    pool: [
-      {
-        profileId: codexXhigh.id,
-        family: "codex",
-        boundModel: { provider: codexXhigh.provider, model: codexXhigh.model },
-      },
-      {
-        profileId: claudeOpus.id,
-        family: "claude",
-        boundModel: { provider: claudeOpus.provider, model: claudeOpus.model },
-      },
-    ],
-    taskOrder: { coding: [codexXhigh.id, claudeOpus.id] },
-  },
-  [claudeOpus, codexXhigh],
-);
-if (!twoFamilyEconomy.ok) throw new Error("unexpected economy policy failure");
 
 describe("buildLaunchPlan", () => {
   test("builds titles, labels, and a kickoff for a healthy team", () => {
@@ -74,66 +53,7 @@ describe("buildLaunchPlan", () => {
     expect(plan.seats.map((seat) => seat.roleId)).toEqual(["architect", "developer"]);
   });
 
-  test("blocks expanded collaborative seats over 64 and duplicate seatIds", () => {
-    const execution = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const judge = role({
-      id: "qa-test",
-      name: "QA Test",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const expert = role({
-      id: "eng-expert",
-      name: "Expert",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const economy = normalizeEconomyPolicy(
-      {
-        pool: [
-          {
-            profileId: claudeOpus.id,
-            family: "claude",
-            boundModel: { provider: claudeOpus.provider, model: claudeOpus.model },
-          },
-          {
-            profileId: codexXhigh.id,
-            family: "codex",
-            boundModel: { provider: codexXhigh.provider, model: codexXhigh.model },
-          },
-        ],
-      },
-      [claudeOpus, codexXhigh],
-    );
-    if (!economy.ok) throw new Error("unexpected economy policy failure");
-    const manyMembers = {
-      ...codingTeam,
-      mode: "collaborative",
-      members: [
-        ...Array.from({ length: 33 }, (_, index) => ({
-          roleId: "eng-fullstack",
-          instanceLabel: `Seat ${index + 1}`,
-          seatId: `seat-${index + 1}`,
-          enabled: true,
-        })),
-        { roleId: "qa-test", instanceLabel: "Judge", seatId: "seat-judge", enabled: true },
-        { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
-      ],
-    };
-    const expanded = buildLaunchPlan({
-      ...base,
-      team: manyMembers,
-      roles: [techLead, execution, judge, expert],
-      maxMembers: 200,
-      economy: economy.value,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: true },
-    });
-    expect(expanded.seatCounts.physical).toBe(68);
-    expect(expanded.blockers).toContain("已启用成员（68）超过上限 64。");
-    expect(expanded.members).toEqual([]);
-
+  test("blocks duplicate seatIds and preserves label compatibility", () => {
     const duplicateSeat = buildLaunchPlan({
       ...base,
       team: {
@@ -223,24 +143,23 @@ describe("buildLaunchPlan", () => {
       team,
       roles: [techLead, fullstack],
       maxMembers: 24,
-      economy: twoFamilyEconomy.value,
       runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
     });
     expect(plan.blockers).toEqual([]);
     expect(plan.seats[0].selected).toMatchObject({
-      source: "economy-pool",
-      profile: { id: codexXhigh.id },
+      source: "role-preferred",
+      profile: { id: claudeOpus.id },
     });
     expect(plan.members).toHaveLength(1);
     expect(plan.members[0]).toMatchObject({
       seatId: "seat-build",
-      profile: { id: codexXhigh.id },
-      source: "economy-pool",
+      profile: { id: claudeOpus.id },
+      source: "role-preferred",
       instanceLabel: "Build",
     });
-    expect(plan.kickoffMessage).toContain(codexXhigh.name);
-    expect(plan.coordinator.systemPrompt).toContain("## Planned seats");
-    expect(plan.coordinator.systemPrompt).toContain("| seat-build |");
+    expect(plan.kickoffMessage).toContain(claudeOpus.name);
+    expect(plan.kickoffMessage).toContain("Fullstack (Build)");
+    expect(plan.coordinator.systemPrompt).toContain("Your team members are already running");
   });
 
   test("on-demand seats stay out of members and need the runtime capability", () => {
@@ -251,7 +170,7 @@ describe("buildLaunchPlan", () => {
     });
     const team = {
       ...codingTeam,
-      mode: "economy",
+      memberCreation: "on-demand",
       members: [
         { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
       ],
@@ -261,33 +180,28 @@ describe("buildLaunchPlan", () => {
       team,
       roles: [techLead, fullstack],
       maxMembers: 24,
-      economy: twoFamilyEconomy.value,
       runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
     });
     expect(ready.blockers).toEqual([]);
-    expect(ready.seats[0].selected).toMatchObject({ profile: { id: codexXhigh.id } });
+    expect(ready.seats[0].selected).toMatchObject({ profile: { id: claudeOpus.id } });
     expect(ready.members).toEqual([]);
     expect(ready.coordinator.systemPrompt).toContain("on first task");
 
     const fallback = buildLaunchPlan({
       ...base,
-      team,
+      team: { ...team, memberCreation: undefined },
       roles: [techLead, fullstack],
       maxMembers: 24,
-      economy: twoFamilyEconomy.value,
     });
-    // No explicit memberCreation: economy falls back to eager for this launch.
     expect(fallback.blockers).toEqual([]);
     expect(fallback.seats[0].activation).toBe("eager");
     expect(fallback.members).toHaveLength(1);
-    expect(fallback.warnings.some((item) => item.includes("按需创建尚未启用"))).toBe(true);
 
     const explicitOnDemand = buildLaunchPlan({
       ...base,
       team: { ...team, memberCreation: "on-demand" },
       roles: [techLead, fullstack],
       maxMembers: 24,
-      economy: twoFamilyEconomy.value,
     });
     expect(explicitOnDemand.blockers.some((item) => item.includes("按需创建成员当前不可用"))).toBe(
       true,
@@ -295,7 +209,7 @@ describe("buildLaunchPlan", () => {
     expect(explicitOnDemand.members).toEqual([]);
   });
 
-  test("the on-demand fallback keeps escalation seats on standby", () => {
+  test("a previously expert-labeled Role is an ordinary eager member", () => {
     const fullstack = role({
       id: "eng-fullstack",
       name: "Fullstack",
@@ -318,17 +232,13 @@ describe("buildLaunchPlan", () => {
       },
       roles: [techLead, fullstack, expert],
       maxMembers: 24,
-      economy: twoFamilyEconomy.value,
     });
     expect(plan.blockers).toEqual([]);
-    expect(plan.warnings.some((item) => item.includes("按需创建尚未启用"))).toBe(true);
-    expect(plan.members.map((member) => member.seatId)).toEqual(["seat-build"]);
-    expect(plan.seats.find((seat) => seat.roleId === "eng-expert")?.activation).toBe(
-      "escalation-only",
-    );
+    expect(plan.members.map((member) => member.seatId)).toEqual(["seat-build", "seat-expert"]);
+    expect(plan.seats.find((seat) => seat.roleId === "eng-expert")?.activation).toBe("eager");
   });
 
-  test("unknown mode, invalid policy, and missing host state block before creating anyone", () => {
+  test("old mode and policy are ignored while invalid creation and missing host block", () => {
     const manyMembers = {
       ...codingTeam,
       mode: "future-mode",
@@ -341,9 +251,9 @@ describe("buildLaunchPlan", () => {
     };
     const unknownMode = buildLaunchPlan({ ...base, team: manyMembers, maxMembers: 64 });
     expect(unknownMode.seatCounts.logical).toBe(65);
-    expect(unknownMode.seats).toEqual([]);
-    expect(unknownMode.members).toEqual([]);
-    expect(unknownMode.blockers.some((item) => item.includes("不支持的模式或策略"))).toBe(true);
+    expect(unknownMode.seats).toHaveLength(65);
+    expect(unknownMode.members).toHaveLength(65);
+    expect(unknownMode.blockers).toContain("已启用成员（65）超过上限 64。");
 
     const brokenRole = role({
       id: "eng-fullstack",
@@ -364,10 +274,8 @@ describe("buildLaunchPlan", () => {
       maxMembers: 24,
       runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
     });
-    expect(brokenPolicy.members).toEqual([]);
-    expect(brokenPolicy.blockers.some((item) => item.includes("层级或任务类型不受支持"))).toBe(
-      true,
-    );
+    expect(brokenPolicy.members).toHaveLength(1);
+    expect(brokenPolicy.blockers).toEqual([]);
 
     const invalidCreation = buildLaunchPlan({
       ...base,
@@ -381,7 +289,7 @@ describe("buildLaunchPlan", () => {
       },
       maxMembers: 24,
     });
-    expect(invalidCreation.members).toEqual([]);
+    expect(invalidCreation.members).toHaveLength(1);
     expect(invalidCreation.blockers.some((item) => item.includes("memberCreation=future"))).toBe(
       true,
     );
@@ -394,205 +302,7 @@ describe("buildLaunchPlan", () => {
     expect(hostDown.blockers.some((item) => item.includes("无法读取当前 host"))).toBe(true);
   });
 
-  test("a collaboration without an independent judge blocks", () => {
-    const fullstack = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const plan = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "collaborative",
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack],
-      maxMembers: 24,
-      economy: twoFamilyEconomy.value,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: true },
-    });
-    expect(plan.seats.some((seat) => seat.purpose === "candidate")).toBe(true);
-    expect(plan.members).toEqual([]);
-    expect(plan.blockers.some((item) => item.includes("协作需要独立的评审/测试席位"))).toBe(true);
-  });
-
-  test("standby seats are planned but never materialized", () => {
-    const fullstack = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const expert = role({
-      id: "eng-expert",
-      name: "Expert",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const plan = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "economy",
-        memberCreation: "eager",
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-          { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack, expert],
-      maxMembers: 24,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
-    });
-    expect(plan.blockers).toEqual([]);
-    expect(plan.seats).toHaveLength(2);
-    expect(plan.seats.find((seat) => seat.roleId === "eng-expert")?.activation).toBe(
-      "escalation-only",
-    );
-    expect(plan.members.map((member) => member.seatId)).toEqual(["seat-build"]);
-  });
-
-  test("eager collaboration materializes candidates and the judge, not standby", () => {
-    const fullstack = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const judge = role({
-      id: "qa-test",
-      name: "QA Test",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const expert = role({
-      id: "eng-expert",
-      name: "Expert",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const plan = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "collaborative",
-        memberCreation: "eager",
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-          { roleId: "qa-test", instanceLabel: "Judge", seatId: "seat-judge", enabled: true },
-          { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack, judge, expert],
-      maxMembers: 24,
-      economy: twoFamilyEconomy.value,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: true },
-    });
-    expect(plan.blockers).toEqual([]);
-    expect(plan.members.map((member) => member.seatId)).toEqual([
-      "seat-build-c1",
-      "seat-build-c2",
-      "seat-judge",
-    ]);
-    expect(plan.members.map((member) => member.profile.id)).toEqual([
-      codexXhigh.id,
-      claudeOpus.id,
-      claudeOpus.id,
-    ]);
-  });
-
-  test("maps role, escalation, capability, and coordinator blockers to readable text", () => {
-    const fullstack = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const disabled = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      enabled: false,
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const disabledPlan = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "economy",
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-        ],
-      },
-      roles: [techLead, disabled],
-      maxMembers: 24,
-      runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
-    });
-    expect(disabledPlan.members).toEqual([]);
-    expect(disabledPlan.blockers.some((item) => item.includes("已禁用"))).toBe(true);
-
-    const invalidEscalation = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "economy",
-        collaboration: { escalationRoleId: "ghost" },
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack],
-      maxMembers: 24,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
-    });
-    expect(invalidEscalation.blockers.some((item) => item.includes("升级角色配置无效"))).toBe(true);
-
-    const expert = role({
-      id: "eng-expert",
-      name: "Expert",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const unavailableEscalation = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "economy",
-        collaboration: { escalationRoleId: "eng-expert" },
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-          { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack, expert],
-      profiles: [claudeOpus, codexXhigh],
-      availability: allAvailable.map((entry) =>
-        entry.provider === "claude" ? { ...entry, available: false } : entry,
-      ),
-      maxMembers: 24,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
-    });
-    expect(unavailableEscalation.blockers.some((item) => item.includes("升级通道不可用"))).toBe(
-      true,
-    );
-
-    const noCollaborationRuntime = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "collaborative",
-        memberCreation: "eager",
-        members: [
-          { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-          { roleId: "qa-test", instanceLabel: "Judge", seatId: "seat-judge", enabled: true },
-        ],
-      },
-      roles: [techLead, fullstack, role({ id: "qa-test", name: "QA Test" })],
-      maxMembers: 24,
-      economy: twoFamilyEconomy.value,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: false },
-    });
-    expect(
-      noCollaborationRuntime.blockers.some((item) =>
-        item.includes("协作模式需要后续版本的运行能力"),
-      ),
-    ).toBe(true);
-
+  test("maps a missing coordinator binding to readable text", () => {
     const coordinatorDown = buildLaunchPlan({
       ...base,
       profiles: [codexXhigh],
@@ -628,77 +338,6 @@ describe("buildLaunchPlan", () => {
     expect(plan.warnings.some((item) => item.includes("重复，已继续启动"))).toBe(true);
   });
 
-  test("economy and collaborative modes block repeated labels", () => {
-    const repeated = [
-      { roleId: "architect", instanceLabel: "A", enabled: true },
-      { roleId: "architect", instanceLabel: "A", enabled: true },
-    ];
-    const economy = buildLaunchPlan({
-      ...base,
-      team: { ...codingTeam, mode: "economy", members: repeated },
-      roles: [techLead, architect],
-      runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
-    });
-    expect(economy.blockers).toContain("实例标签 id「A」已被使用。");
-
-    const collaborative = buildLaunchPlan({
-      ...base,
-      team: { ...codingTeam, mode: "collaborative", members: repeated },
-      roles: [techLead, architect],
-      runtimeCapabilities: { onDemand: true, expansion: false, collaboration: true },
-    });
-    expect(collaborative.blockers).toContain("实例标签 id「A」已被使用。");
-  });
-
-  test("collaboration without on-demand blocks even with an empty pool", () => {
-    const fullstack = role({
-      id: "eng-fullstack",
-      name: "Fullstack",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const baseTeam = {
-      ...codingTeam,
-      mode: "collaborative" as const,
-      members: [
-        { roleId: "eng-fullstack", instanceLabel: "Build", seatId: "seat-build", enabled: true },
-      ],
-    };
-    const closed = buildLaunchPlan({
-      ...base,
-      team: baseTeam,
-      roles: [techLead, fullstack],
-      maxMembers: 24,
-    });
-    expect(closed.blockers.some((item) => item.includes("按需创建成员当前不可用"))).toBe(false);
-    expect(closed.blockers.some((item) => item.includes("协作模式需要后续版本的运行能力"))).toBe(
-      true,
-    );
-    expect(closed.members).toEqual([]);
-
-    const eager = buildLaunchPlan({
-      ...base,
-      team: { ...baseTeam, memberCreation: "eager" },
-      roles: [techLead, fullstack],
-      maxMembers: 24,
-    });
-    expect(eager.blockers.some((item) => item.includes("按需创建成员当前不可用"))).toBe(false);
-    expect(eager.blockers.some((item) => item.includes("协作模式需要后续版本的运行能力"))).toBe(
-      true,
-    );
-    expect(eager.members).toHaveLength(1);
-
-    const open = buildLaunchPlan({
-      ...base,
-      team: baseTeam,
-      roles: [techLead, fullstack],
-      maxMembers: 24,
-      runtimeCapabilities: { onDemand: true, expansion: true, collaboration: true },
-    });
-    expect(open.blockers).toEqual([]);
-    expect(open.seats[0].activation).toBe("on-demand");
-    expect(open.members).toEqual([]);
-  });
-
   test("blocked previews still expose eagerly materialized members", () => {
     const emptyTask = buildLaunchPlan({ ...base, task: "" });
     expect(emptyTask.blockers).toContain("必须填写任务描述。");
@@ -712,31 +351,7 @@ describe("buildLaunchPlan", () => {
     expect(toolsBlocked.blockers.length).toBeGreaterThan(0);
   });
 
-  test("an economy team with only standby seats blocks instead of an empty crew", () => {
-    const expert = role({
-      id: "eng-expert",
-      name: "Expert",
-      preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-    });
-    const plan = buildLaunchPlan({
-      ...base,
-      team: {
-        ...codingTeam,
-        mode: "economy",
-        members: [
-          { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
-        ],
-      },
-      roles: [techLead, expert],
-      maxMembers: 24,
-      economy: twoFamilyEconomy.value,
-    });
-    expect(plan.members).toEqual([]);
-    expect(plan.seats[0].activation).toBe("escalation-only");
-    expect(plan.blockers.some((item) => item.includes("无法按需创建升级席位"))).toBe(true);
-  });
-
-  test("SOTA keeps legacy disabled and invalid-tier Roles with warnings", () => {
+  test("disabled Roles warn and invalid retired tiers do not block", () => {
     const disabled = role({
       id: "qa-review",
       name: "Review",
@@ -779,9 +394,7 @@ describe("buildLaunchPlan", () => {
     });
     expect(brokenPlan.blockers).toEqual([]);
     expect(brokenPlan.members).toHaveLength(1);
-    expect(
-      brokenPlan.warnings.some((item) => item.includes("层级或任务类型无效，已按原绑定启动")),
-    ).toBe(true);
+    expect(brokenPlan.members[0]?.profile.id).toBe(claudeOpus.id);
   });
 
   test("freezes the legacy SOTA launch plan", () => {
