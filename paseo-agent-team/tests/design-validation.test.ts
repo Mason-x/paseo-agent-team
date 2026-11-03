@@ -96,7 +96,7 @@ function previewFor(
     };
   });
   return ModeLaunchPreviewSchema.parse({
-    requestedMode: input.mode,
+    requestedMode: "sota",
     coordinator: {
       roleId: input.team.coordinatorRoleId,
       roleName: input.team.coordinatorRoleId,
@@ -128,7 +128,6 @@ const opusHigh = { ...claudeOpus, id: "opus-high", name: "Opus", model: "opus-hi
 function makeContext(overrides: Partial<DesignValidationContext> = {}): DesignValidationContext {
   return {
     request: "给后台做一次改版",
-    mode: "sota",
     jobId: DESIGN_JOB_ID,
     attempt: 1,
     nonce: DESIGN_NONCE,
@@ -385,11 +384,11 @@ describe("validateDesign", () => {
     if (!result.ok) return;
     expect(result.value.team).toMatchObject({
       id: "rework-team",
-      mode: "sota",
       memberCreation: "eager",
       source: "team-designer",
       designer: { jobId: DESIGN_JOB_ID },
     });
+    expect(result.value.team).not.toHaveProperty("mode");
     expect(result.value.team.members.map((member) => member.seatId)).toEqual([
       "seat-m1",
       "seat-m2",
@@ -615,22 +614,24 @@ describe("validateDesign", () => {
     if (!collidingResult.ok)
       expect(codes(collidingResult.issues)).toContain("DESIGN_ROLE_NAME_CONFLICT");
 
-    const invalidPolicy = withNewRoles([
-      validNewRole({
-        executionPolicy: {
-          tier: "economy",
-          taskKind: "coding",
-        } as unknown as NewDesignRole["executionPolicy"],
-      }),
-    ]);
+    const invalidPolicy = withNewRoles(
+      [
+        validNewRole({
+          executionPolicy: {
+            tier: "economy",
+            taskKind: "coding",
+          } as unknown as NewDesignRole["executionPolicy"],
+        }),
+      ],
+      { m3: "codex-xhigh" },
+    );
     const invalidPolicyResult = run(invalidPolicy.proposal, {
       planner: invalidPolicy.planner,
       identity: { logicalSeatIds: { m1: "seat-m1", m2: "seat-m2", m3: "seat-m3" } },
     });
-    expect(invalidPolicyResult.ok).toBe(false);
-    if (!invalidPolicyResult.ok) {
-      expect(codes(invalidPolicyResult.issues)).toContain("DESIGN_MODE_PLAN_INVALID");
-    }
+    expect(invalidPolicyResult.ok, JSON.stringify(invalidPolicyResult.issues)).toBe(true);
+    if (invalidPolicyResult.ok)
+      expect(invalidPolicyResult.value.newRoles[0]).not.toHaveProperty("executionPolicy");
   });
 
   test("enforces new-Role count and Profile references without blocking legacy reused placeholders", () => {
@@ -731,7 +732,7 @@ describe("validateDesign", () => {
 
   test("maps planner blockers, launch blockers, and ordered choices", () => {
     const planner = fakePlanner({
-      issues: [modeIssue("MODE_JUDGE_REQUIRED", "blocker")],
+      issues: [modeIssue("MODE_ONDEMAND_UNAVAILABLE", "blocker")],
       launchBlockers: ["missing tools"],
     });
     const result = run(designProposal(), { planner });
@@ -741,7 +742,7 @@ describe("validateDesign", () => {
         expect.arrayContaining(["DESIGN_MODE_PLAN_INVALID", "DESIGN_LAUNCH_BLOCKED"]),
       );
       const mode = result.issues.find((issue) => issue.code === "DESIGN_MODE_PLAN_INVALID");
-      expect(mode?.params.modeCode).toBe("MODE_JUDGE_REQUIRED");
+      expect(mode?.params.modeCode).toBe("MODE_ONDEMAND_UNAVAILABLE");
       expect(mode?.action).toBe("repair");
     }
 
@@ -760,7 +761,7 @@ describe("validateDesign", () => {
     const configInvalid = run(designProposal(), {
       planner: fakePlanner({
         ok: false,
-        issues: [modeIssue("MODE_POOL_CONFIG_INVALID", "blocker")],
+        issues: [modeIssue("MODE_UNKNOWN", "blocker")],
       }),
     });
     expect(configInvalid.ok).toBe(false);
@@ -770,13 +771,13 @@ describe("validateDesign", () => {
       ).toBe("inspect");
     }
     const successBlocker = run(designProposal(), {
-      planner: fakePlanner({ issues: [modeIssue("MODE_JUDGE_REQUIRED", "blocker")] }),
+      planner: fakePlanner({ issues: [modeIssue("MODE_ONDEMAND_UNAVAILABLE", "blocker")] }),
     });
     expect(successBlocker.ok).toBe(false);
 
     const warnings = run(designProposal(), {
       planner: fakePlanner({
-        issues: [modeIssue("MODE_FAMILIES_REDUCED", "warning")],
+        issues: [modeIssue("MODE_REVIEW_FAMILY_SAME", "warning")],
         launchWarnings: ["legacy warning"],
       }),
     });
@@ -804,7 +805,7 @@ describe("validateDesign", () => {
     }
   });
 
-  test("supports collaboration only when capability is open and validates its member refs", () => {
+  test("ignores retired collaboration fields and accepts ordinary planner selections", () => {
     const collaborative = designProposal({
       team: {
         ...designProposal().team,
@@ -812,47 +813,12 @@ describe("validateDesign", () => {
         collaboration: { replicas: 2, judgeRoleId: "architect" },
       },
     });
-    const blocked = run(collaborative, { context: { mode: "collaborative" } });
-    expect(blocked.ok).toBe(false);
-    if (!blocked.ok) expect(codes(blocked.issues)).toContain("DESIGN_MODE_UNAVAILABLE");
-
-    const accepted = run(collaborative, {
-      context: {
-        mode: "collaborative",
-        capabilities: { onDemand: true, expansion: true, collaboration: true },
-      },
-    });
+    const accepted = run(collaborative);
     expect(accepted.ok).toBe(true);
-    if (accepted.ok) expect(accepted.value.team.memberCreation).toBe("on-demand");
-
-    const wrongMode = run(
-      designProposal({
-        team: {
-          ...designProposal().team,
-          collaboration: { replicas: 2, judgeRoleId: "architect" },
-        },
-      }),
-    );
-    expect(wrongMode.ok).toBe(false);
-    if (!wrongMode.ok) expect(codes(wrongMode.issues)).toContain("DESIGN_TEAM_INVALID");
-
-    const badJudge = designProposal({
-      team: {
-        ...designProposal().team,
-        mode: "collaborative",
-        collaboration: { replicas: 2, judgeRoleId: "developer" },
-        members: [designProposal().team.members[0]],
-      },
-      profileChoices: designProposal().profileChoices.slice(0, 2),
-    });
-    const badJudgeResult = run(badJudge, {
-      context: {
-        mode: "collaborative",
-        capabilities: { onDemand: true, expansion: true, collaboration: true },
-      },
-    });
-    expect(badJudgeResult.ok).toBe(false);
-    if (!badJudgeResult.ok) expect(codes(badJudgeResult.issues)).toContain("DESIGN_TEAM_INVALID");
+    if (accepted.ok) {
+      expect(accepted.value.team).not.toHaveProperty("mode");
+      expect(accepted.value.team).not.toHaveProperty("collaboration");
+    }
 
     const fallbackPlanner: DesignPlanningPort = {
       plan(input) {
@@ -876,13 +842,12 @@ describe("validateDesign", () => {
     expect(fallback.ok).toBe(true);
   });
 
-  test("uses eager creation for economy without on-demand support", () => {
+  test("uses eager creation regardless of retired mode and on-demand capability", () => {
     const economy = designProposal({
       team: { ...designProposal().team, mode: "economy" },
     });
     const eager = run(economy, {
       context: {
-        mode: "economy",
         capabilities: { onDemand: false, expansion: true, collaboration: false },
       },
     });
@@ -890,12 +855,11 @@ describe("validateDesign", () => {
     if (eager.ok) expect(eager.value.team.memberCreation).toBe("eager");
     const onDemand = run(economy, {
       context: {
-        mode: "economy",
         capabilities: { onDemand: true, expansion: true, collaboration: false },
       },
     });
     expect(onDemand.ok).toBe(true);
-    if (onDemand.ok) expect(onDemand.value.team.memberCreation).toBe("on-demand");
+    if (onDemand.ok) expect(onDemand.value.team.memberCreation).toBe("eager");
   });
 
   test("rejects identity collisions and missing logical seats", () => {
@@ -998,42 +962,6 @@ test("maps model mN keys through logicalSeatIds and supports ordered candidates"
     ).toEqual(["claude-opus-high"]);
   }
 
-  const standby = run(designProposal(), {
-    planner: fakePlanner({
-      extraSeats: [
-        {
-          logicalSeatId: "seat-m1",
-          roleId: "architect",
-          purpose: "judge",
-          profileId: "claude-opus-high",
-        },
-      ],
-    }),
-  });
-  expect(standby.ok, JSON.stringify(standby.issues)).toBe(true);
-
-  const sameRoleStandby = run(designProposal(), {
-    planner: fakePlanner({
-      extraSeats: [
-        {
-          logicalSeatId: "seat-m1",
-          roleId: "architect",
-          purpose: "escalation",
-          activation: "escalation-only",
-          profileId: "claude-opus-high",
-          source: "role-preferred",
-        },
-      ],
-    }),
-  });
-  expect(sameRoleStandby.ok).toBe(true);
-  if (sameRoleStandby.ok) {
-    expect(
-      sameRoleStandby.value.memberReasons.find((reason) => reason.target === "m1")
-        ?.expectedProfileIds,
-    ).toEqual(["codex-xhigh"]);
-  }
-
   const emptyChoice = designProposal({
     profileChoices: [
       designProposal().profileChoices[0],
@@ -1052,17 +980,6 @@ test("maps model mN keys through logicalSeatIds and supports ordered candidates"
   });
   expect(normalEmpty.ok).toBe(false);
   if (!normalEmpty.ok) expect(codes(normalEmpty.issues)).toContain("DESIGN_PROFILE_CHOICE");
-
-  const optionalEmpty = run(emptyChoice, {
-    planner: fakePlanner({ profileIds: { m1: null }, purposes: { m1: "escalation" } }),
-  });
-  expect(optionalEmpty.ok).toBe(true);
-  if (optionalEmpty.ok) {
-    expect(
-      optionalEmpty.value.memberReasons.find((reason) => reason.target === "m1")
-        ?.expectedProfileIds,
-    ).toEqual([]);
-  }
 
   const missingCoordinator = run(designProposal(), {
     planner: fakePlanner({ omitCoordinator: true }),
@@ -1120,7 +1037,7 @@ test("aggregates profileChoices structure before calling the planner and exposes
   ]);
 });
 
-test("returns choice diagnostics from real failure paths and excludes valid optional-empty", () => {
+test("returns choice diagnostics from real failure paths", () => {
   const wrong = designProposal({
     profileChoices: [
       designProposal().profileChoices[0],
@@ -1176,21 +1093,6 @@ test("returns choice diagnostics from real failure paths and excludes valid opti
       expectedProfileIds: [],
       reason: "missing-profile",
     });
-  }
-
-  const optional = run(emptyChoice, {
-    planner: fakePlanner({ profileIds: { m1: null }, purposes: { m1: "escalation" } }),
-  });
-  expect(optional.ok).toBe(true);
-  if (optional.ok) {
-    expect(
-      describeProfileChoiceMismatches(
-        optional.value.proposal,
-        optional.value.plan,
-        optional.value.team,
-        optional.value.logicalSeatIds,
-      ),
-    ).toEqual([]);
   }
 });
 
@@ -1522,24 +1424,17 @@ describe("record rule and the 0/3 new-Role limit", () => {
 });
 
 describe("design contract policy", () => {
-  test("the mode access decision is a pure contract check", () => {
+  test("retired request modes are refused across contract versions", () => {
     expect(designModeAccess({ mode: "sota" })).toEqual({ ok: true });
-    expect(designModeAccess({ mode: "economy" })).toEqual({ ok: true });
-    expect(designModeAccess({ mode: "economy-all", contractVersion: 2 })).toEqual({ ok: true });
-    expect(designModeAccess({ mode: "economy-all" })).toEqual({
-      ok: false,
-      reason: "contract-required",
-      value: "economy-all",
-      contractVersion: 2,
-    });
-    expect(designModeAccess({ mode: "economy-all", contractVersion: 1 })).toMatchObject({
-      ok: false,
-      reason: "contract-required",
-    });
-    expect(designModeAccess({ mode: "economy-all", contractVersion: 3 })).toMatchObject({
-      ok: false,
-      reason: "contract-required",
-    });
+    for (const mode of ["economy", "economy-all", "collaborative"] as const) {
+      for (const contractVersion of [undefined, 1, 2, 3]) {
+        expect(designModeAccess({ mode, contractVersion })).toMatchObject({
+          ok: false,
+          reason: "retired",
+          value: mode,
+        });
+      }
+    }
   });
 
   test("rules derive the single 0/3 limit and the new-job defaults", () => {
