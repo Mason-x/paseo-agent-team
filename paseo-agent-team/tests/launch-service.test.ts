@@ -221,26 +221,6 @@ describe("launch preview and hash", () => {
     expect(created).toHaveLength(3);
   });
 
-  test("a mode override affects the preview and job without changing the Team", async () => {
-    const { service, port } = setup();
-    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
-    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
-    expect(preview.preview.requestedMode).toBe("economy");
-    expect(preview.preview.issues).toContainEqual(
-      expect.objectContaining({ code: "MODE_ONDEMAND_FALLBACK_EAGER" }),
-    );
-    expect(
-      preview.preview.issues.filter((issue) => issue.code === "MODE_ONDEMAND_FALLBACK_EAGER"),
-    ).toHaveLength(1);
-
-    const started = await service.start(
-      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
-      port,
-    );
-    expect(started.ok).toBe(true);
-    if (started.ok) expect(started.job.mode).toBe("economy");
-  });
-
   test("previewing a new workspace validates the project without creating it", async () => {
     const { service, port } = setup();
     const preview = await service.preview(
@@ -281,26 +261,6 @@ describe("launch preview and hash", () => {
     expect(degraded.sent[0]?.text).toBe(normal.sent[0]?.text);
   });
 
-  test("availability failure blocks economy and collaborative modes with one issue", async () => {
-    for (const mode of ["economy", "collaborative"] as const) {
-      const { service, port, created } = setup();
-      port.providers.listAvailable.mockRejectedValue(new Error("providers offline"));
-      const preview = await service.preview({ ...onWorkspace, mode }, port);
-      expect(preview.ok, mode).toBe(false);
-      if (preview.ok) continue;
-      expect(preview.blockers).toContain(zh.modes.contextUnavailable);
-      expect(
-        preview.issues.filter((issue) => issue.code === "MODE_CONTEXT_UNAVAILABLE"),
-        mode,
-      ).toHaveLength(1);
-      expect(created).toHaveLength(0);
-
-      const started = await service.start({ ...onWorkspace, mode }, port);
-      expect(started.ok, mode).toBe(false);
-      expect(created).toHaveLength(0);
-    }
-  });
-
   test("raw host errors never reach the RPC result", async () => {
     const secret = "connect ECONNREFUSED /secret/path token=ABC";
     const { service, port, log, created } = setup();
@@ -322,21 +282,22 @@ describe("launch preview and hash", () => {
 
     const availability = setup();
     availability.port.providers.listAvailable.mockRejectedValue(new Error(secret));
-    const availabilityFailure = await availability.service.preview(
-      { ...onWorkspace, mode: "economy" },
-      availability.port,
-    );
-    expect(availabilityFailure.ok).toBe(false);
+    const availabilityFailure = await availability.service.preview(onWorkspace, availability.port);
+    expect(availabilityFailure.ok).toBe(true);
     expect(JSON.stringify(availabilityFailure)).not.toContain("/secret/path");
     expect(JSON.stringify(availabilityFailure)).not.toContain("token=ABC");
-    if (!availabilityFailure.ok) {
-      expect(availabilityFailure.issues).toContainEqual(
+    if (availabilityFailure.ok) {
+      expect(availabilityFailure.preview.issues).toContainEqual(
         expect.objectContaining({
           code: "MODE_CONTEXT_UNAVAILABLE",
+          severity: "warning",
           params: expect.objectContaining({ reason: "availability-unverified" }),
         }),
       );
+      expect(availabilityFailure.preview.warnings).toContain(zh.modes.availabilityUnverified);
     }
+    expect(availability.log).toHaveBeenCalled();
+    expect(availability.created).toHaveLength(0);
   });
 
   test("unrelated Role and Team edits do not invalidate a preview hash", async () => {
@@ -397,54 +358,43 @@ describe("launch preview and hash", () => {
     expect(profile.created).toHaveLength(0);
   });
 
-  test("start warnings match preview warnings for pool problems", async () => {
-    const { service, port } = setup({
-      prefs: {
-        ...preferences,
-        economy: {
-          pool: [
-            { profileId: "ghost", enabled: true },
-            { profileId: "ghost2", enabled: true },
-          ],
-        },
-      },
-    });
-    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
+  test("start warnings match preview warnings when availability cannot be verified", async () => {
+    const { service, port } = setup();
+    port.providers.listAvailable.mockRejectedValue(new Error("providers offline"));
+    const preview = await service.preview(onWorkspace, port);
     if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
-    expect(
-      preview.preview.warnings.filter((warning) => warning.includes("经济池条目")),
-    ).toHaveLength(2);
+    expect(preview.preview.warnings).toContain(zh.modes.availabilityUnverified);
     const started = await service.start(
-      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
       port,
     );
     expect(started.ok).toBe(true);
-    if (started.ok) expect(started.job.warnings).toEqual(preview.preview.warnings);
+    if (started.ok) {
+      expect(started.job.warnings).toEqual(preview.preview.warnings);
+      await settled(service, started.job.runId);
+    }
   });
 
-  test("an economy pool participates in the hash and accepts a matching start", async () => {
-    const { service, port } = setup({
+  test("legacy economy preferences do not change the hash or matching start", async () => {
+    const current = setup();
+    const legacy = setup({
       prefs: {
         ...preferences,
         economy: {
-          pool: [
-            {
-              profileId: claudeOpus.id,
-              family: "claude",
-              enabled: true,
-              boundModel: { provider: "claude", model: "opus" },
-            },
-          ],
+          pool: [{ profileId: claudeOpus.id, family: "claude", enabled: true }],
         },
       },
     });
-    const preview = await service.preview({ ...onWorkspace, mode: "economy" }, port);
-    if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
-    const started = await service.start(
-      { ...onWorkspace, mode: "economy", expectedPlanHash: preview.preview.planHash },
-      port,
+    const preview = await current.service.preview(onWorkspace, current.port);
+    const legacyPreview = await legacy.service.preview(onWorkspace, legacy.port);
+    if (!preview.ok || !legacyPreview.ok) throw new Error("unexpected preview blockers");
+    expect(legacyPreview.preview.planHash).toBe(preview.preview.planHash);
+    const started = await legacy.service.start(
+      { ...onWorkspace, expectedPlanHash: preview.preview.planHash },
+      legacy.port,
     );
     expect(started.ok).toBe(true);
+    if (started.ok) await settled(legacy.service, started.job.runId);
   });
 
   test("freezes the legacy SOTA creation output", async () => {
@@ -576,64 +526,64 @@ describe("mode access gate", () => {
   const unknownModeTeam = { ...codingTeam, id: "unknown-team", mode: "turbo" };
   const withTeams = () =>
     setup({ teams: ready({ teams: [codingTeam, economyAllTeam, unknownModeTeam] }) });
-  const denied = (subject: "team" | "request", value: string) => [
-    launchContractZh.modeRequired(subject, value),
+  const denied = (value: string) => [
+    launchContractZh.retiredMode(value),
     launchContractZh.refreshHint,
   ];
 
-  test("a legacy caller cannot launch an economy-all Team even with a SOTA override", async () => {
-    const { service, port, created } = withTeams();
-    for (const override of [undefined, "sota" as const]) {
-      const preview = await service.preview(
-        { ...onWorkspace, teamId: economyAllTeam.id, ...(override ? { mode: override } : {}) },
-        port,
-      );
-      expect(preview.ok).toBe(false);
-      if (preview.ok) continue;
-      expect(preview.blockers).toEqual(denied("team", "economy-all"));
-      expect(preview.issues).toEqual([
-        expect.objectContaining({
-          code: "MODE_UNKNOWN",
-          severity: "blocker",
-          params: expect.objectContaining({ reason: "contract-required" }),
-        }),
-      ]);
-
-      for (const input of [
-        { ...onWorkspace, teamId: economyAllTeam.id, ...(override ? { mode: override } : {}) },
-        {
+  test("retired request modes block preview and start before host or target reads", async () => {
+    for (const mode of ["economy", "economy-all", "collaborative"] as const) {
+      for (const contractVersion of [undefined, 1, 2, 3] as const) {
+        const { service, port, created, refresh } = withTeams();
+        const input = {
           ...onWorkspace,
           teamId: economyAllTeam.id,
-          ...(override ? { mode: override } : {}),
-          expectedPlanHash: "stale",
-        },
-      ]) {
-        const started = await service.start(input, port);
+          mode,
+          ...(contractVersion === undefined ? {} : { contractVersion }),
+        };
+        const preview = await service.preview(input, port);
+        expect(preview.ok).toBe(false);
+        if (preview.ok) throw new Error(`retired ${mode} was accepted`);
+        expect(preview.blockers).toEqual(denied(mode));
+        expect(preview.issues).toEqual([
+          expect.objectContaining({
+            code: "MODE_UNKNOWN",
+            severity: "blocker",
+            params: expect.objectContaining({ reason: "retired", value: mode }),
+          }),
+        ]);
+        const started = await service.start({ ...input, expectedPlanHash: "stale" }, port);
         expect(started.ok).toBe(false);
-        if (!started.ok) expect(started.blockers).toEqual(denied("team", "economy-all"));
+        if (!started.ok) expect(started.blockers).toEqual(denied(mode));
+        expect(created).toHaveLength(0);
+        expect(port.config.get).not.toHaveBeenCalled();
+        expect(port.providers.listAvailable).not.toHaveBeenCalled();
+        expect(refresh).not.toHaveBeenCalled();
       }
     }
-    expect(created).toHaveLength(0);
-    // The gate short-circuits before host and target reads.
-    expect(port.config.get).not.toHaveBeenCalled();
-    expect(port.providers.listAvailable).not.toHaveBeenCalled();
   });
 
-  test("an unknown stored mode is denied for every legacy caller", async () => {
-    for (const contractVersion of [undefined, 1, 3] as const) {
-      const { service, port, created } = withTeams();
-      const preview = await service.preview(
-        {
+  test("saved legacy and unknown modes are ignored for every caller", async () => {
+    for (const teamId of [economyAllTeam.id, unknownModeTeam.id]) {
+      for (const contractVersion of [undefined, 1, 2, 3] as const) {
+        const { service, port, created } = withTeams();
+        const input = {
           ...onWorkspace,
-          teamId: unknownModeTeam.id,
-          mode: "sota",
+          teamId,
           ...(contractVersion === undefined ? {} : { contractVersion }),
-        },
-        port,
-      );
-      expect(preview.ok, String(contractVersion)).toBe(false);
-      if (!preview.ok) expect(preview.blockers).toEqual(denied("team", "turbo"));
-      expect(created).toHaveLength(0);
+        };
+        const preview = await service.preview(input, port);
+        if (!preview.ok) throw new Error(`unexpected blockers: ${preview.blockers.join(", ")}`);
+        expect(preview.preview.requestedMode).toBe("sota");
+        expect(created).toHaveLength(0);
+        const started = await service.start(
+          { ...input, expectedPlanHash: preview.preview.planHash },
+          port,
+        );
+        expect(started.ok).toBe(true);
+        if (started.ok) await settled(service, started.job.runId);
+        expect(created).toHaveLength(3);
+      }
     }
   });
 
@@ -660,15 +610,15 @@ describe("mode access gate", () => {
     expect(created.length).toBeGreaterThan(0);
   });
 
-  test("legacy Teams keep working for v1 callers, and contractVersion is not hashed", async () => {
+  test("contractVersion and explicit sota are not hashed", async () => {
     const { service, port } = withTeams();
-    const legacy = await service.preview({ ...onWorkspace, mode: "economy" }, port);
-    expect(legacy.ok).toBe(true);
-
+    const explicit = await service.preview({ ...onWorkspace, mode: "sota" }, port);
     const plain = await service.preview(onWorkspace, port);
     const v2 = await service.preview({ ...onWorkspace, contractVersion: 2 }, port);
     const v3 = await service.preview({ ...onWorkspace, contractVersion: 3 }, port);
-    if (!plain.ok || !v2.ok || !v3.ok) throw new Error("unexpected preview failure");
+    if (!explicit.ok || !plain.ok || !v2.ok || !v3.ok)
+      throw new Error("unexpected preview failure");
+    expect(explicit.preview.planHash).toBe(plain.preview.planHash);
     expect(v2.preview.planHash).toBe(plain.preview.planHash);
     expect(v3.preview.planHash).toBe(plain.preview.planHash);
   });
@@ -692,6 +642,6 @@ describe("mode access gate", () => {
     const { service, port } = withTeams();
     const preview = await service.preview({ ...onWorkspace, mode: "economy-all" }, port);
     expect(preview.ok).toBe(false);
-    if (!preview.ok) expect(preview.blockers).toEqual(denied("request", "economy-all"));
+    if (!preview.ok) expect(preview.blockers).toEqual(denied("economy-all"));
   });
 });

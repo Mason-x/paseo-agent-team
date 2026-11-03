@@ -2,11 +2,7 @@ import { describe, expect, test } from "vitest";
 import { hashLaunchPlan } from "../server/launch-hash";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
 import { toModeLaunchPreview } from "../shared/domain/launch-preview";
-import {
-  type EconomyPolicy,
-  type HostSnapshot,
-  normalizeEconomyPolicy,
-} from "../shared/domain/mode-resolver";
+import type { HostSnapshot } from "../shared/domain/mode-resolver";
 import { ModeLaunchPreviewSchema } from "../shared/schemas/launch-preview";
 import type { Team } from "../shared/schemas/team";
 import { zh } from "../shared/zh";
@@ -21,7 +17,6 @@ import {
   techLead,
 } from "./fixtures";
 
-const emptyEconomy: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 const host: HostSnapshot = {
   status: "ready",
   profiles: [claudeOpus, codexXhigh],
@@ -31,11 +26,7 @@ const host: HostSnapshot = {
 function makePlan(
   team: Team,
   roles = [techLead, architect, developer],
-  options: {
-    host?: HostSnapshot;
-    mode?: "sota" | "economy" | "collaborative";
-    economy?: EconomyPolicy;
-  } = {},
+  options: { host?: HostSnapshot } = {},
 ) {
   return buildLaunchPlan({
     team,
@@ -46,19 +37,13 @@ function makePlan(
     task: "Add Stripe",
     runId: "preview",
     maxMembers: 24,
-    mode: options.mode,
     host: options.host ?? host,
-    economy: options.economy ?? emptyEconomy,
     runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
   });
 }
 
-function previewOf(
-  plan: ReturnType<typeof makePlan>,
-  hash = "a".repeat(64),
-  economy: EconomyPolicy = emptyEconomy,
-) {
-  return toModeLaunchPreview(plan, hash, [], economy);
+function previewOf(plan: ReturnType<typeof makePlan>, hash = "a".repeat(64)) {
+  return toModeLaunchPreview(plan, hash);
 }
 
 describe("launch preview DTO", () => {
@@ -88,104 +73,65 @@ describe("launch preview DTO", () => {
     expect(json).not.toContain("mcpServers");
   });
 
-  test("reports the coordinator budget for SOTA and economy pool bindings", () => {
-    const sotaPreview = previewOf(makePlan(codingTeam));
-    expect(sotaPreview.coordinator).toMatchObject({
-      budget: "unknown",
-      budgetBasis: "conservative-default",
-    });
-    expect(
-      sotaPreview.seats.every(
-        (seat) => seat.budget === "unknown" && seat.budgetBasis === "conservative-default",
-      ),
-    ).toBe(true);
-
-    const poolEconomy: EconomyPolicy = {
-      pool: [{ profileId: claudeOpus.id, family: "claude", enabled: true }],
-      taskOrder: {},
-      profileBudget: {},
-    };
-    const economyPreview = previewOf(
-      makePlan({ ...codingTeam, mode: "economy" }, [techLead, architect, developer], {
-        mode: "economy",
-        economy: poolEconomy,
-      }),
-      "b".repeat(64),
-      poolEconomy,
-    );
-    expect(economyPreview.coordinator).toMatchObject({
-      budget: "economy",
-      budgetBasis: "pool",
-    });
+  test("keeps the compatible fixed budget fields on coordinator and every seat", () => {
+    const preview = previewOf(makePlan(codingTeam));
+    expect(preview.coordinator).toMatchObject({ budget: "unknown", budgetBasis: "host" });
+    expect(preview.seats).toHaveLength(2);
+    for (const seat of preview.seats) {
+      expect(seat).toMatchObject({
+        budget: "unknown",
+        budgetBasis: "host",
+        standby: false,
+        unavailable: false,
+        alternates: [],
+      });
+    }
   });
 
-  test("includes every warning issue once, including missing economy pool entries", () => {
-    const normalized = normalizeEconomyPolicy(
-      {
-        pool: [{ profileId: "missing-profile", family: "ghost", enabled: true }],
-        taskOrder: {},
-        profileBudget: {},
-      },
-      [claudeOpus, codexXhigh],
-    );
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    const extraIssues = [...(normalized.issues ?? []), ...(normalized.issues ?? [])];
-    const plan = makePlan({ ...codingTeam, mode: "economy" }, [techLead, architect, developer], {
-      mode: "economy",
-      economy: normalized.value,
+  test("reports an availability warning only once", () => {
+    const plan = makePlan(codingTeam, undefined, {
+      host: { ...host, availabilityUnverified: true },
     });
-    const preview = toModeLaunchPreview(plan, "a".repeat(64), extraIssues, normalized.value);
-    const missing = preview.warnings.filter(
-      (warning) => warning === zh.modes.poolEntryMissing("missing-profile"),
-    );
-    expect(missing).toHaveLength(1);
+    const preview = previewOf(plan);
+    expect(
+      preview.warnings.filter((warning) => warning === zh.modes.availabilityUnverified),
+    ).toHaveLength(1);
     expect(new Set(preview.warnings).size).toBe(preview.warnings.length);
   });
 
-  test("adding coordinator budget fields does not change the plan hash", () => {
+  test("preview budget fields leave the plan hash unchanged", () => {
     const plan = makePlan(codingTeam);
     const input = {
       team: codingTeam,
       roles: [techLead, architect, developer],
       plan,
       host,
-      economy: emptyEconomy,
       target: { kind: "workspace" as const, workspaceId: "ws-1" },
       task: "Add Stripe",
       maxMembers: 24,
       runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
     };
     const hash = hashLaunchPlan(input);
-    const preview = toModeLaunchPreview(plan, hash, [], emptyEconomy);
+    const preview = previewOf(plan, hash);
     expect(preview.planHash).toBe(hash);
     expect(preview.coordinator.budget).toBe("unknown");
-    expect(hashLaunchPlan(input)).toBe(hash);
   });
 
-  test("keeps distinct pool warnings for two missing Profiles", () => {
-    const economy = normalizeEconomyPolicy(
-      {
-        pool: [
-          { profileId: "ghost", enabled: true },
-          { profileId: "ghost2", enabled: true },
-        ],
-      },
-      [claudeOpus, codexXhigh],
-    );
-    if (!economy.ok) throw new Error("unexpected economy policy failure");
-    const plan = makePlan({ ...codingTeam, mode: "economy" }, undefined, {
-      mode: "economy",
-      economy: economy.value,
-    });
-    const preview = toModeLaunchPreview(plan, "c".repeat(64), economy.issues ?? [], economy.value);
-    const ghostWarnings = preview.warnings.filter((warning) => warning.includes("经济池条目"));
-    expect(ghostWarnings).toHaveLength(2);
-    expect(ghostWarnings.some((warning) => warning.includes("ghost2"))).toBe(true);
-    expect(new Set(ghostWarnings).size).toBe(2);
+  test("keeps distinct warnings for two disabled Roles", () => {
+    const disabledRoles = [
+      techLead,
+      { ...architect, enabled: false },
+      { ...developer, enabled: false },
+    ];
+    const preview = previewOf(makePlan(codingTeam, disabledRoles));
+    const disabled = preview.issues.filter((issue) => issue.code === "MODE_ROLE_DISABLED");
+    expect(disabled.map((issue) => issue.roleId)).toEqual([architect.id, developer.id]);
+    expect(preview.warnings).toContain(zh.modes.roleDisabledWarning(architect.name));
+    expect(preview.warnings).toContain(zh.modes.roleDisabledWarning(`${developer.name} (Backend)`));
+    expect(new Set(preview.warnings).size).toBe(preview.warnings.length);
   });
 
-  test("keeps an unavailable escalation seat explicit instead of dropping it", () => {
+  test("an unresolved ordinary member blocks the plan with its seat identity", () => {
     const expert = role({
       id: "eng-expert",
       name: "Expert",
@@ -194,14 +140,12 @@ describe("launch preview DTO", () => {
     const plan = makePlan(
       {
         ...codingTeam,
-        mode: "economy",
         members: [
           { roleId: "eng-expert", instanceLabel: "Expert", seatId: "seat-expert", enabled: true },
         ],
       },
       [techLead, expert],
       {
-        mode: "economy",
         host: {
           status: "ready",
           profiles: [claudeOpus, codexXhigh],
@@ -212,15 +156,16 @@ describe("launch preview DTO", () => {
       },
     );
     const preview = previewOf(plan);
-    const seat = preview.seats[0];
-    expect(seat).toMatchObject({
-      seatId: "seat-expert",
-      purpose: "escalation",
-      activation: "escalation-only",
-      source: "unavailable",
-      unavailable: true,
-      profile: null,
-    });
+    expect(plan.blockers.length).toBeGreaterThan(0);
+    expect(preview.seats).toHaveLength(0);
+    expect(preview.issues).toContainEqual(
+      expect.objectContaining({
+        code: "MODE_PROFILE_UNRESOLVED",
+        severity: "blocker",
+        roleId: "eng-expert",
+        seatId: "seat-expert",
+      }),
+    );
     expect(ModeLaunchPreviewSchema.parse(preview)).toEqual(preview);
   });
 
@@ -231,13 +176,12 @@ describe("launch preview DTO", () => {
       roles: [techLead, architect, developer],
       plan,
       host,
-      economy: emptyEconomy,
       target: { kind: "workspace" as const, workspaceId: "ws-1" },
       task: "Add Stripe",
       maxMembers: 24,
       runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
     };
-    const other = { ...plan, runId: "another", mode: plan.mode };
+    const other = { ...plan, runId: "another" };
     expect(hashLaunchPlan(input)).toMatch(/^[a-f0-9]{64}$/);
     expect(hashLaunchPlan({ ...input, plan: other })).toBe(hashLaunchPlan(input));
   });
