@@ -112,7 +112,6 @@ type Transport = {
   cancel: ReturnType<typeof vi.fn>;
   continueJob: ReturnType<typeof vi.fn>;
   onOpenRole: ReturnType<typeof vi.fn>;
-  onConfigureEconomy: ReturnType<typeof vi.fn>;
   onCreateRole: ReturnType<typeof vi.fn>;
 };
 function transport(withSeed: boolean, jobs: unknown[] = [gapJob]): Transport {
@@ -133,7 +132,6 @@ function transport(withSeed: boolean, jobs: unknown[] = [gapJob]): Transport {
     cancel: vi.fn(async () => ({ ok: true })),
     continueJob: vi.fn(async () => ({ ok: true })),
     onOpenRole: vi.fn(),
-    onConfigureEconomy: vi.fn(),
     onCreateRole: vi.fn(),
   };
 }
@@ -181,7 +179,6 @@ function Harness({ api }: { api: Transport }) {
         onPreviewLaunch: () => undefined,
         modeContract: "v2",
         onOpenRole: api.onOpenRole as never,
-        onConfigureEconomy: api.onConfigureEconomy as never,
         onCreateRole: api.onCreateRole as never,
         onGapRetry: (prefill: DesignerPrefill) => {
           const next = applyGapRetry("A", prefill);
@@ -366,15 +363,14 @@ describe("gap exits and job actions through the panel", () => {
     unmount();
   });
 
-  test("an economy-all gap sends the user to the all-seats route, not to the Role", async () => {
-    const api = transport(false, [{ ...gapJob, mode: "economy-all" }]);
+  test("a historical economy-all gap still opens the Role binding", async () => {
+    const api = transport(false, [{ ...gapJob, mode: "economy-all", roleGap: [unlaunchable] }]);
     const { root, unmount } = await mount(api, false);
 
-    await press(root, designGapZh.actionConfigureEconomy);
-    expect(api.onConfigureEconomy).toHaveBeenCalledWith(
-      expect.objectContaining({ layer: "allSeats" }),
+    await press(root, designGapZh.actionOpenRole);
+    expect(api.onOpenRole).toHaveBeenCalledWith(
+      expect.objectContaining({ roleId: "qa-migration", profileId: profile.id }),
     );
-    expect(api.onOpenRole).not.toHaveBeenCalled();
     unmount();
   });
 
