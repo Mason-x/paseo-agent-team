@@ -5,7 +5,6 @@ import { describe, expect, test } from "vitest";
 import { hashLaunchPlan } from "../server/launch-hash";
 import { type AtomicJsonCodec, createAtomicJson } from "../server/ledger/atomic-json";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
-import type { EconomyPolicy } from "../shared/domain/mode-resolver";
 import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import { RunTeamEngineConfigSchema } from "../shared/schemas/run-engine/config";
 import {
@@ -1511,7 +1510,6 @@ describe("F15 reuses the real hashLaunchPlan digest", () => {
       { provider: "claude", available: true },
       { provider: "codex", available: true },
     ];
-    const economy: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
     const runtimeCapabilities = { onDemand: true, expansion: true, collaboration: true };
     const task = "Add Stripe";
     const plan = buildLaunchPlan({
@@ -1523,7 +1521,6 @@ describe("F15 reuses the real hashLaunchPlan digest", () => {
       task,
       runId: "run-f15",
       maxMembers: 8,
-      economy,
       runtimeCapabilities,
       daemonConfig: { mcp: { enabled: true, injectIntoAgents: true } },
     });
@@ -1532,7 +1529,6 @@ describe("F15 reuses the real hashLaunchPlan digest", () => {
       roles,
       plan,
       host: { status: "ready", profiles, availability },
-      economy,
       target: { kind: "workspace", workspaceId: "ws-1" },
       task,
       maxMembers: 8,
