@@ -5,7 +5,6 @@ import {
   copyTeam,
   keepRoleMetadata,
   keepTeamMetadata,
-  mergeRoleExecutionPolicy,
   moveProfileRef,
   newProfileRef,
   removeProfileRef,
@@ -60,38 +59,16 @@ describe("editor metadata", () => {
     expect(keepRoleMetadata(null, fresh)).toBe(fresh);
   });
 
-  test("merges role execution policy without dropping unknown policy fields", () => {
-    expect(
-      mergeRoleExecutionPolicy(
-        { tier: "retain", taskKind: "general", custom: true },
-        {
-          tier: "execution",
-          taskKind: "coding",
-          tierTouched: true,
-          taskKindTouched: true,
-        },
-      ),
-    ).toEqual({ tier: "execution", taskKind: "coding", custom: true });
-    expect(
-      mergeRoleExecutionPolicy(
-        { tier: 5, taskKind: { future: true }, custom: true },
-        { tier: "", taskKind: "", tierTouched: false, taskKindTouched: false },
-      ),
-    ).toEqual({ tier: 5, taskKind: { future: true }, custom: true });
-    expect(
-      mergeRoleExecutionPolicy(
-        { tier: "retain", custom: true },
-        { tier: "", taskKind: "", tierTouched: true, taskKindTouched: true },
-      ),
-    ).toEqual({ custom: true });
-    expect(
-      mergeRoleExecutionPolicy(undefined, {
-        tier: "",
-        taskKind: "",
-        tierTouched: false,
-        taskKindTouched: false,
-      }),
-    ).toBeUndefined();
+  test("preserves retired Role policy on old hosts and removes it on upgraded hosts", () => {
+    const old = {
+      ...stored,
+      executionPolicy: { tier: 5, taskKind: { future: true }, custom: true },
+    };
+    const next = { ...stored, name: "Edited" };
+    expect(keepRoleMetadata(old, next).executionPolicy).toEqual(old.executionPolicy);
+    expect(keepRoleMetadata(old, next, { retireLegacyFields: true })).not.toHaveProperty(
+      "executionPolicy",
+    );
   });
 
   test("keeps Team designer and unknown extensions", () => {
@@ -113,7 +90,7 @@ describe("editor metadata", () => {
     expect(edited.operatingRules).toBeUndefined();
   });
 
-  test("the Team form owns mode fields while metadata and extensions survive", () => {
+  test("the Team form preserves retired fields on old hosts and removes them on upgraded hosts", () => {
     const withMode = {
       ...codingTeam,
       mode: "collaborative",
@@ -121,14 +98,17 @@ describe("editor metadata", () => {
       designer: { jobId: "job-4" },
       custom: { keep: true },
     };
-    const edited = keepTeamMetadata(withMode, {
-      ...withMode,
-      mode: "sota",
-      collaboration: undefined,
-      name: "Mode changed",
-    });
-    expect(edited.mode).toBe("sota");
-    expect(edited.collaboration).toBeUndefined();
+    const { mode: _mode, collaboration: _collaboration, ...form } = withMode;
+    const edited = keepTeamMetadata(withMode, { ...form, name: "Edited" });
+    expect(edited.mode).toBe("collaborative");
+    expect(edited.collaboration).toEqual(withMode.collaboration);
+    const retired = keepTeamMetadata(
+      withMode,
+      { ...form, name: "Edited" },
+      { retireLegacyFields: true },
+    );
+    expect(retired).not.toHaveProperty("mode");
+    expect(retired).not.toHaveProperty("collaboration");
     expect(edited.designer).toEqual({ jobId: "job-4" });
     expect(edited.custom).toEqual({ keep: true });
   });

@@ -1,10 +1,7 @@
 import { formatDesignIssue } from "../../shared/domain/design-output";
 import type { DesignIssue, DesignJob } from "../../shared/schemas/design";
 import type { Role } from "../../shared/schemas/role";
-import type { TeamMode } from "../../shared/schemas/team-mode";
-import { AllSeatsRouteSchema } from "../../shared/schemas/team-mode";
 import { designZh } from "../../shared/zh/design";
-import type { EconomyEditorFocus } from "../settings/EconomyPoolEditor";
 import type { DesignGapOpenRole } from "./DesignRoleGapCard";
 import type { DesignPrefillEvent } from "./events";
 import type { DesignLaunchPrefill } from "./submission-state";
@@ -14,7 +11,6 @@ export type DesignerPrefill = {
   nonce: string;
   text: string;
   workspaceId: string | null;
-  mode?: TeamMode;
   /** Set only by the Role-gap retry (false). A `/team-design` prefill never carries it. */
   existingRolesOnly?: boolean;
   /** The retry keeps the original Profile intent; absent leaves the draft's choice alone. */
@@ -54,7 +50,6 @@ export function designerPrefillFromEvent(event: DesignPrefillEvent): DesignerPre
     nonce: event.token,
     text: event.request,
     workspaceId: event.workspaceId,
-    ...(event.mode ? { mode: event.mode } : {}),
   };
 }
 
@@ -68,20 +63,6 @@ export function roleEditorTargetForGap(
 ): { role: Role; focusProfileId: string | null } | null {
   const role = roles.find((entry) => entry.id === target.roleId);
   return role ? { role, focusProfileId: target.profileId ?? null } : null;
-}
-
-/**
- * "配置经济池" opens the editor on the all-seats layer. A route from the gap must be a real
- * all-seats route; an invalid value is dropped instead of opening a misleading section.
- */
-export function economyFocusForConfigure(target: {
-  layer: "standard" | "allSeats";
-  route?: string;
-}): EconomyEditorFocus | null {
-  if (target.layer === "standard") return { layer: "standard" };
-  if (target.route === undefined) return { layer: "allSeats" };
-  const parsed = AllSeatsRouteSchema.safeParse(target.route);
-  return parsed.success ? { layer: "allSeats", route: parsed.data } : null;
 }
 
 export type DesignLaunchSeed = {

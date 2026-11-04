@@ -5,11 +5,13 @@ import {
   verifySavedDesign,
 } from "../../shared/domain/design-merge";
 import { finalizeDesignIssues } from "../../shared/domain/design-validation";
+import { omitRetired } from "../../shared/domain/retired-fields";
 import type { DesignIssue, DesignJob, DesignResult } from "../../shared/schemas/design";
 import type { Preferences } from "../../shared/schemas/preferences";
 import type { Role } from "../../shared/schemas/role";
 import type { Team } from "../../shared/schemas/team";
 import type { RolesDocument, TeamsDocument } from "../../shared/settings";
+import { type RetirementProbe, shouldRetire, shouldRetireAny } from "../catalog/retirement";
 import type {
   DesignSaveGateway,
   DesignSettingsSnapshot,
@@ -41,6 +43,8 @@ export type DesignSaveDeps = {
   timeoutMs?: number;
   /** Shared per-host run memory: any unknown write blocks compensation for that job. */
   unknownWrites?: DesignUnknownWrites;
+  /** Probe the target host before copying retired keys from an older design result. */
+  retirementProbe?: RetirementProbe;
 };
 
 /** Three write attempts per phase; stages keep separate counters. */
@@ -368,12 +372,11 @@ function referencedRoleIds(teams: readonly Team[]): Set<string> {
   for (const team of teams) {
     ids.add(team.coordinatorRoleId);
     for (const member of team.members) ids.add(member.roleId);
+    // A previous host can still use a preserved retired block. During compensation, retain any
+    // Role whose id appears in that block so a cross-version reference is never deleted.
     if (team.collaboration) {
-      if (typeof team.collaboration.judgeRoleId === "string") {
-        ids.add(team.collaboration.judgeRoleId);
-      }
-      if (typeof team.collaboration.escalationRoleId === "string") {
-        ids.add(team.collaboration.escalationRoleId);
+      for (const value of Object.values(team.collaboration)) {
+        if (typeof value === "string") ids.add(value);
       }
     }
   }
@@ -511,12 +514,22 @@ export async function saveDesign(
     if (merged.rolesChanged) {
       if (aborted()) return canceledOutcome();
       if (leaseExpired(prepared.lease.expiresAt, now)) continue;
-      writeAttempted = true;
       const rows = merged.addedRoleIds
         .map((id) => merged.roles.roles.find((role) => role.id === id))
         .filter((role): role is Role => role !== undefined);
+      const retireLegacyFields = deps.retirementProbe
+        ? await shouldRetireAny(deps.retirementProbe, "role", rows)
+        : false;
+      if (aborted()) return canceledOutcome();
+      if (leaseExpired(prepared.lease.expiresAt, now)) continue;
+      const writtenRows = retireLegacyFields ? rows.map((role) => omitRetired("role", role)) : rows;
+      writeAttempted = true;
       const write = await bounded(
-        () => gateway.saveRoles(appendRows(fresh.roles.raw, "roles", rows), fresh.roles.revision),
+        () =>
+          gateway.saveRoles(
+            appendRows(fresh.roles.raw, "roles", writtenRows),
+            fresh.roles.revision,
+          ),
         timeoutMs,
         () => "failed" as const,
       );
@@ -560,9 +573,19 @@ export async function saveDesign(
     if (!merged.teamsChanged || !team) {
       return complete(gateway, input, job, leaseId, prepared.result, timeoutMs);
     }
+    const retireLegacyFields = deps.retirementProbe
+      ? await shouldRetire(deps.retirementProbe, "team", team)
+      : false;
+    if (aborted()) return canceledOutcome();
+    if (leaseExpired(prepared.lease.expiresAt, now)) continue;
     writeAttempted = true;
+    const writtenTeam = retireLegacyFields ? omitRetired("team", team) : team;
     const write = await bounded(
-      () => gateway.saveTeams(appendRows(fresh.teams.raw, "teams", [team]), fresh.teams.revision),
+      () =>
+        gateway.saveTeams(
+          appendRows(fresh.teams.raw, "teams", [writtenTeam]),
+          fresh.teams.revision,
+        ),
       timeoutMs,
       () => "failed" as const,
     );
@@ -776,9 +799,15 @@ export async function compensateDesign(
       const referenced = referencedRoleIds(after.teams.values.teams);
       const needsRestore = plan.removeRoleIds.some((roleId) => referenced.has(roleId));
       if (needsRestore) {
-        const missing = prepared.result.newRoles.filter(
-          (candidate) => !after.roles.values.roles.some((role) => role.id === candidate.id),
-        );
+        // Restore a concurrently referenced Role exactly as it was in the pre-delete snapshot.
+        const missing = rawRows(fresh.roles.raw, "roles").filter((candidate) => {
+          const id = roleIdOf(candidate);
+          return (
+            id !== undefined &&
+            plan.removeRoleIds.includes(id) &&
+            !after.roles.values.roles.some((role) => role.id === id)
+          );
+        });
         if (missing.length > 0) {
           const restore = await bounded(
             () =>

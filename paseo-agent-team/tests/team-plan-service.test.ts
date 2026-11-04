@@ -131,7 +131,7 @@ describe("team plan parity with launch preview", () => {
     );
     const result = resultOf(output, "s");
     expect(result.status).toBe("ready");
-    expect(result.effectiveMode).toBe("economy");
+    expect(result.effectiveMode).toBe("sota");
     const coordinator = result.rows.find((row) => row.kind === "coordinator");
     expect(coordinator?.profile?.id).toBe(preview.preview.coordinator.profile?.id);
     expect(coordinator?.source).toBe(preview.preview.coordinator.source);
@@ -151,7 +151,7 @@ describe("team plan parity with launch preview", () => {
     }
   });
 
-  test("economy-all rows match the preview on a cheap host", async () => {
+  test("a saved economy-all Team matches the single-path preview", async () => {
     const fixture = setup();
     const preview = await createLaunchService({
       roles: fixture.roles,
@@ -164,13 +164,13 @@ describe("team plan parity with launch preview", () => {
     );
     const result = resultOf(output, "s");
     expect(result.status).toBe("ready");
-    expect(result.effectiveMode).toBe("economy-all");
+    expect(result.effectiveMode).toBe("sota");
     const coordinator = result.rows.find((row) => row.kind === "coordinator");
     expect(coordinator).toMatchObject({
-      profile: { id: sonnet.id },
-      source: "economy-pool",
-      route: "coordinator",
+      profile: { id: claudeOpus.id },
+      source: "role-preferred",
     });
+    expect(coordinator?.route).toBeUndefined();
     for (const seat of preview.preview.seats) {
       const row = result.rows.find((entry) => entry.seatId === seat.seatId);
       if (!row) throw new Error(`missing row for seat ${seat.seatId}`);
@@ -219,31 +219,37 @@ describe("failed-row routes", () => {
     return fixture;
   }
 
-  test("an economy-all outage keeps the coordinator and each member route", async () => {
+  test("unavailable providers block coordinator and member bindings without route data", async () => {
     const fixture = routedSetup(cheapPreferences, false);
     const result = resultOf(
       valid(await fixture.service.plan({ items: [saved("r", routedTeam.id)] }, fixture.port)),
       "r",
     );
     expect(result.status).toBe("blocked");
-    for (const row of result.rows.filter((entry) => entry.enabled)) {
-      expect(row.route, row.rowKey).toBeDefined();
+    const enabled = result.rows.filter((entry) => entry.enabled);
+    expect(enabled).toHaveLength(3);
+    for (const row of enabled) {
+      expect(row.route, row.rowKey).toBeUndefined();
+      expect(row.profile, row.rowKey).toBeNull();
+      expect(row.issues.some((issue) => issue.code === "MODE_PROFILE_UNRESOLVED")).toBe(true);
     }
-    expect(result.rows.find((row) => row.kind === "coordinator")?.route).toBe("coordinator");
-    expect(result.rows.find((row) => row.roleId === decisionRole.id)?.route).toBe("decision");
-    expect(result.rows.find((row) => row.roleId === executionRole.id)?.route).toBe("execution");
   });
 
-  test("an absent all-seats policy still gives economy-all rows their route", async () => {
+  test("an absent all-seats policy does not affect the Role bindings", async () => {
     const fixture = routedSetup(preferences);
     const result = resultOf(
       valid(await fixture.service.plan({ items: [saved("r", routedTeam.id)] }, fixture.port)),
       "r",
     );
-    expect(result.status).toBe("blocked");
-    expect(result.rows.find((row) => row.kind === "coordinator")?.route).toBe("coordinator");
-    expect(result.rows.find((row) => row.roleId === decisionRole.id)?.route).toBe("decision");
-    expect(result.rows.find((row) => row.roleId === executionRole.id)?.route).toBe("execution");
+    expect(result.status).toBe("ready");
+    expect(result.rows.find((row) => row.kind === "coordinator")?.profile?.id).toBe(claudeOpus.id);
+    expect(result.rows.find((row) => row.roleId === decisionRole.id)?.profile?.id).toBe(
+      claudeOpus.id,
+    );
+    expect(result.rows.find((row) => row.roleId === executionRole.id)?.profile?.id).toBe(
+      codexXhigh.id,
+    );
+    expect(result.rows.every((row) => row.route === undefined)).toBe(true);
   });
 
   test("standard and legacy rows keep no route", async () => {
@@ -355,7 +361,8 @@ describe("team plan batching and probe", () => {
       context: null,
       results: [],
     });
-    expect(output.capabilities.supportedModes).toContain("economy-all");
+    expect(output.capabilities.supportedModes).toEqual(["sota"]);
+    expect(output.capabilities.retiresLegacyFields).toBe(true);
     expect(fixture.roles.read).not.toHaveBeenCalled();
     expect(fixture.teams.read).not.toHaveBeenCalled();
     expect(fixture.prefs.read).not.toHaveBeenCalled();
@@ -420,7 +427,7 @@ describe("team plan failure paths", () => {
     );
   });
 
-  test("an availability failure blocks the new modes but leaves SOTA ready and unverified", async () => {
+  test("an availability failure leaves saved Teams ready and unverified", async () => {
     const fixture = setup();
     fixture.port.providers.listAvailable.mockRejectedValue(new Error("providers offline"));
     const output = valid(
@@ -433,20 +440,26 @@ describe("team plan failure paths", () => {
     expect(sota.status).toBe("ready");
     expect(sota.rows.every((row) => row.availability === "unverified")).toBe(true);
     const all = resultOf(output, "all");
-    expect(all.status).toBe("blocked");
+    expect(all.status).toBe("ready");
+    expect(all.rows.every((row) => row.availability === "unverified")).toBe(true);
     expect(all.issues).toContainEqual(
-      expect.objectContaining({ code: "MODE_CONTEXT_UNAVAILABLE" }),
+      expect.objectContaining({
+        code: "MODE_CONTEXT_UNAVAILABLE",
+        severity: "warning",
+        params: expect.objectContaining({ reason: "availability-unverified" }),
+      }),
     );
   });
 
-  test("an unknown stored mode keeps the raw value and is blocked", async () => {
+  test("an unknown stored mode does not affect planning", async () => {
     const fixture = setup();
     const result = resultOf(
       valid(await fixture.service.plan({ items: [saved("u", unknownTeam.id)] }, fixture.port)),
       "u",
     );
-    expect(result).toMatchObject({ status: "blocked", effectiveMode: null, rawMode: "turbo" });
-    expect(result.rows.every((row) => row.profile === null)).toBe(true);
+    expect(result).toMatchObject({ status: "ready", effectiveMode: "sota" });
+    expect(result.rawMode).toBeUndefined();
+    expect(result.rows.every((row) => row.profile !== null)).toBe(true);
   });
 });
 
@@ -610,10 +623,13 @@ describe("team plan rows", () => {
     });
     const result = resultOf(valid(await fixture.service.plan(input, fixture.port)), "draft");
     const physical = result.rows.filter((row) => row.rowKey === "backend");
-    expect(physical.length).toBeGreaterThanOrEqual(2);
-    expect(new Set(physical.map((row) => row.seatId)).size).toBe(physical.length);
-    expect(physical.every((row) => row.logicalSeatId === "backend")).toBe(true);
-    expect(physical.filter((row) => row.purpose === "candidate")).toHaveLength(2);
+    expect(physical).toHaveLength(1);
+    expect(physical[0]).toMatchObject({
+      seatId: "backend",
+      logicalSeatId: "backend",
+      purpose: "member",
+      profile: { id: sonnet.id },
+    });
     expect(result.rows.find((row) => row.rowKey === "disabled")).toMatchObject({
       enabled: false,
       profile: null,
@@ -663,12 +679,6 @@ describe("team plan status agrees with launch preview", () => {
   test("a preview that fails for a non-tool reason is blocked here too", async () => {
     const stale: Team = { ...codingTeam, id: "stale-team", memberCreation: "on-demand" };
     for (const fixture of [
-      {
-        name: "unknown mode",
-        team: unknownTeam,
-        roles: { roles: [techLead, architect, developer] },
-        prefs: cheapPreferences,
-      },
       {
         name: "missing coordinator role",
         team: { ...codingTeam, id: "no-coordinator", coordinatorRoleId: "gone" },
@@ -791,8 +801,9 @@ describe("shared snapshot constants", () => {
     expect(output.capabilities).toEqual({
       modeContract: 2,
       designRolePolicy: 1,
-      supportedModes: expect.arrayContaining(["sota", "economy", "economy-all", "collaborative"]),
+      supportedModes: ["sota"],
       runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
+      retiresLegacyFields: true,
     });
   });
 });

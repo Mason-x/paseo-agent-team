@@ -1,28 +1,12 @@
 import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import { modeContractSupport } from "../../shared/domain/mode-contract";
 import {
-  identifyModelFamily,
-  sameModelTuple,
-  storedModelFamily,
-} from "../../shared/domain/model-family";
-import {
-  type ModelFamilyHint,
   type ModelSummaryReason,
   summarizeModelRows,
   unresolvedReasonOf,
 } from "../../shared/domain/model-summary";
-import type { ModeIssue } from "../../shared/domain/role-execution";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
-import type { ModeIssueDto } from "../../shared/schemas/launch-preview";
 import type { Team } from "../../shared/schemas/team";
-import {
-  AllSeatsRouteSchema,
-  StoredAllSeatsEntrySchema,
-  StoredAllSeatsPolicySchema,
-  type StoredCollaboration,
-  StoredEconomyEntrySchema,
-  type StoredEconomyPolicy,
-} from "../../shared/schemas/team-mode";
 import {
   TEAM_PLAN_MAX_ITEMS,
   type TeamPlanContext,
@@ -32,10 +16,8 @@ import {
   type TeamPlanRow,
 } from "../../shared/schemas/team-plan";
 import { zh } from "../../shared/zh";
-import { cheapIssueText } from "../../shared/zh/mode-plan";
 import { teamPlanZh } from "../../shared/zh/team-plan";
 import { modeIssueText } from "../launch/launch-preview-state";
-import { formatLaunchBudget } from "../shared/budget-format";
 
 /**
  * Pure client core for `agent-team.team.plan`: request identity, batching, debounce, cache, probe
@@ -63,10 +45,8 @@ export type TeamPlanSend = (input: TeamPlanInput) => Promise<TeamPlanOutput>;
 export type TeamPlanDraftRequest = {
   /** Stable editor session; only one in-flight draft per session. */
   sessionId: string;
-  mode?: string;
   coordinatorRoleId?: string;
   memberCreation?: string;
-  collaboration?: StoredCollaboration;
   members: readonly {
     rowKey: string;
     roleId?: string;
@@ -171,65 +151,12 @@ export function scopeSignature(scope: TeamPlanScope): string {
   });
 }
 
-function isAutomaticModel(model: string | undefined): boolean {
-  const value = model?.trim().toLowerCase();
-  return value === undefined || value === "" || value === "auto" || value === "default";
-}
-
-/**
- * B01's rule: hints may only come from a live, tuple-matched policy record. Auto/missing models
- * never become a family, and a stored family that contradicts the live model is discarded.
- */
-export function familyHintsFromEconomy(
-  economy: StoredEconomyPolicy | undefined,
-  profiles: readonly PaseoProfile[],
-): ModelFamilyHint[] {
-  if (!economy) return [];
-  const live = new Map(profiles.map((profile) => [profile.id, profile]));
-  const hints = new Map<string, ModelFamilyHint>();
-
-  function add(profileId: string, family: string | undefined, bound: unknown): void {
-    if (hints.has(profileId)) return;
-    const resolved = storedModelFamily(family);
-    const profile = live.get(profileId);
-    if (!resolved || !profile || isAutomaticModel(profile.model)) return;
-    const tuple = bound as { provider?: unknown; model?: unknown } | undefined;
-    if (!tuple || typeof tuple.provider !== "string") return;
-    if (!sameModelTuple(tuple as { provider: string; model?: string }, profile)) return;
-    const match = identifyModelFamily({ model: profile.model });
-    if (match.status === "identified" && match.family !== resolved) return;
-    hints.set(profileId, {
-      profileId,
-      provider: profile.provider,
-      ...(profile.model === undefined ? {} : { model: profile.model }),
-      family: resolved,
-    });
-  }
-
-  for (const raw of economy.pool ?? []) {
-    const entry = StoredEconomyEntrySchema.safeParse(raw);
-    if (!entry.success) continue;
-    add(entry.data.profileId, entry.data.family, entry.data.boundModel);
-  }
-  const allSeats = StoredAllSeatsPolicySchema.safeParse(economy.allSeats);
-  if (allSeats.success && Array.isArray(allSeats.data.profiles)) {
-    for (const raw of allSeats.data.profiles) {
-      const entry = StoredAllSeatsEntrySchema.safeParse(raw);
-      if (!entry.success) continue;
-      add(entry.data.profileId, entry.data.family, entry.data.boundModel);
-    }
-  }
-  return [...hints.values()];
-}
-
 const REASON_LABELS: Readonly<Record<ModelSummaryReason, string>> = {
   unbound: teamPlanZh.reasons.unbound,
   "role-missing": teamPlanZh.reasons.roleMissing,
   "profile-missing": teamPlanZh.reasons.profileMissing,
   "provider-unavailable": teamPlanZh.reasons.providerUnavailable,
   unverified: teamPlanZh.reasons.unverified,
-  "route-unavailable": teamPlanZh.reasons.routeUnavailable,
-  "no-cheap-profile": teamPlanZh.reasons.noCheapProfile,
   policy: teamPlanZh.reasons.policy,
 };
 
@@ -246,45 +173,13 @@ export type TeamSummaryView =
       groupsText: string;
       unresolvedText: string | null;
       tone: "neutral" | "warning";
-      /** Pool/route remedies for the card itself; rows keep their own actions in the editor. */
-      actions: readonly Extract<TeamBindingTarget, { kind: "economy" }>[];
     }
   | { kind: "unknown-mode"; text: string }
   | { kind: "missing-team"; text: string }
   | { kind: "unavailable"; text: string };
 
-function issueText(issue: ModeIssueDto): string {
-  // The server only emits codes from the closed planner table; the DTO keeps them as strings so a
-  // newer daemon cannot break this client. cheapIssueText reads params only.
-  return issue.code.startsWith("MODE_CHEAP_")
-    ? cheapIssueText(issue as ModeIssue)
-    : modeIssueText(issue);
-}
-
-/**
- * The card-level pool/route remedies. One per layer/route, in row order; a Team whose only
- * problems are Role bindings gets none (those stay on the row's "rebind" entry).
- */
-export function economyActionsForResult(
-  result: TeamPlanResult,
-): Extract<TeamBindingTarget, { kind: "economy" }>[] {
-  const seen = new Set<string>();
-  const actions: Extract<TeamBindingTarget, { kind: "economy" }>[] = [];
-  for (const row of result.rows) {
-    for (const action of rowActions(row, result.effectiveMode)) {
-      if (action.kind !== "economy") continue;
-      const key = `${action.layer}:${action.route ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      actions.push(action);
-    }
-  }
-  return actions;
-}
-
 export function buildTeamSummary(input: {
   result: TeamPlanResult;
-  hints?: readonly ModelFamilyHint[];
   /** Only a response with a non-null context can distinguish a missing Team from a read failure. */
   hasContext: boolean;
 }): TeamSummaryView {
@@ -294,7 +189,7 @@ export function buildTeamSummary(input: {
       return { kind: "missing-team", text: teamPlanZh.teamMissing };
     }
     const first = result.issues[0];
-    return { kind: "unavailable", text: first ? issueText(first) : teamPlanZh.loadFailed };
+    return { kind: "unavailable", text: first ? modeIssueText(first) : teamPlanZh.loadFailed };
   }
   if (result.effectiveMode === null) {
     return { kind: "unknown-mode", text: teamPlanZh.unknownMode(result.rawMode ?? "") };
@@ -304,7 +199,6 @@ export function buildTeamSummary(input: {
     effectiveMode: result.effectiveMode,
     ...(result.rawMode === undefined ? {} : { rawMode: result.rawMode }),
     rows: result.rows,
-    ...(input.hints === undefined ? {} : { familyHints: input.hints }),
   });
   if (summary.status === "none") {
     return summary.reason === "unknown-mode"
@@ -313,11 +207,7 @@ export function buildTeamSummary(input: {
   }
   if (summary.total === 0) return { kind: "empty" };
   const groupsText = summary.groups
-    .map((group) =>
-      group.standby > 0
-        ? teamPlanZh.groupWithStandby(group.label, group.count, group.standby)
-        : teamPlanZh.group(group.label, group.count),
-    )
+    .map((group) => teamPlanZh.group(group.label, group.count))
     .join(" · ");
   const reasons = summary.unresolved.reasons
     .map((entry) => teamPlanZh.reasonCount(reasonLabel(entry.reason), entry.count))
@@ -326,7 +216,6 @@ export function buildTeamSummary(input: {
     kind: "summary",
     total: summary.total,
     groupsText,
-    actions: economyActionsForResult(result),
     unresolvedText:
       summary.unresolved.count === 0
         ? null
@@ -353,18 +242,10 @@ export function buildTeamSummaries(input: {
   failedKeys: ReadonlySet<string>;
   hasContext: boolean;
   error: string | null;
-  hints?: readonly ModelFamilyHint[];
 }): Map<string, TeamSummaryView> {
   const built = new Map<string, TeamSummaryView>();
   for (const [key, result] of input.results) {
-    built.set(
-      key,
-      buildTeamSummary({
-        result,
-        hasContext: input.hasContext,
-        ...(input.hints === undefined ? {} : { hints: input.hints }),
-      }),
-    );
+    built.set(key, buildTeamSummary({ result, hasContext: input.hasContext }));
   }
   for (const key of input.failedKeys) {
     if (built.has(key)) continue;
@@ -373,9 +254,8 @@ export function buildTeamSummaries(input: {
   return built;
 }
 
-export type TeamBindingTarget =
-  | { kind: "role"; roleId: string; profileId?: string }
-  | { kind: "economy"; layer: "standard" | "allSeats"; route?: string };
+/** The one entry point a problem row offers: open its Role to change the Profile bindings. */
+export type TeamBindingTarget = { kind: "role"; roleId: string; profileId?: string };
 
 export type TeamModelRowView = {
   key: string;
@@ -390,13 +270,11 @@ export type TeamModelRowView = {
   profileStatus: string | null;
   profileMeta: string | null;
   source: string;
-  budget: string;
   availability: "available" | "unavailable" | "unverified";
   availabilityLabel: string;
   configuredNames: readonly string[];
   reasons: readonly string[];
   actions: readonly TeamBindingTarget[];
-  standby: boolean;
   purposeLabel: string | null;
   activationLabel: string | null;
 };
@@ -405,7 +283,6 @@ export type TeamModelRowView = {
 const SOURCE_LABELS: Readonly<Record<string, string>> = {
   "role-preferred": zh.modes.sourcePreferred,
   "role-fallback": zh.modes.sourceFallback,
-  "economy-pool": zh.modes.sourceEconomyPool,
   unavailable: zh.modes.sourceUnavailable,
 };
 
@@ -417,18 +294,13 @@ const AVAILABILITY_LABELS: Readonly<Record<TeamModelRowView["availability"], str
 
 const PURPOSE_LABELS: Readonly<Record<string, string>> = {
   member: teamPlanZh.purpose.member,
-  candidate: teamPlanZh.purpose.candidate,
-  judge: teamPlanZh.purpose.judge,
-  escalation: teamPlanZh.purpose.escalation,
 };
 
 const ACTIVATION_LABELS: Readonly<Record<string, string>> = {
   eager: teamPlanZh.activation.eager,
   "on-demand": teamPlanZh.activation.onDemand,
-  "escalation-only": teamPlanZh.activation.escalationOnly,
 };
 
-const POOL_CODES = /^MODE_(CHEAP|POOL)_/u;
 const BINDING_REASONS: Readonly<Record<string, true>> = {
   unbound: true,
   "profile-missing": true,
@@ -436,53 +308,23 @@ const BINDING_REASONS: Readonly<Record<string, true>> = {
   unverified: true,
 };
 
-/**
- * The two entry points a problem row may offer. Pool/route problems never open the Role editor
- * alone; economy-all targets the all-seats layer and standard targets the standard pool.
- */
-function rowRoute(row: TeamPlanRow): string | undefined {
-  if (row.route !== undefined) return row.route;
-  for (const issue of row.issues) {
-    const route = issue.params.route;
-    if (typeof route === "string" && route !== "") return route;
-  }
-  return undefined;
-}
-
-function rowActions(row: TeamPlanRow, mode: TeamPlanResult["effectiveMode"]): TeamBindingTarget[] {
-  if (!row.enabled) return [];
-  const actions: TeamBindingTarget[] = [];
-  const poolIssue = row.issues.some((issue) => POOL_CODES.test(issue.code));
+/** Only a real binding issue or fact opens the Role editor; a policy limit has no rebind. */
+function rowActions(row: TeamPlanRow): TeamBindingTarget[] {
+  if (!row.enabled || row.roleId === null) return [];
   const unresolved = row.profile === null ? unresolvedReasonOf(row) : null;
-  const economyNeeded =
-    poolIssue ||
-    unresolved === "route-unavailable" ||
-    unresolved === "no-cheap-profile" ||
-    unresolved === "policy";
-  const routeValue = rowRoute(row);
-  if (economyNeeded) {
-    const route = routeValue === undefined ? null : AllSeatsRouteSchema.safeParse(routeValue);
-    actions.push({
-      kind: "economy",
-      layer: mode === "economy-all" || routeValue !== undefined ? "allSeats" : "standard",
-      ...(route?.success ? { route: route.data } : {}),
-    });
-  }
-  // A cheap-route outage is never a Role-binding problem: only a real binding issue/fact may open
-  // the Role editor, and a pool reason (provider unavailable etc.) must never add one implicitly.
   const explicitBinding = row.issues.some(
     (issue) => issue.code === "MODE_PROFILE_UNRESOLVED" || issue.code === "MODE_ROLE_DISABLED",
   );
-  const bindingByFact = !poolIssue && unresolved !== null && BINDING_REASONS[unresolved] === true;
-  if (row.roleId !== null && (explicitBinding || bindingByFact)) {
-    const profileId = row.profile?.id ?? row.configuredProfiles[0]?.id;
-    actions.push({
+  const bindingByFact = unresolved !== null && BINDING_REASONS[unresolved] === true;
+  if (!explicitBinding && !bindingByFact) return [];
+  const profileId = row.profile?.id ?? row.configuredProfiles[0]?.id;
+  return [
+    {
       kind: "role",
       roleId: row.roleId,
       ...(profileId === undefined ? {} : { profileId }),
-    });
-  }
-  return actions;
+    },
+  ];
 }
 
 export function buildTeamModelRows(input: {
@@ -521,16 +363,14 @@ export function buildTeamModelRows(input: {
       source: Object.hasOwn(SOURCE_LABELS, row.source)
         ? (SOURCE_LABELS[row.source] as string)
         : row.source,
-      budget: formatLaunchBudget(row.budget, row.budgetBasis),
       availability: row.availability,
       availabilityLabel: AVAILABILITY_LABELS[row.availability],
       configuredNames: row.configuredProfiles.map((entry) => entry.name),
       reasons:
         profile === null && row.issues.length === 0
           ? [reasonLabel(unresolvedReasonOf(row))]
-          : [...new Set(row.issues.map(issueText))],
-      actions: rowActions(row, input.result.effectiveMode),
-      standby: row.activation === "escalation-only",
+          : [...new Set(row.issues.map((issue) => modeIssueText(issue)))],
+      actions: rowActions(row),
       purposeLabel: row.purpose === undefined ? null : (PURPOSE_LABELS[row.purpose] ?? null),
       activationLabel:
         row.activation === undefined ? null : (ACTIVATION_LABELS[row.activation] ?? null),
@@ -542,15 +382,15 @@ export function buildTeamModelRows(input: {
 export function buildTeamPlanIssues(
   result: TeamPlanResult,
 ): { text: string; severity: "warning" | "blocker" }[] {
-  return result.issues.map((issue) => ({ text: issueText(issue), severity: issue.severity }));
+  return result.issues.map((issue) => ({ text: modeIssueText(issue), severity: issue.severity }));
 }
 
-/** One meta line for a row: a blocked row still shows source/budget/availability. */
+/** One meta line for a row: a blocked row still shows source/availability. */
 export function modelRowMeta(view: TeamModelRowView): string {
   return (
     view.profileName === null
-      ? [view.source, view.budget, view.availabilityLabel]
-      : [view.profileMeta, view.source, view.budget, view.availabilityLabel]
+      ? [view.source, view.availabilityLabel]
+      : [view.profileMeta, view.source, view.availabilityLabel]
   )
     .filter((part): part is string => Boolean(part))
     .join(" · ");
@@ -580,14 +420,12 @@ function draftInput(request: TeamPlanDraftRequest, key: string): TeamPlanInput {
         key,
         kind: "draft",
         draft: {
-          ...(request.mode === undefined ? {} : { mode: request.mode }),
           ...(request.coordinatorRoleId === undefined
             ? {}
             : { coordinatorRoleId: request.coordinatorRoleId }),
           ...(request.memberCreation === undefined
             ? {}
             : { memberCreation: request.memberCreation }),
-          ...(request.collaboration === undefined ? {} : { collaboration: request.collaboration }),
           members: request.members.map((member) => ({
             rowKey: member.rowKey,
             ...(member.roleId === undefined ? {} : { roleId: member.roleId }),

@@ -1,6 +1,5 @@
 import { utf8ByteLength } from "../../shared/domain/design-output";
 import { designNewRoleLimit } from "../../shared/domain/design-planning";
-import type { EconomyBudget, EconomyPolicy } from "../../shared/domain/mode-resolver";
 import type {
   PaseoProfile,
   ProviderAvailability,
@@ -11,9 +10,7 @@ import type {
   DesignIssue,
   DesignOutputContractVersion,
 } from "../../shared/schemas/design";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { TEAM_DESIGN_RECIPES, type TeamDesignRecipe } from "../templates/recipes";
-import type { DesignModeRouting } from "./context";
 
 /** Kickoff aims for this and may grow through the hard cap before failing. */
 export const DESIGN_KICKOFF_TARGET_BYTES = 30 * 1024;
@@ -47,7 +44,7 @@ export type DesignPromptRoleSummary = {
   /** Strict binding order already resolved against live Profiles. */
   preferredProfileIds: readonly string[];
   fallbackProfileIds: readonly string[];
-  /** At least one usable Profile in the current mode (execution seats may use the economy pool). */
+  /** At least one usable Profile among the Role preferred and fallback bindings. */
   launchable: boolean;
   /** Bound Profile ids that are missing or provider-unavailable; bounded for the required index. */
   unavailableProfileIds: readonly string[];
@@ -59,8 +56,6 @@ export type DesignPromptRoleSummary = {
   /** v2 only. False when availability could not be verified, so no gap may be claimed. */
   launchVerified?: boolean;
   coordinatorLaunchVerified?: boolean;
-  tier?: string;
-  taskKind?: string;
 };
 
 export type DesignPromptProfileSummary = {
@@ -73,9 +68,6 @@ export type DesignPromptProfileSummary = {
   available: boolean;
   /** Catalog notes. featureValues, config, and credentials never belong here. */
   notes?: string;
-  family?: string;
-  budget?: EconomyBudget;
-  budgetBasis?: "host" | "pool" | "conservative-default";
 };
 
 export type DesignPromptTeamName = {
@@ -95,7 +87,6 @@ export type ExpectedDesignChoice = {
 
 export type DesignPromptContext = {
   request: string;
-  requestedMode: TeamMode;
   runtimeCapabilities: {
     onDemand: boolean;
     expansion: boolean;
@@ -109,7 +100,6 @@ export type DesignPromptContext = {
   carrierWorkspaceId: string | null;
   roles: readonly DesignPromptRoleSummary[];
   profiles: readonly DesignPromptProfileSummary[];
-  economy: Pick<EconomyPolicy, "pool" | "taskOrder">;
   occupiedRoleIds: readonly string[];
   occupiedRoleNames: readonly string[];
   occupiedTeams: readonly DesignPromptTeamName[];
@@ -122,8 +112,6 @@ export type DesignPromptContext = {
    */
   outputContractVersion?: DesignOutputContractVersion;
   existingRolesOnly?: boolean;
-  /** economy-all route evidence; copied from the context snapshot, never recomputed here. */
-  modeRouting?: DesignModeRouting;
 };
 
 export type DesignPromptInput = {
@@ -179,10 +167,9 @@ function jsonBlock(title: string, value: unknown): string {
 }
 
 const CONTRACT_TEAM = {
-  required: ["id≤48 slug", "name 1–40", "mode=请求模式", "coordinatorRoleId", "members 1–64"],
-  optional: ["description≤160", "collaboration", "operatingRules≤4000"],
+  required: ["id≤48 slug", "name 1–40", "coordinatorRoleId", "members 1–64"],
+  optional: ["description≤160", "operatingRules≤4000"],
   members: "key 必须按数组顺序为连续的 m1..mN；roleId 必填；重复 Role 的 instanceLabel(1–40) 必填",
-  collaboration: "可选。replicas 只能是 2 或 3；judgeRoleId、escalationRoleId 可选 slug",
 } as const;
 
 const CONTRACT_NEW_ROLE = {
@@ -196,20 +183,15 @@ const CONTRACT_NEW_ROLE = {
     "outputContract 0–30 项、每项 1–500",
     "preferredProfiles 1–5",
     "fallbackProfiles 0–5",
-    "executionPolicy",
     "noveltyReason 1–600",
   ],
   optional: ["description≤160", "color≤32", "icon≤64"],
   profileRef: "{ profileId }，profileId 取白名单真实 id，1–256",
-  executionPolicy: {
-    tier: ["decision", "execution", "escalation", "retain"],
-    taskKind: ["coding", "testing", "acceptance", "codebase", "ops", "general"],
-  },
 } as const;
 
 const CONTRACT_PROFILE_CHOICE = {
   target: "coordinator 或 m1..m64",
-  profileIds: "0–3 个有序真实 id；空数组只允许规划器判定不可用的待命升级位",
+  profileIds: "1–3 个有序真实 id，必须与规划结果一致",
   reason: "1–600，只解释职责",
 } as const;
 
@@ -237,15 +219,11 @@ const CONTRACT_GAP = {
   ],
   kind: ["missing-role", "unlaunchable-role"],
   use: ["coordinator", "member"],
-  profiles: "existing：profileIds 1–3，须为该用途 route 内合格 id；none：reason 1–600",
+  profiles: "existing：profileIds 1–3，须为白名单中真实且可用的 id；none：reason 1–600",
   suggestedRole: {
     id: "≤48 slug",
     name: "1–40，前缀按目录",
     responsibilities: "1–8 项",
-    executionPolicy: {
-      tier: ["decision", "execution", "escalation", "retain"],
-      taskKind: ["coding", "testing", "acceptance", "codebase", "ops", "general"],
-    },
   },
   bounds: "gaps 1–8",
   forbidden: ["team", "newRoles", "profileChoices"],
@@ -361,7 +339,6 @@ function teamSample(
     outputContract: ["改动清单"],
     preferredProfiles: [{ profileId: "profile-1" }],
     fallbackProfiles: [],
-    executionPolicy: { tier: "execution", taskKind: "coding" },
     noveltyReason: "现有 Role 不覆盖这次专职改版",
   };
   return {
@@ -370,7 +347,6 @@ function teamSample(
     team: {
       id: "rework-team",
       name: "改版团队",
-      mode: input.context.requestedMode,
       coordinatorRoleId: "lead-tech",
       members: withNewRole
         ? [
@@ -381,7 +357,6 @@ function teamSample(
             { key: "m1", roleId: "eng-fullstack" },
             { key: "m2", roleId: "qa-review" },
           ],
-      ...(withNewRole ? { collaboration: { replicas: 2, judgeRoleId: "qa-review" } } : {}),
     },
     reuse: withNewRole
       ? [
@@ -427,7 +402,6 @@ function gapSample(input: DesignPromptInput): Record<string, unknown> {
           id: "eng-data",
           name: "【工程】数据迁移",
           responsibilities: ["编写可回滚的迁移脚本"],
-          executionPolicy: { tier: "execution", taskKind: "coding" },
         },
       },
     ],
@@ -464,15 +438,6 @@ function outputTemplate(
   return parts.join("\n");
 }
 
-const SUPPORTED_TASK_KINDS = [
-  "coding",
-  "testing",
-  "acceptance",
-  "codebase",
-  "ops",
-  "general",
-] as const;
-
 function stringIds(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
@@ -493,24 +458,6 @@ function projectedCapabilities(value: DesignPromptContext["runtimeCapabilities"]
     expansion: value.expansion,
     collaboration: value.collaboration,
   };
-}
-
-function projectedPool(
-  pool: DesignPromptContext["economy"]["pool"],
-): { profileId: string; family: string | null; enabled: boolean }[] {
-  return pool.map((entry) => ({
-    profileId: entry.profileId,
-    family: entry.family ?? null,
-    enabled: entry.enabled,
-  }));
-}
-
-function projectedTaskOrder(
-  taskOrder: DesignPromptContext["economy"]["taskOrder"],
-): Record<string, string[]> {
-  const projected: Record<string, string[]> = {};
-  for (const kind of SUPPORTED_TASK_KINDS) projected[kind] = stringIds(taskOrder[kind]);
-  return projected;
 }
 
 function projectedTeams(teams: readonly DesignPromptTeamName[]): { id: string; name: string }[] {
@@ -557,8 +504,6 @@ function rolePayload(role: DesignPromptRoleSummary, detail: PromptDetail): Recor
     id: role.id,
     name: role.name,
     enabled: role.enabled,
-    tier: role.tier ?? null,
-    taskKind: role.taskKind ?? null,
     mission: clamped ? clampCodePoints(role.mission, MISSION_CODE_POINTS) : role.mission,
     responsibilities: clamped
       ? responsibilities
@@ -582,9 +527,6 @@ function profilePayload(
     modeId: profile.modeId ?? null,
     thinkingOptionId: profile.thinkingOptionId ?? null,
     available: profile.available,
-    family: profile.family ?? null,
-    budget: profile.budget ?? null,
-    budgetBasis: profile.budgetBasis ?? null,
   };
   if (detail.notes === "none" || profile.notes === undefined) return payload;
   return { ...payload, notes: clampCodePoints(profile.notes, NOTES_CODE_POINTS) };
@@ -599,6 +541,7 @@ function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<s
     return {
       id: recipe.id,
       name: recipe.name,
+      ...(recipe.optionalRoleIds ? { optionalRoleIds: recipe.optionalRoleIds } : {}),
       members: recipe.members.map((member) => ({
         roleId: member.roleId,
         minInstances: member.minInstances,
@@ -612,6 +555,7 @@ function recipePayload(recipe: TeamDesignRecipe, detail: PromptDetail): Record<s
     name: recipe.name,
     coordinatorRoleId: recipe.coordinatorRoleId,
     members: recipe.members.map((member) => ({ ...member })),
+    ...(recipe.optionalRoleIds ? { optionalRoleIds: recipe.optionalRoleIds } : {}),
     ...(detail.recipeNotes && notes !== undefined ? { notes } : {}),
   };
 }
@@ -694,42 +638,6 @@ function identityRequirement(
   return `jobId=${input.jobId} attempt=${input.attempt} nonce=${input.nonce}。identity 必须逐字复制：jobId、attempt、nonce 与本节完全一致，不得自行生成或改写。`;
 }
 
-const ROUTE_ELIGIBLE_LIMIT = 8;
-const ROUTE_FAILED_IDS_LIMIT = 5;
-
-function routingPayload(routing: DesignModeRouting): Record<string, unknown> {
-  if (routing.status !== "ready") {
-    return {
-      status: routing.status,
-      ...(routing.status === "invalid" ? { reason: routing.reason } : {}),
-    };
-  }
-  return {
-    routes: routing.routes.map((row) => {
-      const eligible = row.candidates.filter((entry) => entry.eligible);
-      const failed = row.candidates.filter((entry) => !entry.eligible);
-      const reasons = [
-        ...new Set(failed.flatMap((entry) => (entry.reason === undefined ? [] : [entry.reason]))),
-      ].slice(0, ROUTE_FAILED_IDS_LIMIT);
-      return {
-        route: row.route,
-        ...(row.taskKind === null ? {} : { taskKind: row.taskKind }),
-        eligible: eligible.slice(0, ROUTE_ELIGIBLE_LIMIT).map((entry) => entry.profileId),
-        ...(eligible.length > ROUTE_ELIGIBLE_LIMIT
-          ? { omittedEligible: eligible.length - ROUTE_ELIGIBLE_LIMIT }
-          : {}),
-        failedCount: failed.length,
-        ...(failed.length === 0
-          ? {}
-          : {
-              failedIds: failed.slice(0, ROUTE_FAILED_IDS_LIMIT).map((entry) => entry.profileId),
-            }),
-        ...(reasons.length === 0 ? {} : { failedReasons: reasons }),
-      };
-    }),
-  };
-}
-
 /** What the model may claim for one use: usable now, provably blocked, or unproven. */
 type PromptLaunchState = "ok" | "blocked" | "unknown";
 
@@ -750,7 +658,6 @@ function roleIndexEntry(
     id: role.id,
     name: role.name,
     enabled: role.enabled,
-    tier: role.tier ?? null,
     preferredProfileIds: stringIds(role.preferredProfileIds),
     fallbackProfileIds: stringIds(role.fallbackProfileIds),
     launchable: role.launchable,
@@ -824,9 +731,10 @@ function relevantRoleIds(
 ): ReadonlySet<string> {
   if (limit <= 0) return new Set<string>();
   const recipeIds = new Set<string>(
-    TEAM_DESIGN_RECIPES.flatMap((recipe) => [
+    TEAM_DESIGN_RECIPES.flatMap((recipe: TeamDesignRecipe) => [
       recipe.coordinatorRoleId,
       ...recipe.members.map((member) => member.roleId),
+      ...(recipe.optionalRoleIds ?? []),
     ]),
   );
   const terms = new Set<string>();
@@ -898,7 +806,6 @@ function roleDirectoryEntry(
     return {
       id: role.id,
       name: role.name,
-      tier: role.tier ?? null,
       memberLaunch: launchState(role.launchable, role.launchVerified),
       coordinatorLaunch: launchState(role.coordinatorLaunchable, role.coordinatorLaunchVerified),
     };
@@ -909,13 +816,12 @@ function roleDirectoryEntry(
     ...index,
     mission: summary.mission,
     responsibilities: summary.responsibilities,
-    taskKind: summary.taskKind,
   };
 }
 
-function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undefined): string {
+function indexRequirement(rules: PromptRules): string {
   if (rules.version === 1) {
-    return "Role 索引的 launchable 表示当前模式下该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
+    return "Role 索引的 launchable 表示该 Role 至少有一个可用 Profile；优先复用 launchable=true 的 Role。新建 Role 只使用 Profile 白名单中 available=true 的 Profile；unavailableProfileIds 最多列出 5 个不可用绑定。";
   }
   // AC-0c.6 defines missing-role as "no Role carries the responsibility"; an unverified
   // availability row proves nothing about the Role, so it must not be reclassified. AC-0c.14
@@ -924,27 +830,23 @@ function indexRequirement(rules: PromptRules, routing: DesignModeRouting | undef
   const launchRule =
     "memberLaunch/coordinatorLaunch 是该用途判定：ok=可启动；blocked=已核实不可启动（只可报 unlaunchable-role，use 须选对）；unknown=可用性未核实（照常使用该 Role 并在 reuse.reason 注明；不得声称 Role 缺失或不可启动，只有确实无 Role 承担时才报 missing-role，profiles.none 只表示不提供 Profile）。用途不可互推。";
   const directoryLegend =
-    "条目形态：完整条目含 mission/responsibilities/taskKind；无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用，停用 Role 不可选，也不属于 unlaunchable-role（缺职责时报 missing-role）；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
-  if (routing !== undefined) {
-    return `Role 索引的 unavailableProfileIds 是该用途 route 内不合格的候选（非 Role 绑定），补救是调整「经济：全席位」路由。${directoryLegend}${launchRule}`;
-  }
+    "条目形态：完整条目含 mission/responsibilities；无 mission 的条目是索引摘要（仍可按名称复用）；enabled:false 表示停用，停用 Role 不可选，也不属于 unlaunchable-role（缺职责时报 missing-role）；memberLaunch/coordinatorLaunch=blocked 表示该用途已核实不可启动；无 enabled 的可选条目默认启用。";
   return `Role 索引的 unavailableProfileIds 是不可用绑定，最多 5 个。${directoryLegend}${launchRule}优先复用两种用途都可启动的 Role；新建 Role 只使用 Profile 白名单中 available=true 的 Profile。`;
 }
 
 function recipeInstruction(rules: PromptRules): string {
   if (rules.version === 1) {
-    return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+    return `配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
   }
   if (rules.rolesOnly) {
-    return "配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；覆盖不了就报 role-gap，不要用职责不符的 Role 凑数。复用 Role 时 reason 必须说明它承担的职责；不要新建 Role。";
+    return "配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；覆盖不了就报 role-gap，不要用职责不符的 Role 凑数。复用 Role 时 reason 必须说明它承担的职责；不要新建 Role。";
   }
-  return `配方是参考，不是必须照抄。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。覆盖不了就报缺口，不要用职责不符的 Role 凑数；复用 Role 时 reason 必须说明它承担的职责。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
+  return `配方是参考，不是必须照抄。default 配方只默认启用所列成员；其按需专家不得默认加入，因为启用成员都会立即创建。目录里没有的 Role 要标明缺失，不能当成已有；缺通用 Role 时可提示先同步预设。覆盖不了就报缺口，不要用职责不符的 Role 凑数；复用 Role 时 reason 必须说明它承担的职责。不要为凑配方新建超过 ${rules.limit} 个 Role。`;
 }
 
 function compose(input: DesignPromptInput, detail: PromptDetail): string {
   const { context } = input;
   const rules = promptRules(context);
-  const routing = rules.version === 2 ? context.modeRouting : undefined;
   const v2 = rules.version === 2;
   const relevant = v2 ? relevantRoleIds(context, rules, detail.indexOnlyLimit) : new Set<string>();
   const target = context.target
@@ -968,27 +870,13 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
       carrierAccess: "forbidden",
     }),
     "",
-    "## 模式、预算与席位",
-    jsonBlock("模式", {
-      requestedMode: context.requestedMode,
+    "## 席位",
+    jsonBlock("席位", {
       runtimeCapabilities: projectedCapabilities(context.runtimeCapabilities),
       maxMembers: context.maxMembers,
-      maxMembersCounts:
-        "physical members excluding the coordinator; collaboration and standby seats count",
-      economyPool: projectedPool(context.economy.pool),
-      taskOrder: projectedTaskOrder(context.economy.taskOrder),
+      maxMembersCounts: "physical members excluding the coordinator",
     }),
     "",
-    ...(routing === undefined
-      ? []
-      : [
-          "## 经济：全席位路由",
-          routing.status === "ready"
-            ? "不使用 Role 原绑定；每个席位按用途走 route，route 内没有合格候选即阻断且不回退，profileChoices 必须与规划一致。补救是调整设置中的「经济：全席位」路由。"
-            : "「经济：全席位」策略缺失或非法，无法给出合格候选；不要建议 existing Profile，只能 kind:none 并说明原因。",
-          jsonBlock("route 摘要", routingPayload(routing)),
-          "",
-        ]),
     "## 目录与 Profile 白名单",
     jsonBlock(
       "目录约束",
@@ -1018,7 +906,7 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
         v2 ? roleDirectoryEntry(role, rules, detail, relevant) : roleIndexEntry(role, rules),
       ),
     ),
-    indexRequirement(rules, routing),
+    indexRequirement(rules),
     ...(v2
       ? []
       : [
@@ -1033,7 +921,7 @@ function compose(input: DesignPromptInput, detail: PromptDetail): string {
     ),
     jsonBlock("期望选择", projectedChoices(context.expectedChoices)),
     "",
-    "## 九配方",
+    "## 参考配方",
     recipeInstruction(rules),
     jsonBlock(
       "配方",
@@ -1223,14 +1111,8 @@ export function buildDesignCorrection(input: {
 export function summarizeProfiles(
   profiles: readonly PaseoProfile[],
   availability: readonly ProviderAvailability[],
-  economy: EconomyPolicy,
 ): DesignPromptProfileSummary[] {
   const available = new Map(availability.map((item) => [item.provider, item.available]));
-  const families = new Map(
-    economy.pool.flatMap((entry) =>
-      entry.family ? [[entry.profileId, entry.family] as const] : [],
-    ),
-  );
   return profiles.map((profile) => ({
     id: profile.id,
     name: profile.name,
@@ -1240,8 +1122,5 @@ export function summarizeProfiles(
     thinkingOptionId: profile.thinkingOptionId,
     available: available.get(profile.provider) ?? false,
     notes: profile.notes,
-    family: families.get(profile.id),
-    budget: economy.profileBudget[profile.id],
-    budgetBasis: economy.profileBudget[profile.id] === undefined ? undefined : "host",
   }));
 }

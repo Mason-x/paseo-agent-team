@@ -134,11 +134,9 @@ export function DesignResultCard({
             {designZh.resultTeamLine(view.teamLabel, view.teamId)}
           </Text>
         </View>
-        <Text style={styles.muted}>{view.modeLabel}</Text>
       </View>
       <Text style={styles.summary}>{view.summary}</Text>
       <View style={styles.meta}>
-        <LabelValue label={designZh.resultMode} value={view.modeLabel} theme={theme} strong />
         <LabelValue
           label={designZh.resultTargetLabel}
           value={view.targetLabel}
@@ -164,12 +162,6 @@ export function DesignResultCard({
             <LabelValue
               label={designZh.resultSeatProfile}
               value={view.coordinator.profileLabel}
-              theme={theme}
-              strong
-            />
-            <LabelValue
-              label={designZh.resultSeatBudget}
-              value={view.coordinator.budgetLabel}
               theme={theme}
               strong
             />
@@ -256,18 +248,9 @@ export function DesignResultCard({
                   <Text style={styles.unavailable}>{designZh.resultSeatUnavailable}</Text>
                 ) : null}
               </View>
-              {seat.cohortId ? (
-                <LabelValue label={designZh.resultSeatCohort} value={seat.cohortId} theme={theme} />
-              ) : null}
               <LabelValue
                 label={designZh.resultSeatProfile}
                 value={seat.profileLabel}
-                theme={theme}
-                strong
-              />
-              <LabelValue
-                label={designZh.resultSeatBudget}
-                value={seat.budgetLabel}
                 theme={theme}
                 strong
               />
@@ -282,13 +265,6 @@ export function DesignResultCard({
                 <LabelValue
                   label={designZh.resultSeatSource}
                   value={seat.sourceLabel}
-                  theme={theme}
-                />
-              ) : null}
-              {seat.familyLabel ? (
-                <LabelValue
-                  label={designZh.resultSeatFamily}
-                  value={seat.familyLabel}
                   theme={theme}
                 />
               ) : null}

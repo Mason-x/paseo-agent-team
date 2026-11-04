@@ -8,7 +8,6 @@ import {
   createTeamPlanClient,
   draftInputProblem,
   draftRowKey,
-  familyHintsFromEconomy,
   isAppStateActive,
   isMethodNotFound,
   modeContractForHost,
@@ -28,6 +27,7 @@ import {
   type TeamPlanResult,
   type TeamPlanRow,
 } from "../shared/schemas/team-plan";
+import { zh } from "../shared/zh";
 import { codingTeam } from "./fixtures";
 
 const revisions: TeamPlanRevisions = { roles: "r1", teams: "t1", preferences: "p1" };
@@ -314,7 +314,6 @@ describe("draft debounce and identity", () => {
     overrides: Partial<Parameters<ReturnType<typeof createTeamPlanClient>["requestDraft"]>[0]> = {},
   ) => ({
     sessionId: "session-1",
-    mode: "sota",
     coordinatorRoleId: "tech-lead",
     members: [
       { rowKey: "member:0", roleId: "developer", enabled: true },
@@ -346,7 +345,6 @@ describe("draft debounce and identity", () => {
     expect(item).toMatchObject({
       kind: "draft",
       draft: {
-        mode: "sota",
         coordinatorRoleId: "tech-lead",
         members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
       },
@@ -367,13 +365,14 @@ describe("draft debounce and identity", () => {
     client.setScope(scope);
     client.requestDraft(draft());
     fake.advance(100);
-    client.requestDraft(draft({ mode: "economy" }));
+    client.requestDraft(draft({ coordinatorRoleId: "new-lead" }));
     fake.advance(200);
     await flush();
     expect(port.calls).toHaveLength(1);
     const item = port.calls[0]?.items[0];
     if (item?.kind !== "draft") throw new Error("expected a draft item");
-    expect(item.draft.mode).toBe("economy");
+    expect(item.draft.coordinatorRoleId).toBe("new-lead");
+    expect(item.draft).not.toHaveProperty("mode");
   });
 
   test("an older response never overwrites the latest one", async () => {
@@ -386,10 +385,10 @@ describe("draft debounce and identity", () => {
       cancel: fake.cancel,
     });
     client.setScope(scope);
-    client.requestDraft(draft({ mode: "sota" }));
+    client.requestDraft(draft({ coordinatorRoleId: "old-lead" }));
     fake.advance(TEAM_PLAN_DEBOUNCE_MS);
     await flush();
-    client.requestDraft(draft({ mode: "economy" }));
+    client.requestDraft(draft({ coordinatorRoleId: "new-lead" }));
     fake.advance(TEAM_PLAN_DEBOUNCE_MS);
     await flush();
     expect(port.calls).toHaveLength(2);
@@ -399,7 +398,6 @@ describe("draft debounce and identity", () => {
       1,
       output([
         result(newest?.key ?? "newest", {
-          effectiveMode: "economy",
           rows: [row({ rowKey: "coordinator", kind: "coordinator", seatId: "coordinator" })],
         }),
       ]),
@@ -410,7 +408,7 @@ describe("draft debounce and identity", () => {
     await flush();
     const state = client.getDraftState("session-1");
     expect(state.status).toBe("result");
-    if (state.status === "result") expect(state.result.effectiveMode).toBe("economy");
+    if (state.status === "result") expect(state.result.rows[0]?.rowKey).toBe("coordinator");
   });
 
   test("a reserved or duplicate row key is rejected before any request", async () => {
@@ -469,7 +467,7 @@ describe("view models", () => {
     if (summary.kind === "unknown-mode") expect(summary.text).toContain("turbo");
   });
 
-  test("summary counts the coordinator, standby seats, and unresolved reasons", () => {
+  test("summary counts the coordinator, members, and unresolved reasons", () => {
     const summary = buildTeamSummary({
       result: result("t", {
         status: "blocked",
@@ -482,7 +480,6 @@ describe("view models", () => {
           }),
           row({
             rowKey: "seat:a",
-            activation: "escalation-only",
             profile: {
               id: "p-sonnet",
               name: "Sonnet",
@@ -505,12 +502,12 @@ describe("view models", () => {
     if (summary.kind !== "summary") return;
     expect(summary.total).toBe(3);
     expect(summary.groupsText).toContain("Opus ×1");
-    expect(summary.groupsText).toContain("待命 1");
+    expect(summary.groupsText).toContain("Sonnet ×1");
     expect(summary.unresolvedText).toContain("未解析 ×1");
     expect(summary.tone).toBe("warning");
   });
 
-  test("rows keep unknown sources, disabled states, and pool entry points", () => {
+  test("rows keep unknown sources, disabled states, and Role entry points", () => {
     const views = buildTeamModelRows({
       result: result("t", {
         status: "blocked",
@@ -553,8 +550,8 @@ describe("view models", () => {
     const pooled = views[0];
     expect(pooled?.source).toBe("custom-source");
     expect(pooled?.instanceLabel).toBe("Backend");
-    expect(pooled?.actions).toEqual([{ kind: "economy", layer: "allSeats", route: "execution" }]);
-    expect(pooled?.reasons[0]).toContain("路由");
+    expect(pooled?.actions).toEqual([]);
+    expect(pooled?.reasons).toContain(zh.modes.unknownFallback("MODE_CHEAP_ROUTE_UNAVAILABLE"));
     expect(views[1]?.enabled).toBe(false);
     expect(views[1]?.actions).toEqual([]);
     expect(views[2]?.actions).toEqual([
@@ -562,7 +559,7 @@ describe("view models", () => {
     ]);
   });
 
-  test("a standard-mode pool problem targets the standard pool", () => {
+  test("a legacy pool issue does not hide the Role repair action", () => {
     const views = buildTeamModelRows({
       result: result("t", {
         status: "blocked",
@@ -587,7 +584,6 @@ describe("view models", () => {
         ],
       }),
     });
-    expect(views[0]?.actions).toContainEqual({ kind: "economy", layer: "standard" });
     expect(views[0]?.actions).toContainEqual({
       kind: "role",
       roleId: "developer",
@@ -616,56 +612,7 @@ describe("view models", () => {
   });
 });
 
-describe("family hints", () => {
-  test("only live tuple-matched explicit classifications become hints", () => {
-    const hints = familyHintsFromEconomy(
-      {
-        pool: [
-          {
-            profileId: "p-sonnet",
-            family: "sonnet",
-            enabled: true,
-            boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
-          },
-          {
-            profileId: "p-opus",
-            family: "sonnet",
-            enabled: true,
-            boundModel: { provider: "claude", model: "different" },
-          },
-          {
-            profileId: "p-auto",
-            family: "sonnet",
-            enabled: true,
-            boundModel: { provider: "claude", model: "auto" },
-          },
-        ],
-        allSeats: {
-          version: 1,
-          profiles: [
-            {
-              profileId: "p-sonnet",
-              enabled: true,
-              costClass: "low",
-              family: "sonnet",
-              boundModel: { provider: "claude", model: "claude-sonnet-4-6" },
-            },
-          ],
-          routes: {},
-        },
-      },
-      [...profiles, { id: "p-auto", name: "Auto", provider: "claude", model: "auto" }],
-    );
-    expect(hints).toEqual([
-      {
-        profileId: "p-sonnet",
-        provider: "claude",
-        model: "claude-sonnet-4-6",
-        family: "sonnet",
-      },
-    ]);
-  });
-
+describe("stable request identity", () => {
   test("stableJson ignores key order", () => {
     expect(stableJson({ a: 1, b: { c: 2, d: 3 } })).toBe(stableJson({ b: { d: 3, c: 2 }, a: 1 }));
   });
@@ -798,7 +745,6 @@ describe("rework 1 regressions", () => {
     client.setScope(scope);
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
     fake.advance(200);
@@ -829,7 +775,6 @@ describe("rework 1 regressions", () => {
     client.setScope(scope);
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       coordinatorRoleId: "tech-lead",
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
@@ -853,26 +798,28 @@ describe("rework 1 regressions", () => {
       cancel: fake.cancel,
     });
     client.setScope(scope);
-    const draft = (mode: string) => ({
+    const draft = (coordinatorRoleId: string) => ({
       sessionId: "editor",
-      mode,
-      coordinatorRoleId: "tech-lead",
+      coordinatorRoleId,
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
-    client.requestDraft(draft("sota"));
+    client.requestDraft(draft("old-lead"));
     fake.advance(200);
     await flush();
-    client.requestDraft(draft("economy"));
+    client.requestDraft(draft("new-lead"));
     fake.advance(200);
     await flush();
     const newest = port.calls[1]?.items[0];
-    port.resolve(1, output([result(newest?.key ?? "newest", { effectiveMode: "economy" })]));
+    port.resolve(
+      1,
+      output([result(newest?.key ?? "newest", { rows: [row({ rowKey: "new-row" })] })]),
+    );
     await flush();
     port.reject(0, new Error("socket hang up"));
     await flush();
     const state = client.getDraftState("editor");
     expect(state.status).toBe("result");
-    if (state.status === "result") expect(state.result.effectiveMode).toBe("economy");
+    if (state.status === "result") expect(state.result.rows[0]?.rowKey).toBe("new-row");
   });
 
   test("I3/S1: an older saved batch failure cannot delete the newer batch results", async () => {
@@ -911,14 +858,12 @@ describe("rework 1 regressions", () => {
     client.setScope(scope);
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
     fake.advance(200);
     await flush();
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       members: [{ rowKey: "coordinator", roleId: "tech-lead", enabled: true }],
     });
     const firstKey = port.calls[0]?.items[0]?.key;
@@ -942,7 +887,6 @@ describe("rework 1 regressions", () => {
     client.setScope(scope);
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
     fake.advance(200);
@@ -1039,7 +983,7 @@ describe("rework 1 regressions", () => {
     expect(port.calls.length).toBeGreaterThanOrEqual(3);
   });
 
-  test("I6: a cheap-route outage never offers Role rebinding and keeps the route", () => {
+  test("I6: an obsolete cheap-route issue offers no retired repair action", () => {
     const views = buildTeamModelRows({
       result: result("t", {
         status: "blocked",
@@ -1060,7 +1004,7 @@ describe("rework 1 regressions", () => {
         ],
       }),
     });
-    expect(views[0]?.actions).toEqual([{ kind: "economy", layer: "allSeats", route: "execution" }]);
+    expect(views[0]?.actions).toEqual([]);
   });
 
   test("I7: null rows distinguish disabled, unbound, and blocked selections", () => {
@@ -1112,7 +1056,6 @@ describe("rework 1 regressions", () => {
     expect(views[3]?.profileStatus).toBe("当前无可运行的选中 Profile");
     expect(views[2]?.profileStatus).toBe("当前无可运行的选中 Profile");
     expect(views[2]?.availability).toBe("available");
-    expect(views[1]?.budget).toContain("SOTA");
     expect(modelRowMeta(views[3] as NonNullable<(typeof views)[3]>)).toContain("不可用");
   });
 
@@ -1163,7 +1106,6 @@ describe("rework 1 regressions", () => {
     expect(client.modeContract()).toBe("legacy");
     client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
     fake.advance(200);

@@ -5,7 +5,6 @@ import { exampleCatalog, materializeDefaultCatalog } from "../server/templates";
 import { defaultCatalogRevision, defaultRoleTemplates } from "../server/templates/default-catalog";
 import { hashCatalogContent } from "../server/templates/hash";
 import { resolveProfile } from "../shared/domain/profile-resolver";
-import { DEFAULT_ROLE_EXECUTION } from "../shared/domain/role-execution";
 import { DefaultRoleTemplateSchema } from "../shared/schemas/default-catalog";
 import { RoleSchema } from "../shared/schemas/role";
 import { expectedBindings, expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
@@ -14,14 +13,14 @@ import { NOW } from "./fixtures";
 describe("default Role templates", () => {
   const catalog = exampleCatalog(sourceProfiles, NOW);
 
-  test("ships exactly the 13 source Roles and no Teams; raw and materialized schemas pass", () => {
+  test("ships exactly the 14 source Roles and no Teams; raw and materialized schemas pass", () => {
     expect(sourceProfiles).toHaveLength(7);
-    expect(defaultCatalogRevision).toBe("defaults-2026-10-28.1");
-    expect(defaultRoleTemplates).toHaveLength(13);
+    expect(defaultCatalogRevision).toBe("defaults-2026-11-03.1");
+    expect(defaultRoleTemplates).toHaveLength(14);
     expect(catalog.roles.map((role) => role.id)).toEqual(
       expectedRoleContent.map((role) => role.id),
     );
-    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(13);
+    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(14);
     expect(catalog.teams).toEqual([]);
     for (const template of defaultRoleTemplates) {
       expect(DefaultRoleTemplateSchema.parse(template)).toEqual(template);
@@ -30,12 +29,8 @@ describe("default Role templates", () => {
   });
 
   test("preserves every source content field and every ordered hint", () => {
-    // executionPolicy is added by the generator from DEFAULT_ROLE_EXECUTION; the source-content
-    // fixture stays free of it so a binding/content change cannot hide behind tier edits.
     expect(expectedRoleContent.every((role) => !("executionPolicy" in role))).toBe(true);
-    expect(
-      defaultRoleTemplates.map(({ executionPolicy: _executionPolicy, ...content }) => content),
-    ).toEqual(expectedRoleContent);
+    expect(defaultRoleTemplates).toEqual(expectedRoleContent);
     for (const [index, role] of catalog.roles.entries()) {
       const {
         preferredProfiles,
@@ -49,7 +44,7 @@ describe("default Role templates", () => {
       } = role;
       const { preferredHints, fallbackHints, ...expectedContent } = expectedRoleContent[index];
       expect(content, role.id).toEqual(expectedContent);
-      expect(executionPolicy, role.id).toEqual(DEFAULT_ROLE_EXECUTION[role.id]);
+      expect(executionPolicy, role.id).toBeUndefined();
       expect(
         preferredProfiles.map((ref) => ref.hint),
         role.id,
@@ -74,23 +69,10 @@ describe("default Role templates", () => {
     }
   });
 
-  test("the generator writes the explicit tier for all 13 presets", () => {
-    // The table also keeps the ids retired from earlier catalog revisions.
-    expect(Object.keys(DEFAULT_ROLE_EXECUTION)).toHaveLength(24);
-    expect(
-      defaultRoleTemplates.every((role) => Object.hasOwn(DEFAULT_ROLE_EXECUTION, role.id)),
-    ).toBe(true);
+  test("the generator writes no retired execution policy", () => {
     for (const template of defaultRoleTemplates) {
-      expect(template.executionPolicy, template.id).toEqual(DEFAULT_ROLE_EXECUTION[template.id]);
+      expect(template, template.id).not.toHaveProperty("executionPolicy");
     }
-    // Only tier/taskKind: no Profile ID, no host metadata leaks into the raw module.
-    expect(
-      defaultRoleTemplates.every(
-        (template) =>
-          JSON.stringify(Object.keys(template.executionPolicy ?? {}).sort()) ===
-          '["taskKind","tier"]',
-      ),
-    ).toBe(true);
   });
 
   test("binds all preferred and fallback IDs in the exact source order, Opus Max only for planning", () => {
@@ -170,7 +152,7 @@ describe("default Role templates", () => {
   });
 
   test.each(["claude", "codex", "omp"])(
-    "all 13 Roles resolve when %s Profiles are absent",
+    "all 14 Roles resolve when %s Profiles are absent",
     (provider) => {
       const profiles = sourceProfiles.filter((profile) => profile.provider !== provider);
       const availability = ["claude", "codex", "omp"].map((name) => ({

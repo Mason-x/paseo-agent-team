@@ -32,7 +32,6 @@ import {
   launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
-  projectLaunchJobForLegacyPeer,
   teamPlanRpc,
 } from "./shared/rpc";
 import { preferencesSettings, rolesSettings, teamsSettings } from "./shared/settings";
@@ -161,8 +160,8 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(launchPreviewRpc, (input, { paseo }) => launches.preview(input, paseo));
   server.handle(launchStartRpc, (input, { paseo }) => launches.start(input, paseo));
-  server.handle(launchStatusRpc, ({ runId, contractVersion }) => ({
-    job: projectLaunchJobForLegacyPeer(launches.status(runId), contractVersion),
+  server.handle(launchStatusRpc, ({ runId }) => ({
+    job: launches.status(runId),
   }));
   server.handle(teamPlanRpc, (input, { paseo }) => teamPlans.plan(input, paseo));
   server.handle(exampleCatalogRpc, async (_input, { paseo }) => {

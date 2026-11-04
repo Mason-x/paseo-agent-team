@@ -38,15 +38,16 @@ const StoredDesignerProfileSchema = ProfileRefSchema.passthrough();
 export const PreferencesSchema = z
   .object({
     // Storage has no upper bound: existing Teams may exceed what this version runs, and the
-    // settings screen must still open them. The host economy policy owns the runtime cap.
+    // settings screen must still open them. Seat planning owns the runtime cap.
     maxMembers: z.number().int().min(1).default(24),
     archiveOnLaunchFailure: z.boolean().default(true),
     recentRuns: z.array(RunSummarySchema).max(20).default([]),
     templatesImportedAt: z.string().optional(),
-    // Host-level economy pool. User data: the block stays exactly as written, including entries
-    // this version cannot interpret, so no later preferences write deletes it. normalizeEconomyPolicy
-    // reports per-entry problems before a launch.
+    // RETIRED host-level economy pool. It still decodes, exactly as written, and planning never
+    // reads it. It is deleted when the preferences are next saved by a version that retires it
+    // (shared/domain/retired-fields.ts); an earlier version keeps reading it.
     economy: StoredEconomyPolicySchema.optional(),
+    // NOT retired: how a quota-exhausted seat is recovered; no tie to the retired modes.
     quotaRecovery: StoredQuotaRecoverySchema.optional(),
     // The designer's remembered Profile. Explicit start options override it; a malformed block
     // only clears the preference instead of invalidating the whole settings document.

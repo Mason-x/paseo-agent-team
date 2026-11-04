@@ -150,10 +150,6 @@ describe("strict model output", () => {
           members: [{ ...proposal.team.members[0], extra: true }],
         },
       },
-      {
-        ...proposal,
-        team: { ...proposal.team, collaboration: { replicas: 2, extra: true } },
-      },
       { ...proposal, reuse: [{ ...proposal.reuse[0], extra: true }] },
       {
         ...proposal,
@@ -173,6 +169,14 @@ describe("strict model output", () => {
     for (const value of invalid) {
       expect(DesignProposalSchema.safeParse(value).success).toBe(false);
     }
+    const legacy = {
+      ...proposal,
+      team: { ...proposal.team, collaboration: { replicas: 2, extra: true } },
+    };
+    expect(DesignProposalSchema.parse(legacy).team.collaboration).toEqual({
+      replicas: 2,
+      extra: true,
+    });
   });
 
   test("enforces the new-Role limit, required preferred Profile, and non-empty reasons", () => {

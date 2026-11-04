@@ -8,6 +8,7 @@ import {
   designPrepareSaveRpc,
   designSaveFailedRpc,
 } from "../../shared/rpc/design";
+import { teamPlanRpc } from "../../shared/rpc/team-plan";
 import type {
   DesignMarkSavedInput,
   DesignMarkSavedOutput,
@@ -17,6 +18,7 @@ import type {
   DesignSaveFailedOutput,
 } from "../../shared/schemas/design";
 import { preferencesSettings, rolesSettings, teamsSettings } from "../../shared/settings";
+import { createRetirementProbe, type RetirementProbe } from "../catalog/retirement";
 import {
   createDesignSaveGateway,
   type DesignModeContract,
@@ -128,6 +130,7 @@ export type DesignSaveRunInput = {
   clientId: string;
   /** Built from the host that owns this run; never resolved from a later render. */
   gateway: DesignSaveGateway;
+  retirementProbe?: RetirementProbe;
 };
 
 export type DesignSaveRunner = {
@@ -223,6 +226,7 @@ export function createDesignSaveRunner(
           signal: controller.signal,
           now: options.now ?? Date.now,
           unknownWrites,
+          retirementProbe: input.retirementProbe,
           ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         },
       )
@@ -297,6 +301,7 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
   const saveFailed = useRpc(designSaveFailedRpc);
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
+  const sendTeamPlan = useRpc(teamPlanRpc);
 
   const [active, setActive] = useState(0);
   const latest = useRef(input);
@@ -362,8 +367,15 @@ export function useDesignSave(input: UseDesignSaveInput): UseDesignSaveResult {
 
   const save = useCallback(
     (jobId: string, resultId: string): Promise<DesignSaveOutcome | null> =>
-      runner.run({ hostId, jobId, resultId, clientId, gateway: makeGateway() }),
-    [runner, hostId, clientId, makeGateway],
+      runner.run({
+        hostId,
+        jobId,
+        resultId,
+        clientId,
+        gateway: makeGateway(),
+        retirementProbe: createRetirementProbe(sendTeamPlan),
+      }),
+    [runner, hostId, clientId, makeGateway, sendTeamPlan],
   );
 
   const cleanup = useCallback(

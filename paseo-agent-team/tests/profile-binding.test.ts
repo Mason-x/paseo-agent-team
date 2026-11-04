@@ -186,11 +186,21 @@ describe("strict Profile hint binding", () => {
   });
 
   test("an unavailable provider does not affect binding; resolver handles it at launch", () => {
-    const role = exampleCatalog(sourceProfiles, NOW).roles[0];
-    const result = resolveProfile(role, sourceProfiles, [{ provider: "claude", available: false }]);
-    expect(role.preferredProfiles[0].profileId).toBe(
-      sourceProfiles.find((entry) => entry.name === "Claude-Opus-5.5-Medium")?.id,
+    const role = exampleCatalog(sourceProfiles, NOW).roles.find(
+      (entry) => entry.id === "lead-owner",
     );
-    expect(result).toMatchObject({ ok: true, profile: { provider: "omp" } });
+    if (!role) throw new Error("default owner Role missing");
+    const result = resolveProfile(role, sourceProfiles, [{ provider: "claude", available: false }]);
+    const preferred = sourceProfiles.find((entry) => entry.name === "Claude-Sonnet 5.5 high");
+    const fallback = sourceProfiles.find((entry) => entry.name === "GPT-6.1-Sol Xhigh");
+    expect(preferred).toBeDefined();
+    expect(fallback).toBeDefined();
+    expect(role.preferredProfiles[0].profileId).toBe(preferred?.id);
+    expect(role.fallbackProfiles[0].profileId).toBe(fallback?.id);
+    expect(result).toMatchObject({
+      ok: true,
+      source: "role-fallback",
+      profile: { id: fallback?.id },
+    });
   });
 });

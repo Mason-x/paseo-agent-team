@@ -2,6 +2,7 @@ import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PresetAction, PresetSelection } from "../../shared/domain/catalog-content";
+import { hasRetiredFields } from "../../shared/domain/retired-fields";
 import type { PresetRolePreview } from "../../shared/schemas/default-catalog";
 import { zh } from "../../shared/zh";
 import { ModalActions } from "../shared/buttons";
@@ -19,6 +20,7 @@ import {
   countPresetActions,
   defaultPresetSelection,
 } from "./preset-state";
+import { useRetirement, useRetirementProbe } from "./use-retirement";
 
 type PreviewState =
   | { kind: "loading" }
@@ -53,8 +55,21 @@ export function PresetSyncDialog({
   const [promptOpen, setPromptOpen] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [legacyEconomy, setLegacyEconomy] = useState(false);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const gatewayRef = useRef(gateway);
   gatewayRef.current = gateway;
+  const retirementProbe = useRetirementProbe();
+  // E1: a sync over preferences that still hold the retired economy block always says what happens
+  // to it; the wording follows the target host (deleted, or kept until its plugin is upgraded).
+  const hostRetires = useRetirement(retirementProbe, open && legacyEconomy);
+  const retiredLine = !legacyEconomy
+    ? null
+    : hostRetires === null
+      ? zh.retiredPresetSyncProbePending
+      : hostRetires
+        ? zh.retiredPresetSync
+        : zh.retiredPresetSyncKept;
 
   useEffect(() => {
     if (!open) return;
@@ -64,6 +79,26 @@ export function PresetSyncDialog({
     setSameOpen(false);
     setPromptOpen(null);
     setMessage(null);
+    setLegacyEconomy(false);
+    setPreferencesReady(false);
+    void gatewayRef.current
+      .readPreferences()
+      .then((snapshot) => {
+        if (!active) return;
+        if (snapshot.status !== "ready") {
+          setMessage(zh.defaultPresetsSettingsUnavailable);
+          return;
+        }
+        setPreferencesReady(true);
+        const raw = snapshot.raw;
+        setLegacyEconomy(
+          hasRetiredFields("preferences", snapshot.values) ||
+            (typeof raw === "object" && raw !== null && hasRetiredFields("preferences", raw)),
+        );
+      })
+      .catch(() => {
+        if (active) setMessage(zh.defaultPresetsSettingsUnavailable);
+      });
     void gatewayRef.current
       .preview(false)
       .then((preview) => {
@@ -172,7 +207,7 @@ export function PresetSyncDialog({
   }
 
   async function confirm() {
-    if (state.kind !== "ready" || submitting) return;
+    if (state.kind !== "ready" || !preferencesReady || submitting) return;
     setSubmitting(true);
     setMessage(null);
     let result: PresetSyncResult;
@@ -181,6 +216,7 @@ export function PresetSyncDialog({
         preview: state.preview,
         selection,
         now: new Date().toISOString(),
+        probe: retirementProbe,
       });
     } catch {
       setSubmitting(false);
@@ -374,11 +410,12 @@ export function PresetSyncDialog({
                 </View>
               ) : null}
 
+              {retiredLine ? <Text style={styles.warning}>{retiredLine}</Text> : null}
               <Text style={styles.muted}>{zh.defaultPresetsSummary(counts.add, counts.adopt)}</Text>
               <ModalActions
                 theme={theme}
                 confirmLabel={submitting ? zh.saving : zh.defaultPresetsApply}
-                confirmDisabled={submitting}
+                confirmDisabled={submitting || !preferencesReady}
                 onCancel={onClose}
                 onConfirm={() => void confirm()}
               />

@@ -255,7 +255,7 @@ describe("server entry", () => {
     expect(await status({ runId: "run-unknown" }, { paseo: port })).toEqual({ job: null });
   });
 
-  test("serves exactly 13 default Roles bound to this host's Profiles and no Teams", async () => {
+  test("serves exactly 14 default Roles bound to this host's Profiles and no Teams", async () => {
     const { server, handlers } = fakeServer();
     contribute(server);
     const { port } = fakePort({ agentProfiles: sourceProfiles });
@@ -263,7 +263,7 @@ describe("server entry", () => {
       {},
       { paseo: port },
     )) as { roles: unknown[]; teams: unknown[] };
-    expect(catalog.roles).toHaveLength(13);
+    expect(catalog.roles).toHaveLength(14);
     expect(catalog.teams).toEqual([]);
     expect(exampleCatalogRpc.output.parse(catalog)).toEqual(catalog);
     for (const role of catalog.roles) RoleSchema.parse(role);
@@ -316,7 +316,7 @@ describe("server entry", () => {
     });
     if (!next.ok) throw new Error("expected successful preview");
     expect(next.roles[0].kind).toBe("same");
-    expect(next.roles[1].kind).toBe("deleted");
+    expect(next.roles.find((entry) => entry.id === "lead-tech")?.kind).toBe("deleted");
   });
 
   test("preview blocks a Profile read error unless explicitly importing unbound", async () => {

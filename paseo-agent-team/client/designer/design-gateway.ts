@@ -1,9 +1,5 @@
 import type { ZodType } from "zod";
-import {
-  MODE_CONTRACT_VERSION,
-  type ModeContractSupport,
-  modeMinContract,
-} from "../../shared/domain/mode-contract";
+import { MODE_CONTRACT_VERSION, type ModeContractSupport } from "../../shared/domain/mode-contract";
 import type {
   DesignMarkSavedInput,
   DesignMarkSavedOutput,
@@ -15,7 +11,6 @@ import type {
 } from "../../shared/schemas/design";
 import type { Preferences } from "../../shared/schemas/preferences";
 import { PreferencesSchema } from "../../shared/schemas/preferences";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import {
   type RolesDocument,
   RolesDocumentSchema,
@@ -80,11 +75,6 @@ export function prepareDesignStartInput(
   }
   const { existingRolesOnly: _rule, contractVersion: _contract, ...baseline } = input;
   return baseline;
-}
-
-/** True when the draft's mode cannot be requested from a host that is not confirmed as v2. */
-export function designModeNeedsV2(mode: TeamMode, support: DesignModeContract): boolean {
-  return support !== "v2" && modeMinContract(mode) > 1;
 }
 
 /** The host's settings write answer, before transport failures are folded in. */

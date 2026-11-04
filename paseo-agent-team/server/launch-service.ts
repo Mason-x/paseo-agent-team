@@ -1,8 +1,7 @@
 import { buildLaunchPlan, type LaunchPlan } from "../shared/domain/launch-plan";
 import { launchPreviewWarnings, toModeLaunchPreview } from "../shared/domain/launch-preview";
 import { isLaunchError, launchTeam } from "../shared/domain/launch-team";
-import { checkModeAccess, requestContractVersion } from "../shared/domain/mode-contract";
-import type { EconomyPolicy } from "../shared/domain/mode-resolver";
+import { checkModeAccess } from "../shared/domain/mode-contract";
 import type { ModeIssue } from "../shared/domain/role-execution";
 import { createRunId } from "../shared/ids";
 import {
@@ -18,12 +17,7 @@ import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
 import { launchContractZh } from "../shared/zh/launch-contract";
 import { hashLaunchPlan } from "./launch-hash";
-import {
-  planningEconomy,
-  readPlanningHost,
-  readPlanningSettings,
-  type SettingsReader,
-} from "./planning-context";
+import { readPlanningHost, readPlanningSettings, type SettingsReader } from "./planning-context";
 
 export type { SettingsReader } from "./planning-context";
 
@@ -50,10 +44,6 @@ type PreparedLaunch = {
   workspace: { id: string } | null;
   project: ProjectSummary | undefined;
   preferences: Preferences;
-  economy: EconomyPolicy;
-  economyIssues: ModeIssue[];
-  /** The stored value planning could not read; a job then carries it instead of a placeholder. */
-  rawMode?: string;
 };
 
 type PrepareResult =
@@ -109,26 +99,19 @@ export function createLaunchService(deps: {
       };
     }
 
-    // Access gate: after reading the stored Team, before any override, host read, or target read.
-    // A stale caller may not launch a Team whose saved mode it cannot represent, even by sending
-    // a legacy override; the refusal is the only blocker, so the reason is unambiguous.
-    const team = settings.teams.teams.find((entry) => entry.id === input.teamId);
-    const access = checkModeAccess({
-      storedMode: team?.mode,
-      requestedMode: input.mode,
-      contractVersion: requestContractVersion(input),
-    });
+    // Access gate, before any host read or target read. The team mode is retired: an absent
+    // override or `sota` runs, any other value is refused with a refresh hint, and the refusal is
+    // the only blocker so the reason is unambiguous. The saved Team's own mode is never checked.
+    const access = checkModeAccess({ requestedMode: input.mode });
     if (!access.ok) {
       return {
         ok: false,
-        blockers: [
-          launchContractZh.modeRequired(access.denial.subject, access.denial.value),
-          launchContractZh.refreshHint,
-        ],
+        blockers: [launchContractZh.retiredMode(access.value), launchContractZh.refreshHint],
         warnings: [],
         issues: [access.issue],
       };
     }
+    const team = settings.teams.teams.find((entry) => entry.id === input.teamId);
 
     const target = input.target;
     const [workspace, project, hostFacts] = await Promise.all([
@@ -147,7 +130,6 @@ export function createLaunchService(deps: {
     if (target.kind === "workspace" && !workspace) targetBlockers.push(zh.workspaceMissing);
     if (target.kind === "new-workspace" && !project) targetBlockers.push(zh.projectMissing);
 
-    const { economy, issues: economyIssues } = planningEconomy(settings.preferences, host);
     const plan = buildLaunchPlan({
       team,
       roles: settings.roles.roles,
@@ -157,13 +139,11 @@ export function createLaunchService(deps: {
       task: input.task,
       runId,
       maxMembers: settings.preferences.maxMembers,
-      mode: input.mode,
       host,
-      economy,
       runtimeCapabilities: LAUNCH_RUNTIME_CAPABILITIES,
       daemonConfig,
     });
-    const issues = [...economyIssues, ...plan.seatIssues];
+    const issues = [...plan.seatIssues];
     const blockers = [...targetBlockers, ...plan.blockers];
     const prepared: PreparedLaunch = {
       plan,
@@ -172,7 +152,6 @@ export function createLaunchService(deps: {
         roles: settings.roles.roles,
         plan,
         host,
-        economy,
         target,
         task: input.task,
         maxMembers: settings.preferences.maxMembers,
@@ -181,9 +160,6 @@ export function createLaunchService(deps: {
       workspace,
       project,
       preferences: settings.preferences,
-      economy,
-      economyIssues,
-      ...(plan.rawMode === undefined ? {} : { rawMode: plan.rawMode }),
     };
     if (blockers.length > 0) {
       return { ok: false, blockers, warnings: plan.warnings, issues };
@@ -264,12 +240,7 @@ export function createLaunchService(deps: {
       }
       return {
         ok: true,
-        preview: toModeLaunchPreview(
-          prepared.prepared.plan,
-          prepared.prepared.planHash,
-          prepared.prepared.economyIssues,
-          prepared.prepared.economy,
-        ),
+        preview: toModeLaunchPreview(prepared.prepared.plan, prepared.prepared.planHash),
       };
     },
 
@@ -302,11 +273,9 @@ export function createLaunchService(deps: {
         memberTotal: plan.members.length,
         workspaceId: workspace?.id,
         memberIds: [],
-        warnings: launchPreviewWarnings(plan, prepared.prepared.economyIssues),
+        warnings: launchPreviewWarnings(plan),
         startedAt: now().toISOString(),
-        ...(prepared.prepared.rawMode === undefined
-          ? { mode: plan.mode }
-          : { rawMode: prepared.prepared.rawMode }),
+        mode: plan.mode,
         planHash: prepared.prepared.planHash,
       };
       jobs.set(runId, job);

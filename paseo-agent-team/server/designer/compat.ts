@@ -1,4 +1,4 @@
-import { isLegacyTeamMode, MODE_CONTRACT_VERSION } from "../../shared/domain/mode-contract";
+import { MODE_CONTRACT_VERSION } from "../../shared/domain/mode-contract";
 import {
   type DesignIssue,
   type DesignJob,
@@ -14,9 +14,10 @@ import type { TeamMode } from "../../shared/schemas/team-mode";
 // 1. Strip: the ledger keeps keys a newer writer added (passthrough). Anything that leaves the
 //    service is first projected through the strip-mode DTO schemas, so those keys never reach an
 //    RPC reply, a hash, or an identity.
-// 2. Legacy callers (contract 1, i.e. every caller that does not say 2) only understand the three
-//    baseline modes. A job in a newer mode is hidden from lists and answered with the existing
-//    DESIGN_MODE_UNAVAILABLE issue, so one new enum value can never break a baseline page's parse.
+// 2. Legacy callers (contract 1, i.e. every caller that does not say 2) only parse the three
+//    baseline job modes. A job recorded before the upgrade in a newer mode is hidden from lists
+//    and answered with the existing DESIGN_MODE_UNAVAILABLE issue, so one enum value can never
+//    break a baseline page parse. Every job this version creates is recorded as sota.
 
 /** Fields that exist only for a contract-2 reader; a baseline reader neither needs nor expects them. */
 const CONTRACT_2_JOB_FIELDS = [
@@ -28,15 +29,22 @@ const CONTRACT_2_JOB_FIELDS = [
 
 export type DesignContract = 1 | typeof MODE_CONTRACT_VERSION;
 
+/** The job modes a contract-1 page can parse: its enum predates the fourth value. */
+const BASELINE_JOB_MODES: ReadonlySet<TeamMode> = new Set<TeamMode>([
+  "sota",
+  "economy",
+  "collaborative",
+]);
+
 /** True when a caller of this contract can represent the mode. */
 export function modeVisibleTo(mode: TeamMode, contract: DesignContract): boolean {
-  return contract === MODE_CONTRACT_VERSION || isLegacyTeamMode(mode);
+  return contract === MODE_CONTRACT_VERSION || BASELINE_JOB_MODES.has(mode);
 }
 
 /** The existing issue a legacy caller receives for a job or mode it cannot represent. */
 export function legacyModeIssue(
   mode: TeamMode,
-  reason: "contract-required" | "hidden-by-contract" = "contract-required",
+  reason: "contract-required" | "hidden-by-contract" | "retired" = "contract-required",
   extra: Record<string, string | number | boolean> = {},
 ): DesignIssue {
   return {
@@ -103,7 +111,7 @@ export function projectStatusForContract(
     truncated: true,
     discoveryIssues: [
       ...input.discoveryIssues,
-      legacyModeIssue(firstHidden?.mode ?? "economy-all", "hidden-by-contract", { hidden }),
+      legacyModeIssue(firstHidden?.mode ?? "sota", "hidden-by-contract", { hidden }),
     ],
   };
 }

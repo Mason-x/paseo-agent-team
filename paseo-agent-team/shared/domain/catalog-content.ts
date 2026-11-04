@@ -2,7 +2,14 @@ import { DEFAULT_CATALOG_ID, type PresetRolePreview } from "../schemas/default-c
 import { type Preferences, PreferencesSchema } from "../schemas/preferences";
 import { type Role, RoleSchema } from "../schemas/role";
 import { zh } from "../zh";
-import { DEFAULT_ROLE_EXECUTION } from "./role-execution";
+import { omitRetired } from "./retired-fields";
+
+/**
+ * Write options shared by the preset-sync writers. `retireLegacyFields` is true only when the
+ * target host is known to ignore the retired settings keys (E2); otherwise the objects are written
+ * back the way an earlier version would have written them.
+ */
+export type PresetWriteOptions = { retireLegacyFields?: boolean };
 
 const MANAGEMENT_FIELDS = new Set(["createdAt", "updatedAt", "source", "preset", "designer"]);
 const REFERENCE_FIELDS = ["preferredProfiles", "fallbackProfiles"] as const;
@@ -42,25 +49,12 @@ export function canonicalize(value: Record<string, unknown>): string {
  * profileId sequence, ignoring nameSnapshot and hint, so renaming a Profile cannot make every
  * preset look changed. Every other top-level field, including extensions, compares canonically.
  * A missing executionPolicy compares as the known-id default: that is the tier planning actually
- * applies, so an unmarked pre-tier Role is not reported as a user collision on first sync.
+ * A retired key (executionPolicy) never counts: planning ignores it, so a Role that differs from
+ * the preset only by that key is "same", not a local change.
  */
 function comparableContent(value: Role): Record<string, unknown> {
   const parsed = RoleSchema.parse(value);
-  const content = contentOf(parsed);
-  const fallback = DEFAULT_ROLE_EXECUTION[parsed.id];
-  const policy = content.executionPolicy;
-  if (policy === undefined) {
-    if (fallback) content.executionPolicy = fallback;
-  } else if (fallback && typeof policy === "object" && policy !== null && !Array.isArray(policy)) {
-    // Compare the tier planning actually applies: a present block with only one explicit field
-    // still inherits the other from the known-id default. Invalid values remain visible.
-    const explicit = policy as Record<string, unknown>;
-    content.executionPolicy = {
-      ...explicit,
-      ...(explicit.tier === undefined ? { tier: fallback.tier } : {}),
-      ...(explicit.taskKind === undefined ? { taskKind: fallback.taskKind } : {}),
-    };
-  }
+  const content = omitRetired("role", contentOf(parsed));
   for (const key of REFERENCE_FIELDS) content[key] = parsed[key].map((ref) => ref.profileId);
   return content;
 }
@@ -166,11 +160,18 @@ export type PresetPreviewSnapshot = {
 
 /**
  * Keep everything the preset row does not own: unknown extensions and metadata such as `designer`.
- * `source`/`preset` come from the candidate because adoption records the preset origin.
+ * `source`/`preset` come from the candidate because adoption records the preset origin. A retired
+ * key the new catalog no longer carries (executionPolicy) is dropped here when the target host
+ * retires it; the Role being adopted is the object being saved.
  */
-function adoptionExtensions(existing: Role, candidate: Role): Record<string, unknown> {
+function adoptionExtensions(
+  existing: Role,
+  candidate: Role,
+  options: PresetWriteOptions,
+): Record<string, unknown> {
   const owned = new Set([...Object.keys(candidate), "createdAt", "updatedAt", "preset"]);
-  return Object.fromEntries(Object.entries(existing).filter(([key]) => !owned.has(key)));
+  const kept = Object.fromEntries(Object.entries(existing).filter(([key]) => !owned.has(key)));
+  return options.retireLegacyFields === true ? omitRetired("role", kept) : kept;
 }
 
 /**
@@ -186,6 +187,7 @@ export function applyPresetSelection(
   preview: PresetPreviewSnapshot,
   selection: PresetSelection,
   now: string,
+  options: PresetWriteOptions = {},
 ): Role[] {
   if (current.revision !== preview.revisions.roles) {
     throw new Error(zh.defaultPresetsCatalogChanged);
@@ -210,7 +212,7 @@ export function applyPresetSelection(
       throw new Error(zh.defaultPresetsInvalidSelection);
     }
     const role: Role = {
-      ...(existing ? adoptionExtensions(existing, row.candidate) : {}),
+      ...(existing ? adoptionExtensions(existing, row.candidate, options) : {}),
       ...row.candidate,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -243,12 +245,14 @@ export function applyPresetSelectionDocument(
   preview: PresetPreviewSnapshot,
   selection: PresetSelection,
   now: string,
+  options: PresetWriteOptions = {},
 ): { roles: Role[]; document: Record<string, unknown> } {
   const roles = applyPresetSelection(
     { roles: current.roles, revision: current.revision },
     preview,
     selection,
     now,
+    options,
   );
   const changed = new Set<string>();
   for (const row of preview.roles) {
@@ -280,6 +284,9 @@ export function applyPresetSelectionDocument(
  * are classified "same" and still present, so a user-built Role that merely reuses a preset id is
  * never marked as seen. Frontend: pass the `agent-team.templates.defaults.preview` result as
  * `preview` (it is structurally compatible) and settings.save(result, current.revision).
+ * This is the only preferences write of this version: when the target host retires the legacy
+ * keys, the retired `economy` block is dropped here and every other key (quotaRecovery included)
+ * is written back unchanged.
  */
 export function recordPresetSync(
   current: { values: Preferences; revision: string },
@@ -287,6 +294,7 @@ export function recordPresetSync(
   roles: readonly Role[],
   catalogRevision: string,
   now: string,
+  options: PresetWriteOptions = {},
 ): Preferences {
   if (current.revision !== preview.revisions.preferences) {
     throw new Error(zh.defaultPresetsCatalogChanged);
@@ -297,7 +305,7 @@ export function recordPresetSync(
   for (const row of preview.roles) {
     if (row.kind === "same" && present.has(row.id)) seen.add(row.id);
   }
-  return PreferencesSchema.parse({
+  const next = {
     ...current.values,
     templatesImportedAt: current.values.templatesImportedAt ?? now,
     defaultPresets: {
@@ -305,5 +313,8 @@ export function recordPresetSync(
       seenRoleIds: [...(current.values.defaultPresets?.seenRoleIds ?? []), ...seen],
       lastSyncedAt: now,
     },
-  });
+  };
+  return PreferencesSchema.parse(
+    options.retireLegacyFields === true ? omitRetired("preferences", next) : next,
+  );
 }

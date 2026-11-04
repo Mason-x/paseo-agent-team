@@ -2,7 +2,6 @@ import { describe, expect, test, vi } from "vitest";
 import { resolveStartBlock } from "../client/designer/card-state";
 import {
   designContractFields,
-  designModeNeedsV2,
   prepareDesignStartInput,
   withDesignContract,
 } from "../client/designer/design-gateway";
@@ -149,7 +148,7 @@ describe("the request always carries an explicit boolean", () => {
   test("true and false are both sent, never omitted", () => {
     for (const existingRolesOnly of [true, false]) {
       const built = buildDesignStartInput(
-        { request: "需求", mode: "sota", workspaceId: "", profileChoice: null, existingRolesOnly },
+        { request: "需求", workspaceId: "", profileChoice: null, existingRolesOnly },
         ID,
       );
       expect(built.ok && built.input.existingRolesOnly).toBe(existingRolesOnly);
@@ -251,39 +250,34 @@ describe("gap views", () => {
     });
   });
 
-  test("an economy-all job is repaired in the route list, never only in the Role editor", () => {
+  test("a historical economy-all job still offers the relevant Role repairs", () => {
     const views = buildDesignRoleGapViews(gapJob({ mode: "economy-all" }));
-    expect(views[0]?.primary).toEqual({
-      kind: "configure-economy",
-      layer: "allSeats",
-      route: "decision",
-      profileIds: ["p-sonnet"],
-    });
-    // A suggested Role can still be created, as the second choice.
-    expect(views[0]?.secondary).toEqual({ kind: "create-role" });
-    // The route of an unlaunchable member Role is unknown here (the card has no Role list).
+    expect(views[0]?.primary).toEqual({ kind: "create-role" });
     expect(views[1]?.primary).toEqual({
-      kind: "configure-economy",
-      layer: "allSeats",
-      profileIds: ["p-gone", "p-down"],
+      kind: "open-role",
+      roleId: "eng-fullstack",
+      profileId: "p-gone",
     });
-    expect(views[1]?.primary?.kind).not.toBe("open-role");
     const coordinator = buildDesignRoleGapViews(
       gapJob({ mode: "economy-all", roleGap: [coordinatorGap] }),
     );
     expect(coordinator[0]?.primary).toMatchObject({
-      kind: "configure-economy",
-      route: "coordinator",
+      kind: "open-role",
+      roleId: "lead-orchestrator",
     });
   });
 
-  test("the exit follows the job's mode, not the form's mode", () => {
+  test("the Role repair is independent of the historical job mode", () => {
     const sota = buildDesignRoleGapViews(gapJob({ mode: "sota", roleGap: [unlaunchable] }));
     const economy = buildDesignRoleGapViews(
       gapJob({ mode: "economy-all", roleGap: [unlaunchable] }),
     );
-    expect(sota[0]?.primary?.kind).toBe("open-role");
-    expect(economy[0]?.primary?.kind).toBe("configure-economy");
+    expect(sota[0]?.primary).toEqual({
+      kind: "open-role",
+      roleId: "eng-fullstack",
+      profileId: "p-gone",
+    });
+    expect(economy[0]?.primary).toEqual(sota[0]?.primary);
   });
 
   test("a job without a gap, or from an old daemon, has no card", () => {
@@ -338,7 +332,7 @@ describe("close the switch and retry", () => {
     useDefaultProfileHints: false,
   };
 
-  test("prefills the original request, the job's mode and target, and turns the switch off", () => {
+  test("prefills the original request and target, ignores old mode, and turns the switch off", () => {
     const plan = planDesignGapRetry(gapJob({ mode: "economy-all" }), source, () => "nonce-1");
     expect(plan).toEqual({
       ok: true,
@@ -346,7 +340,6 @@ describe("close the switch and retry", () => {
         nonce: "nonce-1",
         text: "给后台做一次改版",
         workspaceId: "ws-target",
-        mode: "economy-all",
         profileChoice: "codex-xhigh",
         existingRolesOnly: false,
         confirmReplace: true,
@@ -392,7 +385,7 @@ describe("close the switch and retry", () => {
     const original = createDesignSubmissionController({
       start,
       nextId: () => ID,
-      initialDraft: { request: source.request, mode: "sota", profileChoice: "codex-xhigh" },
+      initialDraft: { request: source.request, profileChoice: "codex-xhigh" },
     });
     const originalPlan = planDesignSubmission(original.getState(), () => ID);
     const plan = planDesignGapRetry(gapJob(), source, () => "nonce-1");
@@ -403,7 +396,6 @@ describe("close the switch and retry", () => {
     const state = applyDesignPrefill(createDesignSubmissionState(), {
       request: plan.prefill.text,
       workspaceId: plan.prefill.workspaceId,
-      mode: plan.prefill.mode,
       profileChoice: plan.prefill.profileChoice,
       existingRolesOnly: plan.prefill.existingRolesOnly,
     });
@@ -578,26 +570,8 @@ describe("contract negotiation (K1)", () => {
     expect(seen.prepareSave).not.toHaveProperty("contractVersion");
   });
 
-  test("economy-all cannot start against a host that is not confirmed as v2", () => {
-    expect(designModeNeedsV2("economy-all", "v2")).toBe(false);
-    expect(designModeNeedsV2("economy-all", "legacy")).toBe(true);
-    expect(designModeNeedsV2("economy-all", "unknown")).toBe(true);
-    for (const mode of ["sota", "economy", "collaborative"] as const) {
-      expect(designModeNeedsV2(mode, "legacy")).toBe(false);
-    }
+  test("the start gate remains usable when the valid request has no blockers", () => {
     const request = checkDesignRequest("需求");
-    expect(
-      resolveStartBlock({
-        hasStartHandler: true,
-        disabledReason: undefined,
-        submitting: false,
-        request,
-        workspaceMissing: false,
-        profileMissing: false,
-        profilesLoading: false,
-        modeNeedsUpgrade: true,
-      }),
-    ).toBe("mode-needs-upgrade");
     expect(
       resolveStartBlock({
         hasStartHandler: true,

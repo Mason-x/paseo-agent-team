@@ -35,6 +35,8 @@ import {
   countBindingReport,
   resolveEmptyCatalogMode,
 } from "../catalog/preset-state";
+import { shouldRetire } from "../catalog/retirement";
+import { useRetirementProbe } from "../catalog/use-retirement";
 import { DesignJobsPanel } from "../designer/DesignJobsPanel";
 import {
   applyGapRetry,
@@ -42,7 +44,6 @@ import {
   designerPrefillFromEvent,
   designPrefillForHost,
   designPrefillSlot,
-  economyFocusForConfigure,
   planSettledForHost,
   roleEditorTargetForGap,
   teamPlanActive,
@@ -55,14 +56,13 @@ import { useHostProfiles } from "../paseo/profiles";
 import { RoleEditor } from "../roles/RoleEditor";
 import { RoleList } from "../roles/RoleList";
 import { RunsTab } from "../runs/RunsTab";
-import { type EconomyEditorFocus, EconomyPoolEditor } from "../settings/EconomyPoolEditor";
+import { MaxMembersEditor } from "../settings/MaxMembersEditor";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
 import { ImeTextInput } from "../shared/ImeTextInput";
 import { TeamEditor } from "../teams/TeamEditor";
 import { TeamsTab } from "../teams/TeamsTab";
-import { familyHintsFromEconomy } from "../teams/team-plan-state";
 import { useTeamPlans } from "../teams/use-team-plans";
 import { VersionEntry } from "../version/VersionEntry";
 import { AGENT_TEAM_TABS, type AgentTeamTab, parseTab, resolveInitialTab } from "./tabs";
@@ -120,6 +120,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const roles = useSettings(rolesSettings);
   const teams = useSettings(teamsSettings);
   const preferences = useSettings(preferencesSettings);
+  const retirementProbe = useRetirementProbe();
   const hostProfiles = useHostProfiles(adapter);
   const profileList = hostProfiles.status === "ready" ? hostProfiles.profiles : [];
   const ready =
@@ -131,8 +132,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
   const [presetNotice, setPresetNotice] = useState<PresetNotice | null>(null);
   const [presetForceOpen, setPresetForceOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [economyOpen, setEconomyOpen] = useState(false);
-  const [economyFocus, setEconomyFocus] = useState<EconomyEditorFocus | null>(null);
+  const [maxMembersOpen, setMaxMembersOpen] = useState(false);
   const [roleEditor, setRoleEditor] = useState<{
     mode: "create" | "edit";
     role: Role | null;
@@ -155,11 +155,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     }),
     [planningRolesKey, planningTeamsKey, planningPrefsKey],
   );
-  const preferenceValues = preferences.status === "ready" ? preferences.values : null;
-  const familyHints = useMemo(
-    () => (preferenceValues ? familyHintsFromEconomy(preferenceValues.economy, profileList) : []),
-    [preferenceValues, profileList],
-  );
   const settingsReady =
     roles.status === "ready" && teams.status === "ready" && preferences.status === "ready";
   const plans = useTeamPlans({
@@ -173,11 +168,9 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       settingsReady,
       profilesLoading: hostProfiles.status === "loading",
     }),
-    familyHints,
   });
-  // Success and failure both settle the probe; before that neither design polling nor a launch
-  // preview may go out with a guessed contract (W-I2-1). The host identity makes the settled
-  // flag fail closed for the first render after switching hosts.
+  // Design RPCs need the host's contract to preserve existingRolesOnly compatibility. The host
+  // identity makes the settled flag fail closed for the first render after switching hosts.
   const plansSettled = planSettledForHost(plans, host.id);
   const designJobs = useDesignJobs({
     hostId: host.id,
@@ -228,11 +221,12 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     return unsubscribe;
   }, [designJobs.scopeId, host.id, params.designToken, toast]);
 
-  const economyHostRef = useRef(host.id);
+  const preferencesHostRef = useRef(host.id);
   useEffect(() => {
-    if (economyHostRef.current === host.id) return;
-    economyHostRef.current = host.id;
-    setEconomyOpen(false);
+    if (preferencesHostRef.current === host.id) return;
+    preferencesHostRef.current = host.id;
+    setMaxMembersOpen(false);
+    setSyncOpen(false);
   }, [host.id]);
 
   const presetGateway = useMemo(
@@ -368,6 +362,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       allowUnbound: false,
       onlyWhenUnimported: true,
       now: new Date().toISOString(),
+      probe: retirementProbe,
     })
       .then((result) => {
         if (generation !== autoGeneration.current) return;
@@ -385,6 +380,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
     teamRevision,
     preferencesRevision,
     presetGateway,
+    retirementProbe,
     applyPresetResult,
   ]);
 
@@ -603,11 +599,13 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       return;
     }
     const now = new Date().toISOString();
+    const retireLegacyFields = await shouldRetire(retirementProbe, "role", source);
     const copy = copyRoleRecord(
       source,
       uniqueCopyId(source.id, new Set(fresh.rows.map((entry) => entry.id))),
       `${source.name} ${zh.copySuffix}`.slice(0, 40),
       now,
+      { retireLegacyFields },
     );
     await saveRawRoles(appendDocumentRow(fresh.raw, "roles", copy), fresh.revision);
   }
@@ -631,11 +629,13 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       return;
     }
     const now = new Date().toISOString();
+    const retireLegacyFields = await shouldRetire(retirementProbe, "team", source);
     const copy = copyTeamRecord(
       source,
       uniqueCopyId(source.id, new Set(fresh.rows.map((entry) => entry.id))),
       `${source.name} ${zh.copySuffix}`.slice(0, 40),
       now,
+      { retireLegacyFields },
     );
     await saveRawTeams(appendDocumentRow(fresh.raw, "teams", copy), fresh.revision);
   }
@@ -657,6 +657,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         allowUnbound,
         onlyWhenUnimported: false,
         now: new Date().toISOString(),
+        probe: retirementProbe,
       });
       applyPresetResult(result, true);
     } catch {
@@ -679,6 +680,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
       presetNotice.preview,
       presetNotice.roles,
       new Date().toISOString(),
+      retirementProbe,
     );
     if (result !== "saved") {
       toast.error(
@@ -816,8 +818,8 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         <View style={styles.headerActions}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={zh.economyPool}
-            onPress={() => setEconomyOpen(true)}
+            accessibilityLabel={zh.maxMembers}
+            onPress={() => setMaxMembersOpen(true)}
             style={({ pressed }) => [
               styles.newButton,
               layout.compact && styles.newButtonIcon,
@@ -825,7 +827,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             ]}
           >
             <Icon name="Boxes" size={14} color={theme.colors.foregroundMuted} />
-            {layout.compact ? null : <Text style={styles.action}>{zh.economyPool}</Text>}
+            {layout.compact ? null : <Text style={styles.action}>{zh.maxMembers}</Text>}
           </Pressable>
           <VersionEntry key={host.id} theme={theme} layout={layout} hostId={host.id} />
           <Pressable
@@ -983,12 +985,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                         focusProfileId: resolved.focusProfileId,
                       });
                     }}
-                    onConfigureEconomy={(target) => {
-                      const focus = economyFocusForConfigure(target);
-                      if (!focus) return;
-                      setEconomyFocus(focus);
-                      setEconomyOpen(true);
-                    }}
                     onCreateRole={() =>
                       setRoleEditor({ mode: "create", role: null, focusProfileId: undefined })
                     }
@@ -1013,12 +1009,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
                   error: plans.error,
                   onRetry: plans.retry,
                   onRefreshTeams: () => void teams.reload(),
-                }}
-                onConfigureEconomy={(target) => {
-                  const focus = economyFocusForConfigure(target);
-                  if (!focus) return;
-                  setEconomyFocus(focus);
-                  setEconomyOpen(true);
                 }}
               />
             </View>
@@ -1045,29 +1035,19 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           </ScrollView>
         </>
       ) : null}
-      <EconomyPoolEditor
+      <MaxMembersEditor
         key={host.id}
         theme={theme}
-        layout={layout}
-        open={economyOpen}
-        hostId={host.id}
-        adapter={adapter}
-        profiles={profileList}
-        profilesLoading={hostProfiles.status === "loading"}
-        profilesError={hostProfiles.status === "error" ? hostProfiles.error : undefined}
-        focus={economyFocus ?? undefined}
+        open={maxMembersOpen}
         onSaved={() => {
           plans.invalidate();
           void preferences.reload();
-          toast.show(zh.economyPoolSaved, { variant: "success" });
+          toast.show(zh.maxMembersSaved, { variant: "success" });
         }}
-        onClose={() => {
-          plans.invalidate();
-          setEconomyFocus(null);
-          setEconomyOpen(false);
-        }}
+        onClose={() => setMaxMembersOpen(false)}
       />
       <PresetSyncDialog
+        key={host.id}
         theme={theme}
         layout={layout}
         open={syncOpen}
@@ -1133,12 +1113,6 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             focusProfileId: resolved.focusProfileId,
           });
         }}
-        onConfigureEconomy={(target) => {
-          const focus = economyFocusForConfigure(target);
-          if (!focus) return;
-          setEconomyFocus(focus);
-          setEconomyOpen(true);
-        }}
       />
       {ready && launch ? (
         <LaunchDialog
@@ -1154,14 +1128,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
           lockTeam={launch.lockTeam ?? launch.teamId !== undefined}
           initialTask={launch.initialTask}
           initialWorkspaceId={launch.initialWorkspaceId}
-          modeContract={plans.modeContract}
-          probeSettled={plansSettled}
           onClose={() => setLaunch(null)}
-          onEditTeam={(team) => {
-            setLaunch(null);
-            setTab("teams");
-            setTeamEditor({ mode: "edit", team });
-          }}
           onLaunched={() => {
             setLaunch(null);
             setTab("runs");

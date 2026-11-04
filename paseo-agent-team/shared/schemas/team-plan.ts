@@ -30,10 +30,11 @@ export const TeamPlanDraftMemberSchema = z.strictObject({
 
 export const TeamPlanDraftSchema = z
   .strictObject({
+    // Retired inputs: a page that was not refreshed still sends them, and this schema is strict.
+    // They are accepted and ignored; planning never reads a draft's mode or collaboration.
     mode: z.string().optional(),
     coordinatorRoleId: z.string().optional(),
     memberCreation: z.string().optional(),
-    // Stored shape: passthrough preserves newer collaboration fields for planning diagnostics.
     collaboration: StoredCollaborationSchema.optional(),
     members: z.array(TeamPlanDraftMemberSchema).max(TEAM_PLAN_MAX_DRAFT_ROWS),
   })
@@ -81,9 +82,16 @@ export const TeamPlanCapabilitiesSchema = z.strictObject({
   modeContract: z.number().int().nonnegative(),
   /** Designer policy version; 1 means the existing-Roles-only switch is available. */
   designRolePolicy: z.number().int().nonnegative(),
-  /** Every mode this daemon recognizes, as strings so future values do not break the DTO. */
+  /** Every mode this daemon plans, as strings so future values do not break the DTO. */
   supportedModes: z.array(z.string().min(1)),
   runtimeCapabilities: TeamPlanRuntimeCapabilitiesSchema,
+  /**
+   * True when this daemon ignores the retired settings keys (a Team's mode and collaboration, a
+   * Role's executionPolicy, the preferences' economy block). A client deletes those keys on save
+   * only against a host that reports it; absent means an earlier daemon that still reads them.
+   * Additive and optional, so older pages ignore it.
+   */
+  retiresLegacyFields: z.boolean().optional(),
 });
 
 export const TeamPlanContextSchema = z.strictObject({

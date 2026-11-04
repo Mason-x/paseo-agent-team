@@ -5,17 +5,14 @@ import {
   checkDesignRequest,
   DESIGN_REQUEST_MAX_CODE_POINTS,
 } from "../../shared/domain/design-request";
-import { LAUNCH_RUNTIME_CAPABILITIES } from "../../shared/domain/launch-runtime";
 import type { PaseoAdapter, PaseoProfile } from "../../shared/paseo/adapter";
 import type { DesignJob, DesignStartInput, DesignStartOutput } from "../../shared/schemas/design";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { zh } from "../../shared/zh";
 import { designZh } from "../../shared/zh/design";
 import { designGapZh } from "../../shared/zh/design-gap";
 import { CompactPicker } from "../shared/CompactPicker";
 import { Field, inputStyle } from "../shared/Field";
 import { ImeTextInput } from "../shared/ImeTextInput";
-import { TeamModePicker } from "../shared/TeamModePicker";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import {
   type FoldChoice,
@@ -26,7 +23,7 @@ import {
   resolveStartBlock,
   type StartBlock,
 } from "./card-state";
-import { type DesignModeContract, designModeNeedsV2 } from "./design-gateway";
+import type { DesignModeContract } from "./design-gateway";
 import {
   type DesignerPrefill,
   designStartFailureMessage,
@@ -58,20 +55,13 @@ export type TeamDesignerCardProps = {
   onRefreshProfiles?: () => void;
   /** Preselected until the user picks; ignored while the host no longer lists it. */
   defaultProfileId?: string;
-  /** Initial Team mode; the designer keeps the user's later choice. */
-  mode?: TeamMode;
-  /** Notifies the screen when the user changes the design mode. */
-  onModeChange?: (mode: TeamMode) => void;
   /** Seeds the request box, and re-seeds it whenever the value changes. */
   initialRequest?: string;
   /** Seeds the target workspace, and re-seeds it whenever the value changes. */
   initialWorkspaceId?: string;
   /** One-shot `/team-design` prefill; consumed by nonce, never by re-render. */
   prefill?: DesignerPrefill;
-  /**
-   * The host's mode contract from the `team.plan` probe. Until it is a confirmed "v2" the switch
-   * is shown locked (the old rule applies) and economy-all cannot be started.
-   */
+  /** Until the host confirms contract v2, the existing-Roles-only switch stays locked. */
   modeContract?: DesignModeContract;
   /** A hard reason the designer cannot start right now; disables the button and is shown beside it. */
   disabledReason?: string;
@@ -104,8 +94,6 @@ export function TeamDesignerCard({
   profilesError,
   onRefreshProfiles,
   defaultProfileId,
-  mode,
-  onModeChange,
   initialRequest,
   initialWorkspaceId,
   prefill,
@@ -133,7 +121,6 @@ export function TeamDesignerCard({
       start: startCall,
       initialDraft: {
         request: initialRequest ?? "",
-        mode: mode ?? "sota",
         workspaceId: initialWorkspaceId ?? "",
         profileChoice: null,
       },
@@ -170,7 +157,6 @@ export function TeamDesignerCard({
       controller.prefill({
         request: next.text,
         workspaceId: next.workspaceId ?? "",
-        mode: next.mode ?? current.mode,
         profileChoice:
           next.profileChoice === undefined ? current.profileChoice : next.profileChoice,
         // Only the Role-gap retry sets the rule (false); any other prefill is a new draft: on.
@@ -216,7 +202,6 @@ export function TeamDesignerCard({
     controller.prefill({
       request: nextRequest ?? current.request,
       workspaceId: nextWorkspace ?? current.workspaceId,
-      mode: current.mode,
       profileChoice: current.profileChoice,
       existingRolesOnly: current.existingRolesOnly,
     });
@@ -246,20 +231,14 @@ export function TeamDesignerCard({
     profiles,
     profilesLoading,
   );
-  const modeNeedsUpgrade = designModeNeedsV2(draft.mode, modeContract);
-  const effectiveDisabledReason =
-    draft.mode === "collaborative" && !LAUNCH_RUNTIME_CAPABILITIES.collaboration
-      ? designZh.modeUnavailable
-      : disabledReason;
   const block = resolveStartBlock({
     hasStartHandler: onStart !== undefined,
-    disabledReason: effectiveDisabledReason,
+    disabledReason,
     submitting,
     request: check,
     workspaceMissing: workspace.missing,
     profileMissing: profile.missing,
     profilesLoading,
-    modeNeedsUpgrade,
   });
 
   const workspaceItems = useMemo<PickerItem[]>(
@@ -380,7 +359,7 @@ export function TeamDesignerCard({
       case "unavailable":
         return zh.designerUnavailable;
       case "disabled":
-        return effectiveDisabledReason ?? null;
+        return disabledReason ?? null;
       case "request-empty":
         return zh.designerRequestEmpty;
       case "request-too-long":
@@ -395,10 +374,6 @@ export function TeamDesignerCard({
         return zh.loadingProfiles;
       case "submitting":
         return zh.designerStarting;
-      case "mode-needs-upgrade":
-        return modeContract === "unknown"
-          ? designGapZh.modeProbePending
-          : designGapZh.modeNeedsUpgrade;
     }
   }
 
@@ -440,10 +415,7 @@ export function TeamDesignerCard({
         : null;
   // Field-level reasons already sit under their own control; the button note carries the rest.
   const note =
-    block === "unavailable" ||
-    block === "disabled" ||
-    block === "profiles-loading" ||
-    block === "mode-needs-upgrade"
+    block === "unavailable" || block === "disabled" || block === "profiles-loading"
       ? blockText(block)
       : null;
   const summaryStyle = [
@@ -564,17 +536,6 @@ export function TeamDesignerCard({
             ) : null}
           </View>
         </View>
-        <TeamModePicker
-          theme={theme}
-          layout={layout}
-          value={draft.mode}
-          label={zh.teamMode}
-          disabled={submitting}
-          onChange={(next) => {
-            editDraft({ mode: next });
-            onModeChange?.(next);
-          }}
-        />
         <View style={styles.ruleRow}>
           <View style={styles.ruleText}>
             <Text style={styles.ruleLabel}>{designGapZh.switchLabel}</Text>

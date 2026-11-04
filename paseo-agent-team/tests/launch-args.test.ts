@@ -1,13 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
-  launchModeDisplay,
   launchPreviewRequest,
   launchStartRequest,
   launchStatusRequest,
   resolveLaunchPrefill,
 } from "../client/launch/launch-args";
-import { zh } from "../shared/zh";
-import { modesZh } from "../shared/zh/modes";
 import { codingTeam } from "./fixtures";
 
 const teams = [codingTeam, { ...codingTeam, id: "research-team", name: "Research Team" }];
@@ -64,40 +61,6 @@ describe("resolveLaunchPrefill", () => {
   });
 });
 
-describe("launchModeDisplay", () => {
-  test("no selected Team shows no mode row", () => {
-    expect(launchModeDisplay(undefined)).toEqual({ kind: "none" });
-  });
-
-  test("known modes use the existing mode copy", () => {
-    expect(launchModeDisplay({ ...codingTeam, mode: "economy" })).toEqual({
-      kind: "known",
-      mode: "economy",
-      label: modesZh.modeLabels.standard,
-    });
-    expect(launchModeDisplay({ ...codingTeam, mode: "collaborative" })).toEqual({
-      kind: "known",
-      mode: "collaborative",
-      label: zh.teamModeCollaborative,
-    });
-  });
-
-  test("a Team without a saved mode falls back to the planner default, SOTA", () => {
-    expect(launchModeDisplay(codingTeam)).toEqual({
-      kind: "known",
-      mode: "sota",
-      label: zh.teamModeSota,
-    });
-  });
-
-  test("an unknown stored value stays unknown and keeps the original text", () => {
-    expect(launchModeDisplay({ ...codingTeam, mode: "turbo" })).toEqual({
-      kind: "unknown",
-      value: "turbo",
-    });
-  });
-});
-
 describe("launch requests", () => {
   const target = { kind: "workspace" as const, workspaceId: "ws-1" };
   const input = {
@@ -107,42 +70,15 @@ describe("launch requests", () => {
     expectedPlanHash: "hash-1",
   };
 
-  test("legacy and unknown callers keep the baseline shape and never send a mode", () => {
-    for (const modeContract of ["legacy", "unknown"] as const) {
-      const preview = launchPreviewRequest(input, modeContract);
-      expect(preview).toEqual({ teamId: "coding-team", task: "Ship it", target });
-      expect(preview).not.toHaveProperty("mode");
-      expect(preview).not.toHaveProperty("contractVersion");
-
-      const start = launchStartRequest(input, modeContract);
-      expect(start).toEqual({
-        teamId: "coding-team",
-        task: "Ship it",
-        target,
-        expectedPlanHash: "hash-1",
-      });
-      expect(start).not.toHaveProperty("mode");
-      expect(start).not.toHaveProperty("contractVersion");
-
-      expect(launchStatusRequest("run-1", modeContract)).toEqual({ runId: "run-1" });
-    }
-  });
-
-  test("a confirmed v2 caller declares contractVersion 2 on every request", () => {
-    const preview = launchPreviewRequest(input, "v2");
-    expect(preview).toEqual({
-      teamId: "coding-team",
-      task: "Ship it",
-      target,
-      contractVersion: 2,
-    });
+  test("preview, start and status use the single-path request shape", () => {
+    const preview = launchPreviewRequest(input);
+    expect(preview).toEqual({ teamId: "coding-team", task: "Ship it", target });
     expect(preview).not.toHaveProperty("mode");
-
-    const start = launchStartRequest(input, "v2");
-    expect(start).toMatchObject({ expectedPlanHash: "hash-1", contractVersion: 2 });
+    expect(preview).not.toHaveProperty("contractVersion");
+    const start = launchStartRequest(input);
+    expect(start).toEqual({ ...preview, expectedPlanHash: "hash-1" });
     expect(start).not.toHaveProperty("mode");
-    expect(Object.keys(start).filter((key) => key === "contractVersion")).toHaveLength(1);
-
-    expect(launchStatusRequest("run-1", "v2")).toEqual({ runId: "run-1", contractVersion: 2 });
+    expect(start).not.toHaveProperty("contractVersion");
+    expect(launchStatusRequest("run-1")).toEqual({ runId: "run-1" });
   });
 });

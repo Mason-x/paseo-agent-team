@@ -4,7 +4,12 @@ import { DescriptionSchema, ShortTextSchema, SlugSchema, StringListSchema } from
 import { type ModeLaunchPreview, ModeLaunchPreviewSchema } from "./launch-preview";
 import { RoleSchema } from "./role";
 import { TeamSchema } from "./team";
-import { RoleTierSchema, TaskKindSchema, TeamModeSchema } from "./team-mode";
+import {
+  RoleTierSchema,
+  StoredCollaborationSchema,
+  TaskKindSchema,
+  TeamModeSchema,
+} from "./team-mode";
 
 /** Shared primitives. Model output and RPC input stay strict; DTOs use tolerant objects. */
 export const DesignUuidSchema = z.string().uuid();
@@ -47,10 +52,14 @@ export const NewDesignRoleSchema = z.strictObject({
   outputContract: StringListSchema,
   preferredProfiles: z.array(ProposalProfileRefSchema).min(1).max(5),
   fallbackProfiles: z.array(ProposalProfileRefSchema).max(5),
-  executionPolicy: z.strictObject({
-    tier: RoleTierSchema,
-    taskKind: TaskKindSchema,
-  }),
+  // Retired: new prompts neither ask for nor read it, and the strict shape still has to decode
+  // the model output and ledger records of jobs started before the upgrade.
+  executionPolicy: z
+    .strictObject({
+      tier: RoleTierSchema,
+      taskKind: TaskKindSchema,
+    })
+    .optional(),
   color: z.string().max(32).optional(),
   icon: z.string().max(64).optional(),
   noveltyReason: DesignReasonSchema,
@@ -62,7 +71,8 @@ export const DesignTeamDraftSchema = z.strictObject({
   id: SlugSchema,
   name: ShortTextSchema,
   description: DescriptionSchema.optional(),
-  mode: TeamModeSchema,
+  // Retired: optional and ignored (see executionPolicy above).
+  mode: TeamModeSchema.optional(),
   coordinatorRoleId: SlugSchema,
   members: z
     .array(
@@ -74,13 +84,8 @@ export const DesignTeamDraftSchema = z.strictObject({
     )
     .min(1)
     .max(64),
-  collaboration: z
-    .strictObject({
-      replicas: z.union([z.literal(2), z.literal(3)]),
-      judgeRoleId: SlugSchema.optional(),
-      escalationRoleId: SlugSchema.optional(),
-    })
-    .optional(),
+  // Retired: optional and ignored, decoded as stored (see executionPolicy above).
+  collaboration: StoredCollaborationSchema.optional(),
   operatingRules: z.string().trim().max(4000).optional(),
 });
 
@@ -88,7 +93,7 @@ export type DesignTeamDraft = z.infer<typeof DesignTeamDraftSchema>;
 
 export const DesignProfileChoiceSchema = z.strictObject({
   target: DesignChoiceTargetSchema,
-  // Empty only for a standby escalation seat the planner reports as unavailable.
+  // At most one id per seat today; the bound is wider so older records still decode.
   profileIds: z.array(DesignIdSchema).max(3),
   reason: DesignReasonSchema,
 });
@@ -180,10 +185,13 @@ export const DesignRoleGapSchema = z.discriminatedUnion("kind", [
       id: SlugSchema,
       name: ShortTextSchema,
       responsibilities: StringListSchema.min(1).max(8),
-      executionPolicy: z.strictObject({
-        tier: RoleTierSchema,
-        taskKind: TaskKindSchema,
-      }),
+      // Retired: optional and ignored (see NewDesignRoleSchema).
+      executionPolicy: z
+        .strictObject({
+          tier: RoleTierSchema,
+          taskKind: TaskKindSchema,
+        })
+        .optional(),
     }),
   }),
   z.strictObject({
@@ -333,8 +341,19 @@ export const RoleGapSuggestedRoleSchema = z.object({
   id: SlugSchema,
   name: ShortTextSchema,
   responsibilities: StringListSchema,
+  // Retired but still required here: an older page parses this report strictly, so the server
+  // always sends RETIRED_GAP_EXECUTION_POLICY. No consumer reads it.
   executionPolicy: z.object({ tier: RoleTierSchema, taskKind: TaskKindSchema }),
 });
+
+/** The fixed value of the retired field above; never a stand-in for a user setting. */
+export const RETIRED_GAP_EXECUTION_POLICY = {
+  tier: "retain",
+  taskKind: "general",
+} as const satisfies {
+  tier: z.infer<typeof RoleTierSchema>;
+  taskKind: z.infer<typeof TaskKindSchema>;
+};
 
 export const RoleGapUnlaunchableRoleSchema = z.object({
   roleId: SlugSchema,

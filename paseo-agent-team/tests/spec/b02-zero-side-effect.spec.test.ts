@@ -180,7 +180,7 @@ describe("team.plan is read-only", () => {
 });
 
 describe("launch access gate is read-only", () => {
-  test("a stale preview and start are refused before host/target reads and writes", async () => {
+  test("retired-mode preview and start are refused before host/target reads and writes", async () => {
     const settings = store();
     const counts = zeroCounts();
     const reads = zeroReads();
@@ -192,18 +192,24 @@ describe("launch access gate is read-only", () => {
       {
         teamId: economyTeam.id,
         task: "Add Stripe",
-        mode: "sota",
+        mode: "economy-all",
         target: { kind: "workspace", workspaceId: "ws-1" },
       },
       fake.port,
     );
     expect(preview.ok).toBe(false);
+    if (!preview.ok) {
+      expect(preview.issues[0]).toMatchObject({
+        code: "MODE_UNKNOWN",
+        params: { reason: "retired" },
+      });
+    }
 
     const started = await service.start(
       {
         teamId: economyTeam.id,
         task: "Add Stripe",
-        mode: "sota",
+        mode: "economy-all",
         expectedPlanHash: "stale",
         target: { kind: "workspace", workspaceId: "ws-1" },
       },

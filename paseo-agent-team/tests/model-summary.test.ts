@@ -1,9 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  type ModelFamilyHint,
-  summarizeModelRows,
-  unresolvedReasonOf,
-} from "../shared/domain/model-summary";
+import { summarizeModelRows, unresolvedReasonOf } from "../shared/domain/model-summary";
 import type { TeamPlanRow } from "../shared/schemas/team-plan";
 
 type RowOverrides = Partial<Omit<TeamPlanRow, "profile">> & {
@@ -43,7 +39,7 @@ function input(
 ) {
   return summarizeModelRows({
     status: "ready",
-    effectiveMode: "economy",
+    effectiveMode: "sota",
     rows,
     ...overrides,
   });
@@ -68,13 +64,13 @@ describe("model summary grouping", () => {
     expect(result.status).toBe("summary");
     if (result.status !== "summary") return;
     expect(result.groups).toEqual([
-      { key: "family:opus", label: "Opus", count: 2, standby: 0 },
-      { key: "family:deepseek", label: "DeepSeek", count: 1, standby: 0 },
+      { key: "family:opus", label: "Opus", count: 2 },
+      { key: "family:deepseek", label: "DeepSeek", count: 1 },
     ]);
     expect(result.total).toBe(3);
   });
 
-  test("includes the coordinator and counts standby seats in both count and standby", () => {
+  test("includes the coordinator and a historical escalation row in counts", () => {
     const result = input([
       row({ rowKey: "coordinator", kind: "coordinator", roleId: "lead", activation: "eager" }),
       row({
@@ -89,8 +85,8 @@ describe("model summary grouping", () => {
     expect(result.total).toBe(2);
     expect(result.groups).toEqual(
       expect.arrayContaining([
-        { key: "family:sonnet", label: "Sonnet", count: 1, standby: 1 },
-        { key: "family:opus", label: "Opus", count: 1, standby: 0 },
+        { key: "family:sonnet", label: "Sonnet", count: 1 },
+        { key: "family:opus", label: "Opus", count: 1 },
       ]),
     );
   });
@@ -121,8 +117,8 @@ describe("model summary grouping", () => {
     expect(result.status).toBe("summary");
     if (result.status !== "summary") return;
     expect(result.groups).toEqual([
-      { key: "profile:p-1", label: "Mystery One", count: 1, standby: 0 },
-      { key: "profile:p-2", label: "Mystery Two", count: 1, standby: 0 },
+      { key: "profile:p-1", label: "Mystery One", count: 1 },
+      { key: "profile:p-2", label: "Mystery Two", count: 1 },
     ]);
   });
 
@@ -136,40 +132,18 @@ describe("model summary grouping", () => {
       key: "profile:p-lite",
       label: "Opus-Lite",
       count: 1,
-      standby: 0,
     });
   });
 
-  test("uses an explicit family hint only when the provider/model tuple still matches", () => {
-    const hints: ModelFamilyHint[] = [
-      { profileId: "p-hint", provider: "claude", model: "mystery", family: "sonnet" },
-      { profileId: "p-moved", provider: "claude", model: "old-model", family: "sonnet" },
-      { profileId: "p-bad-family", provider: "claude", model: "mystery", family: "not-a-family" },
-    ];
-    const result = input(
-      [
-        row({
-          rowKey: "hint",
-          profile: { id: "p-hint", name: "Hinted", provider: "claude", model: "mystery" },
-        }),
-        row({
-          rowKey: "moved",
-          profile: { id: "p-moved", name: "Moved", provider: "claude", model: "mystery" },
-        }),
-        row({
-          rowKey: "bad",
-          profile: { id: "p-bad-family", name: "Bad", provider: "claude", model: "mystery" },
-        }),
-      ],
-      { familyHints: hints },
-    );
+  test("does not infer a family from a Profile name when the model is ambiguous", () => {
+    const result = input([
+      row({
+        profile: { id: "p-ambiguous", name: "Sonnet", provider: "claude", model: "opus-sonnet" },
+      }),
+    ]);
     expect(result.status).toBe("summary");
     if (result.status !== "summary") return;
-    expect(result.groups).toEqual([
-      { key: "profile:p-bad-family", label: "Bad", count: 1, standby: 0 },
-      { key: "profile:p-moved", label: "Moved", count: 1, standby: 0 },
-      { key: "family:sonnet", label: "Sonnet", count: 1, standby: 0 },
-    ]);
+    expect(result.groups).toEqual([{ key: "profile:p-ambiguous", label: "Sonnet", count: 1 }]);
   });
 });
 
@@ -209,38 +183,22 @@ describe("unresolved rows", () => {
     ).toBe("policy");
   });
 
-  test("P1-FIX1 item 3: economy-all route failures keep their own reasons", () => {
-    const cheap = (code: string, params: Record<string, string>) =>
-      unresolvedReasonOf(
-        row({
-          profile: null,
-          // The provider snapshot must not outrank the route-level cause.
-          availability: "unverified",
-          issues: [issue(code, params)],
-        }),
-      );
-    for (const reason of ["list-empty", "route-empty"]) {
-      expect(cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason })).toBe(
-        "route-unavailable",
-      );
+  test("a binding failure takes precedence over unverified availability", () => {
+    for (const [reason, expected] of [
+      ["all-missing", "profile-missing"],
+      ["provider-unavailable", "provider-unavailable"],
+      ["all-excluded", "policy"],
+    ] as const) {
+      expect(
+        unresolvedReasonOf(
+          row({
+            profile: null,
+            availability: "unverified",
+            issues: [issue("MODE_PROFILE_UNRESOLVED", { reason })],
+          }),
+        ),
+      ).toBe(expected);
     }
-    for (const reason of ["all-disabled", "model-unverified", "no-eligible"]) {
-      expect(cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason })).toBe(
-        "no-cheap-profile",
-      );
-    }
-    expect(
-      cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason: "profile-missing" }),
-    ).toBe("profile-missing");
-    expect(
-      cheap("MODE_CHEAP_ROUTE_UNAVAILABLE", { route: "execution", reason: "provider-unavailable" }),
-    ).toBe("provider-unavailable");
-    expect(cheap("MODE_CHEAP_POLICY_REQUIRED", { route: "execution", reason: "absent" })).toBe(
-      "route-unavailable",
-    );
-    expect(
-      cheap("MODE_CHEAP_PROFILE_INVALID", { route: "execution", reason: "tuple-changed" }),
-    ).toBe("no-cheap-profile");
   });
 
   test("counts unresolved rows, groups reasons, and keeps total equal to enabled rows", () => {
@@ -291,7 +249,7 @@ describe("summary availability", () => {
     expect(
       summarizeModelRows({
         status: "unavailable",
-        effectiveMode: "economy",
+        effectiveMode: "sota",
         rows: [row()],
       }),
     ).toEqual({ status: "none", reason: "unavailable" });

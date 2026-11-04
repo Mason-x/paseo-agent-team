@@ -1,9 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { hashLaunchPlan } from "../server/launch-hash";
-import type { LaunchPlanHashInput } from "../shared/domain/launch-hash";
+import { LAUNCH_PLANNER_VERSION, type LaunchPlanHashInput } from "../shared/domain/launch-hash";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
-import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
-import type { PaseoProfile } from "../shared/paseo/adapter";
+import type { HostSnapshot } from "../shared/domain/mode-resolver";
 import {
   allAvailable,
   architect,
@@ -14,14 +13,13 @@ import {
   techLead,
 } from "./fixtures";
 
-const emptyEconomy: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 const host: HostSnapshot = {
   status: "ready",
   profiles: [claudeOpus, codexXhigh],
   availability: allAvailable,
 };
 const roles = [techLead, architect, developer];
-
+const runtimeCapabilities = { onDemand: false, expansion: false, collaboration: false };
 function input(overrides: Partial<LaunchPlanHashInput> = {}): LaunchPlanHashInput {
   const plan =
     overrides.plan ??
@@ -35,65 +33,56 @@ function input(overrides: Partial<LaunchPlanHashInput> = {}): LaunchPlanHashInpu
       runId: "preview",
       maxMembers: 24,
       host,
-      economy: emptyEconomy,
-      runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
+      runtimeCapabilities,
     });
   return {
     team: codingTeam,
     roles,
     plan,
     host,
-    economy: emptyEconomy,
     target: { kind: "workspace", workspaceId: "ws-1" },
     task: "Add Stripe",
     maxMembers: 24,
-    runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
+    runtimeCapabilities,
     ...overrides,
   };
 }
 
 describe("launch plan hash", () => {
-  test("is stable, and ignores Profile notes and unrelated Roles", () => {
+  test("is stable and ignores Profile notes, unrelated Roles, and task whitespace", () => {
     const base = input();
+    expect(LAUNCH_PLANNER_VERSION).toBe(3);
     expect(hashLaunchPlan(base)).toBe(hashLaunchPlan(input()));
-    const withNotes = {
+    const withNotes: HostSnapshot = {
       ...host,
-      profiles:
-        host.status === "ready"
-          ? host.profiles.map((profile) => ({ ...profile, notes: "host only" }))
-          : [],
+      profiles: host.profiles.map((profile) => ({ ...profile, notes: "host only" })),
     };
-    const unrelatedRole = { ...architect, id: "unrelated-role", name: "Unrelated" };
     expect(
       hashLaunchPlan({
         ...base,
         host: withNotes,
-        roles: [...roles, unrelatedRole],
+        roles: [...roles, { ...architect, id: "unrelated-role" }],
       }),
     ).toBe(hashLaunchPlan(base));
-    // The service trims the task; hash the same text so surrounding spaces do not invalidate.
     expect(hashLaunchPlan({ ...base, task: "  Add Stripe  " })).toBe(hashLaunchPlan(base));
   });
 
   test("changes when launch-relevant input changes", () => {
     const base = hashLaunchPlan(input());
-    const changedProfiles = {
+    const changedProfiles: HostSnapshot = {
       ...host,
-      profiles:
-        host.status === "ready"
-          ? host.profiles.map((profile) =>
-              profile.id === claudeOpus.id ? { ...profile, modeId: "manual" } : profile,
-            )
-          : [],
+      profiles: host.profiles.map((profile) =>
+        profile.id === claudeOpus.id ? { ...profile, modeId: "manual" } : profile,
+      ),
     };
-    const changedAvailability = {
+    const changedAvailability: HostSnapshot = {
       ...host,
       availability: allAvailable.map((entry) =>
         entry.provider === "codex" ? { ...entry, available: false } : entry,
       ),
     };
-    const changedRoles = roles.map((role) =>
-      role.id === "architect" ? { ...role, systemPrompt: "A different prompt" } : role,
+    const changedRoles = roles.map((entry) =>
+      entry.id === "architect" ? { ...entry, systemPrompt: "A different prompt" } : entry,
     );
     const cases = [
       input({ task: "Another task" }),
@@ -103,119 +92,23 @@ describe("launch plan hash", () => {
       input({ host: changedAvailability }),
       input({ roles: changedRoles }),
       input({ team: { ...codingTeam, name: "Renamed Team" } }),
-      input({ economy: { ...emptyEconomy, pool: [{ profileId: claudeOpus.id, enabled: true }] } }),
-      input({
-        runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
-      }),
+      input({ runtimeCapabilities: { ...runtimeCapabilities, onDemand: true } }),
     ];
     for (const candidate of cases) expect(hashLaunchPlan(candidate)).not.toBe(base);
   });
 
-  test("economy-all hashes only all-seats route Profiles, not the standard pool", () => {
-    const deepseek: PaseoProfile = {
-      id: "tail-deepseek",
-      name: "Tail DeepSeek",
-      provider: "omp",
-      model: "deepseek-v4.1",
-      modeId: "full",
-    };
-    const grok: PaseoProfile = {
-      id: "tail-grok",
-      name: "Tail Grok",
-      provider: "omp",
-      model: "grok-4.7",
-      modeId: "full",
-    };
-    const unrelated: PaseoProfile = {
-      id: "tail-unrelated",
-      name: "Unrelated standard pool",
-      provider: "omp",
-      model: "grok-4.6",
-      modeId: "full",
-    };
-    const tailHost: HostSnapshot = {
-      status: "ready",
-      profiles: [deepseek, grok, unrelated],
-      availability: [{ provider: "omp", available: true }],
-    };
-    const economy: EconomyPolicy = {
-      pool: [{ profileId: unrelated.id, family: "grok", enabled: true }],
-      taskOrder: {},
-      profileBudget: {},
-      allSeats: {
-        status: "ready",
-        version: 1,
-        profiles: [
-          {
-            profileId: deepseek.id,
-            enabled: true,
-            family: "deepseek",
-            boundModel: { provider: deepseek.provider, model: deepseek.model ?? "" },
-          },
-          {
-            profileId: grok.id,
-            enabled: true,
-            family: "grok",
-            boundModel: { provider: grok.provider, model: grok.model ?? "" },
-          },
-        ],
-        routes: {
-          coordinator: [deepseek.id],
-          decision: [deepseek.id],
-          execution: [deepseek.id],
-          escalation: [deepseek.id],
-          retain: [deepseek.id],
-        },
-        executionTaskOrder: {},
-        issues: [],
-      },
-    };
-    const economyAllTeam = { ...codingTeam, mode: "economy-all" as const };
-    const plan = buildLaunchPlan({
-      team: economyAllTeam,
-      roles,
-      profiles: tailHost.profiles,
-      availability: tailHost.availability,
-      workspaceId: "ws-1",
-      task: "Add Stripe",
-      runId: "preview",
-      maxMembers: 24,
-      host: tailHost,
-      economy,
-      runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
-    });
-    const base = input({ team: economyAllTeam, plan, host: tailHost, economy });
-    const changedUnrelated: HostSnapshot = {
-      ...tailHost,
-      profiles: tailHost.profiles.map((profile) =>
-        profile.id === unrelated.id ? { ...profile, modeId: "manual" } : profile,
-      ),
-    };
-    expect(hashLaunchPlan({ ...base, host: changedUnrelated })).toBe(hashLaunchPlan(base));
-    const changedRoute: HostSnapshot = {
-      ...tailHost,
-      profiles: tailHost.profiles.map((profile) =>
-        profile.id === deepseek.id ? { ...profile, modeId: "manual" } : profile,
-      ),
-    };
-    expect(hashLaunchPlan({ ...base, host: changedRoute })).not.toBe(hashLaunchPlan(base));
-  });
-
-  test("covers mode and member creation decisions", () => {
-    const sota = input();
-    const economyPlan = buildLaunchPlan({
-      team: { ...codingTeam, mode: "economy" },
-      roles,
-      profiles: [claudeOpus, codexXhigh],
-      availability: allAvailable,
-      workspaceId: "ws-1",
-      task: "Add Stripe",
-      runId: "preview",
-      maxMembers: 24,
-      host,
-      economy: emptyEconomy,
-      runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
-    });
-    expect(hashLaunchPlan({ ...sota, plan: economyPlan })).not.toBe(hashLaunchPlan(sota));
+  test("ignores retired Team and Role fields but includes member creation", () => {
+    const base = input();
+    const legacyTeam = { ...codingTeam, mode: "economy-all", collaboration: { replicas: 3 } };
+    const legacyRoles = roles.map((entry) => ({
+      ...entry,
+      executionPolicy: { tier: "execution", taskKind: "coding" },
+    }));
+    expect(hashLaunchPlan({ ...base, team: legacyTeam, roles: legacyRoles })).toBe(
+      hashLaunchPlan(base),
+    );
+    expect(
+      hashLaunchPlan({ ...base, team: { ...codingTeam, memberCreation: "on-demand" } }),
+    ).not.toBe(hashLaunchPlan(base));
   });
 });

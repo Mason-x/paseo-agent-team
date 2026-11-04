@@ -11,12 +11,10 @@ export function ModelRow({
   theme,
   view,
   onOpenRole,
-  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   view: TeamModelRowView;
   onOpenRole?: (roleId: string, profileId?: string) => void;
-  onConfigureEconomy?: (target: Extract<TeamBindingTarget, { kind: "economy" }>) => void;
 }) {
   const styles = {
     row: {
@@ -51,28 +49,15 @@ export function ModelRow({
   };
 
   function action(target: TeamBindingTarget) {
-    if (target.kind === "role") {
-      if (!onOpenRole) return null;
-      return (
-        <Pressable
-          key={`role:${target.roleId}`}
-          accessibilityRole="button"
-          accessibilityLabel={teamPlanZh.rebind}
-          onPress={() => onOpenRole(target.roleId, target.profileId)}
-        >
-          <Text style={styles.link}>{teamPlanZh.rebind}</Text>
-        </Pressable>
-      );
-    }
-    if (!onConfigureEconomy) return null;
+    if (!onOpenRole) return null;
     return (
       <Pressable
-        key={`economy:${target.layer}:${target.route ?? ""}`}
+        key={`role:${target.roleId}`}
         accessibilityRole="button"
-        accessibilityLabel={teamPlanZh.configureEconomy}
-        onPress={() => onConfigureEconomy(target)}
+        accessibilityLabel={teamPlanZh.rebind}
+        onPress={() => onOpenRole(target.roleId, target.profileId)}
       >
-        <Text style={styles.link}>{teamPlanZh.configureEconomy}</Text>
+        <Text style={styles.link}>{teamPlanZh.rebind}</Text>
       </Pressable>
     );
   }
@@ -84,7 +69,6 @@ export function ModelRow({
           {view.roleName}
           {view.instanceLabel ? ` · ${view.instanceLabel}` : ""}
         </Text>
-        {view.standby ? <Text style={styles.badge}>{teamPlanZh.standby}</Text> : null}
         {!view.enabled ? <Text style={styles.badge}>{teamPlanZh.disabled}</Text> : null}
         {view.purposeLabel ? <Text style={styles.meta}>{view.purposeLabel}</Text> : null}
         {view.activationLabel ? <Text style={styles.meta}>{view.activationLabel}</Text> : null}
