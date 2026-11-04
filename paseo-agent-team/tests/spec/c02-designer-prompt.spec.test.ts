@@ -1,9 +1,6 @@
 // C02 spec: the designer prompt must follow the record's output contract (v1 legacy vs v2 by
-// switch), stay inside the 30KiB input budget, carry per-use launch verdicts without inferring
-// one from the other, and gate economy-all gap suggestions through D02's route evidence.
+// switch), stay inside the 30KiB input budget, and carry independent per-use launch verdicts.
 import { describe, expect, test } from "vitest";
-import { type DesignModeRouting, describeModeRouting } from "../../server/designer/context";
-import { checkGapEconomyEligibility } from "../../server/designer/planning";
 import {
   buildDesignCorrection,
   buildDesignKickoff,
@@ -14,9 +11,6 @@ import {
   type DesignPromptRoleSummary,
 } from "../../server/designer/prompt";
 import { utf8ByteLength } from "../../shared/domain/design-output";
-import { normalizeEconomyPolicy } from "../../shared/domain/mode-resolver";
-import type { PaseoProfile } from "../../shared/paseo/adapter";
-import { DesignRoleGapSchema } from "../../shared/schemas/design";
 import { expectedRoleContent, sourceProfiles } from "../default-presets.fixtures";
 
 const JOB = "11111111-1111-4111-8111-111111111111";
@@ -36,8 +30,6 @@ function role(
     fallbackProfileIds: [],
     launchable: true,
     unavailableProfileIds: [],
-    tier: "execution",
-    taskKind: "coding",
     ...overrides,
   };
 }
@@ -45,7 +37,6 @@ function role(
 function context(overrides: Partial<DesignPromptContext> = {}): DesignPromptContext {
   return {
     request: "设计一个改版团队",
-    requestedMode: "economy",
     runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
     maxMembers: 8,
     target: null,
@@ -60,7 +51,6 @@ function context(overrides: Partial<DesignPromptContext> = {}): DesignPromptCont
         available: true,
       },
     ],
-    economy: { pool: [], taskOrder: {} },
     occupiedRoleIds: ["eng"],
     occupiedRoleNames: ["Role eng"],
     occupiedTeams: [],
@@ -169,18 +159,6 @@ describe("C02 designer prompt contract", () => {
         context: context({
           outputContractVersion: 1,
           existingRolesOnly: true,
-          modeRouting: {
-            status: "ready",
-            routes: [
-              {
-                route: "execution",
-                taskKind: "coding",
-                candidates: [
-                  { profileId: "profile-1", family: "haiku", eligible: true, reported: false },
-                ],
-              },
-            ],
-          },
           roles: [
             role("eng", {
               coordinatorLaunchable: false,
@@ -276,125 +254,17 @@ describe("C02 designer prompt contract", () => {
     }
   });
 
-  test("economy-all gap suggestions must be route candidates", () => {
-    const profiles: PaseoProfile[] = [
-      { id: "haiku", name: "Haiku", provider: "claude", model: "claude-haiku-4-5" },
-      {
-        id: "deepseek",
-        name: "DeepSeek",
-        provider: "omp",
-        model: "opencode-go/deepseek-v4.1-flash",
-      },
-    ];
-    const policy = normalizeEconomyPolicy(
-      {
-        pool: [],
-        taskOrder: {},
-        profileBudget: {},
-        allSeats: {
-          version: 1,
-          profiles: [
-            {
-              profileId: "haiku",
-              enabled: true,
-              costClass: "low",
-              family: "haiku",
-              boundModel: { provider: "claude", model: "claude-haiku-4-5" },
-            },
-            {
-              profileId: "deepseek",
-              enabled: true,
-              costClass: "low",
-              family: "deepseek",
-              boundModel: { provider: "omp", model: "opencode-go/deepseek-v4.1-flash" },
-            },
-          ],
-          routes: { coordinator: ["haiku"], execution: ["deepseek"] },
-        },
-      },
-      profiles,
+  test("gap prompts use real Profile availability without retired routing", () => {
+    const rendered = text(
+      buildDesignKickoff({
+        jobId: JOB,
+        attempt: 1,
+        nonce: NONCE,
+        context: context({ outputContractVersion: 2, existingRolesOnly: true }),
+      }),
     );
-    expect(policy.ok).toBe(true);
-    if (!policy.ok) return;
-    const routing: DesignModeRouting = describeModeRouting({
-      profiles,
-      availability: [
-        { provider: "claude", available: true },
-        { provider: "omp", available: true },
-      ],
-      economy: policy.value,
-    });
-    const gap = (profileIds: string[]) =>
-      DesignRoleGapSchema.parse({
-        kind: "missing-role",
-        responsibility: "负责数据库迁移",
-        reason: "目录没有承担迁移的 Role",
-        use: "member",
-        profiles: { kind: "existing", profileIds },
-        suggestedRole: {
-          id: "eng-data",
-          name: "【工程】数据迁移",
-          responsibilities: ["迁移"],
-          executionPolicy: { tier: "execution", taskKind: "coding" },
-        },
-      });
-    expect(
-      checkGapEconomyEligibility({ mode: "economy-all", gap: gap(["deepseek"]), routing }),
-    ).toEqual([]);
-    const rejected = checkGapEconomyEligibility({
-      mode: "economy-all",
-      gap: gap(["haiku"]),
-      routing,
-    });
-    expect(rejected[0]?.params).toMatchObject({
-      modeCode: "MODE_CHEAP_PROFILE_INVALID",
-      route: "execution",
-      profileId: "haiku",
-    });
-    expect(
-      checkGapEconomyEligibility({
-        mode: "economy-all",
-        gap: DesignRoleGapSchema.parse({
-          kind: "missing-role",
-          responsibility: "负责数据库迁移",
-          reason: "目录没有承担迁移的 Role",
-          use: "member",
-          profiles: { kind: "none", reason: "host 无合格 Profile" },
-          suggestedRole: {
-            id: "eng-data",
-            name: "【工程】数据迁移",
-            responsibilities: ["迁移"],
-            executionPolicy: { tier: "execution", taskKind: "coding" },
-          },
-        }),
-        routing,
-      }),
-    ).toEqual([]);
-    expect(
-      checkGapEconomyEligibility({
-        mode: "economy-all",
-        gap: DesignRoleGapSchema.parse({
-          kind: "missing-role",
-          responsibility: "负责数据库迁移",
-          reason: "目录没有承担迁移的 Role",
-          use: "member",
-          profiles: { kind: "none", reason: "host 无合格 Profile" },
-          suggestedRole: {
-            id: "eng-data",
-            name: "【工程】数据迁移",
-            responsibilities: ["迁移"],
-            executionPolicy: { tier: "execution", taskKind: "coding" },
-          },
-        }),
-        routing: { status: "absent" },
-      }),
-    ).toEqual([]);
-    expect(
-      checkGapEconomyEligibility({
-        mode: "economy-all",
-        gap: gap(["deepseek"]),
-        routing: { status: "absent" },
-      })[0]?.params,
-    ).toMatchObject({ modeCode: "MODE_CHEAP_POLICY_REQUIRED" });
+    expect(rendered).toContain("可用的 id");
+    expect(rendered).not.toContain("route 摘要");
+    expect(rendered).not.toContain("executionPolicy");
   });
 });
