@@ -38,7 +38,7 @@ describe("default catalog preview", () => {
       warnings: [],
     });
     if (!preview.ok) throw new Error("unexpected blocked preview");
-    expect(preview.roles).toHaveLength(14);
+    expect(preview.roles).toHaveLength(15);
     expect(
       preview.roles.every((row) => row.kind === "missing" && row.defaultAction === "add"),
     ).toBe(true);

@@ -13,14 +13,14 @@ import { NOW } from "./fixtures";
 describe("default Role templates", () => {
   const catalog = exampleCatalog(sourceProfiles, NOW);
 
-  test("ships exactly the 14 source Roles and no Teams; raw and materialized schemas pass", () => {
-    expect(sourceProfiles).toHaveLength(7);
-    expect(defaultCatalogRevision).toBe("defaults-2026-11-03.1");
-    expect(defaultRoleTemplates).toHaveLength(14);
+  test("ships exactly the 15 source Roles and no Teams; raw and materialized schemas pass", () => {
+    expect(sourceProfiles).toHaveLength(8);
+    expect(defaultCatalogRevision).toBe("defaults-2026-11-04.1");
+    expect(defaultRoleTemplates).toHaveLength(15);
     expect(catalog.roles.map((role) => role.id)).toEqual(
       expectedRoleContent.map((role) => role.id),
     );
-    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(14);
+    expect(new Set(catalog.roles.map((role) => role.id)).size).toBe(15);
     expect(catalog.teams).toEqual([]);
     for (const template of defaultRoleTemplates) {
       expect(DefaultRoleTemplateSchema.parse(template)).toEqual(template);

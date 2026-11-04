@@ -281,9 +281,9 @@ describe("v1 prompt golden snapshot", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.utf8Bytes).toBe(29095);
+    expect(result.utf8Bytes).toBe(29806);
     expect(goldenSha(result.text)).toBe(
-      "35bf77ae6ee49ec49fb2d8a76e6289b9882fcd9c90b095af5533cdfb01330a84",
+      "86d49215d996981d5503ea434f64a4307af025181249b8273889df2545707e82",
     );
   });
 
@@ -608,7 +608,7 @@ describe("design output contract", () => {
   }
 
   test("both switches stay within the 30KiB target, including the 22-Role stress", () => {
-    // The current 14-Role catalog plus eight custom Roles and long Profile notes.
+    // The current 15-Role catalog plus eight custom Roles and long Profile notes.
     const cases = [
       {},
       { roles: realScaleRoles(), profiles: [profile(1, "说明".repeat(3000))] },
@@ -663,7 +663,7 @@ describe("design output contract", () => {
   test("the 40-Role / 30-Team / 12-Profile stress fits both switches", () => {
     const roles = [
       ...realScaleRoles(),
-      ...Array.from({ length: 18 }, (_, index) =>
+      ...Array.from({ length: 17 }, (_, index) =>
         role(100 + index, {
           id: `stress-${index}`,
           name: `【质量】压测审查 ${index}`,
@@ -713,7 +713,7 @@ describe("design output contract", () => {
       expect(result.text).toContain("## 字段合同");
       if (!on) expect(result.text).toContain("noveltyReason 1–600");
       expect(result.text).toContain('"profileChoices"');
-      expect(result.text).toContain(`"id":"stress-17"`);
+      expect(result.text).toContain(`"id":"stress-16"`);
       const index = jsonBlockAt(result.text, "Role 索引") as unknown[];
       expect(index).toHaveLength(40);
       expect(result.text).not.toContain("## Role 摘要");

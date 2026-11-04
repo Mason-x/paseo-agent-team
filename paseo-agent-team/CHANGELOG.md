@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Features
+
+- New default Role 【工程】主力开发 bound to the `GPT-6.1 Terra Max` Profile (all-round feature work,
+  cross-file debugging, refactors and tests), with Claude-Sonnet 5.5 high as fallback. Default
+  catalog revision `defaults-2026-11-04.1`.
+
 ## [0.3.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.3.0) (2026-11-04)
 
 ### Changes

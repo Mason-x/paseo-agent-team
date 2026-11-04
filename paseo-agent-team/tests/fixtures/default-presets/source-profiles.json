@@ -61,5 +61,14 @@
     "modeId": "full",
     "thinkingOptionId": "high",
     "notes": "Chat / Vision：OCR、截图文字提取、图表与流程图解读；Chat / Text：多轮问答、摘要、翻译、脑暴与写作初稿。"
+  },
+  {
+    "id": "agent_profile_mw252pba_2u1yitpwg4o",
+    "name": "GPT-6.1 Terra Max",
+    "provider": "omp",
+    "model": "magpie/remote-magpie/auto/gpt-6.1-terra",
+    "modeId": "full",
+    "thinkingOptionId": "max",
+    "notes": "全能主力开发：功能实现、跨文件调试、重构与测试。"
   }
 ]

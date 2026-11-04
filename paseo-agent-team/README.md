@@ -49,7 +49,7 @@ and **Launch agent team** Command Center actions open the panel directly.
 
 1. Create at least one Paseo Agent Profile per provider you want on a team
    (**Settings → Agents / Profiles**). Roles store Profile ids and optional binding hints.
-2. Open **Agent Teams → Roles**. Create a Role or import the 14 default Role presets
+2. Open **Agent Teams → Roles**. Create a Role or import the 15 default Role presets
    when the catalog is empty. The presets do not include Teams.
 3. Bind each Role to a preferred Profile (and optional fallbacks). Missing
    Profiles are marked; they are never silently replaced.
@@ -68,6 +68,7 @@ The presets bind only to the host's current Profiles, one job per model:
 | Claude-Opus-5.5-Max | 【规划】架构师 (project planning and architecture; writes no code) |
 | Claude-Sonnet 5.5 high | 【统筹】主负责人, 【统筹】总协调, 【统筹】技术负责人 |
 | GPT-6.1-Sol Xhigh | 【工程】排障修复; fallback for 主负责人 |
+| GPT-6.1 Terra Max | 【工程】主力开发 (all-round main developer; fallback Claude-Sonnet 5.5 high) |
 | DeepSeek-V4.1-Flash-Max | 【工程】全栈开发, 【工程】前端开发, 【工程】批量开发, 【研究】代码库分析师, 【质量】测试与验收 |
 | Grok-4.6-Xhigh | 【质量】代码审查, 【研究】联网研究员 |
 | Gemini-3.8-flash-High | 【研究】资料与视觉解析, 【内容】写作与翻译 (OCR, charts, Q&A, summaries, translation, drafts) |

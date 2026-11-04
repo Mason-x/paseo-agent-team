@@ -454,9 +454,9 @@ describe("default preset sync", () => {
     ]);
 
     expect(results.map((result) => result.kind).sort()).toEqual(["already-present", "imported"]);
-    expect(roles).toHaveLength(14);
-    expect(new Set(roles.map((role) => role.id)).size).toBe(14);
+    expect(roles).toHaveLength(15);
+    expect(new Set(roles.map((role) => role.id)).size).toBe(15);
     expect(preferenceWrites).toBe(1);
-    expect(storedPreferences.defaultPresets?.seenRoleIds).toHaveLength(14);
+    expect(storedPreferences.defaultPresets?.seenRoleIds).toHaveLength(15);
   });
 });
