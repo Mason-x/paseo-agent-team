@@ -61,7 +61,25 @@ export type ProfileBinding = {
   /** Live name, then the saved snapshot, then the hint; null when no name is known. */
   label: string | null;
   missing: boolean;
+  /**
+   * Model and thinking level for display only. Live Profile first; an unbound reference falls
+   * back to the preset's saved hint. It never takes part in binding.
+   */
+  detail: string | null;
 };
+
+type RuntimeSummary = {
+  provider: string;
+  model?: string;
+  thinkingOptionId?: string;
+};
+
+/** "model · thinking", or just the provider when the Profile names no model. */
+export function runtimeDetail(source: RuntimeSummary | undefined): string | null {
+  if (!source) return null;
+  const parts = [source.model || source.provider, source.thinkingOptionId].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 export type RoleBindingLabels = {
   preferred: ProfileBinding[];
@@ -76,9 +94,16 @@ export function profileBindingLabels(
   const live = new Map(profiles.map((profile) => [profile.id, profile]));
   const binding = (ref: Role["preferredProfiles"][number]): ProfileBinding => {
     const profile = live.get(ref.profileId);
-    if (profile) return { profileId: ref.profileId, label: profile.name, missing: false };
+    if (profile) {
+      return {
+        profileId: ref.profileId,
+        label: profile.name,
+        missing: false,
+        detail: runtimeDetail(profile),
+      };
+    }
     const label = ref.nameSnapshot?.trim() || ref.hint?.name?.trim() || null;
-    return { profileId: ref.profileId, label, missing: true };
+    return { profileId: ref.profileId, label, missing: true, detail: runtimeDetail(ref.hint) };
   };
   return {
     preferred: role.preferredProfiles.map(binding),

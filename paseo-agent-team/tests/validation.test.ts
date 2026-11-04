@@ -59,6 +59,49 @@ describe("validation", () => {
     expect(missing.fallback).toEqual([]);
   });
 
+  test("binding detail shows the live model and thinking, or the preset hint when unbound", () => {
+    const live = profileBindingLabels(
+      {
+        ...architect,
+        preferredProfiles: [
+          {
+            profileId: claudeOpus.id,
+            hint: {
+              name: "Old",
+              provider: "claude",
+              model: "stale-model",
+              thinkingOptionId: "low",
+            },
+          },
+        ],
+        fallbackProfiles: [],
+      },
+      [{ ...claudeOpus, model: "live-model", thinkingOptionId: "max" }],
+    );
+    expect(live.preferred[0]?.detail).toBe("live-model · max");
+
+    const unbound = profileBindingLabels(
+      {
+        ...architect,
+        preferredProfiles: [
+          {
+            profileId: "gone",
+            hint: {
+              name: "Hinted",
+              provider: "omp",
+              model: "gpt-6.1-terra",
+              thinkingOptionId: "max",
+            },
+          },
+          { profileId: "bare", nameSnapshot: "Bare" },
+        ],
+        fallbackProfiles: [],
+      },
+      [],
+    );
+    expect(unbound.preferred.map((entry) => entry.detail)).toEqual(["gpt-6.1-terra · max", null]);
+  });
+
   test("preferred profile label uses the live name or a missing snapshot", () => {
     expect(preferredProfileLabel(architect, [claudeOpus])).toEqual({
       name: "Claude Opus High",

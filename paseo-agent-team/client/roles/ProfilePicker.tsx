@@ -5,6 +5,7 @@ import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import { zh } from "../../shared/zh";
 import { addProfileRef, moveProfileRef, removeProfileRef } from "../catalog/preset-metadata";
+import { runtimeDetail } from "../domain/validation";
 import type { PluginTheme } from "../shared/theme";
 
 function profileLine(profile: PaseoProfile): string {
@@ -81,7 +82,11 @@ export function ProfilePicker({
             <Text style={missing ? styles.danger : styles.name}>
               {live?.name ?? zh.missingProfile(ref.nameSnapshot ?? ref.profileId)}
             </Text>
-            {live ? <Text style={styles.meta}>{profileLine(live)}</Text> : null}
+            {live ? (
+              <Text style={styles.meta}>{profileLine(live)}</Text>
+            ) : runtimeDetail(ref.hint) ? (
+              <Text style={styles.meta}>{runtimeDetail(ref.hint)}</Text>
+            ) : null}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Move up"

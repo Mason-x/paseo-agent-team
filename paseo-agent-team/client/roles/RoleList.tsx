@@ -39,6 +39,7 @@ function BindingLine({
               ? teamPlanZh.bindings.missingUnnamed
               : teamPlanZh.bindings.missing(item.label)
             : item.label}
+          {item.detail ? `（${item.detail}）` : ""}
           {index === shown.length - 1 ? "" : "、"}
         </Text>
       ))}
