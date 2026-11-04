@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.4.0) (2026-11-05)
+
 ### Features
 
 - New default Role 【工程】主力开发 bound to the `GPT-6.1 Terra Max` Profile (all-round feature work,
