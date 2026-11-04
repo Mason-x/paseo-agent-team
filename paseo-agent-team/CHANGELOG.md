@@ -2,15 +2,22 @@
 
 ## Unreleased
 
+### Changes
+
+- Team modes, the economy pool, and Role execution tiers have been retired. Each seat now follows
+  its Role's preferred and fallback Profile bindings. Existing retired settings remain readable and
+  are removed from an object only when it is next saved to a host that confirms support. A downgrade
+  cannot restore deleted mode, pool, collaboration, or execution-policy settings; recreate them if
+  returning to an older host. The CLI accepts omitted `--mode` or `--mode sota` only.
+- The default development lineup uses a hands-on owner, DeepSeek implementation and test Roles,
+  and Grok independent review. Optional planning and troubleshooting Roles are not enabled by default.
+
 ### Features
 
-- 新增“【工程】快速开发”默认 Role：首选 Grok 4.6 High，沿用现有 High-Fast Profile，
-  后备 DeepSeek V4.1 Flash Max / GPT-6.1-Sol Max；作为 execution/coding 成员承担规格明确的
-  快速迭代，默认预设增至 23 个，已有目录可通过“同步默认预设”补入。
 - Team 页新增设计师——描述需求后生成可启动的 Team，结果可预览并一键保存、启动。
 - Agent Teams opens on the Team page, with tabs ordered Team / Role / 运行; Role and Team
   searches keep independent queries
-- Team page: the Team designer card (request, mode, target workspace, design Profile) above the
+- Team page: the Team designer card (request, target workspace, design Profile) above the
   search box and list; it starts a design job, shows every physical seat, and saves the result;
   compact layouts fold the designer and show an icon-only “新建”
 - run progress: Agent Teams **运行** tab and per-run phase, member state, plan, assignment, and
@@ -19,10 +26,10 @@
 - launch runs on the daemon host as a background job (`agent-team.launch.*` RPCs), survives a
   closed dialog, and is available from the `/team` slash command and `npm run launch:team`
 - launch into an existing workspace or a new worktree from the Agent Teams screen
-- 启动对话框可临时切换本次运行的模式，并按物理席位预览成员、Profile 与预算。
+- 启动对话框按物理席位预览成员与 Profile。
 - Crew panel: allow a permission for the rest of the session
 - the launch task is stored on the coordinator as a label, so runs describe themselves
-- default Role presets: import 23 built-in Roles that bind to local Profiles by normalized name and
+- default Role presets: import 14 built-in Roles that bind to local Profiles by normalized name and
   identical provider/model/mode/thinking settings, with strict unbound, ambiguous, and
   config-changed reporting
 - `agent-team.templates.defaults.preview` previews missing, updated, deleted, and colliding preset
@@ -31,8 +38,7 @@
   previews every change before writing; editing or copying keeps or strips preset origin metadata
 - version entry in the Agent Teams header and an update panel: source, current/remote revisions,
   check throttling, blockers and remedies, update confirmation, and reconnect/recovery after reload
-- edit Team modes, Role execution tiers, and the host economy pool; new member seats get stable
-  ids and duplication labels, and preference writes merge the latest host settings
+- new member seats get stable ids and duplication labels; the member cap has a host preference editor
 - version management (`agent-team.version.*` RPCs): report the installed version, source and latest
   stable release (or the default branch head); fast-forward a clean directory checkout on its default
   branch, run `npm ci` and reload through a detached runner that survives the reload, and roll a
@@ -41,15 +47,9 @@
 - the reloaded plugin confirms its own commit and version, npm is resolved from a real `npm-cli.js`
   before any git write, and remote credentials never reach RPC results or job files
 - 版本管理：检查更新时列出待更新的提交数和标题
-- Team mode data model: Teams store `mode`, `memberCreation`, and `collaboration`; Roles store an
-  explicit `executionPolicy` tier/task kind (defaults written for the 22 presets); host Preferences
-  store the economy pool and quota recovery policy; the default seat cap is now 24 with no storage
-  upper bound, a launch never creates more than 64 members, and stored documents keep unknown
-  values and fields instead of invalidating
-- 启动前按 Team 模式规划席位：SOTA 模式与未设模式的旧 Team 保持原有的成员与 Profile；经济模式
-  的执行席位在当前版本启动时全部创建并给出提示，升级席位待命、不创建；协作模式暂不可启动，
-  需要后续版本
-- 启动前先预览席位与预算并冻结 `planHash`；配置或可用性变化后旧预览会被拒绝，避免按旧额度启动
+- the default seat cap is 24 with no storage upper bound; a launch never creates more than 64
+  members, and stored documents keep unknown values and fields instead of invalidating
+- 启动前预览席位并冻结 `planHash`；配置或可用性变化后旧预览会被拒绝
 ### Bug Fixes
 
 - 写入 Roles / Teams 时保留 Profile 引用、hint、文档顶层以及 Team 成员与协作对象的未知字段；
@@ -57,8 +57,7 @@
 
 - Team / Role 编辑器保存时检测目录冲突，提示覆盖保存或重新加载，不再静默覆盖其他客户端刚保存的修改
 
-- default preset sync compares the effective Role tier, so an existing pre-tier Role with the
-  preset's content is not reported as a user ID collision on the first sync
+- default preset sync ignores retired Role execution policy when comparing preset content
 
 - an idle coordinator with a member error shows as 需处理 and keeps 追加任务; the Crew panel
   and the runs page agree on the failed state

@@ -11,7 +11,6 @@ import { createDesignService } from "../server/designer/service";
 import type { DesignJobStore, StoredDesignJob } from "../server/designer/store";
 import { formatDesignIssue } from "../shared/domain/design-output";
 import { availableProfileIds } from "../shared/domain/design-planning";
-import { TEAM_MODES, teamModeDisplay } from "../shared/domain/mode-contract";
 import type { ProfileSelection } from "../shared/domain/mode-resolver";
 import { MODE_ISSUE_CODES } from "../shared/domain/role-execution";
 import { LABELS } from "../shared/paseo/labels";
@@ -46,8 +45,6 @@ import { launchModeZh, zh } from "../shared/zh";
 import { DESIGN_ISSUE_KEY_BY_CODE, designZh } from "../shared/zh/design";
 import { designGapZh } from "../shared/zh/design-gap";
 import { launchContractZh } from "../shared/zh/launch-contract";
-import { cheapIssueText } from "../shared/zh/mode-plan";
-import { modesZh } from "../shared/zh/modes";
 import { teamPlanZh } from "../shared/zh/team-plan";
 import {
   DESIGN_CLIENT_REQUEST_ID,
@@ -105,28 +102,14 @@ function expandCopy(value: unknown, key = ""): string[] {
 }
 
 describe("planning port", () => {
-  test("standby selections contribute no expected Profile IDs", () => {
+  test("resolved selections keep expected Profile IDs in order", () => {
     const ready: ProfileSelection = {
-      unavailable: false,
       profile: { id: "p1", name: "Profile 1", provider: "claude" },
       source: "role-preferred",
-      budget: "sota",
-      budgetBasis: "host",
-      standby: false,
       issues: [],
     };
-    const standby: ProfileSelection = {
-      unavailable: true,
-      profile: null,
-      source: "unavailable",
-      budget: "unknown",
-      budgetBasis: "conservative-default",
-      standby: true,
-      issues: [],
-    };
-
     expect(
-      availableProfileIds([ready, standby, { ...ready, profile: { ...ready.profile, id: "p2" } }]),
+      availableProfileIds([ready, { ...ready, profile: { ...ready.profile, id: "p2" } }]),
     ).toEqual(["p1", "p2"]);
   });
 });
@@ -317,13 +300,9 @@ describe("shared boundary", () => {
     expect(source).not.toMatch(/server\.before\s*\(/);
   });
 
-  test("zh.modes merges the launch copy and modesZh without shadowing keys", () => {
-    // Two disjoint source maps: a duplicate key would let one side silently replace the other.
-    expect(Object.keys(launchModeZh).filter((key) => Object.hasOwn(modesZh, key))).toEqual([]);
+  test("zh.modes exposes launch issue copy without retired controls", () => {
     const merged = zh.modes as Record<string, unknown>;
-    for (const [key, value] of Object.entries(modesZh)) expect(merged[key]).toBe(value);
     for (const [key, value] of Object.entries(launchModeZh)) expect(merged[key]).toBe(value);
-    // Dead labels are gone; the stored values only exist in `modeLabels`.
     for (const dead of ["sota", "economy", "collaborative"]) {
       expect(merged).not.toHaveProperty(dead);
     }
@@ -336,9 +315,6 @@ describe("shared boundary", () => {
     expect(zh.teamPlan).toBe(teamPlanZh);
     const keys = Object.keys(zh);
     expect(new Set(keys).size).toBe(keys.length);
-    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.flagship);
-    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.standard);
-    expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("SOTA 或标准");
   });
 
   test("designGap/teamPlan display copy contains no stale stored values or labels", () => {
@@ -346,53 +322,12 @@ describe("shared boundary", () => {
     for (const stale of ["economy-all", "sota", "SOTA 或标准", "SOTA 池", "配置 SOTA"]) {
       expect(texts).not.toContain(stale);
     }
-    // The two economy-pool entrances are one phrase, and the route hint follows its title.
-    expect(designGapZh.actionConfigureEconomy).toBe(modesZh.economyPoolAction);
-    expect(teamPlanZh.configureEconomy).toBe(modesZh.economyPoolAction);
-    expect(modesZh.economyAllTitle).toBe("经济：全席位");
-    expect(designGapZh.economyHint).toContain(modesZh.economyAllTitle);
-    expect(designGapZh.modeNeedsUpgrade).toContain(modesZh.modeLabels.economy);
   });
 
-  test("mode labels come from the one display table", () => {
-    expect(zh.teamModeSota).toBe(modesZh.modeLabels.flagship);
-    expect(zh.teamModeCollaborative).toBe(modesZh.modeLabels.collaborative);
-    for (const mode of TEAM_MODES) {
-      expect(designZh.modes[mode]).toBe(modesZh.modeLabels[teamModeDisplay(mode)]);
-    }
-    expect(designZh.modes.economy).toBe("标准");
-    expect(designZh.modes["economy-all"]).toBe("经济");
-  });
-
-  test("the standard-pool empty state names the standard mode, never economy-all", () => {
-    expect(zh.economyPoolEmpty).toContain(modesZh.modeLabels.standard);
-    expect(zh.economyPoolEmpty).not.toContain("经济模式");
-    // The old copy claimed the standard pool gated the mode; the standard mode can fall back.
-    expect(zh.economyPoolEmpty).not.toContain("才可使用");
-    expect(zh.modes.collaborationRuntimeUnavailable).toContain(modesZh.modeLabels.standard);
-    expect(zh.modes.collaborationRuntimeUnavailable).not.toContain("经济模式");
-  });
-
-  test("renamed-mode copy avoids raw stored values and the old economy-only wording", () => {
-    expect(zh.memberCreationHint).toContain(
-      `${modesZh.modeLabels.standard}/${modesZh.modeLabels.economy}/${modesZh.modeLabels.collaborative}`,
-    );
-    expect(zh.memberCreationHint).not.toContain("；经济/协作");
-
-    const teamGate = launchContractZh.modeRequired("team", "economy-all");
-    expect(teamGate).toContain(modesZh.modeLabels.economy);
-    expect(teamGate).not.toContain("economy-all");
-    const requestGate = launchContractZh.modeRequired("request", "economy-all");
-    expect(requestGate).toContain("本次运行模式");
-    expect(requestGate).not.toContain("economy-all");
-
-    // A damaged Team is not a stale page: say so instead of claiming an update is required.
-    const unknownGate = launchContractZh.modeRequired("team", "turbo");
-    expect(unknownGate).toContain("无法识别");
-    expect(unknownGate).toContain("Team 编辑器");
-    expect(unknownGate).not.toContain("更新插件");
-    expect(launchContractZh.refreshHint).not.toContain("插件已更新");
+  test("retired requests get a refresh instruction", () => {
+    expect(launchContractZh.retiredMode("economy-all")).toContain("组队模式已取消");
     expect(launchContractZh.refreshHint).toContain("刷新页面");
+    expect(launchContractZh.refreshHint).not.toContain("插件已更新");
   });
 
   test("the new-Role limit copy reads 0, 3, and a legacy missing limit", () => {
@@ -446,9 +381,7 @@ describe("shared boundary", () => {
         expect(zh.modes.planChanged.length).toBeGreaterThan(0);
         continue;
       }
-      const text = code.startsWith("MODE_CHEAP_")
-        ? cheapIssueText(issue)
-        : modeIssueText(issue as Parameters<typeof modeIssueText>[0]);
+      const text = modeIssueText(issue);
       expect(text.length).toBeGreaterThan(0);
       expect(text).not.toBe(zh.modes.unknownFallback(code));
     }

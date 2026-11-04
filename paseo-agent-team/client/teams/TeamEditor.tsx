@@ -9,7 +9,6 @@ import { toJsonValue } from "../../shared/json";
 import type { Role } from "../../shared/schemas/role";
 import type { Team, TeamMember } from "../../shared/schemas/team";
 import { TeamSchema } from "../../shared/schemas/team";
-import type { TeamMode } from "../../shared/schemas/team-mode";
 import { TeamsDocumentSchema, teamsSettings } from "../../shared/settings";
 import { zh } from "../../shared/zh";
 import { teamPlanZh } from "../../shared/zh/team-plan";
@@ -21,34 +20,32 @@ import {
   saveEditorRow,
 } from "../catalog/editor-save";
 import { keepTeamMetadata } from "../catalog/preset-metadata";
+import { shouldRetire } from "../catalog/retirement";
+import { useRetirement, useRetirementProbe } from "../catalog/use-retirement";
 import { ModalActions } from "../shared/buttons";
 import { CompactPicker } from "../shared/CompactPicker";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { TextField } from "../shared/Field";
 import { RolePicker } from "../shared/RolePicker";
 import { SlugInput } from "../shared/SlugInput";
-import { TeamModePicker } from "../shared/TeamModePicker";
 import { MEMBER_CREATION_OPTIONS, type MemberCreation } from "../shared/team-mode-options";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { MemberEditor } from "./MemberEditor";
 import { ModelRow } from "./ModelRow";
 import {
-  buildCollaboration,
-  buildTeamModeFields,
-  type CollaborationDraft,
-  type CollaborationTouched,
+  buildMemberCreationField,
   duplicateMemberPair,
   newTeamMember,
-  readCollaboration,
+  type RetiredTeamNotice,
   readMemberCreation,
-  readStoredTeamMode,
+  readRetiredTeamNotice,
+  retiredTeamNoticeLines,
   usedSeatIds,
 } from "./team-mode-edit";
 import {
   buildTeamModelRows,
   buildTeamPlanIssues,
   draftRowKey,
-  economyActionsForResult,
   type TeamModelRowView,
   type TeamPlanClient,
   type TeamPlanDraftRequest,
@@ -79,7 +76,6 @@ export function TeamEditor({
   onClose,
   planClient,
   onOpenRole,
-  onConfigureEconomy,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -93,10 +89,10 @@ export function TeamEditor({
   /** Shared Team-plan client; absent means the plan UI is not wired yet (I02 supplies it). */
   planClient?: TeamPlanClient | null;
   onOpenRole?: (roleId: string, profileId?: string) => void;
-  onConfigureEconomy?: (target: { layer: "standard" | "allSeats"; route?: string }) => void;
 }) {
   const readTeamsDoc = useRpc(teamsRead);
   const writeTeamsDoc = useRpc(teamsWrite);
+  const retirementProbe = useRetirementProbe();
   const defaultCoordinatorId = roles[0]?.id ?? "";
   const [name, setName] = useState(team?.name ?? "");
   const [id, setId] = useState(team?.id ?? slugify(team?.name ?? "", "team"));
@@ -110,22 +106,10 @@ export function TeamEditor({
     ],
   );
   const [operatingRules, setOperatingRules] = useState(team?.operatingRules ?? "");
-  const [teamMode, setTeamMode] = useState<TeamMode>("sota");
-  const [modeUnknown, setModeUnknown] = useState<string | null>(null);
+  const [retiredNotice, setRetiredNotice] = useState<RetiredTeamNotice | null>(null);
   const [memberCreation, setMemberCreation] = useState<MemberCreation>("");
-  const [collaboration, setCollaboration] = useState<CollaborationDraft>({
-    replicas: 2,
-    judgeRoleId: "",
-    escalationRoleId: "",
-  });
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [modeTouched, setModeTouched] = useState(false);
   const [memberCreationTouched, setMemberCreationTouched] = useState(false);
-  const [collaborationTouched, setCollaborationTouched] = useState<CollaborationTouched>({
-    replicas: false,
-    judgeRoleId: false,
-    escalationRoleId: false,
-  });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState<ConflictKind | null>(null);
   const [formSeed, setFormSeed] = useState(0);
@@ -140,6 +124,11 @@ export function TeamEditor({
   const autoSlug = useRef(createAutoSlug("team")).current;
   const nameRef = useRef(name);
 
+  // E1: a Team that carries retired settings always shows a line; its wording follows the target
+  // host (deleted on save, or kept because that host's plugin is not upgraded yet).
+  const hostRetires = useRetirement(retirementProbe, open && retiredNotice !== null);
+  const retiredLines = retiredTeamNoticeLines(retiredNotice, hostRetires);
+
   const planSessionToken = useRef<string | null>(null);
   if (planSessionToken.current === null) {
     planSessionToken.current =
@@ -148,18 +137,10 @@ export function TeamEditor({
   const planSessionId = `team-editor:${team?.id ?? "new"}:${planSessionToken.current}`;
   const planRequest = useMemo<TeamPlanDraftRequest | null>(() => {
     if (!planClient) return null;
-    const nextCollaboration = buildCollaboration(
-      baseline.current?.collaboration,
-      collaboration,
-      teamMode,
-      collaborationTouched,
-    );
     return {
       sessionId: planSessionId,
-      mode: modeUnknown ?? teamMode,
       coordinatorRoleId,
       ...(memberCreation === "" ? {} : { memberCreation }),
-      ...(nextCollaboration === undefined ? {} : { collaboration: nextCollaboration }),
       members: members.map((member, index) => ({
         rowKey: draftRowKey(member, index),
         roleId: member.roleId,
@@ -167,17 +148,7 @@ export function TeamEditor({
         enabled: member.enabled,
       })),
     };
-  }, [
-    planClient,
-    planSessionId,
-    modeUnknown,
-    teamMode,
-    coordinatorRoleId,
-    memberCreation,
-    collaboration,
-    collaborationTouched,
-    members,
-  ]);
+  }, [planClient, planSessionId, coordinatorRoleId, memberCreation, members]);
   const draftPlan = useTeamDraftPlan({
     client: planClient ?? null,
     sessionId: planSessionId,
@@ -212,10 +183,6 @@ export function TeamEditor({
     if (!planResult || planResult.effectiveMode === null) return [];
     return buildTeamPlanIssues(planResult);
   }, [planResult]);
-  const planEconomyActions = useMemo(
-    () => (planResult === null ? [] : economyActionsForResult(planResult)),
-    [planResult],
-  );
 
   const seedTeam = useCallback(
     (next: Team | null) => {
@@ -231,20 +198,10 @@ export function TeamEditor({
       const nextCoordinator = next?.coordinatorRoleId ?? defaultCoordinatorId;
       setMembers(next?.members ?? [newTeamMember(roles, nextCoordinator, new Set())]);
       setOperatingRules(next?.operatingRules ?? "");
-      const storedMode = readStoredTeamMode(next?.mode);
-      setTeamMode(storedMode.mode);
-      setModeUnknown(storedMode.unknown);
+      setRetiredNotice(readRetiredTeamNotice(next));
       setMemberCreation(readMemberCreation(next?.memberCreation));
-      const storedCollaboration = readCollaboration(next?.collaboration);
-      setCollaboration(storedCollaboration);
-      setAdvancedOpen(storedMode.mode === "collaborative" || Boolean(next?.collaboration));
-      setModeTouched(false);
+      setAdvancedOpen(false);
       setMemberCreationTouched(false);
-      setCollaborationTouched({
-        replicas: false,
-        judgeRoleId: false,
-        escalationRoleId: false,
-      });
       setErrors({});
       setConflict(null);
       setFormSeed((seed) => seed + 1);
@@ -308,14 +265,10 @@ export function TeamEditor({
       description: description.trim() || undefined,
       coordinatorRoleId,
       members,
-      ...buildTeamModeFields({
+      ...buildMemberCreationField({
         original: baseline.current,
-        mode: teamMode,
-        modeTouched,
         memberCreation,
         memberCreationTouched,
-        collaboration,
-        collaborationTouched,
       }),
       operatingRules: operatingRules.trim() || undefined,
       enabled: true,
@@ -333,7 +286,8 @@ export function TeamEditor({
     }
     const result = await saveEditorRowWithSnapshot(
       mode,
-      keepTeamMetadata(baseline.current, parsed.data),
+      (retireLegacyFields) =>
+        keepTeamMetadata(baseline.current, parsed.data, { retireLegacyFields }),
       overwrite,
     );
     if (result === "saved") {
@@ -354,7 +308,7 @@ export function TeamEditor({
 
   async function saveEditorRowWithSnapshot(
     editorMode: "create" | "edit",
-    row: Team,
+    buildRow: (retireLegacyFields: boolean) => Team,
     overwrite: boolean,
   ) {
     const snapshot = opened.current;
@@ -365,10 +319,12 @@ export function TeamEditor({
     setSaveError(null);
     setSavingHere(true);
     try {
+      // E2: the retired keys are dropped only if the host this Team is written to ignores them.
+      const retireLegacyFields = await shouldRetire(retirementProbe, "team", baseline.current);
       const result = await saveEditorRow({
         mode: editorMode,
         key: "teams",
-        row,
+        row: buildRow(retireLegacyFields),
         baseline: baseline.current,
         opened: snapshot,
         forceOverwrite: overwrite,
@@ -431,22 +387,6 @@ export function TeamEditor({
                     {issue.text}
                   </Text>
                 ))}
-                {onConfigureEconomy && planEconomyActions.length > 0 ? (
-                  <View style={{ flexDirection: "row", gap: 12, flexWrap: "wrap" }}>
-                    {planEconomyActions.map((action) => (
-                      <Pressable
-                        key={`${action.layer}:${action.route ?? ""}`}
-                        accessibilityRole="button"
-                        accessibilityLabel={teamPlanZh.configureEconomy}
-                        onPress={() => onConfigureEconomy(action)}
-                      >
-                        <Text style={{ color: theme.colors.accent, fontSize: 12 }}>
-                          {teamPlanZh.configureEconomy}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : null}
               </View>
             ) : null}
             <TextField
@@ -486,21 +426,11 @@ export function TeamEditor({
               error={errors.description}
               onChange={setDescription}
             />
-            <TeamModePicker
-              theme={theme}
-              layout={layout}
-              value={teamMode}
-              onChange={(next) => {
-                setTeamMode(next);
-                setModeTouched(true);
-                setModeUnknown(null);
-              }}
-            />
-            {modeUnknown ? (
-              <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
-                {zh.teamModeUnknown(modeUnknown)}
+            {retiredLines.map((line) => (
+              <Text key={line} style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+                {line}
               </Text>
-            ) : null}
+            ))}
             <RolePicker
               theme={theme}
               label={zh.coordinator}
@@ -510,12 +440,7 @@ export function TeamEditor({
               onChange={setCoordinatorRoleId}
             />
             {coordinatorModel ? (
-              <ModelRow
-                theme={theme}
-                view={coordinatorModel}
-                onOpenRole={onOpenRole}
-                onConfigureEconomy={onConfigureEconomy}
-              />
+              <ModelRow theme={theme} view={coordinatorModel} onOpenRole={onOpenRole} />
             ) : null}
             <Pressable
               accessibilityRole="button"
@@ -561,98 +486,6 @@ export function TeamEditor({
                     {zh.memberCreationUnknown(team.memberCreation)}
                   </Text>
                 ) : null}
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-                  {zh.collaborationReplicas}
-                </Text>
-                <View style={{ flexDirection: "row", gap: 6 }}>
-                  {([2, 3] as const).map((replicas) => {
-                    const selected = collaboration.replicas === replicas;
-                    return (
-                      <Pressable
-                        key={replicas}
-                        accessibilityRole="button"
-                        accessibilityState={{ selected }}
-                        accessibilityLabel={
-                          replicas === 2 ? zh.collaborationTwo : zh.collaborationThree
-                        }
-                        onPress={() => setCollaboration((current) => ({ ...current, replicas }))}
-                        style={{
-                          minHeight: 34,
-                          paddingHorizontal: 12,
-                          borderRadius: 8,
-                          borderWidth: 1,
-                          borderColor: selected ? theme.colors.accent : theme.colors.border,
-                          backgroundColor: selected ? theme.colors.surface1 : theme.colors.surface2,
-                          alignItems: "center",
-                          justifyContent: "center",
-                        }}
-                      >
-                        <Text
-                          style={{
-                            color: selected ? theme.colors.accent : theme.colors.foreground,
-                            fontSize: 13,
-                            fontWeight: "600",
-                          }}
-                        >
-                          {replicas === 2 ? zh.collaborationTwo : zh.collaborationThree}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-                  {zh.collaborationHint}
-                </Text>
-                {team?.collaboration &&
-                ((!collaborationTouched.replicas &&
-                  team.collaboration.replicas !== undefined &&
-                  team.collaboration.replicas !== 2 &&
-                  team.collaboration.replicas !== 3) ||
-                  (!collaborationTouched.judgeRoleId &&
-                    team.collaboration.judgeRoleId !== undefined &&
-                    typeof team.collaboration.judgeRoleId !== "string") ||
-                  (!collaborationTouched.escalationRoleId &&
-                    team.collaboration.escalationRoleId !== undefined &&
-                    typeof team.collaboration.escalationRoleId !== "string")) ? (
-                  <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
-                    {zh.collaborationUnknown}
-                  </Text>
-                ) : null}
-                <CompactPicker
-                  theme={theme}
-                  label={zh.judgeRole}
-                  items={[
-                    { id: "", name: zh.roleAuto },
-                    ...roles.map((role) => ({ id: role.id, name: role.name })),
-                  ]}
-                  selectedId={collaboration.judgeRoleId}
-                  placeholder={zh.roleAuto}
-                  searchPlaceholder={zh.searchRoles}
-                  emptyLabel={zh.noMatchingRoles}
-                  onChange={(judgeRoleId) => {
-                    setCollaboration((current) => ({ ...current, judgeRoleId }));
-                    setCollaborationTouched((current) => ({ ...current, judgeRoleId: true }));
-                  }}
-                />
-                <CompactPicker
-                  theme={theme}
-                  label={zh.escalationRole}
-                  items={[
-                    { id: "", name: zh.roleAuto },
-                    ...roles.map((role) => ({ id: role.id, name: role.name })),
-                  ]}
-                  selectedId={collaboration.escalationRoleId}
-                  placeholder={zh.roleAuto}
-                  searchPlaceholder={zh.searchRoles}
-                  emptyLabel={zh.noMatchingRoles}
-                  onChange={(escalationRoleId) => {
-                    setCollaboration((current) => ({ ...current, escalationRoleId }));
-                    setCollaborationTouched((current) => ({
-                      ...current,
-                      escalationRoleId: true,
-                    }));
-                  }}
-                />
               </View>
             ) : null}
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{zh.members}</Text>
@@ -695,13 +528,7 @@ export function TeamEditor({
                   }}
                   onRemove={() => setMembers(members.filter((_, itemIndex) => itemIndex !== index))}
                   modelRows={memberRows.map((view) => (
-                    <ModelRow
-                      key={view.key}
-                      theme={theme}
-                      view={view}
-                      onOpenRole={onOpenRole}
-                      onConfigureEconomy={onConfigureEconomy}
-                    />
+                    <ModelRow key={view.key} theme={theme} view={view} onOpenRole={onOpenRole} />
                   ))}
                 />
               );
@@ -718,13 +545,7 @@ export function TeamEditor({
                     {teamPlanZh.otherSeats}
                   </Text>
                   {other.map((view) => (
-                    <ModelRow
-                      key={view.key}
-                      theme={theme}
-                      view={view}
-                      onOpenRole={onOpenRole}
-                      onConfigureEconomy={onConfigureEconomy}
-                    />
+                    <ModelRow key={view.key} theme={theme} view={view} onOpenRole={onOpenRole} />
                   ))}
                 </View>
               );

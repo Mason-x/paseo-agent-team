@@ -3,7 +3,6 @@ import { copyText, Icon, Modal, useToast } from "@getpaseo/plugin/client/react-n
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { ModeContractSupport } from "../../shared/domain/mode-contract";
 import type { PaseoAdapter } from "../../shared/paseo/adapter";
 import {
   type LaunchJob,
@@ -22,15 +21,10 @@ import { TextField } from "../shared/Field";
 import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { LaunchPreview } from "./LaunchPreview";
-import {
-  launchModeDisplay,
-  launchPreviewRequest,
-  launchStartRequest,
-  launchStatusRequest,
-} from "./launch-args";
+import { launchPreviewRequest, launchStartRequest, launchStatusRequest } from "./launch-args";
 import {
   launchGate,
-  launchPreviewCacheKey,
+  launchPreviewQueryKey,
   PREVIEW_TASK_DEBOUNCE_MS,
   previewTaskState,
   startFailureAction,
@@ -141,9 +135,6 @@ export function LaunchDialog({
   workspaceId: fixedWorkspaceId,
   onClose,
   onLaunched,
-  onEditTeam,
-  modeContract = "legacy",
-  probeSettled = false,
 }: {
   theme: PluginTheme;
   layout: PluginLayout;
@@ -162,12 +153,6 @@ export function LaunchDialog({
   workspaceId?: string;
   onClose: () => void;
   onLaunched: (runId: string, workspaceId: string | undefined) => void;
-  /** Hosts that can navigate to the Team editor pass this; the saved mode is edited there. */
-  onEditTeam?: (team: Team) => void;
-  /** The team.plan probe result; only v2 requests declare contractVersion 2. */
-  modeContract?: ModeContractSupport;
-  /** False until the probe settles: preview/start stay off (W-I2-1). */
-  probeSettled?: boolean;
 }) {
   const toast = useToast();
   const start = useRpc(launchStartRpc);
@@ -210,7 +195,7 @@ export function LaunchDialog({
     if (job?.state !== "running") return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      status(launchStatusRequest(job.runId, modeContract))
+      status(launchStatusRequest(job.runId))
         .then((next) => {
           if (cancelled) return;
           if (next.job) {
@@ -229,7 +214,7 @@ export function LaunchDialog({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [job, modeContract, status]);
+  }, [job, status]);
 
   useEffect(() => {
     if (job?.state !== "succeeded" || announcedRunId.current === job.runId) return;
@@ -239,8 +224,6 @@ export function LaunchDialog({
   }, [job, onLaunched, toast]);
 
   const team = teams.find((entry) => entry.id === teamId);
-  const modeDisplay = launchModeDisplay(team);
-  const savedMode = team?.mode ?? "";
   const target: LaunchTarget | null = fixedWorkspaceId
     ? { kind: "workspace", workspaceId: fixedWorkspaceId }
     : targetKind === "workspace"
@@ -268,23 +251,14 @@ export function LaunchDialog({
     return () => clearTimeout(timer);
   }, [composing, trimmedTask]);
   const preview = useRpc(launchPreviewRpc);
-  const previewCacheKey = launchPreviewCacheKey(
-    { hostId, teamId, task: previewTask, target, savedMode },
-    modeContract,
-  );
+  const previewCacheKey = launchPreviewQueryKey({ hostId, teamId, task: previewTask, target });
   const currentIdentity = JSON.stringify(previewCacheKey);
   const previewQuery = useQuery({
     queryKey: previewCacheKey,
-    enabled:
-      open &&
-      probeSettled &&
-      Boolean(teamId) &&
-      previewTask.length > 0 &&
-      target !== null &&
-      !running,
+    enabled: open && Boolean(teamId) && previewTask.length > 0 && target !== null && !running,
     queryFn: async () => {
       if (!target) throw new Error(zh.modes.previewNoTarget);
-      return preview(launchPreviewRequest({ teamId, task: previewTask, target }, modeContract));
+      return preview(launchPreviewRequest({ teamId, task: previewTask, target }));
     },
     staleTime: 0,
     retry: false,
@@ -319,7 +293,7 @@ export function LaunchDialog({
     fetching: previewQuery.isFetching,
     error: previewError,
   });
-  const blocked = gate.disabled || !probeSettled;
+  const blocked = gate.disabled;
 
   useEffect(() => {
     if (!currentIdentity) return;
@@ -351,15 +325,12 @@ export function LaunchDialog({
     setJob(null);
     try {
       const result = await start(
-        launchStartRequest(
-          {
-            teamId,
-            task: previewTask,
-            target,
-            expectedPlanHash: shown.planHash,
-          },
-          modeContract,
-        ),
+        launchStartRequest({
+          teamId,
+          task: previewTask,
+          target,
+          expectedPlanHash: shown.planHash,
+        }),
       );
       if (result.ok) {
         setJob(result.job);
@@ -386,7 +357,6 @@ export function LaunchDialog({
   const failure = job?.state === "failed" ? jobErrorText(job) : null;
   const kickoffCopy = job?.state === "failed" ? job.error?.kickoffMessage : undefined;
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
-  const editTeam = team && onEditTeam ? () => onEditTeam(team) : null;
 
   return (
     <Modal
@@ -421,43 +391,6 @@ export function LaunchDialog({
               }}
               onChange={chooseTeam}
             />
-          ) : null}
-          {modeDisplay.kind !== "none" ? (
-            <View style={{ gap: 4 }}>
-              <Text
-                style={
-                  modeDisplay.kind === "unknown"
-                    ? { color: theme.colors.statusWarning, fontSize: 12 }
-                    : muted
-                }
-              >
-                {modeDisplay.kind === "unknown"
-                  ? zh.modes.launchTeamModeUnknown(modeDisplay.value)
-                  : zh.modes.launchTeamMode(modeDisplay.label)}
-              </Text>
-              {editTeam ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={zh.editTeam}
-                  accessibilityState={{ disabled: starting || running }}
-                  disabled={starting || running}
-                  onPress={editTeam}
-                >
-                  <Text
-                    style={{
-                      color: theme.colors.accent,
-                      fontWeight: "600",
-                      fontSize: 12,
-                      opacity: starting || running ? 0.5 : 1,
-                    }}
-                  >
-                    {zh.editTeam}
-                  </Text>
-                </Pressable>
-              ) : (
-                <Text style={muted}>{zh.modes.launchTeamModeEditHint}</Text>
-              )}
-            </View>
           ) : null}
           {!fixedWorkspaceId ? (
             <View style={{ gap: 8 }}>
@@ -523,11 +456,7 @@ export function LaunchDialog({
             error={previewError}
             result={visiblePreview}
           />
-          {!probeSettled ? (
-            <Text style={muted}>{zh.modes.previewLoadingContext}</Text>
-          ) : gate.reason && !visiblePreview ? (
-            <Text style={muted}>{gate.reason}</Text>
-          ) : null}
+          {gate.reason && !visiblePreview ? <Text style={muted}>{gate.reason}</Text> : null}
           {context.error ? (
             <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{context.error}</Text>
           ) : null}

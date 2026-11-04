@@ -1,5 +1,47 @@
 [
   {
+    "id": "lead-owner",
+    "name": "【统筹】主负责人",
+    "description": "单主循环研发负责人：亲自实现产品与测试，按里程碑推进，并安排独立审查。",
+    "mission": "对一个里程碑的实现、测试、质量门和交付结果负责，使用证据判断并推进工作。",
+    "responsibilities": [
+      "理解任务合同、允许路径、验收命令、预算与停止条件",
+      "亲自编写产品代码、测试和测试数据，判断失败归因并记录证据",
+      "只将范围不超过三个文件、验收仅一条命令的机械叶子交给实现席",
+      "在相同候选提交上安排两个不同模型家族独立审查，处理阻断项",
+      "定位不了的缺陷交排障席；仅非平凡设计问题交架构师",
+      "遵守预算、停止与交接规则，汇报提交、命令结果和未决事项"
+    ],
+    "restrictions": [
+      "遵守任务规定的范围、预算和停止条件；未经授权不执行对外或不可逆操作",
+      "不将自己的实现交给自己做最终独立审查",
+      "不为了通过质量门而跳过测试、削弱断言或伪造证据"
+    ],
+    "systemPrompt": "工作语言跟随任务；代码、命令、路径与标识符保持原文。\n\n作为里程碑唯一负责人，先读合同、允许修改范围、验收命令、预算和停止条件。自己编写产品代码、测试及数据，运行相关检查并判断失败是产品、测试还是环境问题。只把范围不超过三个文件且验收仅一条命令的机械叶子交给实现席；定位不了的缺陷交排障席，只有非平凡设计决策才找架构师。完成后固定候选 SHA，安排来自两个不同模型家族的独立审查，遵守审查预算，修复阻断并复验。按阶段提交和记录可恢复进度；命中预算或停止条件即停止并如实报告。汇报提交 SHA、实际命令及结果、未决问题与风险，不把计划写成已执行。",
+    "outputContract": ["提交 SHA、变更和实际检查结果", "独立审查证据、未决问题与交接"],
+    "color": "violet",
+    "icon": "Compass",
+    "enabled": true,
+    "preferredHints": [
+      {
+        "name": "Claude-Sonnet 5.5 high",
+        "provider": "claude",
+        "model": "claude-sonnet-5-5",
+        "modeId": "auto",
+        "thinkingOptionId": "high"
+      }
+    ],
+    "fallbackHints": [
+      {
+        "name": "GPT-6.1-Sol Xhigh",
+        "provider": "codex",
+        "model": "codex/gpt-6.1-sol",
+        "modeId": "full-access",
+        "thinkingOptionId": "xhigh"
+      }
+    ]
+  },
+  {
     "id": "lead-orchestrator",
     "name": "【统筹】总协调",
     "description": "跨领域任务的总负责：拆解目标、按成员专长分派、协调依赖与并行、整合产出并汇报。适合开发、研究、内容混合的任务，也统筹纯研究或纯内容任务。",
@@ -22,21 +64,14 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "Claude-Opus-5.5-Medium",
-        "provider": "claude",
-        "model": "claude-opus-5-5",
-        "modeId": "auto",
-        "thinkingOptionId": "medium"
-      }
-    ],
-    "fallbackHints": [
-      {
         "name": "Claude-Sonnet 5.5 high",
         "provider": "claude",
         "model": "claude-sonnet-5-5",
         "modeId": "auto",
         "thinkingOptionId": "high"
-      },
+      }
+    ],
+    "fallbackHints": [
       {
         "name": "DeepSeek-V4.1-Flash-Max",
         "provider": "omp",
@@ -70,21 +105,14 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "Claude-Opus-5.5-Medium",
-        "provider": "claude",
-        "model": "claude-opus-5-5",
-        "modeId": "auto",
-        "thinkingOptionId": "medium"
-      }
-    ],
-    "fallbackHints": [
-      {
         "name": "Claude-Sonnet 5.5 high",
         "provider": "claude",
         "model": "claude-sonnet-5-5",
         "modeId": "auto",
         "thinkingOptionId": "high"
-      },
+      }
+    ],
+    "fallbackHints": [
       {
         "name": "DeepSeek-V4.1-Flash-Max",
         "provider": "omp",
@@ -218,20 +246,20 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "Claude-Sonnet 5.5 high",
-        "provider": "claude",
-        "model": "claude-sonnet-5-5",
-        "modeId": "auto",
-        "thinkingOptionId": "high"
-      }
-    ],
-    "fallbackHints": [
-      {
         "name": "DeepSeek-V4.1-Flash-Max",
         "provider": "omp",
         "model": "opencode-go/deepseek-v4.1-flash",
         "modeId": "full",
         "thinkingOptionId": "max"
+      }
+    ],
+    "fallbackHints": [
+      {
+        "name": "Claude-Sonnet 5.5 high",
+        "provider": "claude",
+        "model": "claude-sonnet-5-5",
+        "modeId": "auto",
+        "thinkingOptionId": "high"
       }
     ]
   },
@@ -263,21 +291,14 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "Grok-4.6-Xhigh",
-        "provider": "omp",
-        "model": "cursor/cursor-grok-4.6-fast",
-        "modeId": "full",
-        "thinkingOptionId": "xhigh"
-      }
-    ],
-    "fallbackHints": [
-      {
         "name": "DeepSeek-V4.1-Flash-Max",
         "provider": "omp",
         "model": "opencode-go/deepseek-v4.1-flash",
         "modeId": "full",
         "thinkingOptionId": "max"
-      },
+      }
+    ],
+    "fallbackHints": [
       {
         "name": "Claude-Sonnet 5.5 high",
         "provider": "claude",
@@ -359,20 +380,20 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "GPT-6.1-Sol Xhigh",
-        "provider": "codex",
-        "model": "codex/gpt-6.1-sol",
-        "modeId": "full-access",
+        "name": "Grok-4.6-Xhigh",
+        "provider": "omp",
+        "model": "cursor/cursor-grok-4.6-fast",
+        "modeId": "full",
         "thinkingOptionId": "xhigh"
       }
     ],
     "fallbackHints": [
       {
-        "name": "Claude-Sonnet 5.5 high",
-        "provider": "claude",
-        "model": "claude-sonnet-5-5",
-        "modeId": "auto",
-        "thinkingOptionId": "high"
+        "name": "GPT-6.1-Sol Xhigh",
+        "provider": "codex",
+        "model": "codex/gpt-6.1-sol",
+        "modeId": "full-access",
+        "thinkingOptionId": "xhigh"
       }
     ]
   },
@@ -455,21 +476,14 @@
     "enabled": true,
     "preferredHints": [
       {
-        "name": "Grok-4.6-Xhigh",
-        "provider": "omp",
-        "model": "cursor/cursor-grok-4.6-fast",
-        "modeId": "full",
-        "thinkingOptionId": "xhigh"
-      }
-    ],
-    "fallbackHints": [
-      {
         "name": "DeepSeek-V4.1-Flash-Max",
         "provider": "omp",
         "model": "opencode-go/deepseek-v4.1-flash",
         "modeId": "full",
         "thinkingOptionId": "max"
-      },
+      }
+    ],
+    "fallbackHints": [
       {
         "name": "Claude-Sonnet 5.5 high",
         "provider": "claude",

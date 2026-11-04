@@ -3,69 +3,30 @@
 import { designZh } from "./zh/design";
 import { designGapZh } from "./zh/design-gap";
 import { launchContractZh } from "./zh/launch-contract";
-import { modePlanZh } from "./zh/mode-plan";
-import { modesZh } from "./zh/modes";
 import { teamPlanZh } from "./zh/team-plan";
 
-/**
- * Launch/planner issue copy merged into `zh.modes`. It deliberately excludes the mode display
- * names (single source: `modesZh.modeLabels`) and shares no key with `modesZh`; the merge test in
- * tests/design-contracts.test.ts pins the disjoint key sets so neither side can shadow the other.
- */
+/** Launch/planner issue copy, exposed as `zh.modes` (the name predates the single-path planner). */
 export const launchModeZh = {
-  unknown: (value: string) => `不支持的模式或策略${value ? `（${value}）` : ""}。`,
-  rolePolicyUnknown: (label: string) => `Role「${label || "unknown"}」的层级或任务类型不受支持。`,
+  unknown: (value: string) => `不支持的设置${value ? `（${value}）` : ""}。`,
   contextUnavailable: "无法读取当前 host 的 Profile 或可用性，请刷新后重试。",
   availabilityUnverified: "未能核实 provider 可用性，已按原绑定继续启动。",
   profileUnresolved: (label: string, reason: string) =>
     `无法解析 ${label} 的 Profile（${reason}）。`,
   roleDisabled: (label: string) => `Role「${label || "unknown"}」已禁用。`,
   roleDisabledWarning: (label: string) => `Role「${label}」已禁用，仍按原绑定启动。`,
-  rolePolicyWarning: (label: string) => `Role「${label}」的层级或任务类型无效，已按原绑定启动。`,
   roleMissing: (id: string) => `成员 Role「${id}」不存在。`,
-  escalationInvalid: (label: string, reason: string) =>
-    `升级角色配置无效（${label || reason || "unknown"}）。`,
-  escalationUnavailable: (label: string, reason: string) =>
-    `升级通道不可用（${label || "unknown"}：${reason || "unavailable"}）。`,
-  judgeRequired: (reason: string) =>
-    `协作需要独立的评审/测试席位（${reason || "judge-required"}）。`,
-  onDemandFallbackEager: "按需创建尚未启用，本次按标准/经济模式启动时全部创建成员。",
   onDemandUnavailable: "按需创建成员当前不可用；请在 Team 中改为立即创建，或升级插件。",
-  collaborationRuntimeUnavailable: `协作模式需要后续版本的运行能力；当前版本请使用${modesZh.modeLabels.flagship}或${modesZh.modeLabels.standard}模式。`,
-  staleEscalationOnly:
-    "当前版本无法按需创建升级席位；本次没有可立即创建的成员，请调整 Team 或升级插件。",
   duplicateLabelWarning: (label: string) => `实例标签「${label}」重复，已继续启动。`,
   planChanged: "配置或可用性已变化，请重新预览后再启动。",
   unknownFallback: (code: string) => `无法启动（${code}）。`,
-  poolEmpty: "经济池为空，已按原绑定解析。",
-  poolUnavailable: (provider?: string) =>
-    `经济池没有可用候选${provider ? `（${provider}）` : ""}，已按原绑定解析。`,
-  poolConfigInvalid: (field: string) => `经济池配置需整理${field ? `（${field}）` : ""}。`,
-  poolDuplicate: (profileId: string) => `经济池重复条目「${profileId}」，已保留第一个。`,
-  poolOrderIgnored: (profileId: string) => `任务顺序中的「${profileId}」不在池内，已忽略。`,
-  familyMissing: (profileId: string) => `Profile「${profileId}」的模型家族缺失或未核实。`,
-  familiesReduced: (requested: number, families: number) =>
-    `协作候选只有 ${families} 个模型家族，已把 ${requested} 路降为 ${families} 路。`,
-  collaborationUnavailable: "候选家族不足两路，本组已按原绑定单路启动。",
-  noExecutionCohort: "没有可并行的执行席位，本组保持原绑定。",
+  reviewFamilySame: (family: string) =>
+    `两个审查席都落在 ${family} 家族，两道审查不再相互独立；请检查它们的备选 Profile。`,
   sourcePreferred: "首选",
   sourceFallback: "备选",
-  sourceEconomyPool: "经济池",
   sourceUnavailable: "不可用",
-  budgetEconomy: "经济池预算",
-  budgetSota: "SOTA 预算",
-  budgetUnknown: "预算未核实",
   activationEager: "启动时创建",
   activationOnDemand: "首次派活时创建",
-  activationEscalationOnly: "待命，不在启动时创建",
   purposeMember: "成员",
-  purposeCandidate: "候选",
-  purposeJudge: "裁判",
-  purposeEscalation: "升级",
-  launchTeamMode: (mode: string) => `组队模式：${mode}（在 Team 中设置）`,
-  launchTeamModeUnknown: (value: string) =>
-    `组队模式「${value || "unknown"}」无法识别；请编辑 Team 修改。`,
-  launchTeamModeEditHint: "在侧栏 Agent Teams › Teams 中编辑此 Team。",
   previewNoTask: "输入任务后生成启动预览。",
   previewDebouncing: "正在等待输入完成，随后会更新预览。",
   previewNoTarget: "选择目标工作区后显示启动预览。",
@@ -76,28 +37,16 @@ export const launchModeZh = {
   previewBlocked: "存在阻塞项，无法启动。",
   previewRefreshed: "配置或可用性已变化，预览已刷新，请确认后重新启动。",
   profileUnavailable: "Profile 不可用",
-  poolEntryMissing: (profileId: string) => `经济池条目「${profileId}」在当前 host 不存在。`,
   limitClamped: (limit: number) => `席位数超过上限，已按 ${limit} 个规划。`,
   noSeats: "本次没有成员席位。",
   showAllSeats: (count: number) => `展开全部 ${count} 个席位`,
   showFewerSeats: "收起席位",
-  seatFamily: "家族",
   seatSource: "来源",
-  seatBudget: "预算",
   seatStatus: "状态",
-  budgetValueEconomy: "经济",
-  budgetValueSota: "SOTA",
-  budgetValueUnknown: "未核实",
-  budgetBasisHost: "宿主标签",
-  budgetBasisPool: "经济池",
-  budgetBasisConservative: "保守默认",
-  standby: "待命",
   logicalSeats: "逻辑席位",
   physicalSeats: "物理席位",
   eagerSeats: "立即创建",
   deferredSeats: "按需创建",
-  escalationSeats: "待命",
-  sotaPotentialSeats: "可能消耗 SOTA",
 } as const;
 
 export const zh = {
@@ -667,115 +616,59 @@ export const zh = {
     unknown: "未知",
   },
 
-  // 组队模式与经济池
-  teamMode: "组队模式",
-  teamModeSota: modesZh.modeLabels.flagship,
-  teamModeCollaborative: modesZh.modeLabels.collaborative,
-  teamModeSotaHint: "沿用 Role 原绑定，决策与执行都优先使用原 Profile。",
-  teamModeCollaborativeHint: "执行层多路候选，测试与审查后择优；需要隔离工作区。",
-  teamModeUnknown: (value: string) =>
-    `未知模式「${value}」；未修改时原样保留，选择模式后保存会替换。`,
+  // Team 编辑器与成员上限
   memberCreationUnknown: (value: string) => `未知的成员创建值「${value}」；未修改时原样保留。`,
-  collaborationUnknown: "协作配置含无法识别的值；未修改时原样保留。",
   teamAdvanced: "高级",
   teamAdvancedShow: "展开高级设置",
   teamAdvancedHide: "收起高级设置",
   memberCreation: "成员创建方式",
-  memberCreationDefault: "默认（按模式）",
+  memberCreationDefault: "默认（启动时全部创建）",
   memberCreationEager: "启动时全部创建",
   memberCreationOnDemand: "首次派活时创建",
-  memberCreationHint: "默认：旗舰启动时全部创建；标准/经济/协作首次派活时才创建成员。",
-  collaborationReplicas: "协作路数",
-  collaborationTwo: "两路",
-  collaborationThree: "三路",
-  collaborationHint: "仅协作模式使用；路数会由规划阶段展开，不会写成重复成员。",
-  judgeRole: "裁判 Role",
-  escalationRole: "升级 Role",
-  roleAuto: "自动",
+  memberCreationHint: "默认启动时全部创建成员；「首次派活时创建」暂未开放，选择后无法启动。",
   duplicateMember: "复制成员",
-  roleExecutionTier: "执行层级",
-  roleExecutionTaskKind: "任务类型",
-  roleTierDecision: "决策",
-  roleTierExecution: "执行",
-  roleTierEscalation: "升级",
-  roleTierRetain: "保留原绑定",
-  taskKindCoding: "编码",
-  taskKindTesting: "测试",
-  taskKindAcceptance: "验收",
-  taskKindCodebase: "代码库",
-  taskKindOps: "运维",
-  taskKindGeneral: "通用",
-  rolePolicyKeep: "保持原绑定（按预设默认）",
-  rolePolicyKeepHint: "未指定时保留 Role 原 Profile 绑定，并沿用预设默认层级。",
-  rolePolicyUnknown: (value: string) => `当前值「${value}」无法识别，保存前请重新选择。`,
-  economyPool: "经济池",
-  economyPoolTitle: "经济池设置",
-  economyPoolIntro: "只保存到本 host 的插件偏好；不会修改 Profile 本身。",
-  economyPoolEmpty: "标准执行池为空；标准模式将沿用 Role 原绑定解析。",
-  economyPoolAddProfile: "添加 Profile",
-  economyPoolNoProfiles: "当前 host 没有可用 Profile。",
   searchProfiles: "搜索 Profile",
-  economyPoolProfilesUnavailable: "暂无法读取当前 host 的 Profile，仍可编辑已有池成员。",
-  economyPoolProfilesRequired:
-    "标准池与全席位经济都依赖当前 host 的 Profile：请等待 Profile 加载完成后再保存；新增或改过家族的条目需要写入绑定。",
-  economyPoolOmpUnavailable: (reason?: string) =>
-    `omp Provider 当前不可用${reason ? `：${reason}` : ""}；本机建议的 Profile 可能无法启动。`,
-  economyPoolOmpMissing: "当前 host 没有 omp Provider；本机建议不会匹配。",
-  economyPoolFamily: "模型家族",
-  economyPoolFamilyHint: "小写字母/数字/._-，不是 provider；保存时记录当前 provider/model。",
-  economyPoolFamilyPlaceholder: "例如 deepseek / grok",
   searchOptions: "搜索",
-  searchTaskKinds: "搜索任务类型",
-  economyPoolFamilyInvalid: "家族格式无效，保存时将忽略。",
-  economyPoolFamilyChanged: (name: string) => `${name} 的 provider/model 已变化，需重新确认家族。`,
-  economyPoolRebindFamily: "重新绑定家族",
-  economyPoolFamilyFor: (name: string) => `${name} 的模型家族`,
-  economyPoolToggleFor: (name: string) => `${name} 是否启用`,
-  economyPoolMoveUpFor: (name: string) => `上移 ${name}`,
-  economyPoolMoveDownFor: (name: string) => `下移 ${name}`,
-  economyPoolRemoveFor: (name: string) => `移出 ${name}`,
-  economyPoolMoveUp: "上移",
-  economyPoolMoveDown: "下移",
-  economyPoolRemove: "移出经济池",
-  economyPoolSuggest: "按名称预选本机建议",
-  economyPoolSuggestedNone: "没有唯一匹配的 Profile，未自动添加。",
-  economyPoolProfileMissing: (id: string) => `Profile 不存在：${id}`,
-  economyPoolTaskOrder: "按任务类型排序",
-  economyPoolTaskKind: "任务类型",
-  economyPoolResetOrder: "使用池顺序",
-  economyPoolBudget: "池外 Profile 预算",
-  economyPoolBudgetEconomy: "经济",
-  economyPoolBudgetSota: "SOTA",
-  economyPoolBudgetUnknown: "未核实",
-  economyPoolBudgetHint: "仅用于池外 Profile；池内 Profile 始终按经济预算。",
-  economyPoolAddBudget: "添加池外 Profile",
-  economyPoolRemoveBudget: "移除预算标注",
-  economyPoolRemoveBudgetFor: (name: string) => `移除 ${name} 的预算标注`,
-  economyPoolMaxMembers: "成员上限",
-  economyPoolMaxMembersHint: "1–64；协调者不占成员席位。",
-  economyPoolMaxMembersInvalid: "成员上限必须是 1–64 的整数。",
-  economyPoolMaxMembersLegacy: (value: number) =>
+  // 已取消设置的提示（E1）：保存前重新探测，按目标 host 的能力清理。
+  retiredTeamMode: (label: string | null) =>
+    `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}旧模式已停用，现按各 Role 的绑定运行；保存时删除旧设置，回滚到旧版本将按旗舰运行。`,
+  retiredTeamModeKept: (label: string | null) =>
+    `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}新版已停用旧模式。无法确认该 host 的插件支持清理，这次保存不删除；升级后再保存会清理。`,
+  retiredTeamProbePending: (label: string | null) =>
+    `${label ? `此 Team 原为「${label}」模式；` : "此 Team 含旧模式设置；"}新版已停用旧模式，正在检查该 host 是否会在保存时清理旧设置。`,
+  retiredPreferences: "更改成员上限并保存时，会同时删除旧的经济池与全席位配置。",
+  retiredPreferencesKept:
+    "偏好里仍有旧的经济池与全席位配置；该 host 的插件可能尚未升级或探测失败，本次保存不删除，升级后再保存会清理。",
+  retiredPreferencesProbePending:
+    "偏好里仍有旧的经济池与全席位配置；正在检查该 host 是否会在保存时清理。",
+  retiredPresetSync: "本次同步会删除旧的经济池与全席位配置。",
+  retiredPresetSyncKept:
+    "偏好里仍有旧的经济池与全席位配置；无法确认该 host 的插件支持清理，本次同步不删除，升级后再同步会清理。",
+  retiredPresetSyncProbePending:
+    "偏好里仍有旧的经济池与全席位配置；正在检查该 host 是否会在同步时清理。",
+  maxMembers: "成员上限",
+  maxMembersTitle: "成员上限设置",
+  maxMembersIntro: "只保存到本 host 的插件偏好；每次启动最多创建这么多成员。",
+  maxMembersHint: "1–64；协调者不占成员席位。",
+  maxMembersInvalid: "成员上限必须是 1–64 的整数。",
+  maxMembersLegacy: (value: number) =>
     `当前保存值为 ${value}，超过本版运行上限 64；未修改时原样保留，运行时按 64 截断。`,
-  economyPoolLoading: "正在读取经济池…",
-  economyPoolLoadFail: "无法读取偏好。",
-  economyPoolSaveFail: "无法保存经济池。",
-  economyPoolSaveConflict: "偏好已被其他窗口更新，请重试。",
-  economyPoolConflictBody:
-    "其他窗口已修改经济池或成员上限。覆盖保存会以打开时的经济池为基础，可能丢弃对方新增的未知字段；也可重新加载最新值后再编辑。",
-  economyPoolOverwrite: "覆盖保存",
-  economyPoolReload: "重新加载",
-  economyPoolSaved: "经济池已保存。",
-  economyPoolRetry: "重试",
-  economyPoolOrderEmpty: "池中没有可排序的 Profile。",
+  maxMembersLoading: "正在读取偏好…",
+  maxMembersLoadFail: "无法读取偏好。",
+  maxMembersSaveFail: "无法保存成员上限。",
+  maxMembersSaveConflict: "偏好已被其他窗口更新，未保存。",
+  maxMembersReloadHint: "请关闭后重新打开，读取最新值再编辑。",
+  maxMembersConflictBody:
+    "其他窗口已修改偏好。覆盖保存会以打开时的内容为基础；也可重新加载最新值后再编辑。",
+  maxMembersOverwrite: "覆盖保存",
+  maxMembersReload: "重新加载",
+  maxMembersSaved: "成员上限已保存。",
+  maxMembersRetry: "重试",
 
-  // 组队模式：规划、预览与启动闸门
+  // 规划、预览与启动闸门
   design: designZh,
   designGap: designGapZh,
   launchContract: launchContractZh,
-  modePlan: modePlanZh,
   teamPlan: teamPlanZh,
-  modes: {
-    ...launchModeZh,
-    ...modesZh,
-  },
+  modes: launchModeZh,
 } as const;

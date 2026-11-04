@@ -5,26 +5,21 @@ import type { Preferences } from "../schemas/preferences";
 import type { Role } from "../schemas/role";
 import type { Team } from "../schemas/team";
 import type { TeamMode } from "../schemas/team-mode";
-import {
-  MODE_CONTRACT_VERSION,
-  type ModeContractVersion,
-  modeMinContract,
-  requestContractVersion,
-} from "./mode-contract";
+import { checkModeAccess, MODE_CONTRACT_VERSION, type ModeContractVersion } from "./mode-contract";
 import type { HostSnapshot, ProfileSelection } from "./mode-resolver";
 import type { ModeIssue } from "./role-execution";
 
 /**
- * The only seam to 5A's mode-aware planning. This module stays pure: it defines the port and its
- * result aggregate, while server/designer/planning.ts supplies the production adapter.
+ * The only seam to the Team planner. This module stays pure: it defines the port and its result
+ * aggregate, while server/designer/planning.ts supplies the production adapter.
  *
- * T2's HostSnapshot and ProfileSelection are imported from mode-resolver. `host` is required so a
+ * HostSnapshot and ProfileSelection are imported from mode-resolver. `host` is required so a
  * failed Profile/availability query can never be flattened into empty arrays and mistaken for a
  * healthy host; the adapter returns `{status:"unavailable"}` and the planner reports
  * MODE_CONTEXT_UNAVAILABLE, which G2 maps to DESIGN_CONFIG_UNAVAILABLE.
  *
- * The production adapter calls T3's buildSeatPlan and T4's toModeLaunchPreview directly; no
- * selection algorithm is duplicated in this file.
+ * The production adapter calls buildSeatPlan and toModeLaunchPreview directly; no selection
+ * algorithm is duplicated in this file.
  */
 export type DesignPlanningCapabilities = {
   onDemand: boolean;
@@ -39,19 +34,16 @@ export type DesignPlanningInput = {
   host: HostSnapshot;
   preferences: Preferences;
   daemonConfig: unknown;
-  mode: TeamMode;
   workspaceId: string;
   request: string;
 };
 
 /**
- * Profile IDs the planner expects for one logical seat, in candidate order. A standby selection
- * is not creatable yet and contributes none, which is why a DesignProfileChoice may carry an empty
- * profileIds array for that seat. G2 uses this for memberReasons.expectedProfileIds and G4 uses it
- * for the per-seat preview.
+ * Profile IDs the planner expects for one logical seat, in candidate order. G2 uses this for
+ * memberReasons.expectedProfileIds and G4 uses it for the per-seat preview.
  */
 export function availableProfileIds(selections: readonly ProfileSelection[]): string[] {
-  return selections.flatMap((selection) => (selection.unavailable ? [] : [selection.profile.id]));
+  return selections.map((selection) => selection.profile.id);
 }
 
 /**
@@ -80,39 +72,33 @@ export type DesignModeAccess =
   | { ok: true }
   | {
       ok: false;
-      reason: "contract-required";
+      reason: "retired";
       /** The requested mode, so the caller can report it verbatim. */
       value: TeamMode;
-      /** The contract the request must declare to carry this mode. */
       contractVersion: ModeContractVersion;
     };
 
 /**
- * Access check for a design request: a mode introduced in contract 2 requires the caller to say
- * so explicitly (an absent or `1` contract is legacy). Unknown mode strings are rejected by the
- * RPC schema before this point, so the only decision here is the contract one. The service maps a
- * denial to DESIGN_MODE_UNAVAILABLE (C03); this is not D01's launch/Team-side `checkModeAccess`.
+ * Access check for a design request. The mode is retired: an absent value or `sota` runs and the
+ * mode is otherwise ignored; any other mode is refused. Unknown mode strings are rejected by the
+ * RPC schema before this point. The service maps a denial to DESIGN_MODE_UNAVAILABLE.
  */
 export function designModeAccess(input: {
   mode: TeamMode;
   contractVersion?: number;
 }): DesignModeAccess {
-  const contractVersion = requestContractVersion(input);
-  if (modeMinContract(input.mode) > contractVersion) {
-    return {
-      ok: false,
-      reason: "contract-required",
-      value: input.mode,
-      contractVersion: MODE_CONTRACT_VERSION,
-    };
-  }
-  return { ok: true };
+  if (checkModeAccess({ requestedMode: input.mode }).ok) return { ok: true };
+  return {
+    ok: false,
+    reason: "retired",
+    value: input.mode,
+    contractVersion: MODE_CONTRACT_VERSION,
+  };
 }
 
 /**
- * Aggregates the mode issues with the launch warnings/blockers already produced by 5A. It does not
- * replace T1's Result: per-Role resolution still returns Result<RoleExecutionPolicy, ModeIssue[]>
- * and callers must check its `ok` before building this aggregate.
+ * Aggregates the planning issues with the launch warnings/blockers already produced by the Team
+ * planner. Callers must check the per-seat resolution `ok` before building this aggregate.
  *
  * A failed check never carries a fabricated preview; G2 only materializes when `ok` is true. An
  * unavailable HostSnapshot surfaces as MODE_CONTEXT_UNAVAILABLE in `issues` on the failure branch.

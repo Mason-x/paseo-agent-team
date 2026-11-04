@@ -1,8 +1,16 @@
+import { omitRetired } from "../../shared/domain/retired-fields";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import type { ProfileRef } from "../../shared/schemas/profile-ref";
 import { type Role, RoleSchema } from "../../shared/schemas/role";
 import { type Team, TeamSchema } from "../../shared/schemas/team";
 import { createSeatId } from "../teams/team-mode-edit";
+
+/**
+ * `retireLegacyFields` is true only when the TARGET host's capability probe said it no longer reads
+ * the retired keys (.notes/274 E2, see ./retirement.ts). Every other case writes the object back the
+ * way the earlier version would have, so a host that still reads those keys keeps them.
+ */
+export type RetireOptions = { retireLegacyFields?: boolean };
 
 /** Fields the Role editor owns; everything else on a stored Role is metadata or an extension. */
 const ROLE_FORM_FIELDS: Record<string, true> = {
@@ -14,7 +22,6 @@ const ROLE_FORM_FIELDS: Record<string, true> = {
   restrictions: true,
   systemPrompt: true,
   outputContract: true,
-  executionPolicy: true,
   preferredProfiles: true,
   fallbackProfiles: true,
   mcpServers: true,
@@ -30,9 +37,7 @@ const TEAM_FORM_FIELDS: Record<string, true> = {
   id: true,
   name: true,
   description: true,
-  mode: true,
   memberCreation: true,
-  collaboration: true,
   coordinatorRoleId: true,
   members: true,
   operatingRules: true,
@@ -41,53 +46,53 @@ const TEAM_FORM_FIELDS: Record<string, true> = {
   updatedAt: true,
 };
 
-/** Keep source/preset/designer and unknown top-level keys while the form's own fields win. */
-export function keepRoleMetadata(original: Role | null, next: Role): Role {
+/**
+ * Keep source/preset/designer and unknown top-level keys while the form's own fields win. The
+ * retired `executionPolicy` is no longer a form field, so it rides along with the other extensions
+ * and is dropped here, from this Role only, when the target host retires it.
+ */
+export function keepRoleMetadata(
+  original: Role | null,
+  next: Role,
+  options: RetireOptions = {},
+): Role {
   if (!original) return next;
   const extensions = Object.fromEntries(
     Object.entries(original).filter(([key]) => !ROLE_FORM_FIELDS[key]),
   );
-  return RoleSchema.parse({ ...extensions, ...next });
+  const merged = { ...extensions, ...next };
+  return RoleSchema.parse(
+    options.retireLegacyFields === true ? omitRetired("role", merged) : merged,
+  );
 }
 
-/** Keep unknown policy fields while applying only the two fields this editor exposes. */
-export type RolePolicyEdit = {
-  tier: string;
-  taskKind: string;
-  tierTouched: boolean;
-  taskKindTouched: boolean;
-};
-
-/** Keep unknown policy fields while writing only the two fields the user actually edited. */
-export function mergeRoleExecutionPolicy(
-  original: Role["executionPolicy"] | undefined,
-  edit: RolePolicyEdit,
-): Role["executionPolicy"] | undefined {
-  const next: Record<string, unknown> =
-    original && typeof original === "object" ? { ...original } : {};
-  if (edit.tierTouched) {
-    if (edit.tier) next.tier = edit.tier;
-    else delete next.tier;
-  }
-  if (edit.taskKindTouched) {
-    if (edit.taskKind) next.taskKind = edit.taskKind;
-    else delete next.taskKind;
-  }
-  return Object.keys(next).length > 0 ? next : undefined;
-}
-
-export function keepTeamMetadata(original: Team | null, next: Team): Team {
+/** Same rule for a Team: `mode` and `collaboration` are extensions now, dropped only on a retiring host. */
+export function keepTeamMetadata(
+  original: Team | null,
+  next: Team,
+  options: RetireOptions = {},
+): Team {
   if (!original) return next;
   const extensions = Object.fromEntries(
     Object.entries(original).filter(([key]) => !TEAM_FORM_FIELDS[key]),
   );
-  return TeamSchema.parse({ ...extensions, ...next });
+  const merged = { ...extensions, ...next };
+  return TeamSchema.parse(
+    options.retireLegacyFields === true ? omitRetired("team", merged) : merged,
+  );
 }
 
 /** A copy is user-owned: it must not claim a preset origin or another Team's designer job. */
-export function copyRole(role: Role, id: string, name: string, now: string): Role {
+export function copyRole(
+  role: Role,
+  id: string,
+  name: string,
+  now: string,
+  options: RetireOptions = {},
+): Role {
   const { source: _source, preset: _preset, designer: _designer, ...rest } = role;
-  return RoleSchema.parse({ ...rest, id, name, createdAt: now, updatedAt: now });
+  const copy = { ...rest, id, name, createdAt: now, updatedAt: now };
+  return RoleSchema.parse(options.retireLegacyFields === true ? omitRetired("role", copy) : copy);
 }
 
 export function copyTeam(
@@ -95,7 +100,7 @@ export function copyTeam(
   id: string,
   name: string,
   now: string,
-  options: { nowMs?: number; random?: () => number } = {},
+  options: RetireOptions & { nowMs?: number; random?: () => number } = {},
 ): Team {
   const { source: _source, preset: _preset, designer: _designer, ...rest } = team;
   const parsedNow = Date.parse(now);
@@ -107,14 +112,8 @@ export function copyTeam(
     seats.add(seatId);
     return { ...member, seatId };
   });
-  return TeamSchema.parse({
-    ...rest,
-    members,
-    id,
-    name,
-    createdAt: now,
-    updatedAt: now,
-  });
+  const copy = { ...rest, members, id, name, createdAt: now, updatedAt: now };
+  return TeamSchema.parse(options.retireLegacyFields === true ? omitRetired("team", copy) : copy);
 }
 
 /** A newly picked Profile reference carries no hint; only an untouched stored reference keeps one. */

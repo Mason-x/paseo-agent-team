@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import {
   isPlanChanged,
   launchGate,
-  launchPreviewCacheKey,
   launchPreviewIdentity,
   launchPreviewQueryKey,
   launchSeatStatus,
@@ -13,10 +12,9 @@ import {
   previewWarnings,
   startFailureAction,
 } from "../client/launch/launch-preview-state";
-import { formatLaunchBudget } from "../client/shared/budget-format";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
 import { toModeLaunchPreview } from "../shared/domain/launch-preview";
-import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
+import type { HostSnapshot } from "../shared/domain/mode-resolver";
 import type { LaunchTarget } from "../shared/rpc";
 import {
   type LaunchPreviewResult,
@@ -39,7 +37,6 @@ const input = {
   teamId: "team-1",
   task: "  ship it  ",
   target,
-  savedMode: "economy",
 };
 
 const preview = ModeLaunchPreviewSchema.parse({
@@ -103,7 +100,7 @@ function gate(overrides: Partial<Parameters<typeof launchGate>[0]> = {}) {
 }
 
 describe("launch preview identity", () => {
-  test("query key includes host, Team, trimmed task, target, and saved mode", () => {
+  test("query key includes host, Team, trimmed task, and target", () => {
     expect(launchPreviewQueryKey(input)).toEqual([
       "agent-team",
       "launch-preview",
@@ -111,7 +108,6 @@ describe("launch preview identity", () => {
       "team-1",
       "ship it",
       target,
-      "economy",
     ]);
   });
 
@@ -119,27 +115,24 @@ describe("launch preview identity", () => {
     expect(launchPreviewIdentity({ ...input, task: "ship it" })).toBe(launchPreviewIdentity(input));
   });
 
-  test("a probe upgrade changes the key once and invalidates the old preview", () => {
-    const unknownKey = JSON.stringify(launchPreviewCacheKey(input, "unknown"));
-    const v2Key = JSON.stringify(launchPreviewCacheKey(input, "v2"));
-    // One key before and one after: React Query refetches once and never starts a launch.
-    expect(new Set([unknownKey, v2Key]).size).toBe(2);
-    expect(gate({ previewIdentity: unknownKey, currentIdentity: v2Key })).toEqual({
-      disabled: true,
-      reason: zh.modes.previewPending,
-    });
-  });
-
-  test("task, target, and saved-mode changes all create a new identity", () => {
+  test("a change of host, Team, task, or target invalidates the old preview", () => {
     const base = launchPreviewIdentity(input);
-    expect(launchPreviewIdentity({ ...input, task: "ship it now" })).not.toBe(base);
-    expect(
+    const changed = [
+      launchPreviewIdentity({ ...input, hostId: "host-2" }),
+      launchPreviewIdentity({ ...input, teamId: "team-2" }),
+      launchPreviewIdentity({ ...input, task: "ship it now" }),
       launchPreviewIdentity({
         ...input,
         target: { kind: "new-workspace", projectId: "project-1" },
       }),
-    ).not.toBe(base);
-    expect(launchPreviewIdentity({ ...input, savedMode: "sota" })).not.toBe(base);
+    ];
+    for (const currentIdentity of changed) {
+      expect(currentIdentity).not.toBe(base);
+      expect(gate({ previewIdentity: base, currentIdentity })).toEqual({
+        disabled: true,
+        reason: zh.modes.previewPending,
+      });
+    }
   });
 });
 
@@ -259,23 +252,10 @@ describe("preview lists and plan changes", () => {
     expect(startFailureAction(["other"])).toBe("show-blockers");
   });
 
-  test("standby never hides an on-demand activation label", () => {
-    expect(launchSeatStatus({ activation: "on-demand", standby: true })).toBe(
-      `${zh.modes.activationOnDemand} · ${zh.modes.standby}`,
-    );
-    expect(launchSeatStatus({ activation: "escalation-only", standby: true })).toBe(
-      zh.modes.activationEscalationOnly,
-    );
-    expect(launchSeatStatus({ activation: "eager", standby: false })).toBe(
-      zh.modes.activationEager,
-    );
-  });
-
-  test("formats budget and basis with the F2 wording", () => {
-    expect(formatLaunchBudget("economy", "pool")).toBe("经济 · 经济池");
-    expect(formatLaunchBudget("sota", "host")).toBe("SOTA · 宿主标签");
-    expect(formatLaunchBudget("unknown", "conservative-default")).toBe("未核实 · 保守默认");
-    expect(formatLaunchBudget(undefined, undefined)).toBe(zh.modes.budgetValueUnknown);
+  test("shows active seat labels and preserves a historical activation value", () => {
+    expect(launchSeatStatus({ activation: "on-demand" })).toBe(zh.modes.activationOnDemand);
+    expect(launchSeatStatus({ activation: "eager" })).toBe(zh.modes.activationEager);
+    expect(launchSeatStatus({ activation: "escalation-only" })).toBe("escalation-only");
   });
 
   test("maps common issue codes and falls back to the raw code", () => {
@@ -285,7 +265,7 @@ describe("preview lists and plan changes", () => {
         severity: "warning",
         params: { provider: "omp" },
       }),
-    ).toBe(zh.modes.poolUnavailable("omp"));
+    ).toBe(zh.modes.unknownFallback("MODE_POOL_UNAVAILABLE"));
     expect(
       modeIssueText({ code: "MODE_LIMIT_CLAMPED", severity: "warning", params: { limit: 8 } }),
     ).toBe(zh.modes.limitClamped(8));
@@ -307,7 +287,6 @@ const host: HostSnapshot = {
   profiles: [claudeOpus, codexXhigh],
   availability: allAvailable,
 };
-const economy: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 
 function realPreviewOf(
   team: typeof codingTeam,
@@ -322,10 +301,8 @@ function realPreviewOf(
     task: "Add Stripe",
     runId: "preview",
     maxMembers: 24,
-    mode: "sota",
     host,
-    economy,
     runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
   });
-  return { plan, preview: toModeLaunchPreview(plan, "hash", [], economy) };
+  return { plan, preview: toModeLaunchPreview(plan, "hash") };
 }

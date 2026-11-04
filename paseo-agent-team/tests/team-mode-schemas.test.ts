@@ -1,15 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { draftFromStored, mergeEconomyPreferences } from "../client/settings/economy-pool";
+import { omitRetired } from "../shared/domain/retired-fields";
 import { PreferencesSchema } from "../shared/schemas/preferences";
 import { RoleSchema } from "../shared/schemas/role";
 import { TeamSchema } from "../shared/schemas/team";
 import {
-  ALL_SEATS_POLICY_VERSION,
-  ALL_SEATS_WRITER_LIMIT,
-  AllSeatsRouteSchema,
   RoleTierSchema,
-  StoredAllSeatsEntrySchema,
-  StoredAllSeatsPolicySchema,
   StoredEconomyPolicySchema,
   TaskKindSchema,
   TeamModeSchema,
@@ -147,7 +142,7 @@ describe("team mode storage schemas", () => {
     expect(TeamSchema.safeParse({ ...baseTeam, members: [] }).success).toBe(false);
   });
 
-  test("writing economy keeps every other preference and preset field", () => {
+  test("reading economy keeps every other preference and preset field", () => {
     const parsed = PreferencesSchema.parse({
       maxMembers: 12,
       archiveOnLaunchFailure: false,
@@ -183,7 +178,7 @@ describe("team mode storage schemas", () => {
     expect(parsed.recentRuns).toHaveLength(1);
   });
 
-  test("invalid nested values are preserved for the normalizer instead of being dropped", () => {
+  test("invalid nested legacy values are preserved instead of being dropped", () => {
     const economy = {
       pool: [{ profileId: 5 }, "bad", { profileId: "profile-1", family: 7, enabled: "yes" }],
       taskOrder: { coding: "not-an-array" },
@@ -226,7 +221,7 @@ describe("team mode storage schemas", () => {
 
 describe("economy-all storage (H4=A: stable values, no migration)", () => {
   const allSeats = {
-    version: ALL_SEATS_POLICY_VERSION,
+    version: 1,
     profiles: [
       {
         profileId: "sonnet",
@@ -268,53 +263,37 @@ describe("economy-all storage (H4=A: stable values, no migration)", () => {
         recentRuns: [],
         economy: { pool: [], allSeats: value, futurePolicy: true },
       });
-      // Only economy-all reads allSeats: a damaged block never invalidates Preferences.
+      // A damaged retired block never invalidates unrelated Preferences.
       expect(preferences.maxMembers).toBe(12);
       expect(preferences.economy).toEqual({ pool: [], allSeats: value, futurePolicy: true });
     }
   });
 
-  test("the reader shape keeps unknown fields and leaves validation to planning", () => {
-    expect(StoredAllSeatsPolicySchema.parse({ version: 9, extra: { kept: true } })).toEqual({
-      version: 9,
-      extra: { kept: true },
-    });
-    expect(StoredAllSeatsPolicySchema.safeParse("broken").success).toBe(false);
+  test("the retired reader keeps allSeats and unknown fields without validating them", () => {
+    const stored = { allSeats: { version: 9, extra: { kept: true } }, extension: "keep" };
+    expect(StoredEconomyPolicySchema.parse(stored)).toEqual(stored);
     expect(StoredEconomyPolicySchema.parse({ allSeats: "broken" })).toEqual({
       allSeats: "broken",
     });
   });
 
-  test("the writer entry is strictly cheap with a verified provider/model tuple", () => {
+  test("damaged retired entries decode without restricting unrelated settings", () => {
     const entry = allSeats.profiles[0];
-    expect(StoredAllSeatsEntrySchema.parse({ ...entry, future: 1 })).toEqual({
-      ...entry,
-      future: 1,
-    });
-    for (const invalid of [
+    for (const stored of [
       { ...entry, costClass: "economy" },
-      { ...entry, costClass: undefined },
       { ...entry, enabled: "yes" },
       { ...entry, family: "" },
       { ...entry, boundModel: { provider: "claude" } },
-      { ...entry, boundModel: { provider: "claude", model: "" } },
       { ...entry, profileId: "" },
     ]) {
-      expect(StoredAllSeatsEntrySchema.safeParse(invalid).success).toBe(false);
+      const economy = { allSeats: { ...allSeats, profiles: [stored] } };
+      const result = PreferencesSchema.parse({ maxMembers: 12, economy });
+      expect(result.maxMembers).toBe(12);
+      expect(result.economy).toEqual(economy);
     }
-    expect(AllSeatsRouteSchema.options).toEqual([
-      "coordinator",
-      "decision",
-      "execution",
-      "escalation",
-      "retain",
-    ]);
-    expect(AllSeatsRouteSchema.safeParse("review").success).toBe(false);
-    expect(ALL_SEATS_POLICY_VERSION).toBe(1);
-    expect(ALL_SEATS_WRITER_LIMIT).toBe(32);
   });
 
-  test("a standard-pool save keeps allSeats and every other economy field verbatim", () => {
+  test("retirement keeps other preferences and the untouched input verbatim", () => {
     const stored = {
       pool: [{ profileId: "deepseek", family: "deepseek", enabled: true }],
       taskOrder: { coding: ["deepseek"] },
@@ -327,10 +306,11 @@ describe("economy-all storage (H4=A: stable values, no migration)", () => {
       designerProfile: { profileId: "designer" },
       economy: stored,
     });
-    const saved = mergeEconomyPreferences(current, draftFromStored(current.economy), []);
-    expect(saved.economy?.allSeats).toEqual(stored.allSeats);
-    expect(saved.economy).toMatchObject({ futurePolicy: { kept: true } });
+    const saved = omitRetired("preferences", current);
+    expect(saved).not.toHaveProperty("economy");
+    expect(saved.maxMembers).toBe(8);
     expect(saved.designerProfile).toEqual({ profileId: "designer" });
+    expect(current.economy).toEqual(stored);
   });
 
   test("no settings document changes version: nothing migrates on read", () => {

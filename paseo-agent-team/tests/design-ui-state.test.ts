@@ -3,7 +3,6 @@ import {
   buildDesignCoordinatorRow,
   buildDesignSeatRows,
   type DesignResultViewInput,
-  formatDesignBudget,
   openDesignAgent,
   planDesignLaunch,
   resolveDesignJobCardSections,
@@ -197,7 +196,7 @@ describe("permissions navigate only", () => {
 });
 
 describe("result seats", () => {
-  test("every physical seat is visible with purpose, activation, profile, and budget", () => {
+  test("every physical seat is visible, including historical unknown labels", () => {
     const previewValue = preview({
       seats: [
         seat({
@@ -253,31 +252,26 @@ describe("result seats", () => {
       purposeLabel: designZh.seatPurposes.member,
       activationLabel: designZh.seatActivations.eager,
       profileLabel: "Codex xhigh",
-      budgetLabel: "经济 · 经济池",
-      sourceLabel: designZh.sources["economy-pool"],
-      familyLabel: "openai",
+      sourceLabel: "economy-pool",
     });
     expect(rows[1]).toMatchObject({
       roleId: "architect",
-      purposeLabel: designZh.seatPurposes.candidate,
+      purposeLabel: "candidate",
       activationLabel: designZh.seatActivations["on-demand"],
-      budgetLabel: "SOTA · 宿主标签",
     });
     expect(rows[2]).toMatchObject({
-      purposeLabel: designZh.seatPurposes.judge,
-      budgetLabel: "未核实 · 保守默认",
+      purposeLabel: "judge",
     });
     expect(rows[3]).toMatchObject({
-      purposeLabel: designZh.seatPurposes.escalation,
-      activationLabel: designZh.seatActivations["escalation-only"],
+      purposeLabel: "escalation",
+      activationLabel: "escalation-only",
       profileLabel: "Claude Opus",
-      standby: true,
       unavailable: false,
     });
     expect(rows[3]?.profileLabel).not.toBe(designZh.resultSeatUnavailable);
   });
 
-  test("a standby seat without a Profile is the only unavailable case", () => {
+  test("a historical seat without a Profile is shown as unavailable", () => {
     const previewValue = preview({
       seats: [
         seat({
@@ -300,13 +294,12 @@ describe("result seats", () => {
       newRoles: base.newRoles,
     });
     expect(row).toMatchObject({
-      standby: true,
       unavailable: true,
       profileLabel: designZh.resultSeatUnavailable,
     });
   });
 
-  test("cohorts and the coordinator reason are carried into the rows", () => {
+  test("seat and coordinator reasons are carried into the rows", () => {
     const previewValue = preview({
       seats: [
         seat({
@@ -323,7 +316,6 @@ describe("result seats", () => {
       memberReasons: base.memberReasons,
       newRoles: base.newRoles,
     });
-    expect(row?.cohortId).toBe("cohort-1");
     expect(row?.reasonLabel).toBe("结构设计需要代码理解。");
 
     const coordinator = buildDesignCoordinatorRow({
@@ -341,16 +333,8 @@ describe("result seats", () => {
       roleLabel: "Tech Lead",
       profileLabel: "Claude Opus",
       runtimeLabel: "claude/opus",
-      budgetLabel: "SOTA · 宿主标签",
       reasonLabel: "统筹",
     });
-  });
-
-  test("budgets keep the host, pool, and conservative-default basis", () => {
-    expect(formatDesignBudget("economy", "pool")).toBe("经济 · 经济池");
-    expect(formatDesignBudget("sota", "host")).toBe("SOTA · 宿主标签");
-    expect(formatDesignBudget("unknown", "conservative-default")).toBe("未核实 · 保守默认");
-    expect(formatDesignBudget(undefined)).toBe("未核实");
   });
 
   test("T4 counts are shown unchanged and marked as excluding the coordinator", () => {

@@ -6,11 +6,7 @@ import { formatDesignIssue } from "../../shared/domain/design-output";
 import type { DesignJob } from "../../shared/schemas/design";
 import { designZh } from "../../shared/zh/design";
 import type { PluginTheme } from "../shared/theme";
-import {
-  type DesignGapConfigureEconomy,
-  type DesignGapOpenRole,
-  DesignRoleGapCard,
-} from "./DesignRoleGapCard";
+import { type DesignGapOpenRole, DesignRoleGapCard } from "./DesignRoleGapCard";
 import {
   openDesignAgent,
   resolveDesignJobCardSections,
@@ -35,7 +31,6 @@ export type DesignJobCardProps = {
   gapRetryBusy?: boolean;
   gapRetryNotice?: string | null;
   onOpenRole?: (target: DesignGapOpenRole) => void;
-  onConfigureEconomy?: (target: DesignGapConfigureEconomy) => void;
   onCreateRole?: () => void;
 };
 
@@ -99,7 +94,6 @@ export function DesignJobCard({
   gapRetryBusy = false,
   gapRetryNotice,
   onOpenRole,
-  onConfigureEconomy,
   onCreateRole,
 }: DesignJobCardProps) {
   const [collapsed, setCollapsed] = useState(false);
@@ -186,7 +180,6 @@ export function DesignJobCard({
       </Pressable>
       <View style={[styles.body, !sections.showBody && styles.hidden]}>
         <View style={styles.meta}>
-          <Text style={styles.muted}>{designZh.jobModeValue(view.modeLabel)}</Text>
           <Text style={styles.muted}>{view.rulesLabel}</Text>
           {view.designerProfileLabel ? (
             <Text style={styles.muted}>
@@ -256,7 +249,6 @@ export function DesignJobCard({
             gaps={view.gaps}
             rulesLabel={view.rulesLabel}
             onOpenRole={onOpenRole}
-            onConfigureEconomy={onConfigureEconomy}
             onCreateRole={onCreateRole}
             onRetry={onGapRetry ? () => onGapRetry(job) : undefined}
             retryBusy={gapRetryBusy}

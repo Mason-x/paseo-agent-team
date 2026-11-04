@@ -135,23 +135,23 @@ describe("default preset diff and selected merge", () => {
         updatedAt: NOW,
       };
     });
-    expect(unmarked).toHaveLength(13);
+    expect(unmarked).toHaveLength(14);
     expect(unmarked.every((entry) => entry.executionPolicy === undefined)).toBe(true);
     const rows = diff(unmarked);
-    expect(rows).toHaveLength(13);
+    expect(rows).toHaveLength(14);
     expect(rows.every((row) => row.kind === "same")).toBe(true);
     expect(rows.every((row) => row.defaultAction === "keep")).toBe(true);
     expect(rows.every((row) => row.changedFields.length === 0 && !row.locallyChanged)).toBe(true);
 
-    // A tier the user explicitly changed is still a real content difference.
+    // Retired tier data never changes preset classification.
     const retiered = unmarked.map((entry, index) =>
       index === 0 ? { ...entry, executionPolicy: { tier: "retain", taskKind: "general" } } : entry,
     );
     expect(diff(retiered, [retiered[0].id])[0]).toMatchObject({
-      kind: "changed",
-      changedFields: ["executionPolicy"],
+      kind: "same",
+      changedFields: [],
       defaultAction: "keep",
-      locallyChanged: true,
+      locallyChanged: false,
     });
     expect(
       diff(retiered, [retiered[0].id])
@@ -159,7 +159,7 @@ describe("default preset diff and selected merge", () => {
         .every((row) => row.kind === "same"),
     ).toBe(true);
 
-    // A partial block inherits the missing field from the known-id default before comparing.
+    // Partial retired policy blocks are ignored too.
     const partial = unmarked.map((entry, index) =>
       index === 0 ? { ...entry, executionPolicy: { tier: "decision" } } : entry,
     );
@@ -295,7 +295,7 @@ describe("default preset diff and selected merge", () => {
     expect(result.roles).toEqual([expect.objectContaining({ id: candidates[0].id })]);
   });
 
-  test("default selection appends only the 8 missing presets; all 8 existing Roles are byte-identical", () => {
+  test("default selection appends only the 9 missing presets; all 8 existing Roles are byte-identical", () => {
     const current = [
       ...originals
         .slice(0, 5)
@@ -308,7 +308,7 @@ describe("default preset diff and selected merge", () => {
     ];
     const snapshots = current.map((entry) => JSON.stringify(entry));
     const result = apply(current, diff(current));
-    expect(result).toHaveLength(16);
+    expect(result).toHaveLength(17);
     expect(result.slice(0, current.length).map((entry) => JSON.stringify(entry))).toEqual(
       snapshots,
     );

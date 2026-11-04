@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import type { DesignModeRouting } from "../server/designer/context";
 import {
   bindDesignerProfile,
   DESIGNER_PROFILE_HINTS,
@@ -27,6 +26,12 @@ import { type DesignIssue, DesignProposalSchema } from "../shared/schemas/design
 import { expectedRoleContent, sourceProfiles } from "./default-presets.fixtures";
 
 const SOURCE_RECIPES = [
+  {
+    id: "default",
+    name: "默认研发团队",
+    coordinatorRoleId: "lead-owner",
+    members: ["eng-fullstack", "research-codebase", "qa-test", "qa-review"],
+  },
   {
     id: "feature",
     name: "功能开发",
@@ -132,8 +137,6 @@ function role(
     fallbackProfileIds: [],
     launchable: true,
     unavailableProfileIds: [],
-    tier: "execution",
-    taskKind: "coding",
     ...overrides,
   };
 }
@@ -148,23 +151,18 @@ function profile(index: number, notes?: string): DesignPromptProfileSummary {
     thinkingOptionId: "high",
     available: true,
     notes,
-    family: "claude",
-    budget: "sota",
-    budgetBasis: "host",
   };
 }
 
 function context(overrides: Partial<DesignPromptContext> = {}): DesignPromptContext {
   return {
     request: "设计一个功能开发团队",
-    requestedMode: "economy",
     runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
     maxMembers: 8,
     target: { id: "workspace-target", name: "目标", path: "/work/target" },
     carrierWorkspaceId: "workspace-carrier",
     roles: [role(1)],
     profiles: [profile(1, "普通说明")],
-    economy: { pool: [{ profileId: "profile-1", family: "claude", enabled: true }], taskOrder: {} },
     occupiedRoleIds: ["role-1"],
     occupiedRoleNames: ["角色1"],
     occupiedTeams: [{ id: "team-1", name: "已有团队" }],
@@ -246,8 +244,6 @@ function devCatalog(): {
         preferredProfileIds: entry.preferredProfiles?.map((ref) => ref.profileId) ?? ["profile-1"],
         fallbackProfileIds: entry.fallbackProfiles?.map((ref) => ref.profileId) ?? [],
         launchable: true,
-        tier: entry.executionPolicy?.tier ?? "execution",
-        taskKind: entry.executionPolicy?.taskKind ?? "general",
       }),
     ),
     teams: backup.teams.teams.map((entry) => ({ id: entry.id, name: entry.name })),
@@ -268,9 +264,9 @@ describe("v1 prompt golden snapshot", () => {
     const result = kickoff();
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.utf8Bytes).toBe(9140);
+    expect(result.utf8Bytes).toBe(8935);
     expect(goldenSha(result.text)).toBe(
-      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+      "be6b5c9e32bf9cd2e1fd401465fe8dd45e092473c10b9c0a4b26de3fe05bf299",
     );
   });
 
@@ -285,9 +281,9 @@ describe("v1 prompt golden snapshot", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.utf8Bytes).toBe(29384);
+    expect(result.utf8Bytes).toBe(29095);
     expect(goldenSha(result.text)).toBe(
-      "f05f00a4c499a780dd55411da07fe2268628d52dfd53bcb1857f353839dc1cf6",
+      "35bf77ae6ee49ec49fb2d8a76e6289b9882fcd9c90b095af5533cdfb01330a84",
     );
   });
 
@@ -295,9 +291,9 @@ describe("v1 prompt golden snapshot", () => {
     const result = realisticCorrection(realisticCorrectionContext());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.utf8Bytes).toBe(4202);
+    expect(result.utf8Bytes).toBe(3737);
     expect(goldenSha(result.text)).toBe(
-      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+      "46c613e7b7f2d1c76c726f47c0bec815fb2e7e5f82ef4af388f2d4b8b0fad2e9",
     );
   });
 
@@ -306,18 +302,6 @@ describe("v1 prompt golden snapshot", () => {
       realisticCorrectionContext({
         outputContractVersion: 1,
         existingRolesOnly: true,
-        modeRouting: {
-          status: "ready",
-          routes: [
-            {
-              route: "execution",
-              taskKind: "coding",
-              candidates: [
-                { profileId: "profile-1", family: "claude", eligible: true, reported: false },
-              ],
-            },
-          ],
-        },
         roles: [
           role(0, {
             launchVerified: false,
@@ -331,9 +315,9 @@ describe("v1 prompt golden snapshot", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.text).not.toContain("上一轮是角色缺口");
-    expect(result.utf8Bytes).toBe(4202);
+    expect(result.utf8Bytes).toBe(3737);
     expect(goldenSha(result.text)).toBe(
-      "37530d2956388b29fe063b9c6158769ad866bcc66a410ea1dca2f6114d819081",
+      "46c613e7b7f2d1c76c726f47c0bec815fb2e7e5f82ef4af388f2d4b8b0fad2e9",
     );
   });
 });
@@ -383,8 +367,8 @@ function realisticCorrection(
 }
 
 describe("team design recipes", () => {
-  test("copies all nine source lineups without inventing counts", () => {
-    expect(TEAM_DESIGN_RECIPES).toHaveLength(9);
+  test("copies all ten source lineups without inventing counts", () => {
+    expect(TEAM_DESIGN_RECIPES).toHaveLength(10);
     expect(TEAM_DESIGN_RECIPES.map((recipe) => recipe.id)).toEqual(
       SOURCE_RECIPES.map((recipe) => recipe.id),
     );
@@ -404,8 +388,9 @@ describe("team design recipes", () => {
         expect(member.maxInstances).toBe(count.maxInstances);
       }
     }
-    expect(TEAM_DESIGN_RECIPES[2]?.notes).toBe("批量开发 ×2–3，用实例标签区分，如 A / B");
-    expect(TEAM_DESIGN_RECIPES[8]?.notes).toBe("调研→开发→发布文案");
+    expect(TEAM_DESIGN_RECIPES[0].optionalRoleIds).toEqual(["eng-expert", "plan-architect"]);
+    expect(TEAM_DESIGN_RECIPES[3].notes).toBe("批量开发 ×2–3，用实例标签区分，如 A / B");
+    expect(TEAM_DESIGN_RECIPES[9].notes).toBe("调研→开发→发布文案");
   });
 });
 
@@ -434,43 +419,10 @@ describe("design output contract", () => {
     return JSON.parse(end < 0 ? rest : rest.slice(0, end));
   }
 
-  const ROUTING: DesignModeRouting = {
-    status: "ready",
-    routes: [
-      {
-        route: "coordinator",
-        taskKind: null,
-        candidates: [{ profileId: "profile-1", family: "claude", eligible: true, reported: false }],
-      },
-      {
-        route: "execution",
-        taskKind: "coding",
-        candidates: [
-          { profileId: "profile-1", family: "claude", eligible: true, reported: false },
-          {
-            profileId: "profile-2",
-            family: "deepseek",
-            eligible: false,
-            reason: "unverified",
-            reported: true,
-          },
-          {
-            profileId: "profile-3",
-            family: "grok",
-            eligible: false,
-            reason: "high-cost-family",
-            reported: true,
-          },
-        ],
-      },
-    ],
-  };
-
   test("v1 text ignores every v2 field and stays byte-identical", () => {
     const enriched = kickoff({
       outputContractVersion: 1,
       existingRolesOnly: true,
-      modeRouting: ROUTING,
       roles: [
         role(1, {
           coordinatorLaunchable: false,
@@ -480,8 +432,9 @@ describe("design output contract", () => {
       ],
     });
     const text = textOf(enriched);
+    expect(text).toBe(textOf(kickoff()));
     expect(goldenSha(text)).toBe(
-      "e9dd9ab133435a8496e33b08af967f6b9917e4acce67240051153eb2449ca7ba",
+      "be6b5c9e32bf9cd2e1fd401465fe8dd45e092473c10b9c0a4b26de3fe05bf299",
     );
   });
 
@@ -619,82 +572,13 @@ describe("design output contract", () => {
     expect(rendered).not.toContain("改报 missing-role");
   });
 
-  test("economy-all v2 renders the route summary and explains the remedy", () => {
-    const text = textOf(
-      kickoff({
-        outputContractVersion: 2,
-        existingRolesOnly: true,
-        requestedMode: "economy-all",
-        modeRouting: ROUTING,
-      }),
-    );
-    expect(text).toContain("## 经济：全席位路由");
-    expect(text).toContain("非 Role 绑定");
-    expect(text).toContain('"route":"execution"');
-    expect(text).toContain('"failedReasons":["unverified","high-cost-family"]');
-    expect(text).toContain('"failedIds":["profile-2","profile-3"]');
-    const v1 = textOf(kickoff({ outputContractVersion: 1, modeRouting: ROUTING }));
-    expect(v1).not.toContain("## 经济：全席位路由");
-  });
-
-  test("a missing or invalid cheap policy tells the model not to suggest Profiles", () => {
-    for (const modeRouting of [
-      { status: "absent" as const },
-      { status: "invalid" as const, reason: "unknown-version" },
-    ]) {
-      const text = textOf(
-        kickoff({
-          outputContractVersion: 2,
-          existingRolesOnly: true,
-          requestedMode: "economy-all",
-          modeRouting,
-        }),
-      );
-      expect(text).toContain("策略缺失或非法");
-      expect(text).toContain("只能 kind:none");
-      expect(text).toContain(`"status":"${modeRouting.status}"`);
+  test("the prompt excludes retired route and policy sections", () => {
+    for (const outputContractVersion of [1, 2] as const) {
+      const text = textOf(kickoff({ outputContractVersion, existingRolesOnly: true }));
+      expect(text).not.toContain("## 经济：全席位路由");
+      expect(text).not.toContain("route 摘要");
+      expect(text).not.toContain("策略缺失或非法");
     }
-  });
-
-  test("route summary caps eligible and failed ids", () => {
-    const many: DesignModeRouting = {
-      status: "ready",
-      routes: [
-        {
-          route: "retain",
-          taskKind: null,
-          candidates: [
-            ...Array.from({ length: 10 }, (_, index) => ({
-              profileId: `ok-${index}`,
-              family: "deepseek",
-              eligible: true,
-              reported: false,
-            })),
-            ...Array.from({ length: 6 }, (_, index) => ({
-              profileId: `bad-${index}`,
-              family: "grok",
-              eligible: false,
-              reason: "unverified" as const,
-              reported: true,
-            })),
-          ],
-        },
-      ],
-    };
-    const text = textOf(
-      kickoff({
-        outputContractVersion: 2,
-        existingRolesOnly: true,
-        requestedMode: "economy-all",
-        modeRouting: many,
-      }),
-    );
-    const payload = jsonBlockAt(text, "route 摘要") as {
-      routes: Array<Record<string, unknown>>;
-    };
-    expect(payload.routes[0]).toMatchObject({ failedCount: 6, omittedEligible: 2 });
-    expect(payload.routes[0]?.eligible).toHaveLength(8);
-    expect(payload.routes[0]?.failedIds).toHaveLength(5);
   });
 
   function realScaleContext(overrides: Partial<DesignPromptContext> = {}): DesignPromptContext {
@@ -723,12 +607,10 @@ describe("design output contract", () => {
     });
   }
 
-  test("both switches stay within the 30KiB target, including the 21-Role stress", () => {
-    // catalog / economy-all / 21-Role + 6000-char-notes stress; measured 24471/24667,
-    // 24941/25137 and 30575/30663 bytes (off/on, all <= 30720; stress-on compressed recipe notes).
+  test("both switches stay within the 30KiB target, including the 22-Role stress", () => {
+    // The current 14-Role catalog plus eight custom Roles and long Profile notes.
     const cases = [
       {},
-      { requestedMode: "economy-all" as const, modeRouting: ROUTING },
       { roles: realScaleRoles(), profiles: [profile(1, "说明".repeat(3000))] },
     ] as const;
     for (const overrides of cases) {
@@ -751,6 +633,18 @@ describe("design output contract", () => {
         expect(result.text).toContain(NONCE);
         expect(result.text.match(/identity 必须逐字复制/gu)).toHaveLength(2);
         expect(result.text).toContain("## 字段合同");
+        expect(result.text).toContain("按需专家不得默认加入");
+        const recipes = jsonBlockAt(result.text, "配方") as Array<Record<string, unknown>>;
+        expect(recipes[0]).toMatchObject({
+          id: "default",
+          optionalRoleIds: ["eng-expert", "plan-architect"],
+          members: [
+            { roleId: "eng-fullstack" },
+            { roleId: "research-codebase" },
+            { roleId: "qa-test" },
+            { roleId: "qa-review" },
+          ],
+        });
         const repaired = buildDesignCorrection({
           jobId: JOB_ID,
           attempt: 2,
@@ -766,10 +660,10 @@ describe("design output contract", () => {
     }
   });
 
-  test("the 40-Role / 30-Team / 12-Profile economy-all stress fits both switches", () => {
+  test("the 40-Role / 30-Team / 12-Profile stress fits both switches", () => {
     const roles = [
       ...realScaleRoles(),
-      ...Array.from({ length: 19 }, (_, index) =>
+      ...Array.from({ length: 18 }, (_, index) =>
         role(100 + index, {
           id: `stress-${index}`,
           name: `【质量】压测审查 ${index}`,
@@ -794,8 +688,6 @@ describe("design output contract", () => {
     for (const on of [false, true]) {
       const ctx: DesignPromptContext = {
         ...realScaleContext({
-          requestedMode: "economy-all",
-          modeRouting: ROUTING,
           roles,
           profiles,
           occupiedTeams: teams,
@@ -821,7 +713,7 @@ describe("design output contract", () => {
       expect(result.text).toContain("## 字段合同");
       if (!on) expect(result.text).toContain("noveltyReason 1–600");
       expect(result.text).toContain('"profileChoices"');
-      expect(result.text).toContain(`"id":"stress-18"`);
+      expect(result.text).toContain(`"id":"stress-17"`);
       const index = jsonBlockAt(result.text, "Role 索引") as unknown[];
       expect(index).toHaveLength(40);
       expect(result.text).not.toContain("## Role 摘要");
@@ -840,8 +732,6 @@ describe("design output contract", () => {
         context: context({
           outputContractVersion: 2,
           existingRolesOnly: on,
-          requestedMode: "economy-all",
-          modeRouting: ROUTING,
           roles,
           occupiedTeams: teams,
           occupiedRoleIds: roles.map((item) => item.id),
@@ -878,8 +768,6 @@ describe("design output contract", () => {
       context: context({
         outputContractVersion: 2,
         existingRolesOnly: false,
-        requestedMode: "economy-all",
-        modeRouting: ROUTING,
         roles: mutated,
         occupiedTeams: teams,
         occupiedRoleIds: mutated.map((entry) => entry.id),
@@ -900,9 +788,9 @@ describe("design output contract", () => {
     }
   });
 
-  test("v2 entries keep taskKind and expose disabled/blocked states", () => {
+  test("v2 entries omit taskKind and expose disabled/blocked states", () => {
     const roles = [
-      role(0, { id: "ops-role", taskKind: "ops" }),
+      role(0, { id: "ops-role" }),
       role(1, { id: "off-role", enabled: false }),
       role(2, {
         id: "blocked-role",
@@ -915,7 +803,7 @@ describe("design output contract", () => {
     ];
     const text = textOf(kickoff({ outputContractVersion: 2, existingRolesOnly: false, roles }));
     const index = roleEntries(text);
-    expect(index[0]).toMatchObject({ taskKind: "ops" });
+    expect(index[0]).not.toHaveProperty("taskKind");
     expect(index[0]).toHaveProperty("mission");
     expect(index[1]).toMatchObject({ id: "off-role", enabled: false });
     expect(index[1]).not.toHaveProperty("memberLaunch");
@@ -1003,8 +891,6 @@ describe("design output contract", () => {
           outputContractVersion: 2,
           existingRolesOnly: false,
           request,
-          requestedMode: "economy-all",
-          modeRouting: ROUTING,
           roles,
           occupiedTeams: teams,
           profiles: [profile(1), profile(2), profile(3)],
@@ -1064,7 +950,7 @@ describe("design output contract", () => {
       }),
     );
     const seen = new Set<string>();
-    for (const fillers of [100, 110, 120, 130, 140, 150, 160]) {
+    for (const fillers of [100, 110, 120, 130, 140, 150, 155, 160, 165, 170, 175, 180, 185, 190]) {
       const roles = [
         ...base,
         ...Array.from({ length: fillers }, (_, index) =>
@@ -1102,6 +988,18 @@ describe("design output contract", () => {
         result.compression === "index-only-minimal"
       ) {
         expect(result.text).toContain('"minInstances":2,"maxInstances":3');
+        expect(result.text).toContain("按需专家不得默认加入");
+        const recipes = jsonBlockAt(result.text, "配方") as Array<Record<string, unknown>>;
+        expect(recipes[0]).toMatchObject({
+          id: "default",
+          optionalRoleIds: ["eng-expert", "plan-architect"],
+          members: [
+            { roleId: "eng-fullstack" },
+            { roleId: "research-codebase" },
+            { roleId: "qa-test" },
+            { roleId: "qa-review" },
+          ],
+        });
       }
       seen.add(result.compression);
     }
@@ -1184,8 +1082,6 @@ describe("design output contract", () => {
           outputContractVersion: 2,
           existingRolesOnly: false,
           request,
-          requestedMode: "economy-all",
-          modeRouting: ROUTING,
           roles,
           occupiedTeams: Array.from({ length: 30 }, (_, index) => ({
             id: `team-${index}`,
@@ -1269,11 +1165,6 @@ describe("designer prompt budgets", () => {
         },
       ],
       [{ provider: "claude", available: true }],
-      {
-        pool: [{ profileId: "profile-1", family: "claude", enabled: true }],
-        taskOrder: {},
-        profileBudget: { "profile-1": "sota" },
-      },
     );
     expect(summarized).toEqual([
       {
@@ -1285,23 +1176,20 @@ describe("designer prompt budgets", () => {
         thinkingOptionId: undefined,
         available: true,
         notes: "说明",
-        family: "claude",
-        budget: "sota",
-        budgetBasis: "host",
       },
     ]);
     expect(summarized[0]).not.toHaveProperty("featureValues");
   });
 
-  test("puts mode, nonce, target limits, and recipe notes into the kickoff", () => {
+  test("puts nonce, target limits, and recipe notes into the kickoff", () => {
     const result = kickoff();
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.utf8Bytes).toBe(utf8ByteLength(result.text));
     expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_KICKOFF_TARGET_BYTES);
     expect(result.omissions).toEqual([]);
-    expect(result.text).toContain(`"requestedMode":"economy"`);
-    expect(result.text).toContain(`"mode":"economy"`);
+    expect(result.text).not.toContain('"requestedMode"');
+    expect(result.text).not.toContain('"mode":"economy"');
     expect(result.text).toContain(NONCE);
     expect(result.text).toContain("workspace-target");
     expect(result.text).toContain("不得修改文件");
@@ -1568,7 +1456,7 @@ describe("designer prompt budgets", () => {
     expect(result.utf8Bytes).toBeLessThanOrEqual(DESIGN_CORRECTION_MAX_BYTES);
     expect(result.text).toContain(NONCE);
     expect(result.text.match(/identity 必须逐字复制/gu)?.length).toBe(2);
-    for (const heading of ["## Role 索引", "## Role 摘要", "## Profile 白名单", "## 九配方"]) {
+    for (const heading of ["## Role 索引", "## Role 摘要", "## Profile 白名单", "## 参考配方"]) {
       expect(result.text).not.toContain(heading);
     }
     expect(result.text).not.toContain(realistic.roles[0]?.mission ?? "missing");
@@ -1582,12 +1470,13 @@ describe("designer prompt budgets", () => {
       "limits",
       "forbidden",
       "preferredProfiles",
-      "executionPolicy",
-      "collaboration",
+      "fallbackProfiles",
       "32768",
     ]) {
       expect(result.text).toContain(field);
     }
+    expect(result.text).not.toContain("executionPolicy");
+    expect(result.text).not.toContain("collaboration");
   });
 
   test("kickoff repeats the exact identity requirement at both ends", () => {
@@ -1690,33 +1579,33 @@ describe("designer prompt budgets", () => {
       expect(text).toContain(NONCE);
       expect(text).toContain("32768");
       expect(text).toContain("preferredProfiles");
-      expect(text).toContain("executionPolicy");
-      expect(text).toContain("collaboration");
-      const sample = JSON.parse(fence.exec(text)?.[1] ?? "{}") as {
-        team: {
-          mode: string;
-          members: { roleId: string }[];
-          collaboration?: { judgeRoleId?: string };
-        };
-        reuse: { roleId: string }[];
-        profileChoices: { target: string }[];
-      };
-      expect(DesignProposalSchema.safeParse(sample).success).toBe(true);
-      expect(sample.team.mode).toBe("economy");
-      const sampledRoles = new Set([
-        ...sample.team.members.map((member) => member.roleId),
-        ...sample.reuse.map((entry) => entry.roleId),
-      ]);
-      expect(sampledRoles.has(sample.team.collaboration?.judgeRoleId ?? "")).toBe(true);
-      expect(sample.profileChoices.map((choice) => choice.target)).toEqual([
+      expect(text).toContain("fallbackProfiles");
+      expect(text).not.toContain("executionPolicy");
+      const sample: unknown = JSON.parse(fence.exec(text)?.[1] ?? "{}");
+      const parsed = DesignProposalSchema.safeParse(sample);
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) throw new Error("prompt sample violates the v1 schema");
+      expect(parsed.data.team).not.toHaveProperty("mode");
+      expect(parsed.data.team).not.toHaveProperty("collaboration");
+      expect(parsed.data.newRoles).toHaveLength(1);
+      expect(parsed.data.newRoles[0]).not.toHaveProperty("executionPolicy");
+      expect(parsed.data.profileChoices.map((choice) => choice.target)).toEqual([
         "coordinator",
         "m1",
         "m2",
       ]);
-      const broken = structuredClone(sample) as unknown as {
-        newRoles: Record<string, unknown>[];
-      };
-      delete broken.newRoles[0]?.mission;
+      const broken: unknown = JSON.parse(fence.exec(text)?.[1] ?? "{}");
+      if (
+        typeof broken !== "object" ||
+        broken === null ||
+        !("newRoles" in broken) ||
+        !Array.isArray(broken.newRoles) ||
+        typeof broken.newRoles[0] !== "object" ||
+        broken.newRoles[0] === null
+      ) {
+        throw new Error("prompt sample has no new Role");
+      }
+      delete broken.newRoles[0].mission;
       expect(DesignProposalSchema.safeParse(broken).success).toBe(false);
     }
   });
@@ -1731,17 +1620,6 @@ describe("designer prompt budgets", () => {
         collaboration: false,
         env: { TOKEN: "ENV_SENTINEL" },
       } as never,
-      economy: {
-        pool: [
-          {
-            profileId: "profile-1",
-            family: "claude",
-            enabled: true,
-            env: { TOKEN: "POOL_SENTINEL" },
-          } as never,
-        ],
-        taskOrder: { coding: ["profile-1"], secret: ["TOKEN_SENTINEL"] } as never,
-      },
       occupiedTeams: [
         { id: "team-1", name: "已有团队", config: { apiKey: "CONFIG_SENTINEL" } } as never,
       ],
@@ -1759,13 +1637,7 @@ describe("designer prompt budgets", () => {
     expect(text).toContain("已有团队");
     expect(text).toContain(JSON.stringify("需求提到 TOKEN=NOTE_DATA"));
     expect(text).toContain(JSON.stringify("notes TOKEN=NOTE_DATA"));
-    for (const marker of [
-      "ENV_SENTINEL",
-      "POOL_SENTINEL",
-      "TOKEN_SENTINEL",
-      "CONFIG_SENTINEL",
-      "CHOICE_SECRET_SENTINEL",
-    ]) {
+    for (const marker of ["ENV_SENTINEL", "CONFIG_SENTINEL", "CHOICE_SECRET_SENTINEL"]) {
       expect(text).not.toContain(marker);
     }
     const correction = buildDesignCorrection({

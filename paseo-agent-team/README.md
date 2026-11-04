@@ -49,7 +49,7 @@ and **Launch agent team** Command Center actions open the panel directly.
 
 1. Create at least one Paseo Agent Profile per provider you want on a team
    (**Settings → Agents / Profiles**). Roles store Profile ids and optional binding hints.
-2. Open **Agent Teams → Roles**. Create a Role or import the 13 default Role presets
+2. Open **Agent Teams → Roles**. Create a Role or import the 14 default Role presets
    when the catalog is empty. The presets do not include Teams.
 3. Bind each Role to a preferred Profile (and optional fallbacks). Missing
    Profiles are marked; they are never silently replaced.
@@ -66,14 +66,15 @@ The presets bind only to the host's current Profiles, one job per model:
 | Profile | Preset Roles |
 | --- | --- |
 | Claude-Opus-5.5-Max | 【规划】架构师 (project planning and architecture; writes no code) |
-| Claude-Opus-5.5-Medium | 【统筹】总协调, 【统筹】技术负责人 (task breakdown and dispatch) |
-| GPT-6.1-Sol Xhigh | 【工程】排障修复, 【质量】代码审查 (finding and fixing bugs) |
-| DeepSeek-V4.1-Flash-Max | 【工程】全栈开发, 【质量】测试与验收 (main coder) |
-| Claude-Sonnet 5.5 high | 【工程】前端开发 (second main coder; DeepSeek takes over when its quota runs out) |
-| Grok-4.6-Xhigh | 【工程】批量开发, 【研究】代码库分析师, 【研究】联网研究员 (simple, token-heavy work) |
+| Claude-Sonnet 5.5 high | 【统筹】主负责人, 【统筹】总协调, 【统筹】技术负责人 |
+| GPT-6.1-Sol Xhigh | 【工程】排障修复; fallback for 主负责人 |
+| DeepSeek-V4.1-Flash-Max | 【工程】全栈开发, 【工程】前端开发, 【工程】批量开发, 【研究】代码库分析师, 【质量】测试与验收 |
+| Grok-4.6-Xhigh | 【质量】代码审查, 【研究】联网研究员 |
 | Gemini-3.8-flash-High | 【研究】资料与视觉解析, 【内容】写作与翻译 (OCR, charts, Q&A, summaries, translation, drafts) |
 
-Each Role also has a fallback on another provider. The 2026-10-28 catalog merged or dropped
+Roles have ordered fallbacks. The `default` designer recipe uses 主负责人 as coordinator with 全栈开发,
+代码库分析师, 测试与验收, and 代码审查 enabled. 排障修复 and 架构师 are optional specialists;
+they are not enabled by default because enabled members are created immediately. The 2026-10-28 catalog merged or dropped
 the earlier research and content leads, requirements analyst, rapid, ops, security, acceptance,
 vision and the three content Roles. Roles already imported from those presets stay in your
 catalog; **同步默认预设** leaves them untouched and never deletes them.
@@ -89,22 +90,18 @@ host settings. Downgrading to an older plugin can discard binding hints, preset 
 history on subsequent saves, but existing Profile ids still work. Damaged preset origins, Profile
 hints, or sync history are ignored rather than invalidating the catalog.
 
-## Team modes
+## Team planning and older settings
 
-A Team stores one of four modes. The UI label is what you see; the stored value never changes
-meaning (`economy` always means 标准/standard, while only `economy-all` is the all-seats mode).
+The four Team modes and economy pool have been retired. Each seat now resolves its Role's preferred
+Profile followed by its fallback Profiles. Existing mode, collaboration, pool, and Role execution
+policy settings still decode but do not affect planning. When an object is next saved, those retired
+keys are removed only if the target host confirms support; an older host or a failed probe preserves
+them. Other settings, including quota recovery and unknown extensions, are retained.
 
-| UI label | Stored value | Planning |
-| --- | --- | --- |
-| 旗舰（SOTA） | `sota` | Keeps every Role's original Profile binding; decision and execution both prefer it. |
-| 标准 | `economy` | Decision roles keep their bindings; execution seats use the **standard pool** (Profiles, task order, and budget labels under **Economy pool → 标准：执行池**). |
-| 经济 | `economy-all` | Every seat (coordinator, decision/review, execution, escalation/standby, retain) uses only allowlisted cheap Profiles from its own route. Each of the five routes needs a qualified candidate; otherwise the launch is blocked and there is no fallback to a Role's original binding. Configure the allowlist, five-layer routes, execution task order, and suggestions under **Economy pool → 经济：全席位**. |
-| 协作 | `collaborative` | Execution seats fan out across model families; a judge/test seat reviews before the winner continues. |
-
-An existing `economy` Team keeps running as 标准 after upgrade; it is not migrated to 经济. A Team
-saved with a mode this build does not recognize stays unlaunched (with a warning) until you pick
-a mode. The designer's "existing Roles only" switch belongs to one design request and does not
-change the Team mode.
+Removing these keys is irreversible on downgrade: a previously saved Team defaults to the old
+flagship path, and removed pool, collaboration, and Role policy settings must be recreated manually.
+An unsaved old all-seats Team may be blocked by an older host if its pool was already removed.
+The designer's "existing Roles only" switch remains a per-request choice.
 
 ## Launch
 
@@ -122,12 +119,8 @@ warnings and blockers. Launch is disabled while blockers remain. Blockers includ
 whose provider cannot reach Paseo's delegation tools (Paseo MCP off, "Inject Paseo tools" off,
 or the provider's "Enable Paseo tools" off).
 
-The terminal client uses the Team's saved mode. `--mode` is an **advanced override for scripts and
-tests only** and is never written back to the Team; it accepts `sota`, `standard`, `economy`,
-`economy-all`, and `collaborative`. `standard` maps to the stored `economy` value (标准); the old
-`economy` spelling prints a notice and also means 标准; `economy-all` is 经济 and requires a
-configured all-seats policy. Every CLI request declares `contractVersion: 2`, which older daemons
-ignore; the host then applies the same preview/start access gate as the app.
+The terminal client accepts no `--mode` or `--mode sota`; any other value is rejected before
+connecting to the host. Refresh an old page or update an old CLI if it requests a retired mode.
 
 After confirm, the daemon host re-validates, creates the coordinator, then each member as a
 child, then sends the coordinator a kickoff message with the roster. The launch runs on the
@@ -156,7 +149,7 @@ so nothing is written to disk.
   `id`, `name`, `description`, `icon`, `media`, `requirements`, and `build`.
 - Roles and Teams are host-scoped settings. Every client on that daemon shares them. There is
   no per-workspace catalog.
-- Default member cap is 8 (hard cap 16). Members are created up front.
+- Default member cap is 24; the runtime cap is 64. Members are created up front.
 - A coordinator's `create_agent` cannot set `systemPrompt` or pick a Profile. This plugin
   therefore pre-creates members instead of letting the coordinator spawn them.
 - Put limits in Role restrictions text. Coordinators are told never to call

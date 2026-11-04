@@ -7,7 +7,6 @@ import {
   designPrefillSlot,
   designSaveAttemptKey,
   designStartFailureMessage,
-  economyFocusForConfigure,
   roleEditorTargetForGap,
   shouldAutoSaveDesignJob,
   shouldCleanupDesignJob,
@@ -30,16 +29,6 @@ describe("gap exits", () => {
     });
     // A missing Role must not open the editor on a different record.
     expect(roleEditorTargetForGap([architect], { roleId: "ghost" })).toBeNull();
-  });
-
-  test("maps gap policy exits onto the editor focus", () => {
-    expect(economyFocusForConfigure({ layer: "allSeats", route: "execution" })).toEqual({
-      layer: "allSeats",
-      route: "execution",
-    });
-    expect(economyFocusForConfigure({ layer: "allSeats" })).toEqual({ layer: "allSeats" });
-    expect(economyFocusForConfigure({ layer: "standard" })).toEqual({ layer: "standard" });
-    expect(economyFocusForConfigure({ layer: "allSeats", route: "turbo" })).toBeNull();
   });
 });
 
@@ -67,7 +56,7 @@ describe("screen prefill", () => {
     });
   });
 
-  test("keeps an explicit mode", () => {
+  test("ignores an old event's retired mode", () => {
     expect(
       designerPrefillFromEvent({
         token: "b".repeat(32),
@@ -77,7 +66,7 @@ describe("screen prefill", () => {
         mode: "economy",
         createdAt: 1,
       }),
-    ).toMatchObject({ workspaceId: "ws-1", mode: "economy" });
+    ).toEqual({ nonce: "b".repeat(32), text: "需求", workspaceId: "ws-1" });
   });
 });
 
@@ -86,7 +75,6 @@ describe("gap retry slot", () => {
     nonce: "n-1",
     text: "原需求",
     workspaceId: "ws-target",
-    mode: "sota" as const,
     existingRolesOnly: false,
     confirmReplace: true,
   };

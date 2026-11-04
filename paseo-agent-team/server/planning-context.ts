@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../shared/domain/catalog-content";
-import {
-  type EconomyPolicy,
-  type HostSnapshot,
-  normalizeEconomyPolicy,
-} from "../shared/domain/mode-resolver";
+import type { HostSnapshot } from "../shared/domain/mode-resolver";
 import type { ModeIssue } from "../shared/domain/role-execution";
 import { type PaseoAdapter, profilesFromConfig } from "../shared/paseo/adapter";
 import type { Preferences } from "../shared/schemas/preferences";
@@ -54,12 +50,8 @@ export type PlanningSnapshot =
       revisions: PlanningRevisions;
       host: HostSnapshot;
       daemonConfig: unknown;
-      economy: EconomyPolicy;
-      economyIssues: ModeIssue[];
     }
   | { status: "unavailable"; blockers: string[]; issues: ModeIssue[] };
-
-const EMPTY_ECONOMY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
 
 function contextIssue(reason: string, document?: string): ModeIssue {
   return {
@@ -149,19 +141,6 @@ export async function readPlanningHost(
   }
 }
 
-/** One normalization for both the economy value and its issues (launch used to normalize twice). */
-export function planningEconomy(
-  preferences: Preferences,
-  host: HostSnapshot,
-): { economy: EconomyPolicy; issues: ModeIssue[] } {
-  const profiles = host.status === "ready" ? host.profiles : [];
-  const normalized = normalizeEconomyPolicy(preferences.economy, profiles);
-  return {
-    economy: normalized.ok ? normalized.value : EMPTY_ECONOMY,
-    issues: normalized.issues ?? [],
-  };
-}
-
 /**
  * Full snapshot for agent-team.team.plan. The two reads are independent, so a capability probe
  * that already returned never reaches here; a batch pays exactly 3 + 1 + 1 reads.
@@ -189,7 +168,6 @@ export async function readPlanningSnapshot(input: {
   if (hostFacts.host.status === "unavailable") {
     return { status: "unavailable", blockers: [], issues: hostIssue };
   }
-  const { economy, issues } = planningEconomy(settings.preferences, hostFacts.host);
   return {
     status: "ready",
     roles: settings.roles,
@@ -198,7 +176,5 @@ export async function readPlanningSnapshot(input: {
     revisions: settings.revisions,
     host: hostFacts.host,
     daemonConfig: hostFacts.daemonConfig,
-    economy,
-    economyIssues: issues,
   };
 }

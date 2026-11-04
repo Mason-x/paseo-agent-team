@@ -21,10 +21,11 @@ export const TeamSchema = z
     id: SlugSchema,
     name: ShortTextSchema,
     description: DescriptionSchema.optional(),
-    // Mode selection stays a plain string on storage; normalizeMode rejects what this version
-    // cannot run. SEAT LIMIT: physical seats are bounded by preferences at launch, not by the
-    // stored array, so large historical Teams stay readable and editable.
+    // SEAT LIMIT: physical seats are bounded by preferences at launch, not by the stored array,
+    // so large historical Teams stay readable and editable.
     memberCreation: z.string().optional(),
+    // RETIRED: still decoded as stored, never read by planning, deleted when the Team is next
+    // saved by a version that retires them (shared/domain/retired-fields.ts).
     mode: z.string().optional(),
     collaboration: StoredCollaborationSchema.optional(),
     coordinatorRoleId: SlugSchema,

@@ -1,16 +1,5 @@
-import { TEAM_MODES, teamModeDisplay } from "../domain/mode-contract";
 import type { DesignIssueAction, DesignIssueCode, DesignJob, DesignState } from "../schemas/design";
 import type { SeatPreview } from "../schemas/launch-preview";
-import type { TeamMode } from "../schemas/team-mode";
-import { modesZh } from "./modes";
-
-/**
- * Stored mode -> the one display table. Derived so the designer cannot drift from the picker;
- * `modesZh.modeLabels` stays the only literal label list (AC-0d.17).
- */
-const DESIGN_MODE_LABELS = Object.fromEntries(
-  TEAM_MODES.map((mode) => [mode, modesZh.modeLabels[teamModeDisplay(mode)]]),
-) as Record<TeamMode, string>;
 
 /**
  * Chinese copy for the Team designer. `zh.design` is this object; error keys deliberately sit at
@@ -22,7 +11,7 @@ const DESIGN_MODE_LABELS = Object.fromEntries(
 export const designZh = {
   inputInvalid: "设计输入格式不正确，请检查需求和选项",
   requestConflict: "该提交标识已用于其他需求，请重新提交",
-  modeUnavailable: "当前插件尚未开放此模式",
+  modeUnavailable: "组队模式已取消，请刷新页面后重试",
   storageUnavailable: "设计任务记录不可用，请检查开发/当前host配置",
   busy: "已有3个进行中或待保存设计，请先处理一个",
   discoveryIncomplete: "设计任务列表尚未核对完整，请稍后刷新",
@@ -101,12 +90,9 @@ export const designZh = {
     inspect: "查看详情",
   } satisfies Record<DesignIssueAction, string>,
 
-  modes: DESIGN_MODE_LABELS,
-
   sources: {
     "role-preferred": "Role 首选",
     "role-fallback": "Role 备选",
-    "economy-pool": "经济池",
     unavailable: "待命",
   },
   permissionKinds: {
@@ -120,7 +106,6 @@ export const designZh = {
   jobHeading: "设计任务",
   jobUntitled: "未填写需求",
   jobAttempt: (attempt: number, max: number) => `第 ${attempt} / ${max} 轮`,
-  jobModeValue: (mode: string) => `模式：${mode}`,
   jobDesignerProfileValue: (profile: string) => `设计 Agent：${profile}`,
   jobPermissionLine: (kind: string, title: string) => `${kind} · ${title}`,
   jobExpand: "展开设计任务",
@@ -143,7 +128,6 @@ export const designZh = {
   jobIssuesTruncated: (count: number) => `另有 ${count} 个问题未显示`,
 
   resultHeading: "设计方案",
-  resultMode: "模式",
   resultTeamLine: (name: string, id: string) => `${name} · ${id}`,
   resultNewRoleLine: (name: string, id: string) => `${name} · ${id}`,
   resultNoveltyReason: "新增原因",
@@ -153,27 +137,20 @@ export const designZh = {
   resultNewRoles: "新增 Role",
   resultSeats: "物理席位",
   resultCoordinator: "协调者",
-  resultSeatCohort: "协作组",
   resultCounts: (logical: number, physical: number) => `逻辑席位 ${logical} · 物理席位 ${physical}`,
   resultCountsNote: "计数不含协调者",
   resultPreviewUnavailable: "预览数据不完整，无法展示席位",
   seatPurposes: {
     member: "成员",
-    candidate: "候选",
-    judge: "裁判",
-    escalation: "升级",
-  } satisfies Record<SeatPreview["purpose"], string>,
+  } satisfies Partial<Record<SeatPreview["purpose"], string>>,
   seatActivations: {
     eager: "启动时创建",
     "on-demand": "首次派活时创建",
-    "escalation-only": "待命",
-  } satisfies Record<SeatPreview["activation"], string>,
+  } satisfies Partial<Record<SeatPreview["activation"], string>>,
   resultWarnings: "警告",
   resultSeatProfile: "Profile",
   resultSeatRuntime: "运行配置",
   resultSeatSource: "来源",
-  resultSeatFamily: "家族",
-  resultSeatBudget: "预算",
   resultSeatReason: "理由",
   resultSeatUnavailable: "无可用 Profile",
   resultNoSeats: "没有可展示的席位",

@@ -7,6 +7,7 @@ import { TeamSchema } from "../schemas/team";
 import type { RolesDocument, TeamsDocument } from "../settings";
 import { canonicalDesignContent } from "./design-content";
 import { finalizeDesignIssues } from "./design-validation";
+import { hasRetiredFields, omitRetired, type RetiredFieldsKind } from "./retired-fields";
 
 export type DesignSnapshot<T> = { values: T; revision: string };
 
@@ -96,19 +97,21 @@ function sameJob(value: unknown, jobId: string): boolean {
   return source === "team-designer" && designerJobId(designer) === jobId;
 }
 
-function sameContent(left: unknown, right: unknown): boolean {
-  return canonicalDesignContent(left) === canonicalDesignContent(right);
+/** Only removal of retired keys from an old result counts as an unchanged saved object. */
+function sameContent(kind: RetiredFieldsKind, saved: object, expected: object): boolean {
+  const savedContent = canonicalDesignContent(saved);
+  return (
+    savedContent === canonicalDesignContent(expected) ||
+    (hasRetiredFields(kind, expected) &&
+      !hasRetiredFields(kind, saved) &&
+      savedContent === canonicalDesignContent(omitRetired(kind, expected)))
+  );
 }
 
 function teamRoleIds(team: Team): string[] {
+  // A retired collaboration block may still ride on an old result; planning ignores it, so the
+  // Roles it names are not part of what the Team needs.
   const ids = [team.coordinatorRoleId, ...team.members.map((member) => member.roleId)];
-  const collaboration = team.collaboration;
-  if (collaboration) {
-    if (typeof collaboration.judgeRoleId === "string") ids.push(collaboration.judgeRoleId);
-    if (typeof collaboration.escalationRoleId === "string") {
-      ids.push(collaboration.escalationRoleId);
-    }
-  }
   return [...new Set(ids)];
 }
 
@@ -163,7 +166,7 @@ export function mergeDesign(input: DesignMergeInput): DesignMergeResult {
     if (existingIndex >= 0) {
       const existing = roles[existingIndex];
       if (!existing) continue;
-      if (sameJob(existing, result.jobId) && sameContent(existing, candidate)) continue;
+      if (sameJob(existing, result.jobId) && sameContent("role", existing, candidate)) continue;
       issues.push(
         issue("DESIGN_ROLE_ID_CONFLICT", ["newRoles", index, "id"], {
           roleId: candidate.id,
@@ -248,10 +251,10 @@ export function mergeDesign(input: DesignMergeInput): DesignMergeResult {
   }
 
   const modified =
-    !sameContent(existingTeam, team) ||
+    !sameContent("team", existingTeam, team) ||
     resultRoles.some((candidate) => {
       const existing = currentRoles.find((role) => role.id === candidate.id);
-      return existing !== undefined && !sameContent(existing, candidate);
+      return existing !== undefined && !sameContent("role", existing, candidate);
     });
 
   if (addedRoleIds.length > 0) {
@@ -340,10 +343,10 @@ export function verifySavedDesign(input: {
   if (conflicts.length > 0) return conflictResult(conflicts);
 
   const modified =
-    !sameContent(team, result.team) ||
+    !sameContent("team", team, result.team) ||
     result.newRoles.some((candidate) => {
       const existing = roleById.get(candidate.id);
-      return existing !== undefined && !sameContent(existing, candidate);
+      return existing !== undefined && !sameContent("role", existing, candidate);
     });
   return { kind: "committed", teamId: team.id, modified };
 }
@@ -357,6 +360,15 @@ export function planDesignCompensation(input: {
   const resultRoles = new Map(input.result.newRoles.map((role) => [role.id, role]));
   const authorized = new Set(input.authorizedRoleIds);
   const referenced = new Set(input.teams.values.teams.flatMap((team) => teamRoleIds(team)));
+  // An older host can still consume preserved retired settings. Be conservative when cleaning up:
+  // a string in that block may name a Role, so do not delete a matching Role on this host.
+  for (const team of input.teams.values.teams) {
+    if (team.collaboration) {
+      for (const value of Object.values(team.collaboration)) {
+        if (typeof value === "string") referenced.add(value);
+      }
+    }
+  }
   const removeRoleIds = new Set<string>();
   const retainedRoleIds = new Set<string>();
   const issues: DesignIssue[] = [];
@@ -370,7 +382,7 @@ export function planDesignCompensation(input: {
     }
     const safe =
       sameJob(existing, input.result.jobId) &&
-      sameContent(existing, expected) &&
+      sameContent("role", existing, expected) &&
       !referenced.has(existing.id);
     if (safe) {
       removeRoleIds.add(existing.id);

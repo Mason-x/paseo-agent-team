@@ -1,6 +1,4 @@
-// V01b-FIX3 / AC-0b.9: an economy-all route outage must offer the economy-pool entry from the
-// Team card and the editor's warning, at the affected layer/route. The plan is real; only the
-// screen wiring is asserted from source because the plugin has no component renderer here.
+// Exercise the real Team plan and view-model repair path without connecting to a daemon.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -12,54 +10,29 @@ import { fakePort, preferences } from "./fakes";
 import { claudeOpus, codingTeam, role, techLead } from "./fixtures";
 import { DesignSettingsStore } from "./helpers/design-settings-store";
 
-const execRole = role({
-  id: "exec",
-  name: "Exec",
-  executionPolicy: { tier: "execution", taskKind: "coding" },
+const unboundRole = role({
+  id: "unbound",
+  name: "Unbound",
+  preferredProfiles: [],
+  fallbackProfiles: [],
 });
-const cheap = {
-  id: "cheap-deepseek",
-  name: "Cheap",
-  provider: "deepseek",
-  model: "deepseek-coder",
-};
 
-async function routeOutage() {
+async function planTeam(enabled = true) {
   const settings = new DesignSettingsStore({
-    roles: { roles: [techLead, execRole] },
+    roles: { roles: [techLead, unboundRole] },
     teams: {
       teams: [
         {
           ...codingTeam,
           mode: "economy-all",
-          members: [{ roleId: execRole.id, enabled: true }],
+          members: [{ roleId: unboundRole.id, enabled }],
         },
       ],
     },
     preferences: {
       ...preferences,
-      economy: {
-        allSeats: {
-          version: 1,
-          profiles: [
-            {
-              profileId: cheap.id,
-              enabled: true,
-              costClass: "low",
-              family: "deepseek",
-              boundModel: { provider: "deepseek", model: cheap.model },
-            },
-          ],
-          routes: {
-            coordinator: [cheap.id],
-            decision: [cheap.id],
-            execution: [],
-            escalation: [cheap.id],
-            retain: [cheap.id],
-          },
-        },
-      },
-    } as Preferences,
+      economy: { allSeats: { version: 1, routes: { execution: [] } } },
+    },
   });
   const read = <T>(key: "roles" | "teams" | "preferences") => {
     const value = settings.read(key);
@@ -73,14 +46,11 @@ async function routeOutage() {
     },
   });
   const port = fakePort({
-    agentProfiles: [claudeOpus, cheap],
+    agentProfiles: [claudeOpus],
     mcp: { enabled: true, injectIntoAgents: true },
   }).port;
   port.providers.listAvailable.mockResolvedValue({
-    providers: [
-      { provider: "claude", available: true },
-      { provider: "deepseek", available: true },
-    ],
+    providers: [{ provider: "claude", available: true }],
   });
   const output = await service.plan(
     { items: [{ key: codingTeam.id, kind: "saved", teamId: codingTeam.id }] },
@@ -91,41 +61,35 @@ async function routeOutage() {
   return result;
 }
 
-describe("V01b-FIX3 economy-pool entries", () => {
-  test("the route-empty Team card carries the all-seats execution action", async () => {
-    const result = await routeOutage();
-    expect(result.effectiveMode).toBe("economy-all");
+describe("Team binding repair", () => {
+  test("a real unbound Role produces a warning summary and a Role repair action", async () => {
+    const result = await planTeam();
+    expect(result.effectiveMode).toBe("sota");
     const summary = buildTeamSummary({ result, hasContext: true });
+    expect(summary).toMatchObject({ kind: "summary", tone: "warning" });
     if (summary.kind !== "summary") throw new Error(`unexpected summary ${summary.kind}`);
-    expect(summary.unresolvedText).toContain("路由未配置");
-    expect(summary.actions).toEqual([{ kind: "economy", layer: "allSeats", route: "execution" }]);
-  });
-
-  test("the affected row still keeps its own action, and disabled rows do not add one", async () => {
-    const result = await routeOutage();
+    expect(summary.unresolvedText).not.toBeNull();
     const rows = buildTeamModelRows({ result });
-    const exec = rows.find((row) => row.roleName === "Exec");
-    expect(exec?.enabled).toBe(true);
-    expect(exec?.actions).toContainEqual({
-      kind: "economy",
-      layer: "allSeats",
-      route: "execution",
-    });
+    const unbound = rows.find((row) => row.roleId === unboundRole.id);
+    expect(unbound).toMatchObject({ enabled: true, profileName: null });
+    expect(unbound?.actions).toEqual([{ kind: "role", roleId: unboundRole.id }]);
+    expect(rows.flatMap((row) => row.actions).every((action) => action.kind === "role")).toBe(true);
   });
 
-  test("TeamList, TeamsTab and both editors render/forward the economy callback", () => {
+  test("a disabled member never offers a repair action", async () => {
+    const result = await planTeam(false);
+    const member = buildTeamModelRows({ result }).find((row) => row.roleId === unboundRole.id);
+    expect(member).toMatchObject({ enabled: false, actions: [] });
+  });
+
+  test("the Team editor forwards the Role repair action to the app", () => {
     const root = path.join(import.meta.dirname, "..");
-    const list = readFileSync(path.join(root, "client", "teams", "TeamList.tsx"), "utf8");
-    expect(list).toContain("summary.actions.length > 0");
-    expect(list).toContain("onConfigureEconomy(action)");
-    const tab = readFileSync(path.join(root, "client", "teams", "TeamsTab.tsx"), "utf8");
-    expect(tab).toContain("onConfigureEconomy={onConfigureEconomy}");
+    const row = readFileSync(path.join(root, "client", "teams", "ModelRow.tsx"), "utf8");
+    expect(row).toContain("onOpenRole(target.roleId, target.profileId)");
     const editor = readFileSync(path.join(root, "client", "teams", "TeamEditor.tsx"), "utf8");
-    expect(editor).toContain("planEconomyActions");
-    expect(editor).toContain("onConfigureEconomy(action)");
+    expect(editor).toContain("onOpenRole={onOpenRole}");
     const screen = readFileSync(path.join(root, "client", "app", "AgentTeamsScreen.tsx"), "utf8");
-    expect(screen.match(/onConfigureEconomy=\{\(target\) =>/g)?.length ?? 0).toBeGreaterThanOrEqual(
-      3,
-    );
+    expect(screen).toContain("onOpenRole={(roleId, profileId) =>");
+    expect(screen).toContain("roleEditorTargetForGap(");
   });
 });

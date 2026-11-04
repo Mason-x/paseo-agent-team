@@ -1,7 +1,7 @@
 import type { PaseoProfile } from "../paseo/adapter";
 import type { CoordinatorPreview, ModeLaunchPreview, SeatPreview } from "../schemas/launch-preview";
 import { type LaunchPlan, warningIssueText } from "./launch-plan";
-import { budgetOf, type EconomyPolicy, type ProfileSelection } from "./mode-resolver";
+import { FIXED_BUDGET, type ProfileSelection } from "./mode-resolver";
 import type { ModeIssue } from "./role-execution";
 
 function profileTuple(profile: PaseoProfile) {
@@ -15,10 +15,6 @@ function profileTuple(profile: PaseoProfile) {
       ? {}
       : { thinkingOptionId: profile.thinkingOptionId }),
   };
-}
-
-function profileOf(selection: ProfileSelection) {
-  return selection.unavailable ? null : profileTuple(selection.profile);
 }
 
 function issueKey(issue: ModeIssue): string {
@@ -53,13 +49,10 @@ function issuesOf(selection: ProfileSelection) {
   }));
 }
 
-/** Preview and start share these warnings; text is the identity, so two pool rows stay distinct. */
-export function launchPreviewWarnings(
-  plan: LaunchPlan,
-  extraIssues: readonly ModeIssue[],
-): string[] {
+/** Preview and start share these warnings; text is the identity, so two rows stay distinct. */
+export function launchPreviewWarnings(plan: LaunchPlan): string[] {
   const warnings = [...plan.warnings];
-  for (const issue of [...extraIssues, ...plan.seatIssues]) {
+  for (const issue of plan.seatIssues) {
     if (issue.severity !== "warning") continue;
     const text = warningIssueText(issue, plan.seats);
     if (!warnings.includes(text)) warnings.push(text);
@@ -67,13 +60,12 @@ export function launchPreviewWarnings(
   return warnings;
 }
 
-/** Maps an internal launch plan to the app-facing preview DTO; prompts, MCP, and notes stay out. */
-export function toModeLaunchPreview(
-  plan: LaunchPlan,
-  planHash: string,
-  extraIssues: readonly ModeIssue[],
-  economy: EconomyPolicy,
-): ModeLaunchPreview {
+/**
+ * Maps an internal launch plan to the app-facing preview DTO; prompts, MCP, and notes stay out.
+ * The DTO keeps every field an older page parses: standby / unavailable are false, alternates are
+ * empty, and the budget label is the fixed `unknown` on the `host` basis.
+ */
+export function toModeLaunchPreview(plan: LaunchPlan, planHash: string): ModeLaunchPreview {
   const seats: SeatPreview[] = plan.seats.map((seat) => ({
     seatId: seat.seatId,
     logicalSeatId: seat.logicalSeatId,
@@ -82,62 +74,34 @@ export function toModeLaunchPreview(
     ...(seat.instanceLabel === undefined ? {} : { instanceLabel: seat.instanceLabel }),
     purpose: seat.purpose,
     activation: seat.activation,
-    ...(seat.cohortId === undefined ? {} : { cohortId: seat.cohortId }),
-    profile: profileOf(seat.selected),
+    profile: profileTuple(seat.selected.profile),
     source: seat.selected.source,
-    ...(seat.selected.route === undefined ? {} : { route: seat.selected.route }),
-    ...(seat.selected.family === undefined ? {} : { family: seat.selected.family }),
-    alternates: [...(seat.selected.alternates ?? [])],
-    budget: seat.selected.budget,
-    budgetBasis: seat.selected.budgetBasis,
-    standby: seat.selected.standby,
-    unavailable: seat.selected.unavailable,
+    alternates: [],
+    budget: FIXED_BUDGET.budget,
+    budgetBasis: FIXED_BUDGET.budgetBasis,
+    standby: false,
+    unavailable: false,
     issues: issuesOf(seat.selected),
   }));
 
-  const selectedCoordinator = plan.mode === "economy-all" ? plan.coordinatorSelected : undefined;
-  const coordinatorProfile = selectedCoordinator
-    ? selectedCoordinator.unavailable
-      ? null
-      : profileTuple(selectedCoordinator.profile)
-    : plan.coordinator.profile.id === "missing"
-      ? null
-      : profileTuple(plan.coordinator.profile);
-  const coordinatorBudget = selectedCoordinator
-    ? { budget: selectedCoordinator.budget, budgetBasis: selectedCoordinator.budgetBasis }
-    : plan.coordinator.profile.id === "missing"
-      ? undefined
-      : (() => {
-          const legacy = budgetOf(plan.coordinator.profile.id, economy);
-          return { budget: legacy.budget, budgetBasis: legacy.basis };
-        })();
+  const missing = plan.coordinator.profile.id === "missing";
   const coordinator: CoordinatorPreview = {
     roleId: plan.coordinator.role.id,
     roleName: plan.coordinator.role.name,
-    profile: coordinatorProfile,
-    source: selectedCoordinator
-      ? selectedCoordinator.source
-      : plan.coordinator.source === "role-fallback"
-        ? "role-fallback"
-        : "role-preferred",
-    ...(selectedCoordinator?.route === undefined ? {} : { route: selectedCoordinator.route }),
-    ...(coordinatorBudget === undefined
-      ? {}
-      : {
-          budget: coordinatorBudget.budget,
-          budgetBasis: coordinatorBudget.budgetBasis,
-        }),
+    profile: missing ? null : profileTuple(plan.coordinator.profile),
+    source: plan.coordinator.source === "role-fallback" ? "role-fallback" : "role-preferred",
+    ...(missing ? {} : { budget: FIXED_BUDGET.budget, budgetBasis: FIXED_BUDGET.budgetBasis }),
     issues: [],
   };
 
   return {
-    ...(plan.rawMode === undefined ? { requestedMode: plan.mode } : { rawMode: plan.rawMode }),
+    requestedMode: plan.mode,
     coordinator,
     seats,
     counts: plan.seatCounts,
     budget: plan.seatBudget,
-    issues: dedupeIssues([...extraIssues, ...plan.seatIssues]),
-    warnings: launchPreviewWarnings(plan, extraIssues),
+    issues: dedupeIssues(plan.seatIssues),
+    warnings: launchPreviewWarnings(plan),
     planHash,
   };
 }

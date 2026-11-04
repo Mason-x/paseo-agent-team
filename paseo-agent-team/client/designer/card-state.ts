@@ -73,8 +73,7 @@ export type StartBlock =
   | "request-too-long"
   | "workspace-missing"
   | "profile-missing"
-  | "profiles-loading"
-  | "mode-needs-upgrade";
+  | "profiles-loading";
 
 /** Why "Start design" is disabled, most fundamental reason first; `null` when it may run. */
 export function resolveStartBlock(input: {
@@ -85,12 +84,9 @@ export function resolveStartBlock(input: {
   workspaceMissing: boolean;
   profileMissing: boolean;
   profilesLoading: boolean;
-  /** The chosen mode needs a host that confirmed the v2 contract, and this one has not. */
-  modeNeedsUpgrade?: boolean;
 }): StartBlock | null {
   if (!input.hasStartHandler) return "unavailable";
   if (input.disabledReason) return "disabled";
-  if (input.modeNeedsUpgrade) return "mode-needs-upgrade";
   if (input.submitting) return "submitting";
   if (!input.request.ok) {
     return input.request.reason === "empty" ? "request-empty" : "request-too-long";

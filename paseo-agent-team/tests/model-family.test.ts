@@ -5,10 +5,6 @@ import {
   MODEL_FAMILIES,
   type ModelFamily,
   modelFamilyName,
-  modelTupleOf,
-  namesHighCostFamily,
-  sameModelTuple,
-  storedModelFamily,
 } from "../shared/domain/model-family";
 
 // Live provider/model tuples in the shape real hosts report them: native ids, bare provider
@@ -113,36 +109,26 @@ describe("model family identification", () => {
     expect(identifyModelFamily({ model: "grok:4@latest" })).toMatchObject({ family: "grok" });
   });
 
-  test("an id naming two families is ambiguous and still reports a high-cost one", () => {
+  test("an id naming two families is ambiguous", () => {
     const mixed = identifyModelFamily({ model: "router-sonnet/claude-opus-5-5" });
     expect(mixed).toEqual({
       status: "unresolved",
       reason: "family-ambiguous",
       families: ["sonnet", "opus"],
     });
-    expect(namesHighCostFamily(mixed)).toBe(true);
     const cheapPair = identifyModelFamily({ model: "deepseek-grok-merge" });
     expect(cheapPair).toMatchObject({ reason: "family-ambiguous", families: ["deepseek", "grok"] });
-    expect(namesHighCostFamily(cheapPair)).toBe(false);
     expect(identifyModelFamily({ model: "sonnet-sonnet-5" })).toMatchObject({ family: "sonnet" });
-  });
-
-  test("namesHighCostFamily follows the identified cost", () => {
-    expect(namesHighCostFamily(identifyModelFamily({ model: "gpt-6.1-sol" }))).toBe(true);
-    expect(namesHighCostFamily(identifyModelFamily({ model: "claude-sonnet-5-5" }))).toBe(false);
-    expect(namesHighCostFamily(identifyModelFamily({ model: "gemini-4-argon" }))).toBe(false);
-    expect(namesHighCostFamily(identifyModelFamily({ model: "auto" }))).toBe(false);
   });
 });
 
-describe("family names and stored values", () => {
-  test("stored family strings map only onto supported families", () => {
-    expect(storedModelFamily("deepseek")).toBe("deepseek");
-    expect(storedModelFamily(" Sonnet ")).toBe("sonnet");
-    for (const raw of ["unverified-family", "", "constructor", 7, null, undefined, ["grok"]]) {
-      expect(storedModelFamily(raw)).toBeUndefined();
+describe("family names and supported values", () => {
+  test("only supported family keys resolve", () => {
+    expect(isModelFamily("deepseek")).toBe(true);
+    expect(isModelFamily("sonnet")).toBe(true);
+    for (const raw of ["unverified-family", "", "constructor", "hasOwnProperty"]) {
+      expect(isModelFamily(raw)).toBe(false);
     }
-    expect(isModelFamily("hasOwnProperty")).toBe(false);
   });
 
   test("every family has a display name", () => {
@@ -150,27 +136,5 @@ describe("family names and stored values", () => {
       expect(modelFamilyName(family).length).toBeGreaterThan(0);
     }
     expect(modelFamilyName("deepseek")).toBe("DeepSeek");
-  });
-});
-
-describe("runtime tuples", () => {
-  test("an empty model means not specified; any other text is kept exactly", () => {
-    expect(modelTupleOf({ provider: "claude", model: "" })).toEqual({ provider: "claude" });
-    expect(modelTupleOf({ provider: "claude" })).toEqual({ provider: "claude" });
-    expect(modelTupleOf({ provider: "omp", model: "cursor/cursor-grok-4.6-fast" })).toEqual({
-      provider: "omp",
-      model: "cursor/cursor-grok-4.6-fast",
-    });
-  });
-
-  test("a saved tuple matches only the same provider and the same model", () => {
-    const live = { provider: "claude", model: "claude-sonnet-5-5" };
-    expect(sameModelTuple({ provider: "claude", model: "claude-sonnet-5-5" }, live)).toBe(true);
-    expect(sameModelTuple({ provider: "omp", model: "claude-sonnet-5-5" }, live)).toBe(false);
-    expect(sameModelTuple({ provider: "claude", model: "claude-opus-5-5" }, live)).toBe(false);
-    expect(sameModelTuple({ provider: "claude" }, live)).toBe(false);
-    expect(sameModelTuple({ provider: "claude", model: " claude-sonnet-5-5" }, live)).toBe(false);
-    expect(sameModelTuple({ provider: "claude", model: "" }, { provider: "claude" })).toBe(true);
-    expect(sameModelTuple({ provider: "claude", model: null }, { provider: "claude" })).toBe(true);
   });
 });

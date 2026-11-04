@@ -1,220 +1,81 @@
 import { describe, expect, test } from "vitest";
-import {
-  DEFAULT_ROLE_EXECUTION,
-  isRoleTier,
-  isTaskKind,
-  resolveRoleExecution,
-} from "../shared/domain/role-execution";
+import { resolveCoordinatorProfile, resolveSeatProfile } from "../shared/domain/mode-resolver";
+import { issueValue, MODE_ISSUE_CODES } from "../shared/domain/role-execution";
+import { RoleSchema } from "../shared/schemas/role";
 import { RoleTierSchema, TaskKindSchema } from "../shared/schemas/team-mode";
-import { role } from "./fixtures";
+import { allAvailable, claudeOpus, codexXhigh, role } from "./fixtures";
 
-// Deliberately independent of DEFAULT_ROLE_EXECUTION so a typo in the table cannot pass through
-// this test. Order and content follow the built-in preset table.
-const EXPECTED_TIERS = [
-  ["lead-orchestrator", "decision", "general"],
-  ["lead-tech", "decision", "general"],
-  ["lead-research", "decision", "general"],
-  ["lead-content", "decision", "general"],
-  ["plan-requirements", "decision", "general"],
-  ["plan-architect", "decision", "general"],
-  ["qa-review", "decision", "general"],
-  ["qa-security", "decision", "general"],
-  ["eng-expert", "escalation", "coding"],
-  ["eng-fullstack", "execution", "coding"],
-  ["eng-frontend", "execution", "coding"],
-  ["eng-batch", "execution", "coding"],
-  ["eng-rapid", "execution", "coding"],
-  ["eng-ops", "execution", "ops"],
-  ["qa-test", "execution", "testing"],
-  ["qa-acceptance", "execution", "acceptance"],
-  ["research-codebase", "execution", "codebase"],
-  ["research-web", "retain", "general"],
-  ["research-docs", "retain", "general"],
-  ["research-vision", "retain", "general"],
-  ["content-creative", "retain", "general"],
-  ["content-technical", "retain", "general"],
-  ["content-editor", "retain", "general"],
-  ["content-writer", "retain", "general"],
-] as const;
+const host = {
+  status: "ready" as const,
+  profiles: [claudeOpus, codexXhigh],
+  availability: allAvailable,
+};
+const custom = role({
+  id: "my-custom-role",
+  name: "Custom",
+  preferredProfiles: [{ profileId: claudeOpus.id }],
+  fallbackProfiles: [{ profileId: codexXhigh.id }],
+});
 
-function member(id: string, executionPolicy?: Record<string, unknown>) {
-  return role({ id, name: id, ...(executionPolicy ? { executionPolicy } : {}) });
-}
-
-describe("role execution defaults", () => {
-  test("covers the 13 presets and the retired ids with the designed tier and task kind", () => {
-    expect(Object.keys(DEFAULT_ROLE_EXECUTION).sort()).toEqual(
-      EXPECTED_TIERS.map(([id]) => id).sort(),
-    );
-    for (const [id, tier, taskKind] of EXPECTED_TIERS) {
-      expect(DEFAULT_ROLE_EXECUTION[id], id).toEqual({ tier, taskKind });
+describe("retired Role execution policy", () => {
+  test("legacy and malformed policy values decode without changing either binding", () => {
+    for (const executionPolicy of [
+      { tier: "retain", taskKind: "coding" },
+      { tier: "economy-plus", taskKind: "delivery", future: true },
+      { tier: 5, taskKind: { future: true } },
+    ]) {
+      const stored = RoleSchema.parse({ ...custom, executionPolicy });
+      expect(stored.executionPolicy).toEqual(executionPolicy);
+      const member = resolveSeatProfile({ role: stored, host });
+      expect(member.ok).toBe(true);
+      if (!member.ok) throw new Error("member binding failed");
+      expect(member.value.profile.id).toBe(claudeOpus.id);
+      expect(member.value.source).toBe("role-preferred");
+      const coordinator = resolveCoordinatorProfile({ role: stored, host });
+      expect(coordinator.ok).toBe(true);
+      if (!coordinator.ok) throw new Error("coordinator binding failed");
+      expect(coordinator.selection.profile.id).toBe(claudeOpus.id);
+      expect(coordinator.warnings).toEqual([]);
     }
   });
 
-  test("known ids resolve from the compatibility table for member seats", () => {
-    for (const [id, tier, taskKind] of EXPECTED_TIERS) {
-      expect(resolveRoleExecution(member(id), "member"), id).toEqual({
-        ok: true,
-        value: { tier, taskKind },
-      });
-    }
-  });
-
-  test("research-codebase is an execution Role while every other research Role is retained", () => {
-    expect(resolveRoleExecution(member("research-codebase"), "member")).toEqual({
-      ok: true,
-      value: { tier: "execution", taskKind: "codebase" },
-    });
-    for (const id of ["research-web", "research-docs", "research-vision"]) {
-      expect(resolveRoleExecution(member(id), "member"), id).toEqual({
-        ok: true,
-        value: { tier: "retain", taskKind: "general" },
-      });
-    }
-  });
-
-  test("an unknown custom id keeps its original binding", () => {
-    expect(resolveRoleExecution(member("my-custom-engineer"), "member")).toEqual({
-      ok: true,
-      value: { tier: "retain", taskKind: "general" },
-    });
-  });
-
-  test("explicit valid fields override the compatibility table field by field", () => {
-    expect(resolveRoleExecution(member("eng-fullstack", { tier: "retain" }), "member")).toEqual({
-      ok: true,
-      value: { tier: "retain", taskKind: "coding" },
-    });
-    expect(resolveRoleExecution(member("eng-ops", { taskKind: "general" }), "member")).toEqual({
-      ok: true,
-      value: { tier: "execution", taskKind: "general" },
-    });
-    expect(
-      resolveRoleExecution(
-        member("eng-expert", { tier: "execution", taskKind: "testing" }),
-        "member",
-      ),
-    ).toEqual({ ok: true, value: { tier: "execution", taskKind: "testing" } });
-    expect(
-      resolveRoleExecution(
-        member("my-custom-role", { tier: "escalation", taskKind: "ops" }),
-        "member",
-      ),
-    ).toEqual({ ok: true, value: { tier: "escalation", taskKind: "ops" } });
-  });
-
-  test("explicit unknown tiers and task kinds are blockers, never a silent fallback", () => {
-    expect(resolveRoleExecution(member("eng-fullstack", { tier: "economy" }), "member")).toEqual({
-      ok: false,
-      issues: [
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "blocker",
-          roleId: "eng-fullstack",
-          params: { field: "tier", value: "economy" },
-        },
+  test("custom Roles retain their own ordered fallback regardless of an old tier", () => {
+    const unavailablePreferred = {
+      ...host,
+      availability: [
+        { provider: "claude", available: false },
+        { provider: "codex", available: true },
       ],
-    });
-    expect(resolveRoleExecution(member("eng-ops", { taskKind: "delivery" }), "member")).toEqual({
-      ok: false,
-      issues: [
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "blocker",
-          roleId: "eng-ops",
-          params: { field: "taskKind", value: "delivery" },
-        },
-      ],
-    });
-    expect(
-      resolveRoleExecution(member("my-custom-role", { tier: "fast", taskKind: "fast" }), "member"),
-    ).toMatchObject({
-      ok: false,
-      issues: [
-        { params: { field: "tier", value: "fast" } },
-        { params: { field: "taskKind", value: "fast" } },
-      ],
-    });
+    };
+    const stored = { ...custom, executionPolicy: { tier: "escalation", taskKind: "ops" } };
+    const result = resolveSeatProfile({ role: stored, host: unavailablePreferred });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("fallback failed");
+    expect(result.value.profile.id).toBe(codexXhigh.id);
+    expect(result.value.source).toBe("role-fallback");
   });
 
-  test("coordinator seats always use the decision tier, keeping their original binding", () => {
-    expect(resolveRoleExecution(member("eng-fullstack"), "coordinator")).toEqual({
-      ok: true,
-      value: { tier: "decision", taskKind: "coding" },
-    });
-    expect(
-      resolveRoleExecution(
-        member("eng-fullstack", { tier: "retain", taskKind: "ops" }),
-        "coordinator",
-      ),
-    ).toEqual({ ok: true, value: { tier: "decision", taskKind: "ops" } });
-    expect(resolveRoleExecution(member("my-custom-role"), "coordinator")).toEqual({
-      ok: true,
-      value: { tier: "decision", taskKind: "general" },
-    });
-    // A coordinator ignores its tier, so an unrecognized value is only a warning and the seat
-    // still uses the decision tier with the known task kind.
-    expect(
-      resolveRoleExecution(member("eng-fullstack", { tier: "economy" }), "coordinator"),
-    ).toEqual({
-      ok: true,
-      value: { tier: "decision", taskKind: "coding" },
-      issues: [
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "warning",
-          roleId: "eng-fullstack",
-          params: { field: "tier", value: "economy" },
-        },
-      ],
-    });
-    expect(
-      resolveRoleExecution(member("my-custom-role", { tier: "fast", taskKind: 5 }), "coordinator"),
-    ).toEqual({
-      ok: true,
-      value: { tier: "decision", taskKind: "general" },
-      issues: [
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "warning",
-          roleId: "my-custom-role",
-          params: { field: "tier", value: "fast" },
-        },
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "warning",
-          roleId: "my-custom-role",
-          params: { field: "taskKind", value: 5 },
-        },
-      ],
-    });
+  test("ledger tier and task-kind schemas retain their strict enums", () => {
+    expect(RoleTierSchema.options).toEqual(["decision", "execution", "escalation", "retain"]);
+    expect(TaskKindSchema.options).toEqual([
+      "coding",
+      "testing",
+      "acceptance",
+      "codebase",
+      "ops",
+      "general",
+    ]);
+    expect(RoleTierSchema.safeParse("economy").success).toBe(false);
+    expect(TaskKindSchema.safeParse("delivery").success).toBe(false);
   });
 
-  test("a non-string explicit value is reported, not silently treated as absent", () => {
-    expect(resolveRoleExecution(member("eng-fullstack", { tier: 5 }), "member")).toEqual({
-      ok: false,
-      issues: [
-        {
-          code: "MODE_ROLE_POLICY_UNKNOWN",
-          severity: "blocker",
-          roleId: "eng-fullstack",
-          params: { field: "tier", value: 5 },
-        },
-      ],
-    });
-  });
-
-  test("runtime tier and task-kind guards match the stored enums", () => {
-    for (const tier of ["decision", "execution", "escalation", "retain"]) {
-      expect(isRoleTier(tier)).toBe(true);
-    }
-    for (const kind of ["coding", "testing", "acceptance", "codebase", "ops", "general"]) {
-      expect(isTaskKind(kind)).toBe(true);
-    }
-    expect(isRoleTier("economy")).toBe(false);
-    expect(isTaskKind("delivery")).toBe(false);
-    // The zod-free runtime lists must accept exactly what the stored command enums list.
-    expect(RoleTierSchema.options.filter(isRoleTier)).toHaveLength(RoleTierSchema.options.length);
-    expect(TaskKindSchema.options.filter(isTaskKind)).toHaveLength(TaskKindSchema.options.length);
+  test("planning issues keep scalar values without exposing nested objects", () => {
+    expect([issueValue("x"), issueValue(3), issueValue(true)]).toEqual(["x", 3, true]);
+    expect([issueValue(null), issueValue([]), issueValue({ token: "secret" })]).toEqual([
+      "null",
+      "array",
+      "object",
+    ]);
+    expect(MODE_ISSUE_CODES).toContain("MODE_PROFILE_UNRESOLVED");
   });
 });

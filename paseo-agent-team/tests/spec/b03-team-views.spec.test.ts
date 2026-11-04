@@ -7,7 +7,6 @@ import {
   buildTeamSummary,
   createTeamPlanClient,
   draftRowKey,
-  familyHintsFromEconomy,
   TEAM_PLAN_CACHE_TTL_MS,
   TEAM_PLAN_DEBOUNCE_MS,
   TEAM_PLAN_MAX_DRAFT_MEMBERS,
@@ -174,11 +173,11 @@ describe("first screen", () => {
     const all = summary("t-all");
     expect(all.kind).toBe("summary");
     if (all.kind === "summary") {
-      expect(all.unresolvedText).toContain("未解析 ×3");
+      expect(all.total).toBe(3);
+      expect(all.unresolvedText).toBeNull();
     }
     const unknown = summary("t-unknown");
-    expect(unknown.kind).toBe("unknown-mode");
-    if (unknown.kind === "unknown-mode") expect(unknown.text).toContain("turbo");
+    expect(unknown).toMatchObject({ kind: "summary", total: 3, unresolvedText: null });
     const disabled = summary("t-disabled");
     expect(disabled.kind).toBe("summary");
     if (disabled.kind === "summary") expect(disabled.total).toBe(2);
@@ -246,7 +245,6 @@ describe("first screen", () => {
 describe("draft editor", () => {
   const draft = (overrides: Partial<TeamPlanDraftRequest> = {}): TeamPlanDraftRequest => ({
     sessionId: "editor",
-    mode: "economy-all",
     coordinatorRoleId: techLead.id,
     members: [
       { rowKey: `seat:${architect.id}`, roleId: architect.id, enabled: true },
@@ -255,7 +253,7 @@ describe("draft editor", () => {
     ...overrides,
   });
 
-  test("200ms debounce then rows keep disabled states and pool entry points", async () => {
+  test("200ms debounce then rows keep disabled states and real bindings", async () => {
     const fixture = setup();
     fixture.client.requestDraft(draft());
     fixture.fake.advance(199);
@@ -279,15 +277,9 @@ describe("draft editor", () => {
       profileName: null,
       actions: [],
     });
-    const blocked = rows.filter((row) => row.enabled && row.profileName === null);
-    expect(blocked.length).toBeGreaterThan(0);
-    expect(blocked.every((row) => row.actions.some((action) => action.kind === "economy"))).toBe(
-      true,
-    );
-    // Pool/route failures never offer Role rebinding as the remedy.
-    expect(blocked.every((row) => !row.actions.some((action) => action.kind === "role"))).toBe(
-      true,
-    );
+    const bound = rows.filter((row) => row.enabled);
+    expect(bound.length).toBeGreaterThan(0);
+    expect(bound.every((row) => row.profileName !== null && row.actions.length === 0)).toBe(true);
   });
 
   test("an older draft response never replaces the newer one", async () => {
@@ -309,10 +301,10 @@ describe("draft editor", () => {
       profiles: healthyConfig.agentProfiles,
       revisions: fixture.settings.revisions(),
     });
-    gated.requestDraft(draft({ mode: "sota" }));
+    gated.requestDraft(draft({ coordinatorRoleId: "old-lead" }));
     fixture.fake.advance(200);
     await flush();
-    gated.requestDraft(draft({ mode: "economy" }));
+    gated.requestDraft(draft({ coordinatorRoleId: techLead.id }));
     fixture.fake.advance(200);
     await flush();
     expect(resolvers).toHaveLength(2);
@@ -325,7 +317,9 @@ describe("draft editor", () => {
     await vi.waitFor(() => expect(gated.getDraftState("editor").status).toBe("result"));
     const state = gated.getDraftState("editor");
     expect(state.status).toBe("result");
-    if (state.status === "result") expect(state.result.effectiveMode).toBe("economy");
+    if (state.status === "result") {
+      expect(state.result.rows.find((row) => row.kind === "coordinator")?.roleId).toBe(techLead.id);
+    }
   });
 });
 
@@ -334,7 +328,6 @@ describe("row actions", () => {
     const fixture = setup([team("t-bind")]);
     fixture.client.requestDraft({
       sessionId: "editor",
-      mode: "sota",
       coordinatorRoleId: techLead.id,
       members: [{ rowKey: "member:0", roleId: "developer", enabled: true }],
     });
@@ -350,11 +343,10 @@ describe("row actions", () => {
     expect(view?.actions).toEqual([]);
   });
 
-  test("economy-all row keys stay unique across physical seats", async () => {
+  test("row keys stay unique across physical seats", async () => {
     const fixture = setup();
     fixture.client.requestDraft({
       sessionId: "editor",
-      mode: "economy-all",
       coordinatorRoleId: techLead.id,
       members: [
         { rowKey: `seat:${architect.id}`, roleId: architect.id, enabled: true },
@@ -419,7 +411,7 @@ describe("collaboration rows", () => {
     },
   };
 
-  test("one draft row expands to several physical rows that share rowKey and differ by seatId", async () => {
+  test("one draft row keeps one physical row and its own key", async () => {
     const settings = new DesignSettingsStore({
       roles: { roles: [techLead, fullstack] },
       teams: { teams: [collaborative] },
@@ -451,9 +443,7 @@ describe("collaboration rows", () => {
     });
     client.requestDraft({
       sessionId: "editor",
-      mode: "collaborative",
       coordinatorRoleId: techLead.id,
-      collaboration: { replicas: 2 },
       members: [{ rowKey: "seat:fs-1", roleId: fullstack.id, enabled: true }],
     });
     fake.advance(200);
@@ -462,13 +452,14 @@ describe("collaboration rows", () => {
     if (state.status !== "result") throw new Error("expected a draft result");
     const views = buildTeamModelRows({ result: state.result });
     const cohort = views.filter((view) => view.rowKey === "seat:fs-1");
-    expect(cohort.length).toBeGreaterThanOrEqual(2);
+    expect(cohort).toHaveLength(1);
+    expect(cohort[0]).toMatchObject({ roleId: fullstack.id, profileName: "Sonnet" });
     expect(new Set(cohort.map((view) => view.key)).size).toBe(cohort.length);
   });
 });
 
 describe("all-seats outage", () => {
-  test("a cheap-route outage offers only the economy route, with a layer/route", async () => {
+  test("a missing Role binding offers only the Role repair target", async () => {
     const cheap = {
       id: "cheap-deepseek",
       name: "Cheap DeepSeek",
@@ -523,42 +514,12 @@ describe("all-seats outage", () => {
     if (!result) throw new Error("missing result");
     expect(result.status).toBe("blocked");
     const views = buildTeamModelRows({ result });
-    expect(views.length).toBeGreaterThan(0);
-    for (const view of views) {
-      expect(view.actions.some((action) => action.kind === "role")).toBe(false);
-      const economy = view.actions.find((action) => action.kind === "economy");
-      expect(economy).toBeDefined();
-      if (economy?.kind === "economy") {
-        expect(economy.layer).toBe("allSeats");
-        expect(economy.route).toBeTruthy();
-      }
-    }
-  });
-});
-
-describe("family hints from the real policy", () => {
-  test("a tuple-matched all-seats entry is the only hint", () => {
-    const hints = familyHintsFromEconomy(
-      {
-        allSeats: {
-          version: 1,
-          profiles: [
-            {
-              profileId: "codex-xhigh",
-              enabled: true,
-              costClass: "low",
-              family: "deepseek",
-              boundModel: { provider: "codex", model: "gpt-5.5" },
-            },
-          ],
-          routes: {},
-        },
-      },
-      healthyConfig.agentProfiles,
+    const missing = views.find((view) => view.roleId === developer.id);
+    expect(missing?.profileName).toBeNull();
+    expect(missing?.actions).toEqual([{ kind: "role", roleId: developer.id }]);
+    expect(views.flatMap((view) => view.actions).every((action) => action.kind === "role")).toBe(
+      true,
     );
-    expect(hints).toEqual([
-      { profileId: "codex-xhigh", provider: "codex", model: "gpt-5.5", family: "deepseek" },
-    ]);
   });
 });
 
@@ -682,7 +643,6 @@ describe("acceptance additions: first screen, cache, and degradation", () => {
 describe("acceptance additions: draft identity and debounce", () => {
   const draft = (): TeamPlanDraftRequest => ({
     sessionId: "editor",
-    mode: "economy-all",
     coordinatorRoleId: techLead.id,
     members: [
       { rowKey: `seat:${architect.id}`, roleId: architect.id, enabled: true },
@@ -703,7 +663,7 @@ describe("acceptance additions: draft identity and debounce", () => {
 
     const item = fixture.calls[0]?.items[0];
     if (item?.kind !== "draft") throw new Error("expected draft input");
-    expect(item.draft.mode).toBe("economy-all");
+    expect(item.draft).not.toHaveProperty("mode");
     expect(item.draft.members).toHaveLength(2);
     for (const member of item.draft.members) {
       for (const key of Object.keys(member)) {
@@ -749,7 +709,7 @@ describe("acceptance additions: draft identity and debounce", () => {
 });
 
 describe("acceptance additions: collaboration, disabled, standby, bindings", () => {
-  test("collaboration keeps one rowKey with distinct seatIds and logical seats", async () => {
+  test("two logical members of one Role keep distinct rowKeys and seatIds", async () => {
     const sonnet = {
       id: "claude-sonnet",
       name: "Sonnet",
@@ -822,21 +782,22 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     });
     client.requestDraft({
       sessionId: "editor",
-      mode: "collaborative",
       coordinatorRoleId: techLead.id,
-      collaboration: { replicas: 2 },
-      members: [{ rowKey: "seat:fs-1", roleId: fullstack.id, enabled: true }],
+      members: [
+        { rowKey: "seat:fs-1", roleId: fullstack.id, instanceLabel: "A", enabled: true },
+        { rowKey: "seat:fs-2", roleId: fullstack.id, instanceLabel: "B", enabled: true },
+      ],
     });
     fake.advance(TEAM_PLAN_DEBOUNCE_MS);
     await vi.waitFor(() => expect(client.getDraftState("editor").status).toBe("result"));
     const state = client.getDraftState("editor");
     if (state.status !== "result") throw new Error("expected result");
-    const cohort = state.result.rows.filter((row) => row.rowKey === "seat:fs-1");
-    expect(cohort.length).toBeGreaterThanOrEqual(2);
-    expect(new Set(cohort.map((row) => row.rowKey)).size).toBe(1);
-    expect(new Set(cohort.map((row) => row.seatId)).size).toBe(cohort.length);
-    expect(cohort.every((row) => typeof row.logicalSeatId === "string")).toBe(true);
-    expect(cohort.every((row) => row.seatId !== undefined)).toBe(true);
+    const members = state.result.rows.filter((row) => row.kind === "member");
+    expect(members).toHaveLength(2);
+    expect(members.map((row) => row.rowKey)).toEqual(["seat:fs-1", "seat:fs-2"]);
+    expect(new Set(members.map((row) => row.seatId)).size).toBe(2);
+    expect(members.every((row) => typeof row.logicalSeatId === "string")).toBe(true);
+    expect(members.every((row) => row.seatId !== undefined)).toBe(true);
   });
 
   test("a disabled member is excluded from the summary and has no model row action", async () => {
@@ -869,7 +830,7 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     expect(disabled).toMatchObject({ profileName: null, actions: [] });
   });
 
-  test("coordinator and standby physical seats count in the summary", async () => {
+  test("coordinator and formerly escalation-labeled members count in the summary", async () => {
     const sonnet = {
       id: "claude-sonnet",
       name: "Sonnet",
@@ -946,11 +907,12 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     expect(summary).toMatchObject({
       kind: "summary",
       total: 2,
-      groupsText: teamPlanZh.groupWithStandby("Sonnet", 2, 1),
+      groupsText: `${teamPlanZh.group("Opus", 1)} · ${teamPlanZh.group("Sonnet", 1)}`,
     });
     const rows = buildTeamModelRows({ result });
     expect(rows.filter((row) => row.kind === "coordinator")).toHaveLength(1);
-    expect(rows.filter((row) => row.standby)).toHaveLength(1);
+    expect(rows.filter((row) => row.kind === "member")).toHaveLength(1);
+    expect(rows.find((row) => row.kind === "member")?.profileName).toBe("Sonnet");
   });
 
   test("Role cards keep stored binding order and live > snapshot > hint precedence", () => {
@@ -975,7 +937,7 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     expect(labels.fallback).toEqual([]);
   });
 
-  test("a missing binding offers the Role target; an economy row offers the all-seats route", async () => {
+  test("a missing binding offers its Role target while a healthy row has no action", async () => {
     const ghostRole: Role = {
       ...architect,
       id: "ghost-binding",
@@ -1014,10 +976,9 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     // AC-0b.9: roleId is mandatory; the Profile hint is optional when no candidate is known.
     expect(row?.actions).toContainEqual({ kind: "role", roleId: ghostRole.id });
 
-    // Default economy-all with no all-seats policy: the row's remedy is the route list.
+    // A healthy binding must not invent a repair action.
     fixture.client.requestDraft({
       sessionId: "editor",
-      mode: "economy-all",
       coordinatorRoleId: techLead.id,
       members: [{ rowKey: "member:0", roleId: architect.id, enabled: true }],
     });
@@ -1026,12 +987,9 @@ describe("acceptance additions: collaboration, disabled, standby, bindings", () 
     const state = fixture.client.getDraftState("editor");
     if (state.status !== "result") throw new Error("expected result");
     const views = buildTeamModelRows({ result: state.result });
-    const economyAction = views
-      .flatMap((view) => view.actions)
-      .find((action) => action.kind === "economy");
-    // K4: economy-all always targets the all-seats layer; the route is optional when the
-    // blocked row has no derived route.
-    expect(economyAction).toMatchObject({ kind: "economy", layer: "allSeats" });
+    const healthy = views.find((view) => view.roleId === architect.id);
+    expect(healthy?.profileName).toBe(claudeOpus.name);
+    expect(healthy?.actions).toEqual([]);
   });
 
   test("draft rowKey rules: stored seat ids, index fallback, reserved and duplicate keys", async () => {

@@ -36,7 +36,6 @@ const haiku = {
 function context(overrides: Partial<DesignValidationContext> = {}): DesignValidationContext {
   return {
     request: "补一个数据库迁移评审",
-    mode: "economy-all",
     jobId: DESIGN_JOB_ID,
     attempt: 1,
     nonce: DESIGN_NONCE,
@@ -136,7 +135,7 @@ describe("role-gap acceptance", () => {
     expect(result.value.gaps[0]?.suggestedRole).toMatchObject({
       id: "eng-migration-reviewer",
       name: "【工程】迁移评审",
-      executionPolicy: { tier: "execution", taskKind: "codebase" },
+      executionPolicy: { tier: "retain", taskKind: "general" },
     });
   });
 
@@ -220,7 +219,7 @@ describe("role-gap acceptance", () => {
     expect(codes(batch)).toContain("DESIGN_ROLE_NAME_CONFLICT");
   });
 
-  test("suggested Profiles must exist, resolve, and not be high-cost", () => {
+  test("suggested Profiles must exist; family and cost do not restrict them", () => {
     const missing = validateRoleGap(
       gapProposal([missingRoleGap({ profiles: { kind: "existing", profileIds: ["p-gone"] } })]),
       context(),
@@ -235,10 +234,10 @@ describe("role-gap acceptance", () => {
       context(),
       ACCEPT,
     );
-    expect(codes(highCost)).toEqual(["DESIGN_OUTPUT_SCHEMA"]);
-    if (!highCost.ok) expect(highCost.issues[0]?.params.reason).toBe("high-cost-family");
+    expect(highCost.ok).toBe(true);
+    if (highCost.ok) expect(highCost.value.gaps[0]?.profiles[0]?.id).toBe(claudeOpus.id);
 
-    // `gpt-5.5` names no supported family, so it cannot pass as a cheap suggestion.
+    // A model with no recognized family is still a valid existing Profile.
     const unresolved = validateRoleGap(
       gapProposal([
         missingRoleGap({ profiles: { kind: "existing", profileIds: ["codex-xhigh"] } }),
@@ -246,38 +245,35 @@ describe("role-gap acceptance", () => {
       context(),
       ACCEPT,
     );
-    expect(codes(unresolved)).toEqual(["DESIGN_OUTPUT_SCHEMA"]);
-    if (!unresolved.ok) expect(unresolved.issues[0]?.params.reason).toBe("family-unverified");
+    expect(unresolved.ok).toBe(true);
+    if (unresolved.ok) expect(unresolved.value.gaps[0]?.profiles[0]?.id).toBe(codexXhigh.id);
   });
 
-  test.each(["sota", "economy", "collaborative"] as const)(
-    "P1-FIX1 item 1: %s does not apply the all-seats low-cost floor to suggestions",
-    (mode) => {
-      const result = validateRoleGap(
-        gapProposal([
-          missingRoleGap({
-            profiles: { kind: "existing", profileIds: [claudeOpus.id, codexXhigh.id] },
-          }),
-        ]),
-        context({ mode }),
-        ACCEPT,
-      );
-      expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.value.gaps[0]?.profiles.map((profile) => profile.id)).toEqual([
-          claudeOpus.id,
-          codexXhigh.id,
-        ]);
-      }
-      // A Profile that does not exist is still rejected in every mode.
-      const missing = validateRoleGap(
-        gapProposal([missingRoleGap({ profiles: { kind: "existing", profileIds: ["p-gone"] } })]),
-        context({ mode }),
-        ACCEPT,
-      );
-      expect(codes(missing)).toEqual(["DESIGN_PROFILE_MISSING"]);
-    },
-  );
+  test("multiple valid Profiles survive while a missing Profile is rejected", () => {
+    const result = validateRoleGap(
+      gapProposal([
+        missingRoleGap({
+          profiles: { kind: "existing", profileIds: [claudeOpus.id, codexXhigh.id] },
+        }),
+      ]),
+      context(),
+      ACCEPT,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.gaps[0]?.profiles.map((profile) => profile.id)).toEqual([
+        claudeOpus.id,
+        codexXhigh.id,
+      ]);
+    }
+    // A Profile that does not exist is still rejected in every mode.
+    const missing = validateRoleGap(
+      gapProposal([missingRoleGap({ profiles: { kind: "existing", profileIds: ["p-gone"] } })]),
+      context(),
+      ACCEPT,
+    );
+    expect(codes(missing)).toEqual(["DESIGN_PROFILE_MISSING"]);
+  });
 });
 
 describe("unlaunchable-role uses the verified per-use verdict", () => {

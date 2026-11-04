@@ -18,10 +18,8 @@ import {
   launchPreviewRpc,
   launchStartRpc,
   launchStatusRpc,
-  projectLaunchJobForLegacyPeer,
   teamPlanRpc,
 } from "../shared/rpc";
-import { launchContractZh } from "../shared/zh/launch-contract";
 
 /** Literal copy of 75ec305's `LaunchJobSchema` (three-mode enum, strip object). */
 const baselineTeamMode = z.enum(["sota", "economy", "collaborative"]);
@@ -53,20 +51,7 @@ const baselineLaunchJob = z.object({
   planHash: z.string().optional(),
 });
 
-const legacyJob: LaunchJob = {
-  runId: "run-legacy",
-  teamId: "team-1",
-  teamName: "Legacy",
-  state: "succeeded",
-  step: "done",
-  memberTotal: 1,
-  memberIds: ["m1"],
-  warnings: [],
-  startedAt: "2026-01-01T00:00:00.000Z",
-  mode: "economy",
-};
-
-const newModeJob: LaunchJob = {
+const singlePathJob: LaunchJob = {
   runId: "run-new",
   teamId: "team-2",
   teamName: "New",
@@ -76,8 +61,7 @@ const newModeJob: LaunchJob = {
   memberIds: ["m1"],
   warnings: ["starting"],
   startedAt: "2026-01-01T00:00:00.000Z",
-  mode: "economy-all",
-  rawMode: "future",
+  mode: "sota",
   planHash: "abc",
 };
 
@@ -373,36 +357,18 @@ describe("plugin RPC contracts", () => {
     expect(() => launchStatusRpc.input.parse({ runId: "run-1", contractVersion: 2.5 })).toThrow();
   });
 
-  test("a new-mode job is projected to the baseline DTO for a legacy poller", () => {
-    // 75ec305's literal schema: `mode` only knows the three legacy values and `z.object` strips
-    // unknown keys. Without projection the parse fails, which is the counter-proof below.
-    expect(baselineLaunchJob.safeParse(newModeJob).success).toBe(false);
-
-    const projected = projectLaunchJobForLegacyPeer(newModeJob);
-    expect(projected).not.toBeNull();
-    if (projected === null) return;
-    expect(projected).not.toHaveProperty("mode");
-    expect(projected).not.toHaveProperty("rawMode");
-    expect(projected.state).toBe("running");
-    expect(projected.step).toBe("coordinator");
-    expect(projected.planHash).toBe(newModeJob.planHash);
-    expect(projected.warnings).toEqual([...newModeJob.warnings, launchContractZh.refreshHint]);
-    expect(baselineLaunchJob.safeParse(projected).success).toBe(true);
-
-    // The stored job is untouched: projection works on a copy.
-    expect(newModeJob.mode).toBe("economy-all");
-    expect(newModeJob.rawMode).toBe("future");
-    // Re-projecting an already hinted job does not duplicate the hint.
-    const again = projectLaunchJobForLegacyPeer(projected);
-    expect(again?.warnings).toEqual(projected.warnings);
-  });
-
-  test("legacy jobs, v2 callers, and null pass the projection through", () => {
-    expect(projectLaunchJobForLegacyPeer(null)).toBeNull();
-    expect(projectLaunchJobForLegacyPeer(legacyJob)).toBe(legacyJob);
-    expect(projectLaunchJobForLegacyPeer(newModeJob, 2)).toBe(newModeJob);
-    expect(projectLaunchJobForLegacyPeer(newModeJob, 3)).not.toBe(newModeJob);
-    expect(projectLaunchJobForLegacyPeer(newModeJob, 3)).not.toHaveProperty("mode");
+  test("a single-path status job parses under the baseline schema unchanged", () => {
+    const parsed = launchStatusRpc.output.parse({ job: singlePathJob });
+    expect(parsed.job).toEqual(singlePathJob);
+    expect(baselineLaunchJob.parse(parsed.job)).toEqual(singlePathJob);
+    expect(parsed.job).not.toHaveProperty("rawMode");
+    expect(parsed.job).toMatchObject({
+      state: "running",
+      step: "coordinator",
+      mode: "sota",
+      planHash: "abc",
+      warnings: ["starting"],
+    });
   });
 
   test("a legacy preview still parses with the baseline strict schema", () => {

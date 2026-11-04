@@ -1,76 +1,56 @@
-import { modeToStore, readStoredMode } from "../../shared/domain/mode-contract";
+import { retiredModeLabel } from "../../shared/domain/mode-contract";
+import { hasRetiredFields } from "../../shared/domain/retired-fields";
 import type { Role } from "../../shared/schemas/role";
-import type { TeamMember } from "../../shared/schemas/team";
-import type { StoredCollaboration, TeamMode } from "../../shared/schemas/team-mode";
+import type { Team, TeamMember } from "../../shared/schemas/team";
 import { zh } from "../../shared/zh";
 import type { MemberCreation } from "../shared/team-mode-options";
-
-export type StoredModeRead = { mode: TeamMode; unknown: string | null };
-
-/**
- * The picker needs a concrete mode, so an unreadable stored value selects the SOTA default in the
- * form — but `unknown` carries the raw value, the editor warns with it, and an untouched save
- * writes the original back (never `sota`).
- */
-export function readStoredTeamMode(raw: string | undefined): StoredModeRead {
-  const stored = readStoredMode(raw);
-  return stored.status === "known"
-    ? { mode: stored.mode, unknown: null }
-    : { mode: "sota", unknown: stored.raw };
-}
 
 export function readMemberCreation(raw: string | undefined): MemberCreation {
   return raw === "eager" || raw === "on-demand" ? raw : "";
 }
 
-export type CollaborationDraft = {
-  replicas: 2 | 3;
-  judgeRoleId: string;
-  escalationRoleId: string;
-};
+/**
+ * Put only the user-edited member-creation choice into the saved Team. An untouched value
+ * (including one this version cannot read) is left exactly as stored; an old Team with none keeps
+ * it absent. The retired mode fields are never produced here (.notes/274).
+ */
+export function buildMemberCreationField(input: {
+  original: Pick<Team, "memberCreation"> | null;
+  memberCreation: MemberCreation;
+  memberCreationTouched: boolean;
+}): { memberCreation?: string } {
+  const memberCreation = input.memberCreationTouched
+    ? input.memberCreation || undefined
+    : input.original?.memberCreation;
+  return memberCreation === undefined ? {} : { memberCreation };
+}
 
-export function readCollaboration(raw: StoredCollaboration | undefined): CollaborationDraft {
+/** What a Team still stores of the retired mode settings; read only to word the E1 notice. */
+export type RetiredTeamNotice = { modeLabel: string | null; collaboration: boolean };
+
+export function readRetiredTeamNotice(
+  team: Pick<Team, "mode" | "collaboration"> | null | undefined,
+): RetiredTeamNotice | null {
+  if (!team || !hasRetiredFields("team", team)) return null;
   return {
-    replicas: raw?.replicas === 3 ? 3 : 2,
-    judgeRoleId: typeof raw?.judgeRoleId === "string" ? raw.judgeRoleId : "",
-    escalationRoleId: typeof raw?.escalationRoleId === "string" ? raw.escalationRoleId : "",
+    modeLabel: retiredModeLabel(team.mode),
+    collaboration: Object.hasOwn(team, "collaboration"),
   };
 }
 
-export type CollaborationTouched = {
-  replicas: boolean;
-  judgeRoleId: boolean;
-  escalationRoleId: boolean;
-};
-
-/**
- * Collaboration is configuration for switching back, so an existing block survives other modes.
- * Untouched fields (including values this version cannot read) are left exactly as stored.
- */
-export function buildCollaboration(
-  original: StoredCollaboration | undefined,
-  draft: CollaborationDraft,
-  mode: TeamMode,
-  touched: CollaborationTouched = {
-    replicas: false,
-    judgeRoleId: false,
-    escalationRoleId: false,
-  },
-): StoredCollaboration | undefined {
-  const anyTouched = touched.replicas || touched.judgeRoleId || touched.escalationRoleId;
-  if (!anyTouched && original) return original;
-  if (!anyTouched && !original && mode !== "collaborative") return undefined;
-  const block: Record<string, unknown> = { ...(original ?? {}) };
-  if (!original || touched.replicas) block.replicas = draft.replicas;
-  if (touched.judgeRoleId) {
-    if (draft.judgeRoleId) block.judgeRoleId = draft.judgeRoleId;
-    else delete block.judgeRoleId;
-  }
-  if (touched.escalationRoleId) {
-    if (draft.escalationRoleId) block.escalationRoleId = draft.escalationRoleId;
-    else delete block.escalationRoleId;
-  }
-  return block;
+/** A single E1 notice for every Team carrying either retired key, including during probing. */
+export function retiredTeamNoticeLines(
+  notice: RetiredTeamNotice | null,
+  hostRetires: boolean | null,
+): string[] {
+  if (notice === null) return [];
+  return [
+    hostRetires === null
+      ? zh.retiredTeamProbePending(notice.modeLabel)
+      : hostRetires
+        ? zh.retiredTeamMode(notice.modeLabel)
+        : zh.retiredTeamModeKept(notice.modeLabel),
+  ];
 }
 
 const SEAT_SUFFIX_RADIX = 36 ** 4;
@@ -170,46 +150,6 @@ export function duplicateMemberPair(
       seatId: copySeat,
       instanceLabel: copyLabel,
     },
-  };
-}
-
-export type TeamModeFields = {
-  mode?: string;
-  memberCreation?: string;
-  collaboration?: StoredCollaboration;
-};
-
-/**
- * Put only user-edited mode fields into the saved Team. Untouched values (including unknown ones)
- * are preserved; an old Team with no mode keeps it absent.
- */
-export function buildTeamModeFields(input: {
-  original: { mode?: string; memberCreation?: string; collaboration?: StoredCollaboration } | null;
-  mode: TeamMode;
-  modeTouched: boolean;
-  memberCreation: MemberCreation;
-  memberCreationTouched: boolean;
-  collaboration: CollaborationDraft;
-  collaborationTouched: CollaborationTouched;
-}): TeamModeFields {
-  const mode = modeToStore({
-    original: input.original?.mode,
-    selected: input.mode,
-    touched: input.modeTouched,
-  });
-  const memberCreation = input.memberCreationTouched
-    ? input.memberCreation || undefined
-    : input.original?.memberCreation;
-  const collaboration = buildCollaboration(
-    input.original?.collaboration,
-    input.collaboration,
-    input.mode,
-    input.collaborationTouched,
-  );
-  return {
-    ...(mode === undefined ? {} : { mode }),
-    ...(memberCreation === undefined ? {} : { memberCreation }),
-    ...(collaboration === undefined ? {} : { collaboration }),
   };
 }
 

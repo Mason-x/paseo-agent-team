@@ -17,8 +17,7 @@ import {
   validateMaterializedDesign,
   validateRoleGap,
 } from "../../shared/domain/design-validation";
-import { isTeamMode, requestContractVersion } from "../../shared/domain/mode-contract";
-import { type EconomyPolicy, normalizeEconomyPolicy } from "../../shared/domain/mode-resolver";
+import { requestContractVersion } from "../../shared/domain/mode-contract";
 import type { PaseoProfile } from "../../shared/paseo/adapter";
 import {
   buildDesignLabels,
@@ -65,7 +64,6 @@ import {
   readDesignContext,
 } from "./context";
 import { bindDesignerProfile, DESIGNER_SYSTEM_PROMPT } from "./definition";
-import { checkGapEconomyEligibility } from "./planning";
 import {
   buildDesignCorrection,
   buildDesignKickoff,
@@ -331,17 +329,11 @@ function chooseDesignerProfile(
   };
 }
 
-function economyOf(context: DesignContextSnapshot): EconomyPolicy {
-  const normalized = normalizeEconomyPolicy(context.preferences.economy, context.profiles);
-  return normalized.ok ? normalized.value : { pool: [], taskOrder: {}, profileBudget: {} };
-}
-
 function promptContext(
   record: StoredDesignJob,
   context: DesignContextSnapshot,
   expectedChoices: readonly ExpectedDesignChoice[] = [],
 ): DesignPromptContext {
-  const economy = economyOf(context);
   const roles = context.roles.map((role) => {
     // Two separate planner verdicts: a Role can launch as a member and fail as coordinator, so
     // neither is ever derived from the other. A Role the tables do not know is "cannot launch,
@@ -369,15 +361,10 @@ function promptContext(
       coordinatorLaunchable: coordinatorLaunch.launchable,
       launchVerified: launch.verified,
       coordinatorLaunchVerified: coordinatorLaunch.verified,
-      ...(typeof role.executionPolicy?.tier === "string" &&
-      typeof role.executionPolicy.taskKind === "string"
-        ? { tier: role.executionPolicy.tier, taskKind: role.executionPolicy.taskKind }
-        : {}),
     };
   });
   return {
     request: record.request,
-    requestedMode: record.mode,
     runtimeCapabilities: context.capabilities,
     maxMembers: Math.min(context.preferences.maxMembers, 64),
     target: context.targetWorkspace
@@ -389,8 +376,7 @@ function promptContext(
       : null,
     carrierWorkspaceId: context.carrierWorkspaceId,
     roles,
-    profiles: summarizeProfiles(context.profiles, context.availability, economy),
-    economy: { pool: economy.pool, taskOrder: economy.taskOrder },
+    profiles: summarizeProfiles(context.profiles, context.availability),
     occupiedRoleIds: context.roles.map((role) => role.id),
     occupiedRoleNames: context.roles.map((role) => role.name),
     occupiedTeams: context.teams.map((team) => ({ id: team.id, name: team.name })),
@@ -399,8 +385,6 @@ function promptContext(
     // must never go through the default for new requests (that would flip it to "on").
     outputContractVersion: record.outputContractVersion,
     existingRolesOnly: record.existingRolesOnly,
-    // economy-all route evidence, copied from the snapshot and never recomputed here.
-    ...(context.modeRouting === undefined ? {} : { modeRouting: context.modeRouting }),
   };
 }
 
@@ -413,7 +397,6 @@ function validationContext(
   const attemptRecord = record.attempts.find((item) => item.attempt === attempt);
   return {
     request: record.request,
-    mode: record.mode,
     jobId: record.job.jobId,
     attempt,
     nonce: attemptRecord?.nonce ?? "",
@@ -619,7 +602,6 @@ export function createDesignService(deps: DesignServiceDeps) {
     const result = await readDesignContext(
       {
         jobId: record.job.jobId,
-        mode: record.mode,
         carrierWorkspaceId: record.job.carrierWorkspaceId,
         targetWorkspaceId: record.job.targetWorkspaceId,
       },
@@ -788,20 +770,6 @@ export function createDesignService(deps: DesignServiceDeps) {
         );
         return;
       }
-      // economy-all: a suggested Profile must be a cheap candidate of the route its own use and
-      // tier pick. An issue is a correction round (same budget of 3), not a terminal state.
-      const eligibility = extracted.gap.gaps.flatMap((gap, index) =>
-        checkGapEconomyEligibility({
-          mode: record.mode,
-          gap,
-          routing: context.modeRouting,
-          path: ["gaps", index],
-        }),
-      );
-      if (eligibility.length > 0) {
-        await handleFailure(record, context, eligibility, null, null, allowCorrection, "role-gap");
-        return;
-      }
       await finishWithRoleGap(record.job.jobId, attempt, gapValidation.value.gaps);
       return;
     }
@@ -912,11 +880,9 @@ export function createDesignService(deps: DesignServiceDeps) {
     }
     return {
       roles: [...roles],
-      available: summarizeProfiles(
-        context.profiles,
-        context.availability,
-        economyOf(context),
-      ).filter((profile) => profile.available),
+      available: summarizeProfiles(context.profiles, context.availability).filter(
+        (profile) => profile.available,
+      ),
     };
   }
 
@@ -962,14 +928,15 @@ export function createDesignService(deps: DesignServiceDeps) {
         return;
       }
       const profileList = profileFailure.available.map(
-        (profile) => `${profile.id} / ${profile.name} / ${profile.family ?? "未标注"}`,
+        (profile) =>
+          `${profile.id} / ${profile.name} / ${profile.provider}${profile.model ? `/${profile.model}` : ""}`,
       );
       const aggregate = error(
         "DESIGN_LAUNCH_BLOCKED",
         ["plan", "profiles"],
         {
           reason: boundedReason(
-            `以下 Role 在本 host 不可启动：${roles.join("、")}。可用 Profile（id / 名称 / family）：`,
+            `以下 Role 在本 host 不可启动：${roles.join("、")}。可用 Profile（id / 名称 / provider/model）：`,
             profileList,
             "。请改用其他 Role，或用这些 Profile 新建 Role。",
           ),
@@ -1714,7 +1681,8 @@ export function createDesignService(deps: DesignServiceDeps) {
 
   /**
    * Refuses, before anything is read or written, a by-job call from a caller whose contract cannot
-   * represent the job's mode (a baseline page asking about an economy-all job). A store problem
+   * represent the job's recorded mode (a baseline page asking about a job recorded before the
+   * upgrade in the fourth mode). A store problem
    * is not this function's to report; the call's own path surfaces it.
    */
   async function contractBlock(jobId: string, raw: number | undefined) {
@@ -1792,19 +1760,12 @@ export function createDesignService(deps: DesignServiceDeps) {
           return failure([
             error("DESIGN_STORAGE_UNAVAILABLE", [], { reason: "disposed" }, "refresh"),
           ]);
-        if (input.mode === "collaborative" && !deps.capabilities.collaboration) {
-          return failure([
-            error("DESIGN_MODE_UNAVAILABLE", ["mode"], { mode: input.mode }, "none"),
-          ]);
-        }
         const mode = input.mode ?? "sota";
-        // The access gate comes before any store read, hash, or agent: a caller that did not say
-        // contract 2 (or a mode this build does not know) is refused with nothing touched.
-        if (
-          !isTeamMode(mode) ||
-          !designModeAccess({ mode, contractVersion: input.contractVersion }).ok
-        ) {
-          return failure([legacyModeIssue(mode)]);
+        // The mode is retired. The access gate comes before any store read, hash, or agent: a
+        // request that names any mode other than the default is refused with nothing touched, and
+        // every job this version records is sota.
+        if (!designModeAccess({ mode, contractVersion: input.contractVersion }).ok) {
+          return failure([legacyModeIssue(mode, "retired")]);
         }
         const request = input.request.trim();
         const rules = normalizeExistingRolesOnly(input.existingRolesOnly);

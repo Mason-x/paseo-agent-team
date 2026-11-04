@@ -1,8 +1,8 @@
 // B01 spec: team.plan strict DTO and the model-summary contract. Real schemas/functions only;
 // every case pins AC-0b.* behavior and must stay green against the B01 implementation.
 import { describe, expect, test } from "vitest";
-import { MODE_CONTRACT_VERSION, TEAM_MODES } from "../../shared/domain/mode-contract";
-import { type ModelFamilyHint, summarizeModelRows } from "../../shared/domain/model-summary";
+import { MODE_CONTRACT_VERSION, SUPPORTED_TEAM_MODES } from "../../shared/domain/mode-contract";
+import { summarizeModelRows } from "../../shared/domain/model-summary";
 import { emptyTeamPlanProbe } from "../../shared/rpc/team-plan";
 import {
   TEAM_PLAN_DESIGN_ROLE_POLICY,
@@ -66,7 +66,7 @@ function planOutput(overrides: Partial<TeamPlanOutput> = {}): TeamPlanOutput {
     capabilities: {
       modeContract: MODE_CONTRACT_VERSION,
       designRolePolicy: TEAM_PLAN_DESIGN_ROLE_POLICY,
-      supportedModes: [...TEAM_MODES],
+      supportedModes: [...SUPPORTED_TEAM_MODES],
       runtimeCapabilities: { onDemand: false, expansion: false, collaboration: false },
     },
     checkedAt: "2026-10-27T12:00:00.000Z",
@@ -198,7 +198,7 @@ describe("team plan input contract", () => {
       capabilities: {
         modeContract: MODE_CONTRACT_VERSION,
         designRolePolicy: TEAM_PLAN_DESIGN_ROLE_POLICY,
-        supportedModes: [...TEAM_MODES],
+        supportedModes: [...SUPPORTED_TEAM_MODES],
         runtimeCapabilities: { onDemand: true, expansion: false, collaboration: false },
       },
       checkedAt: "2026-10-27T12:00:00.000Z",
@@ -207,8 +207,8 @@ describe("team plan input contract", () => {
     } satisfies TeamPlanOutput;
     const parsed = TeamPlanOutputSchema.parse(probe);
     expect(parsed.capabilities.modeContract).toBe(2);
-    expect(parsed.capabilities.supportedModes).toEqual([...TEAM_MODES]);
-    expect(parsed.capabilities.supportedModes).toContain("economy-all");
+    expect(parsed.capabilities.supportedModes).toEqual([...SUPPORTED_TEAM_MODES]);
+    expect(parsed.capabilities.supportedModes).toEqual(["sota"]);
     expect(parsed.capabilities.designRolePolicy).toBe(TEAM_PLAN_DESIGN_ROLE_POLICY);
     expect(parsed.context).toBeNull();
     expect(parsed.results).toEqual([]);
@@ -338,8 +338,8 @@ describe("team plan output contract", () => {
 });
 
 describe("model summary contract", () => {
-  // AC-0b.6: coordinator and standby rows count, disabled rows never do, total reconciles.
-  test("counts the coordinator and standby seats while excluding disabled rows", () => {
+  // Historical rows are still counted; disabled rows never are, and total reconciles.
+  test("counts the coordinator and historical escalation rows while excluding disabled rows", () => {
     const result = summaryOf([
       planRow({ rowKey: "coordinator", kind: "coordinator", roleId: "lead-orchestrator" }),
       planRow({
@@ -352,8 +352,8 @@ describe("model summary contract", () => {
     ]);
     expect(result.total).toBe(2);
     expect(result.groups).toEqual([
-      { key: "family:opus", label: "Opus", count: 1, standby: 0 },
-      { key: "family:sonnet", label: "Sonnet", count: 1, standby: 1 },
+      { key: "family:opus", label: "Opus", count: 1 },
+      { key: "family:sonnet", label: "Sonnet", count: 1 },
     ]);
     expect(result.unresolved).toEqual({ count: 0, reasons: [] });
     expect(result.total).toBe(result.groups.reduce((sum, group) => sum + group.count, 0));
@@ -406,28 +406,8 @@ describe("model summary contract", () => {
     ]);
     expect(auto.unresolved.count).toBe(0);
     expect(auto.groups).toEqual([
-      { key: "profile:p-auto", label: "Auto Profile", count: 1, standby: 0 },
-      { key: "profile:p-none", label: "No Model", count: 1, standby: 0 },
-    ]);
-
-    const hints: ModelFamilyHint[] = [
-      { profileId: "p-auto", provider: "claude", model: "auto", family: "sonnet" },
-      { profileId: "p-none", provider: "claude", model: "old-model", family: "sonnet" },
-    ];
-    const hinted = summaryOf(
-      [
-        planRow({
-          rowKey: "a",
-          profile: { id: "p-auto", name: "Auto Profile", provider: "claude", model: "auto" },
-        }),
-        planRow({ rowKey: "b", profile: { id: "p-none", name: "No Model", provider: "claude" } }),
-      ],
-      { familyHints: hints },
-    );
-    // Only the tuple-matched hint applies; the stale model keeps its own Profile label.
-    expect(hinted.groups.map((group) => group.key).sort()).toEqual([
-      "family:sonnet",
-      "profile:p-none",
+      { key: "profile:p-auto", label: "Auto Profile", count: 1 },
+      { key: "profile:p-none", label: "No Model", count: 1 },
     ]);
   });
 
@@ -451,8 +431,8 @@ describe("model summary contract", () => {
     const summary = summaryOf([low, high, movedProvider, movedModel]);
     expect(summary.total).toBe(4);
     expect(summary.groups).toEqual([
-      { key: "family:opus", label: "Opus", count: 3, standby: 0 },
-      { key: "family:sonnet", label: "Sonnet", count: 1, standby: 0 },
+      { key: "family:opus", label: "Opus", count: 3 },
+      { key: "family:sonnet", label: "Sonnet", count: 1 },
     ]);
     const parsed = TeamPlanOutputSchema.parse(
       planOutput({ results: [planResult("saved-1", [low, high, movedProvider, movedModel])] }),

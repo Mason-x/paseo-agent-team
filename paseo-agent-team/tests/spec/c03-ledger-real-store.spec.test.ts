@@ -472,14 +472,14 @@ describe("AC-0c.16④: crash points leave the old or the new valid record", () =
 });
 
 describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
-  test("economy-all with contract 2 lands as schemaVersion 2", async () => {
+  test("sota with contract 2 lands as schemaVersion 2", async () => {
     const { home, root } = await newHome();
     const store = await openStore(home);
     const service = serviceFor(store);
     const started = await service.start({
       clientRequestId: uuid(),
-      request: "经济任务",
-      mode: "economy-all",
+      request: "设计任务",
+      mode: "sota",
       contractVersion: 2,
     });
     expect(started.ok).toBe(true);
@@ -491,7 +491,7 @@ describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
       outputContractVersion: 2,
       existingRolesOnly: true,
       roleGap: null,
-      mode: "economy-all",
+      mode: "sota",
     });
     expect(onDisk.job).toMatchObject({
       existingRolesOnly: true,
@@ -501,7 +501,7 @@ describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
     await service.dispose();
   });
 
-  test("legacy contract 2 gate rejects economy-all and an unknown mode with zero writes", async () => {
+  test("retired and unknown modes fail across contract versions with zero writes", async () => {
     const { home, root } = await newHome();
     const store = await openStore(home);
     let adapterCalls = 0;
@@ -511,15 +511,23 @@ describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
         return null;
       },
     });
-    for (const mode of ["economy-all", "future-mode"]) {
-      const rejected = await service.start({
-        clientRequestId: uuid(),
-        request: "经济任务",
-        mode: mode as TeamMode,
-      });
-      expect(rejected.ok).toBe(false);
-      expect(issueCodes(rejected)).toEqual(["DESIGN_MODE_UNAVAILABLE"]);
-      if (!rejected.ok) expect(rejected.issues[0]?.action).toBe("refresh");
+    for (const mode of ["economy", "economy-all", "collaborative", "future-mode"]) {
+      for (const contractVersion of [undefined, 2, 3]) {
+        const rejected = await service.start({
+          clientRequestId: uuid(),
+          request: "设计任务",
+          mode: mode as TeamMode,
+          ...(contractVersion === undefined ? {} : { contractVersion }),
+        });
+        expect(rejected.ok).toBe(false);
+        expect(issueCodes(rejected)).toEqual(["DESIGN_MODE_UNAVAILABLE"]);
+        if (!rejected.ok) {
+          expect(rejected.issues[0]).toMatchObject({
+            action: "refresh",
+            params: { reason: "retired" },
+          });
+        }
+      }
     }
     expect(adapterCalls).toBe(0);
     expect((await readdir(root.jobs)).filter((name) => name.endsWith(".json"))).toEqual([]);
@@ -531,18 +539,18 @@ describe("AC-0c.12 / 71-R1: service start and the design mode gate", () => {
     const fixture = structuredClone(DESIGN_V1_RECORD_DESIGNING);
     const record = {
       ...fixture,
-      requestHash: hash(canonicalDesignContent(v1RequestBase(fixture))),
+      mode: "sota" as const,
+      job: { ...fixture.job, mode: "sota" as const },
+      requestHash: hash(canonicalDesignContent(v1RequestBase({ ...fixture, mode: "sota" }))),
     };
     const file = await writeRecordFile(root, record);
     const before = await hashFile(file);
     const store = await openStore(home);
     const service = serviceFor(store);
-    // The fixture stores the known legacy value; narrow once at this boundary.
-    const mode = record.mode as TeamMode;
     const input = {
       clientRequestId: record.job.clientRequestId,
       request: record.request,
-      mode,
+      mode: record.mode,
     };
 
     const omitted = await service.start(input);
@@ -965,7 +973,7 @@ const specPlanner: DesignPlanningPort = {
     return {
       ok: true as const,
       preview: {
-        requestedMode: input.mode,
+        requestedMode: "sota" as const,
         coordinator: {
           roleId: input.team.coordinatorRoleId,
           roleName: "Coordinator",
@@ -1123,7 +1131,7 @@ function withNewRole(record: StoredDesignJob, attempt = 1) {
 }
 
 describe("AC-0c.5 / AC-0c.17: gap eligibility and correction on the real ledger", () => {
-  test("an economy-all suggested Profile outside the route is a correction round, not a terminal gap", async () => {
+  test("a missing suggested Profile triggers a correction round, not a terminal gap", async () => {
     const { home } = await newHome();
     const store = await openStore(home);
     const adapter = new SpecAdapter();
@@ -1132,11 +1140,11 @@ describe("AC-0c.5 / AC-0c.17: gap eligibility and correction on the real ledger"
     const record = await startAndDesign(service, store, {
       clientRequestId: uuid(),
       request: "给后台做一次改版",
-      mode: "economy-all",
+      mode: "sota",
       profileId: DESIGNER.id,
       contractVersion: 2,
     });
-    adapter.entries = answerFor(record, existingProfileGap(record, CHEAP.id));
+    adapter.entries = answerFor(record, existingProfileGap(record, "missing-profile"));
     await finishTurn(service, adapter, record.job.jobId);
     await untilOffline(store, record.job.jobId, (entry) => entry.job.attempt === 2);
 
@@ -1145,8 +1153,8 @@ describe("AC-0c.5 / AC-0c.17: gap eligibility and correction on the real ledger"
     expect(after?.job.state).not.toBe("failed");
     expect(after?.job.issues).toEqual([
       expect.objectContaining({
-        code: "DESIGN_MODE_PLAN_INVALID",
-        params: expect.objectContaining({ modeCode: "MODE_CHEAP_POLICY_REQUIRED" }),
+        code: "DESIGN_PROFILE_MISSING",
+        params: expect.objectContaining({ profileId: "missing-profile" }),
       }),
     ]);
     await service.dispose();

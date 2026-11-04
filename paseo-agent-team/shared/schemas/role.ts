@@ -87,8 +87,9 @@ export const RoleSchema = z
     enabled: z.boolean().default(true),
     createdAt: z.string(),
     updatedAt: z.string(),
-    // Tier and task kind for mode planning. Values are preserved as stored, even when a newer
-    // writer used an unknown value or the wrong type; resolveRoleExecution reports them.
+    // RETIRED tier and task kind. Values are preserved as stored, even when a newer writer used
+    // an unknown value or the wrong type; planning never reads them. Deleted when the Role is next
+    // saved by a version that retires them (shared/domain/retired-fields.ts).
     executionPolicy: StoredRoleExecutionPolicySchema.optional(),
     // Other origins (including team-designer) remain valid extension values.
     source: z.string().optional(),
