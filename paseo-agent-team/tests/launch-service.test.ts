@@ -4,7 +4,7 @@ import {
   type LaunchService,
   type SettingsReader,
 } from "../server/launch-service";
-import { LaunchJobSchema, type LaunchStartInput } from "../shared/rpc";
+import { LaunchJobSchema, type LaunchStartInput, launchStatusRpc } from "../shared/rpc";
 import { LaunchPreviewResultSchema } from "../shared/schemas/launch-preview";
 import type { RolesDocument, TeamsDocument } from "../shared/settings";
 import { zh } from "../shared/zh";
@@ -70,6 +70,13 @@ describe("launch start", () => {
       finishedAt: "2026-10-01T10:00:00.000Z",
     });
     expect(() => LaunchJobSchema.parse(done)).not.toThrow();
+    expect(launchStatusRpc.output.parse({ job: done }).job).toMatchObject({
+      mode: "sota",
+      state: "succeeded",
+      coordinatorId: "coord-1",
+      memberIds: ["member-2", "member-3"],
+    });
+    expect(done).not.toHaveProperty("rawMode");
 
     expect(created.map((agent) => agent.workspaceId)).toEqual(["ws-1", "ws-1", "ws-1"]);
     expect(created.map((agent) => agent.options.parent)).toEqual([undefined, "coord-1", "coord-1"]);
