@@ -7,7 +7,6 @@ import { describe, expect, test } from "vitest";
 import { resolveStartBlock } from "../../client/designer/card-state";
 import {
   designContractFields,
-  designModeNeedsV2,
   prepareDesignStartInput,
   withDesignContract,
 } from "../../client/designer/design-gateway";
@@ -251,14 +250,8 @@ describe("K1 / AC-0d.23: all eight design RPCs carry the contract only on v2", (
     }
   });
 
-  test("economy-all needs v2; legacy modes do not, and the start block says so", () => {
-    expect(designModeNeedsV2("economy-all", "legacy")).toBe(true);
-    expect(designModeNeedsV2("economy-all", "unknown")).toBe(true);
-    expect(designModeNeedsV2("economy-all", "v2")).toBe(false);
-    for (const mode of ["sota", "economy", "collaborative"] as const) {
-      expect(designModeNeedsV2(mode, "legacy")).toBe(false);
-    }
-    const block = resolveStartBlock({
+  test("the start block still enforces workspace and Profile availability", () => {
+    const ready = {
       hasStartHandler: true,
       disabledReason: undefined,
       submitting: false,
@@ -266,14 +259,16 @@ describe("K1 / AC-0d.23: all eight design RPCs carry the contract only on v2", (
       workspaceMissing: false,
       profileMissing: false,
       profilesLoading: false,
-      modeNeedsUpgrade: true,
-    });
-    expect(block).toBe("mode-needs-upgrade");
+    };
+    expect(resolveStartBlock(ready)).toBeNull();
+    expect(resolveStartBlock({ ...ready, workspaceMissing: true })).toBe("workspace-missing");
+    expect(resolveStartBlock({ ...ready, profileMissing: true })).toBe("profile-missing");
+    expect(resolveStartBlock({ ...ready, profilesLoading: true })).toBe("profiles-loading");
   });
 });
 
 describe("AC-0c.5 / K4: the gap card is per item and routes by job.mode", () => {
-  test("each gap renders server-verified text, names and policy", () => {
+  test("each gap renders server-verified text and names", () => {
     const views = buildDesignRoleGapViews(gapJob());
     expect(views).toHaveLength(2);
     const missing = views[0];
@@ -287,7 +282,6 @@ describe("AC-0c.5 / K4: the gap card is per item and routes by job.mode", () => 
         id: "qa-migration",
         name: "【质量】迁移评审",
         responsibilities: ["评审迁移脚本", "确认可回滚"],
-        policyLabel: designGapZh.suggestedRolePolicy("decision", "general"),
       },
     });
     const broken = views[1];
@@ -304,17 +298,15 @@ describe("AC-0c.5 / K4: the gap card is per item and routes by job.mode", () => 
     });
   });
 
-  test("economy-all always exits through the all-seats route, never only the Role editor", () => {
+  test("historical economy-all jobs still offer Role repair exits", () => {
     const views = buildDesignRoleGapViews(gapJob({ mode: "economy-all" }));
-    expect(views[0]?.primary).toEqual({
-      kind: "configure-economy",
-      layer: "allSeats",
-      route: "decision",
-      profileIds: ["p-sonnet"],
+    expect(views[0]?.primary).toEqual({ kind: "create-role" });
+    expect(views[0]?.secondary).toBeNull();
+    expect(views[1]?.primary).toEqual({
+      kind: "open-role",
+      roleId: "eng-fullstack",
+      profileId: "p-gone",
     });
-    expect(views[0]?.secondary).toEqual({ kind: "create-role" });
-    expect(views[1]?.primary).toMatchObject({ kind: "configure-economy", layer: "allSeats" });
-    expect(views[1]?.primary).not.toHaveProperty("route");
     expect(views[1]?.secondary).toBeNull();
   });
 
@@ -351,7 +343,6 @@ describe("AC-0c.8 / H3=B / K5: the retry only prefills", () => {
       nonce: "nonce-1",
       text: "原始需求全文",
       workspaceId: "ws-target",
-      mode: job.mode,
       profileChoice: "p-sonnet",
       existingRolesOnly: false,
       confirmReplace: true,
@@ -361,7 +352,6 @@ describe("AC-0c.8 / H3=B / K5: the retry only prefills", () => {
     const prefilled = applyDesignPrefill(state, {
       request: plan.prefill.text,
       workspaceId: plan.prefill.workspaceId,
-      mode: plan.prefill.mode,
       profileChoice: plan.prefill.profileChoice,
       existingRolesOnly: plan.prefill.existingRolesOnly,
     });
@@ -381,7 +371,6 @@ describe("AC-0c.8 / H3=B / K5: the retry only prefills", () => {
     const prefilled = applyDesignPrefill(createDesignSubmissionState(), {
       request: plan.prefill.text,
       workspaceId: plan.prefill.workspaceId,
-      mode: plan.prefill.mode,
       profileChoice: plan.prefill.profileChoice,
       existingRolesOnly: plan.prefill.existingRolesOnly,
     });
@@ -391,7 +380,6 @@ describe("AC-0c.8 / H3=B / K5: the retry only prefills", () => {
     expect(planned.command.clientRequestId).not.toBe(DESIGN_CLIENT_REQUEST_ID);
     expect(planned.command.input).toMatchObject({
       request: "原始需求全文",
-      mode: job.mode,
       workspaceId: "ws-target",
       existingRolesOnly: false,
     });
@@ -454,11 +442,17 @@ describe("AC-0c.3 / AC-0c.13 / AC-0c.14: legacy DTO and gap terminal safety", ()
     ).toBe(false);
   });
 
-  test("the legacy client is never offered a mode that needs v2", () => {
-    for (const mode of ["sota", "economy", "collaborative"] as const) {
-      expect(designModeNeedsV2(mode, "legacy")).toBe(false);
-    }
-    expect(designModeNeedsV2("economy-all", "legacy")).toBe(true);
+  test("the legacy start payload retains its v1 shape", () => {
+    const current = buildDesignStartInput(
+      createDesignSubmissionState({ request: "需求" }).draftState.draft,
+      JOB_ID,
+    );
+    if (!current.ok) throw new Error("request must be valid");
+    const legacy = prepareDesignStartInput(current.input, "legacy");
+    expect(legacy).not.toHaveProperty("mode");
+    expect(legacy).not.toHaveProperty("contractVersion");
+    expect(legacy).not.toHaveProperty("existingRolesOnly");
+    expect(legacy.request).toBe("需求");
   });
 });
 
@@ -485,7 +479,6 @@ describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
       nonce: "server-seed-nonce",
       text: "原始需求全文",
       workspaceId: "ws-target",
-      mode: "sota",
       profileChoice: "p-sonnet",
       existingRolesOnly: false,
       confirmReplace: true,
@@ -493,7 +486,6 @@ describe("AC-0c.8 / Q2-B: gapRetry server seed on a gap job", () => {
     const prefilled = applyDesignPrefill(createDesignSubmissionState(), {
       request: plan.prefill.text,
       workspaceId: plan.prefill.workspaceId,
-      mode: plan.prefill.mode,
       profileChoice: plan.prefill.profileChoice,
       existingRolesOnly: plan.prefill.existingRolesOnly,
     });
