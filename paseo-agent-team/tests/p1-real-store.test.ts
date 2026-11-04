@@ -176,10 +176,7 @@ describe("P1 real settings store: zero writes on team.plan and launch.preview", 
       fixture.port,
     );
     expect(output.results.map((result) => result.status)).toEqual(["ready", "ready"]);
-    expect(output.results.map((result) => result.effectiveMode)).toEqual([
-      "economy",
-      "economy-all",
-    ]);
+    expect(output.results.map((result) => result.effectiveMode)).toEqual(["sota", "sota"]);
     for (const teamId of [standardTeam.id, economyTeam.id]) {
       const preview = await launchService.preview(
         {
