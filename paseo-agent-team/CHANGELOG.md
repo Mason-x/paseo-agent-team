@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## [0.5.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.5.0) (2026-11-05)
+
+### Features
+
+- The Role list and editor show each Profile binding's model and thinking level. A bound
+  reference shows the live Profile's values; an unbound one falls back to the preset's saved
+  values. Display only, never used for binding.
+
+### Bug Fixes
+
+- Default Role presets bind to Profiles by normalized name only. A Profile whose model, mode or
+  thinking setting differs from the preset snapshot now binds instead of being reported as
+  `config-changed`, so editing a Profile in Paseo no longer requires catalog changes. Roles
+  already imported with unbound references need “同步默认预设” or a manual bind to recover.
+
 ## [0.4.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.4.0) (2026-11-05)
 
 ### Features
