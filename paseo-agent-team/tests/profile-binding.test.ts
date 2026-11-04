@@ -73,16 +73,15 @@ describe("strict Profile hint binding", () => {
   });
 
   test.each(["provider", "model", "modeId", "thinkingOptionId"] as const)(
-    "same-name changed %s stays unbound despite another unique runtime match",
+    "same-name changed %s still binds by name; a runtime twin under another name is ignored",
     (field) => {
       const changed = { ...profile, [field]: "changed" };
       const result = bind([changed, { ...profile, id: "other", name: "Renamed" }]);
-      expect(result.bindingReport[0]).toMatchObject({
-        method: "unbound",
-        reason: "config-changed",
-        candidateNames: [hint.name],
+      expect(result.bindingReport[0]).toMatchObject({ method: "exact", reason: null });
+      expect(result.preferredProfiles[0]).toMatchObject({
+        profileId: changed.id,
+        nameSnapshot: hint.name,
       });
-      expect(result.preferredProfiles[0].nameSnapshot).toBe(hint.name);
     },
   );
 
@@ -92,9 +91,8 @@ describe("strict Profile hint binding", () => {
       "minimal",
     );
     expect(
-      bind([{ id: "minimal", ...minimal, model: "host-default" }], [minimal]).bindingReport[0]
-        .reason,
-    ).toBe("config-changed");
+      bind([{ id: "minimal", ...minimal, model: "host-default" }], [minimal]).bindingReport[0],
+    ).toMatchObject({ method: "exact", reason: null });
     for (const field of ["model", "modeId", "thinkingOptionId"] as const) {
       expect(
         bind([{ id: "minimal", ...minimal, [field]: "" }], [minimal]).bindingReport[0],

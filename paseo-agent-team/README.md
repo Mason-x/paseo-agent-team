@@ -80,8 +80,10 @@ the earlier research and content leads, requirements analyst, rapid, ops, securi
 vision and the three content Roles. Roles already imported from those presets stay in your
 catalog; **同步默认预设** leaves them untouched and never deletes them.
 
-Binding requires a normalized name and identical provider/model/mode/thinking settings, or a
-unique runtime match when there is no same-name Profile. Ambiguous, changed, or missing
+Binding is by Profile name: a normalized name that matches exactly one Profile binds, whatever its
+provider/model/mode/thinking settings are, so editing a Profile in Paseo never unbinds a Role. The
+settings in a preset only pick between Profiles that share a name, or find a renamed Profile when
+exactly one Profile has the same settings. Ambiguous or missing
 Profiles stay unbound; preferred and fallback order is preserved. A Profile read failure blocks
 automatic import; manual import can explicitly leave all references unbound. Bind those in the
 Role editor before launch. Presets contain no host Profile ids or Profile notes.

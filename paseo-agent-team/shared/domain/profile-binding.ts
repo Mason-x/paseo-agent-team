@@ -32,28 +32,35 @@ function matchHint(
   const named = profiles.filter(
     (profile) => normalizeProfileName(profile.name) === normalizeProfileName(hint.name),
   );
-  const exact = named.filter((profile) => sameRuntime(hint, profile));
-  const profile = exact[0];
-  if (exact.length === 1 && profile) {
+  // The Profile name is the identity. The hint's provider/model/mode/thinking are only a snapshot
+  // of the Profile when the preset was authored; editing a Profile in Paseo must never unbind a
+  // Role, so those fields never block a same-name binding. They only narrow down Profiles that
+  // share the normalized name.
+  if (named.length === 1 && named[0]) {
+    const only = named[0];
     return {
-      profile,
-      method: profile.name === hint.name ? "exact" : "normalized-name",
+      profile: only,
+      method: only.name === hint.name ? "exact" : "normalized-name",
       reason: null,
-      candidates: exact,
+      candidates: named,
     };
   }
-  if (exact.length > 1) {
-    // Several Profiles share the normalized name and runtime. A single verbatim name breaks the
-    // tie; anything else is genuinely ambiguous.
-    const verbatim = exact.filter((candidate) => candidate.name === hint.name);
-    if (verbatim.length === 1) {
-      return { profile: verbatim[0], method: "exact", reason: null, candidates: exact };
+  if (named.length > 1) {
+    const sameConfig = named.filter((profile) => sameRuntime(hint, profile));
+    const pool = sameConfig.length > 0 ? sameConfig : named;
+    // A single runtime twin, or else a single verbatim name, breaks the tie; anything else is
+    // genuinely ambiguous.
+    const verbatim = pool.filter((candidate) => candidate.name === hint.name);
+    const pick = pool.length === 1 ? pool : verbatim;
+    if (pick.length === 1 && pick[0]) {
+      return {
+        profile: pick[0],
+        method: pick[0].name === hint.name ? "exact" : "normalized-name",
+        reason: null,
+        candidates: named,
+      };
     }
-    return { method: "unbound", reason: "ambiguous", candidates: exact };
-  }
-  // A changed same-name Profile is never silently replaced by another Profile.
-  if (named.length > 0) {
-    return { method: "unbound", reason: "config-changed", candidates: named };
+    return { method: "unbound", reason: "ambiguous", candidates: named };
   }
   const runtime = profiles.filter((candidate) => sameRuntime(hint, candidate));
   if (runtime.length === 1) {
