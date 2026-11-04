@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.3.0) (2026-11-04)
+
 ### Changes
 
 - Team modes, the economy pool, and Role execution tiers have been retired. Each seat now follows
