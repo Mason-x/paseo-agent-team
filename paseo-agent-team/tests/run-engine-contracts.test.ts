@@ -1,10 +1,21 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { hashLaunchPlan } from "../server/launch-hash";
+import { type AtomicJsonCodec, createAtomicJson } from "../server/ledger/atomic-json";
+import { buildLaunchPlan } from "../shared/domain/launch-plan";
+import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
 import { RunTeamEngineConfigSchema } from "../shared/schemas/run-engine/config";
 import {
   RUN_HARD_BYTES,
   RUN_MAX_TASKS,
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
+  RUN_TASK_PHASES,
+  RunAssignmentSchema,
+  RunCancellationEvidenceSchema,
+  RunDecisionPointSchema,
   RunEffectIntentSchema,
   RunEventReceiptSchema,
   RunHistoryCheckpointSchema,
@@ -13,8 +24,16 @@ import {
   type RunRecord,
   RunRecordSchema,
   RunReopenGrantSchema,
+  RunResourceClaimSchema,
+  RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
+  RunStoredTaskReportSchema,
+  RunTaskPhaseSchema,
+  RunTaskRecordSchema,
 } from "../shared/schemas/run-engine/ledger";
 import {
+  RunBudgetRequestSchema,
+  RunDecisionActionSchema,
   RunDecisionBlockSchema,
   RunReviewReportBlockSchema,
   RunSmokeReportBlockSchema,
@@ -22,13 +41,19 @@ import {
   RunTaskReportBlockSchema,
 } from "../shared/schemas/run-engine/protocol";
 import {
+  RUN_HISTORY_CURSOR_EXPIRED,
+  RUN_READ_FAILURE_CODES,
   RunControlInputSchema,
+  RunDecisionViewSchema,
   type RunDetailView,
   RunDetailViewSchema,
   RunGetInputSchema,
   RunGetOutputSchema,
+  RunIssueViewSchema,
   RunReconcileOutputSchema,
+  runHistoryCursorExpiredIssue,
 } from "../shared/schemas/run-engine/rpc";
+import { architect, claudeOpus, codexXhigh, codingTeam, developer, techLead } from "./fixtures";
 
 const NOW = "2026-10-27T12:00:00.000Z";
 const RUN_ID = "run-abc123-xyz789";
@@ -43,7 +68,7 @@ function artifactRef() {
 }
 
 function taskSpec(overrides: Record<string, unknown> = {}) {
-  return {
+  const merged = {
     id: "t1",
     title: "Ship the change",
     goal: "Implement the requested change.",
@@ -64,6 +89,14 @@ function taskSpec(overrides: Record<string, unknown> = {}) {
     implementationPolicy: "default",
     architectureTaskId: null,
     ...overrides,
+  } as Record<string, unknown>;
+  return {
+    ...merged,
+    dispatchDuties: overrides.dispatchDuties ?? {
+      produce: "implement",
+      review: "review",
+      smoke: merged.devSmoke ? "smoke" : null,
+    },
   };
 }
 
@@ -101,7 +134,7 @@ function taskRecord(overrides: Record<string, unknown> = {}) {
 }
 
 function assignment(overrides: Record<string, unknown> = {}) {
-  return {
+  const merged = {
     assignmentId: ASSIGNMENT_ID,
     taskId: "t1",
     seatId: "seat-b1",
@@ -119,18 +152,28 @@ function assignment(overrides: Record<string, unknown> = {}) {
     attempt: 1,
     nonce: NONCE,
     messageId: MESSAGE_ID,
+    delivery: null,
+    acceptedProof: null,
+    endedEventKey: null,
     turnId: null,
     state: "assigned",
     createdAt: NOW,
     startedAt: null,
     endedAt: null,
     ...overrides,
+  } as Record<string, unknown>;
+  const review = merged.purpose === "reviewer" || merged.purpose === "smoker";
+  return {
+    ...merged,
+    delivery: merged.delivery ?? (review ? { producerAssignmentId: "assignment-producer" } : null),
+    acceptedProof: merged.acceptedProof ?? null,
+    endedEventKey: merged.endedEventKey ?? null,
   };
 }
 
 function modelPlan(overrides: Record<string, unknown> = {}) {
   return {
-    launchPlanFingerprint: DIGEST,
+    p1PlanHash: DIGEST,
     mode: "economy-all",
     targetWorkspaceId: null,
     task: "run the sealed DAG",
@@ -207,7 +250,7 @@ function runRecord(overrides: Record<string, unknown> = {}) {
     schemaVersion: RUN_SCHEMA_VERSION,
     runId: RUN_ID,
     revision: 3,
-    previousDigest: DIGEST,
+    previousDigest: `sha256:${DIGEST}`,
     createdAt: NOW,
     updatedAt: NOW,
     hostBinding: { serverId: "srv-1" },
@@ -244,6 +287,7 @@ function runRecord(overrides: Record<string, unknown> = {}) {
       {
         claimId: "claim-1",
         taskId: "t1",
+        originAssignmentId: "assignment-1",
         repoId: "repo-a",
         kind: "file",
         path: "src/a.ts",
@@ -300,17 +344,48 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
     expect(RunRecordSchema.parse(parsed)).toEqual(parsed);
   });
 
-  test("schemaVersion, ids, digests, and revisions are exact", () => {
+  test("schemaVersion, ids, digests, revisions, and the two header shapes are exact", () => {
     expect(RunRecordSchema.safeParse(runRecord({ schemaVersion: 2 })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-abc" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-AbC-xyz" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ revision: -1 })).success).toBe(false);
-    expect(RunRecordSchema.safeParse(runRecord({ previousDigest: "abc" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ lifecycle: "paused" })).success).toBe(true);
     // A state this version does not know is a damaged v1 record, not passthrough data.
     expect(
       RunRecordSchema.safeParse(runRecord({ tasks: [taskRecord({ state: "holding" })] })).success,
     ).toBe(false);
+
+    // F11: revision 1 is "", later revisions are sha256:<64>, and bare 64hex is not a header.
+    expect(RunRecordSchema.safeParse(runRecord({ revision: 1, previousDigest: "" })).success).toBe(
+      true,
+    );
+    expect(
+      RunRecordSchema.safeParse(runRecord({ revision: 1, previousDigest: `sha256:${DIGEST}` }))
+        .success,
+    ).toBe(false);
+    expect(RunRecordSchema.safeParse(runRecord({ revision: 2, previousDigest: "" })).success).toBe(
+      false,
+    );
+    expect(
+      RunRecordSchema.safeParse(runRecord({ revision: 2, previousDigest: DIGEST })).success,
+    ).toBe(false);
+    expect(RunRecordSchema.safeParse(runRecord({ previousDigest: "abc" })).success).toBe(false);
+
+    // 143 I1: revision 0 is not a persisted header (validateHeader needs revision >= 1), whatever
+    // the digest says. Only the record root is tightened.
+    for (const previousDigest of ["", `sha256:${DIGEST}`]) {
+      const zero = RunRecordSchema.safeParse(runRecord({ revision: 0, previousDigest }));
+      expect(zero.success, `revision 0 / "${previousDigest}"`).toBe(false);
+      if (!zero.success) {
+        expect(zero.error.issues.map((issue) => issue.path.join("."))).toContain("revision");
+      }
+    }
+
+    // F15: the two copies of the P1 plan digest must agree.
+    const split = runRecord({
+      team: { ...runRecord().team, modelPlanHash: "b".repeat(64) },
+    });
+    expect(RunRecordSchema.safeParse(split).success).toBe(false);
   });
 
   test("the hard capacity is enforced by the schema", () => {
@@ -386,6 +461,7 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
       recoverySendCount: 0,
       createdAt: NOW,
       confirmedAt: null,
+      localCancellation: null,
       taskId: "t1",
       assignmentId: ASSIGNMENT_ID,
       semanticArgs: { promptBytes: 100 },
@@ -404,6 +480,7 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
       recoverySendCount: dispatch.recoverySendCount,
       createdAt: dispatch.createdAt,
       confirmedAt: dispatch.confirmedAt,
+      localCancellation: null,
       controlAttempt: 1,
       semanticArgs: { channelId: "channel-a", controlNonce: NONCE, noBusinessWrites: true },
     };
@@ -649,6 +726,97 @@ describe("protocol blocks are strict and identity-bound", () => {
     expect(RunTaskReportBlockSchema.safeParse({ ...done, attempt: 0 }).success).toBe(false);
   });
 
+  test("decision and budget TaskIds are lowercase while seat/strategic refs stay free", () => {
+    const invalidTaskIds = ["T1", "", "a".repeat(65), "t 1", "t/1"];
+    for (const taskId of invalidTaskIds) {
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "assign-seat", taskId, seatId: "seat-a" })
+          .success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "retry", taskId, reason: "x" }).success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: [taskId], reason: "x" })
+          .success,
+      ).toBe(false);
+      expect(
+        RunDecisionActionSchema.safeParse({
+          action: "increase-budget",
+          scope: "task-attempts",
+          subjectId: taskId,
+          delta: 1,
+          reason: "x",
+        }).success,
+      ).toBe(false);
+      expect(
+        RunBudgetRequestSchema.safeParse({
+          scope: "task-attempts",
+          subjectId: taskId,
+          requestedLimit: 1,
+          reason: "x",
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "assign-seat", taskId: "t1", seatId: "seat-a" })
+        .success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "retry", taskId: "t1", reason: "x" }).success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: ["t1", "t2"], reason: "x" })
+        .success,
+    ).toBe(true);
+    expect(
+      RunDecisionActionSchema.safeParse({ action: "cancel", taskIds: ["t1", "T2"], reason: "x" })
+        .success,
+    ).toBe(false);
+    expect(
+      RunDecisionActionSchema.safeParse({
+        action: "increase-budget",
+        scope: "task-attempts",
+        subjectId: "t1",
+        delta: 1,
+        reason: "x",
+      }).success,
+    ).toBe(true);
+    for (const scope of ["seat", "strategic-turns"] as const) {
+      expect(
+        RunDecisionActionSchema.safeParse({
+          action: "increase-budget",
+          scope,
+          subjectId: "Seat-A",
+          delta: 1,
+          reason: "x",
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      RunTaskDagBlockSchema.safeParse({
+        ...controlIdentity,
+        dagRevision: 2,
+        expectedDagRevision: 1,
+        tasks: [taskSpec()],
+        cancelTaskIds: ["T1"],
+        budgetRequests: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunTaskDagBlockSchema.safeParse({
+        ...controlIdentity,
+        dagRevision: 2,
+        expectedDagRevision: 1,
+        tasks: [taskSpec()],
+        cancelTaskIds: ["t1"],
+        budgetRequests: [
+          { scope: "task-attempts", subjectId: "T1", requestedLimit: 1, reason: "x" },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   test("review and smoke reports use their fixed vocabularies", () => {
     const review = {
       ...reportIdentity,
@@ -732,6 +900,903 @@ describe("protocol blocks are strict and identity-bound", () => {
   });
 });
 
+describe("R01c decision nonce digest and frozen phase", () => {
+  const decision = {
+    decisionId: "55555555-5555-4555-8555-555555555555",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "open",
+    answer: null,
+    dedupeKey: "run: D1: decision",
+    subjectId: null,
+    summary: "A decision needs a reply.",
+    createdAt: NOW,
+    answeredAt: null,
+    cancelIntents: null,
+    resolution: null,
+  };
+
+  test("a decision carries a bare 64hex control nonce digest", () => {
+    expect(RunDecisionPointSchema.safeParse(decision).success).toBe(true);
+    const invalid = [
+      { ...decision, controlNonceDigest: "A".repeat(64) },
+      { ...decision, controlNonceDigest: `sha256:${"a".repeat(64)}` },
+      { ...decision, controlNonceDigest: "11111111-1111-4111-8111-111111111111" },
+      { ...decision, controlNonceDigest: "a".repeat(63) },
+      (() => {
+        const { controlNonceDigest: _omit, ...missing } = decision;
+        return missing;
+      })(),
+    ];
+    for (const value of invalid) {
+      const parsed = RunDecisionPointSchema.safeParse(value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(["controlNonceDigest"]);
+      }
+    }
+  });
+
+  test("hot/tool claims are legal enum values and conflict semantics stay out of the schema", () => {
+    const base = {
+      claimId: "claim-hot-1",
+      taskId: "t1",
+      originAssignmentId: "assignment-1",
+      repoId: "repo-1",
+      path: "repo:hotspot",
+      access: "write",
+      frozen: false,
+      createdAt: NOW,
+    };
+    for (const kind of ["hot", "tool"] as const) {
+      expect(RunResourceClaimSchema.safeParse({ ...base, kind }).success).toBe(true);
+    }
+    const invalid = RunResourceClaimSchema.safeParse({ ...base, kind: "glob" });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) {
+      expect(invalid.error.issues).toHaveLength(1);
+      expect(invalid.error.issues[0]?.path).toEqual(["kind"]);
+    }
+    const readOnly = RunResourceClaimSchema.safeParse({ ...base, kind: "hot", access: "read" });
+    expect(readOnly.success).toBe(false);
+    if (!readOnly.success) {
+      expect(readOnly.error.issues).toHaveLength(1);
+      expect(readOnly.error.issues[0]?.path).toEqual(["access"]);
+    }
+  });
+
+  test("frozen is a legal phase and an unknown phase is a single-defect rejection", () => {
+    expect(RUN_TASK_PHASES).toContain("frozen");
+    expect(RunTaskPhaseSchema.safeParse("frozen").success).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: "frozen" })).success,
+    ).toBe(true);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ state: "blocked", phase: undefined })).success,
+    ).toBe(true);
+    const invalidPhases = [
+      { state: "ready", phase: "frozen" },
+      { state: "in_progress", phase: "frozen" },
+      { state: "review", phase: "frozen" },
+      { state: "done", phase: "frozen" },
+      { state: "cancelled", phase: "frozen" },
+      { state: "done", phase: "awaiting-rework" },
+      { state: "blocked", phase: "awaiting-rework" },
+    ];
+    for (const value of invalidPhases) {
+      const invalid = RunTaskRecordSchema.safeParse(taskRecord(value));
+      expect(invalid.success).toBe(false);
+      if (!invalid.success) {
+        expect(invalid.error.issues).toHaveLength(1);
+        expect(invalid.error.issues[0]?.path).toEqual(["phase"]);
+      }
+    }
+    const unknown = RunTaskRecordSchema.safeParse(
+      taskRecord({ state: "review", phase: "holding" }),
+    );
+    expect(unknown.success).toBe(false);
+    if (!unknown.success) {
+      expect(unknown.error.issues).toHaveLength(1);
+      expect(unknown.error.issues[0]?.path).toEqual(["phase"]);
+    }
+  });
+});
+
+describe("R01f cancellation refresh and decision answer", () => {
+  const evidence = {
+    assignmentId: "assignment-1",
+    lastTurnId: "turn-1",
+    endedEventKey: "agent|turn-1|turn_ended",
+    refresh: {
+      agentId: "agent-1",
+      status: "idle",
+      activeTurn: false,
+      observedAt: NOW,
+    },
+    observationSeq: 1,
+    cancelIntentId: "intent-cancel",
+    receipt: { kind: "archive", confirmedAt: NOW, externalId: "archive-1" },
+  };
+  const answered = {
+    decisionId: "99999999-9999-4999-8999-999999999999",
+    category: "D1",
+    controlNonceDigest: "a".repeat(64),
+    state: "answered",
+    answer: { action: "cancel", taskIds: ["t1"], answeredAt: NOW },
+    dedupeKey: "run: D1",
+    subjectId: "t1",
+    summary: "cancel approved",
+    createdAt: NOW,
+    answeredAt: NOW,
+    cancelIntents: null,
+    resolution: null,
+  };
+
+  test("refresh is a required typed observation; decision answers are required only when answered", () => {
+    expect(RunCancellationEvidenceSchema.safeParse(evidence).success).toBe(true);
+    expect(RunDecisionPointSchema.safeParse(answered).success).toBe(true);
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...answered,
+        state: "open",
+        answer: null,
+        answeredAt: null,
+      }).success,
+    ).toBe(true);
+
+    const badEvidence = [
+      {
+        value: (() => {
+          const { refresh: _omit, ...rest } = evidence;
+          return rest;
+        })(),
+        path: ["refresh"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, status: "busy" } },
+        path: ["refresh", "status"],
+      },
+      {
+        value: { ...evidence, refresh: { ...evidence.refresh, activeTurn: true } },
+        path: ["refresh", "activeTurn"],
+      },
+    ];
+    for (const entry of badEvidence) {
+      const parsed = RunCancellationEvidenceSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("answered without answer and invalid answer actions are single defects", () => {
+    const missing = { ...answered, answer: null };
+    const parsedMissing = RunDecisionPointSchema.safeParse(missing);
+    expect(parsedMissing.success).toBe(false);
+    if (!parsedMissing.success) {
+      expect(parsedMissing.error.issues).toHaveLength(1);
+      expect(parsedMissing.error.issues[0]?.path).toEqual(["answer"]);
+    }
+    const badAction = {
+      ...answered,
+      answer: { ...answered.answer, action: "force-done" },
+    };
+    const parsedAction = RunDecisionPointSchema.safeParse(badAction);
+    expect(parsedAction.success).toBe(false);
+    if (!parsedAction.success) {
+      expect(parsedAction.error.issues).toHaveLength(1);
+      expect(parsedAction.error.issues[0]?.path).toEqual(["answer", "action"]);
+    }
+    const timestampCases: Array<{ value: unknown; path: (string | number)[] }> = [
+      {
+        value: { ...answered, answeredAt: null },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, answeredAt: "2026-10-27T13:00:00.000Z" },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, createdAt: "2026-12-01T00:00:00.000Z" },
+        path: ["answeredAt"],
+      },
+      {
+        value: { ...answered, state: "open", answeredAt: NOW },
+        path: ["answer"],
+      },
+    ];
+    for (const entry of timestampCases) {
+      const parsed = RunDecisionPointSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+});
+
+describe("R01d escalation chain", () => {
+  const a = {
+    fromTier: "B",
+    toTier: "A",
+    atAttempt: 3,
+    qualityFailures: 3,
+    at: NOW,
+  };
+  const sTier = { ...a, fromTier: "A", toTier: "S", atAttempt: 6, qualityFailures: 6 };
+  const r01dTask = (overrides: Record<string, unknown>) =>
+    taskRecord({ attempts: 10, qualityFailures: 10, ...overrides });
+
+  test("B→A and B→A→S chains parse; two entries are the maximum", () => {
+    expect(RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a] })).success).toBe(true);
+    expect(RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a, sTier] })).success).toBe(true);
+    const tooMany = RunTaskRecordSchema.safeParse(r01dTask({ escalations: [a, sTier, a] }));
+    expect(tooMany.success).toBe(false);
+    if (!tooMany.success) {
+      expect(tooMany.error.issues.some((issue) => issue.path[0] === "escalations")).toBe(true);
+    }
+  });
+
+  test("A start can escalate only to S; S start cannot escalate at all", () => {
+    const aStart = r01dTask({
+      spec: taskSpec({ level: "L3", tier: "A" }),
+      escalations: [sTier],
+    });
+    expect(RunTaskRecordSchema.safeParse(aStart).success).toBe(true);
+
+    const sStart = r01dTask({
+      spec: taskSpec({ level: "L4", tier: "S" }),
+      escalations: [{ ...a, fromTier: "S", toTier: "S" }],
+    });
+    const rejected = RunTaskRecordSchema.safeParse(sStart);
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(rejected.error.issues).toHaveLength(1);
+      expect(rejected.error.issues[0]?.path).toEqual(["escalations", 0, "toTier"]);
+    }
+  });
+
+  test("wrong fromTier, skipped toTier, missing field and bad attempt are single defects", () => {
+    const cases: Array<{ value: unknown; path: (string | number)[] }> = [
+      {
+        value: r01dTask({ escalations: [{ ...a, fromTier: "A" }] }),
+        path: ["escalations", 0, "fromTier"],
+      },
+      {
+        value: r01dTask({ escalations: [{ ...a, toTier: "S" }] }),
+        path: ["escalations", 0, "toTier"],
+      },
+      {
+        value: r01dTask({ escalations: [a, { ...sTier, fromTier: "B" }] }),
+        path: ["escalations", 1, "fromTier"],
+      },
+      {
+        value: r01dTask({ escalations: [{ ...a, atAttempt: 0 }] }),
+        path: ["escalations", 0, "atAttempt"],
+      },
+      {
+        value: r01dTask({
+          escalations: [{ fromTier: "B", toTier: "A", atAttempt: 1, at: NOW }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(entry.value);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+});
+
+describe("R01e spec tier consistency and escalation counters", () => {
+  test("default tiers follow level, except a-with-s-plan L4/A", () => {
+    for (const [level, tier] of [
+      ["L1", "B"],
+      ["L2", "B"],
+      ["L3", "A"],
+      ["L4", "S"],
+    ] as const) {
+      expect(
+        RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec({ level, tier }) })).success,
+      ).toBe(true);
+    }
+    expect(
+      RunTaskRecordSchema.safeParse(
+        taskRecord({
+          spec: taskSpec({
+            level: "L4",
+            tier: "A",
+            implementationPolicy: "a-with-s-plan",
+            architectureTaskId: "t0",
+            deps: ["t0"],
+          }),
+        }),
+      ).success,
+    ).toBe(true);
+
+    const mismatches: Array<{ spec: Record<string, unknown>; path: (string | number)[] }> = [
+      { spec: { level: "L4", tier: "B" }, path: ["spec", "tier"] },
+      { spec: { level: "L1", tier: "S" }, path: ["spec", "tier"] },
+      {
+        spec: {
+          level: "L3",
+          tier: "A",
+          implementationPolicy: "a-with-s-plan",
+          architectureTaskId: "t0",
+          deps: ["t0"],
+        },
+        path: ["spec", "level"],
+      },
+      {
+        spec: {
+          level: "L4",
+          tier: "B",
+          implementationPolicy: "a-with-s-plan",
+          architectureTaskId: "t0",
+          deps: ["t0"],
+        },
+        path: ["spec", "tier"],
+      },
+    ];
+    for (const entry of mismatches) {
+      const parsed = RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec(entry.spec) }));
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("DAG protocol rejects a tier/level mismatch with a readable path", () => {
+    const dag = {
+      protocolVersion: 1 as const,
+      runId: RUN_ID,
+      taskId: "_dag" as const,
+      attempt: 1 as const,
+      nonce: NONCE,
+      dagRevision: 1,
+      expectedDagRevision: 0,
+      tasks: [taskSpec({ level: "L4", tier: "B" })],
+      cancelTaskIds: [],
+      budgetRequests: [],
+    };
+    const parsed = RunTaskDagBlockSchema.safeParse(dag);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toHaveLength(1);
+      expect(parsed.error.issues[0]?.path).toEqual(["tasks", 0, "tier"]);
+    }
+  });
+
+  test("a-with-s-plan requires a distinct architecture task in deps; default forbids one", () => {
+    const plan = (overrides: Record<string, unknown>) =>
+      taskSpec({
+        level: "L4",
+        tier: "A",
+        implementationPolicy: "a-with-s-plan",
+        architectureTaskId: "t0",
+        deps: ["t0"],
+        ...overrides,
+      });
+    const cases: Array<{ spec: Record<string, unknown>; path: (string | number)[] }> = [
+      { spec: plan({ architectureTaskId: null }), path: ["spec", "architectureTaskId"] },
+      { spec: plan({ architectureTaskId: "t1" }), path: ["spec", "architectureTaskId"] },
+      { spec: plan({ deps: [] }), path: ["spec", "architectureTaskId"] },
+      {
+        spec: taskSpec({ level: "L2", tier: "B", architectureTaskId: "t0" }),
+        path: ["spec", "architectureTaskId"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(taskRecord({ spec: entry.spec }));
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("escalation counters are strictly increasing, positive, and bounded", () => {
+    const base = { fromTier: "B", toTier: "A", atAttempt: 3, qualityFailures: 3, at: NOW };
+    const cases: Array<{ task: ReturnType<typeof taskRecord>; path: (string | number)[] }> = [
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [
+            base,
+            { ...base, fromTier: "A", toTier: "S", atAttempt: 4, qualityFailures: 1 },
+          ],
+        }),
+        path: ["escalations", 1, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 10,
+          qualityFailures: 10,
+          escalations: [{ ...base, qualityFailures: 99 }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 2,
+          qualityFailures: 3,
+          escalations: [{ ...base, atAttempt: 3 }],
+        }),
+        path: ["escalations", 0, "atAttempt"],
+      },
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [base, { ...base, fromTier: "A", toTier: "S", atAttempt: 4 }],
+        }),
+        path: ["escalations", 1, "qualityFailures"],
+      },
+      {
+        task: taskRecord({
+          attempts: 4,
+          qualityFailures: 4,
+          escalations: [base, { ...base, fromTier: "A", toTier: "S", qualityFailures: 4 }],
+        }),
+        path: ["escalations", 1, "atAttempt"],
+      },
+      {
+        task: taskRecord({
+          attempts: 3,
+          qualityFailures: 1,
+          escalations: [{ ...base, qualityFailures: 0 }],
+        }),
+        path: ["escalations", 0, "qualityFailures"],
+      },
+    ];
+    for (const entry of cases) {
+      const parsed = RunTaskRecordSchema.safeParse(entry.task);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toHaveLength(1);
+        expect(parsed.error.issues[0]?.path).toEqual(entry.path);
+      }
+    }
+  });
+
+  test("a third escalation is rejected by the array cap, not only by the S rule", () => {
+    const a = { fromTier: "B", toTier: "A", atAttempt: 3, qualityFailures: 3, at: NOW };
+    const s = { ...a, fromTier: "A", toTier: "S", atAttempt: 6, qualityFailures: 6 };
+    const parsed = RunTaskRecordSchema.safeParse(
+      taskRecord({
+        attempts: 6,
+        qualityFailures: 6,
+        escalations: [a, s, { ...s, fromTier: "S", toTier: "S" }],
+      }),
+    );
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(
+        parsed.error.issues.some(
+          (issue) => issue.path[0] === "escalations" && issue.path.length === 1,
+        ),
+      ).toBe(true);
+    }
+  });
+});
+
+describe("RunRecord persists through the real AtomicJsonCodec", () => {
+  test("create/read/update/CAS keep the codec header and unknown fields", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "r01b-codec-"));
+    try {
+      const codec: AtomicJsonCodec<RunRecord> = {
+        schemaVersion: RUN_SCHEMA_VERSION,
+        parse: (value) => RunRecordSchema.parse(value),
+        readHeader: (record) => ({
+          schemaVersion: record.schemaVersion,
+          revision: record.revision,
+          previousDigest: record.previousDigest,
+        }),
+        withHeader: (record, header) => RunRecordSchema.parse({ ...record, ...header }),
+      };
+      const store = createAtomicJson({
+        file: path.join(root, "run.json"),
+        issuesDir: path.join(root, "issues"),
+        containmentRoot: root,
+        codec,
+      });
+      const firstRecord = RunRecordSchema.parse(
+        runRecord({
+          revision: 1,
+          previousDigest: "",
+          futureTop: { keep: true },
+          launch: { ...runRecord().launch, futureLaunch: "kept" },
+        }),
+      );
+      await store.commit(firstRecord, { revision: 0, digest: "" });
+      const first = await store.read();
+      if (first.status !== "ok") throw new Error(`first read: ${first.status}`);
+      expect(first.record.previousDigest).toBe("");
+      expect(first.digest).toMatch(/^sha256:[a-f0-9]{64}$/u);
+      expect(first.record.futureTop).toEqual({ keep: true });
+      expect(first.record.launch.futureLaunch).toBe("kept");
+
+      await store.commit(
+        RunRecordSchema.parse(
+          runRecord({
+            revision: 2,
+            previousDigest: first.digest,
+            futureTop: { keep: true },
+            launch: { ...runRecord().launch, futureLaunch: "kept" },
+          }),
+        ),
+        { revision: 1, digest: first.digest },
+      );
+      const second = await store.read();
+      if (second.status !== "ok") throw new Error(`second read: ${second.status}`);
+      expect(second.record.previousDigest).toBe(first.digest);
+      expect(second.record.futureTop).toEqual({ keep: true });
+      expect(second.record.launch.futureLaunch).toBe("kept");
+
+      await expect(
+        store.commit(
+          RunRecordSchema.parse(runRecord({ revision: 3, previousDigest: second.digest })),
+          { revision: 1, digest: first.digest },
+        ),
+      ).rejects.toThrow(/cas-mismatch|changed/);
+      await expect(
+        store.commit(
+          RunRecordSchema.parse(
+            runRecord({ revision: 3, previousDigest: `sha256:${"b".repeat(64)}` }),
+          ),
+          { revision: 2, digest: second.digest },
+        ),
+      ).rejects.toThrow(/header-invalid|previousDigest/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("revision 0 is rejected by the schema and by the codec header check alike", () => {
+  test("the same record that RunRecordSchema refuses never reaches the disk", async () => {
+    const zero = runRecord({ revision: 0, previousDigest: `sha256:${DIGEST}` });
+    expect(RunRecordSchema.safeParse(zero).success).toBe(false);
+
+    const root = await mkdtemp(path.join(tmpdir(), "r01b-rev0-"));
+    try {
+      // A lenient parse isolates the codec header check from the schema.
+      const codec: AtomicJsonCodec<RunRecord> = {
+        schemaVersion: RUN_SCHEMA_VERSION,
+        parse: (value) => value as RunRecord,
+        readHeader: (record) => ({
+          schemaVersion: record.schemaVersion,
+          revision: record.revision,
+          previousDigest: record.previousDigest,
+        }),
+        withHeader: (record, header) => ({ ...record, ...header }) as RunRecord,
+      };
+      const store = createAtomicJson({
+        file: path.join(root, "run.json"),
+        issuesDir: path.join(root, "issues"),
+        containmentRoot: root,
+        codec,
+      });
+      await expect(
+        store.commit(zero as unknown as RunRecord, { revision: 0, digest: "" }),
+      ).rejects.toThrow(/header-invalid|positive integer/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("F15 reuses the real hashLaunchPlan digest", () => {
+  test("p1PlanHash and modelPlanHash are the same bare 64hex", () => {
+    const team = { ...codingTeam, mode: "sota" as const };
+    const roles = [techLead, architect, developer];
+    const profiles: PaseoProfile[] = [claudeOpus, codexXhigh];
+    const availability: ProviderAvailability[] = [
+      { provider: "claude", available: true },
+      { provider: "codex", available: true },
+    ];
+    const runtimeCapabilities = { onDemand: true, expansion: true, collaboration: true };
+    const task = "Add Stripe";
+    const plan = buildLaunchPlan({
+      team,
+      roles,
+      profiles,
+      availability,
+      workspaceId: "ws-1",
+      task,
+      runId: "run-f15",
+      maxMembers: 8,
+      runtimeCapabilities,
+      daemonConfig: { mcp: { enabled: true, injectIntoAgents: true } },
+    });
+    const digest = hashLaunchPlan({
+      team,
+      roles,
+      plan,
+      host: { status: "ready", profiles, availability },
+      target: { kind: "workspace", workspaceId: "ws-1" },
+      task,
+      maxMembers: 8,
+      runtimeCapabilities,
+    });
+    expect(digest).toMatch(/^[a-f0-9]{64}$/u);
+    const parsed = RunRecordSchema.parse(
+      runRecord({
+        launch: { ...runRecord().launch, modelPlan: modelPlan({ p1PlanHash: digest }) },
+        team: { ...runRecord().team, modelPlanHash: digest },
+      }),
+    );
+    expect(parsed.launch.modelPlan.p1PlanHash).toBe(digest);
+    expect(parsed.team.modelPlanHash).toBe(digest);
+
+    const { p1PlanHash: _omitted, ...legacyPlan } = modelPlan();
+    expect(
+      RunRecordSchema.safeParse(
+        runRecord({ launch: { ...runRecord().launch, modelPlan: legacyPlan } }),
+      ).success,
+    ).toBe(false);
+  });
+});
+
+describe("R01g proof, compatibility, and decision shapes", () => {
+  const storedIdentity = {
+    protocolVersion: 1 as const,
+    runId: RUN_ID,
+    taskId: "t1",
+    attempt: 1,
+    nonce: NONCE,
+    assignmentId: ASSIGNMENT_ID,
+    messageId: MESSAGE_ID,
+  };
+  const storedDone = {
+    ...storedIdentity,
+    status: "done" as const,
+    changedFiles: [],
+    ref: artifactRef(),
+    workspace: { id: "ws-1", branch: "b", baseRef: "main" },
+    evidence: [evidence()],
+  };
+  const storedReview = {
+    ...storedIdentity,
+    reviewedRef: artifactRef(),
+    verdict: "可合入" as const,
+    blockers: [],
+    probes: [],
+  };
+  const storedSmoke = {
+    ...storedIdentity,
+    testedRef: artifactRef(),
+    devHost: "127.0.0.1:7777",
+    devServerId: "srv-dev",
+    devHome: "/tmp/dev-home",
+    checks: [{ id: "open", result: "pass" as const, evidencePath: "evidence/smoke.log" }],
+  };
+  const storedAssignment = assignment();
+
+  test("stored proof keeps nested unknown fields while the wire parser is strict", () => {
+    const stored = {
+      ...storedDone,
+      futureTop: { nested: true },
+      workspace: { ...storedDone.workspace, futureWorkspace: 1 },
+      evidence: [{ ...evidence(), futureEvidence: { nested: 1 } }],
+    };
+    const parsed = RunStoredTaskReportSchema.parse(stored);
+    expect(parsed.futureTop).toEqual({ nested: true });
+    expect((parsed.workspace as Record<string, unknown>).futureWorkspace).toBe(1);
+    expect(
+      ((parsed.evidence[0] as Record<string, unknown>).futureEvidence as Record<string, unknown>)
+        .nested,
+    ).toBe(1);
+    expect(RunTaskReportBlockSchema.safeParse(stored).success).toBe(false);
+  });
+
+  test("complete producer done/blocked/failed proofs are accepted and stored messageId is required", () => {
+    expect(RunStoredTaskReportSchema.parse(storedDone).status).toBe("done");
+    expect(
+      RunStoredTaskReportSchema.parse({
+        ...storedIdentity,
+        status: "blocked",
+        reasonCode: "NEED_ACCESS",
+        summary: "blocked",
+        evidence: [],
+      }).status,
+    ).toBe("blocked");
+    expect(
+      RunStoredTaskReportSchema.parse({
+        ...storedIdentity,
+        status: "failed",
+        reasonCode: "FAILED",
+        summary: "failed",
+        evidence: [],
+      }).status,
+    ).toBe("failed");
+    expect(
+      RunStoredTaskReportSchema.safeParse({ ...storedDone, messageId: undefined }).success,
+    ).toBe(false);
+    expect(
+      RunTaskReportBlockSchema.safeParse({ ...storedDone, messageId: undefined }).success,
+    ).toBe(true);
+  });
+
+  test("assignment delivery and acceptedProof are purpose-specific", () => {
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        delivery: null,
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedReview,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "smoker",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedSmoke,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: null,
+        acceptedProof: storedReview,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "reviewer",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        delivery: { producerAssignmentId: ASSIGNMENT_ID },
+        acceptedProof: storedDone,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunAssignmentSchema.safeParse({
+        ...storedAssignment,
+        purpose: "member",
+        acceptedProof: null,
+        endedEventKey: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  test("dispatchDuties/devSmoke, lowercase ids, and removed task mirrors are enforced", () => {
+    expect(RunTaskRecordSchema.safeParse(taskRecord()).success).toBe(true);
+    const { dispatchDuties: _duties, ...noDuties } = taskSpec();
+    expect(RunTaskRecordSchema.safeParse(taskRecord({ spec: noDuties })).success).toBe(false);
+    expect(
+      RunTaskRecordSchema.safeParse(
+        taskRecord({
+          spec: taskSpec({
+            devSmoke: true,
+            dispatchDuties: { produce: "x", review: "y", smoke: null },
+          }),
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      RunTaskRecordSchema.safeParse(taskRecord({ spec: taskSpec({ id: "T1" }) })).success,
+    ).toBe(false);
+    for (const mirror of ["report", "reviews", "smokeReport"]) {
+      expect(RunTaskRecordSchema.safeParse(taskRecord({ [mirror]: [] })).success).toBe(false);
+    }
+  });
+
+  test("missing evidence, reviewedRef, DEV fields, and uppercase stored TaskIds stay invalid", () => {
+    expect(RunStoredTaskReportSchema.safeParse({ ...storedDone, evidence: [] }).success).toBe(
+      false,
+    );
+    const { reviewedRef: _reviewedRef, ...reviewWithoutRef } = storedReview;
+    expect(RunStoredReviewSchema.safeParse(reviewWithoutRef).success).toBe(false);
+    expect(
+      RunStoredSmokeReportSchema.safeParse({ ...storedSmoke, devHost: undefined }).success,
+    ).toBe(false);
+    expect(RunStoredTaskReportSchema.safeParse({ ...storedDone, taskId: "T9" }).success).toBe(
+      false,
+    );
+  });
+
+  test("superseded needs a typed no-effects resolution; DTO hides internals", () => {
+    const baseDecision = {
+      decisionId: "55555555-5555-4555-8555-555555555555",
+      category: "D1" as const,
+      controlNonceDigest: "a".repeat(64),
+      state: "open" as const,
+      dedupeKey: "cancel:t1",
+      cancelIntents: [],
+      subjectId: "t1",
+      summary: "cancel t1",
+      answer: null,
+      createdAt: NOW,
+      answeredAt: null,
+      resolution: null,
+    };
+    const resolution = {
+      reason: "no-in-flight" as const,
+      at: NOW,
+      eventSeq: 1,
+      cause: "cancel-requested" as const,
+      witness: { kind: "no-effects-cancel" as const, taskId: "t1", localIntentIds: [] },
+    };
+    const superseded = { ...baseDecision, state: "superseded" as const, resolution };
+    expect(RunDecisionPointSchema.parse(superseded).resolution).toEqual(resolution);
+    expect(RunDecisionPointSchema.safeParse({ ...superseded, resolution: null }).success).toBe(
+      false,
+    );
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...baseDecision,
+        state: "open",
+        resolution,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...superseded,
+        answer: { action: "cancel", taskIds: ["t1"], answeredAt: NOW },
+        answeredAt: NOW,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({
+        ...superseded,
+        resolution: {
+          ...resolution,
+          witness: { ...resolution.witness, localIntentIds: ["b", "a"] },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunDecisionPointSchema.safeParse({ ...baseDecision, cancelIntentId: "old" }).success,
+    ).toBe(false);
+    const dto = RunDecisionViewSchema.parse({
+      decisionId: baseDecision.decisionId,
+      category: "D1",
+      state: "superseded",
+      subjectId: "t1",
+      summary: "cancel t1",
+      createdAt: NOW,
+      answeredAction: null,
+      resolution,
+      acceptedProof: storedDone,
+    });
+    expect(dto).not.toHaveProperty("resolution");
+    expect(dto).not.toHaveProperty("acceptedProof");
+  });
+});
+
 describe("RPC contracts reject unknown input and never leak ledger internals", () => {
   test("inputs are strict and carry the run contract version", () => {
     expect(RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID }).success).toBe(
@@ -744,9 +1809,31 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
     expect(
       RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID, extra: 1 }).success,
     ).toBe(false);
+    expect(
+      RunGetInputSchema.safeParse({
+        runContractVersion: 1,
+        runId: RUN_ID,
+        historyCursor: "cursor-1",
+        limit: 50,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunGetInputSchema.safeParse({
+        runContractVersion: 1,
+        runId: RUN_ID,
+        knownRevision: 3,
+        historyCursor: "cursor-1",
+      }).success,
+    ).toBe(false);
+    for (const limit of [0, 51]) {
+      expect(
+        RunGetInputSchema.safeParse({ runContractVersion: 1, runId: RUN_ID, limit }).success,
+      ).toBe(false);
+    }
   });
 
   test("run.get returns unchanged or a redacted view with no nonce/prompt fields", () => {
+    expect(RUN_READ_FAILURE_CODES).toContain("run-projection-invalid");
     expect(
       RunGetOutputSchema.parse({ runContractVersion: 1, status: "unchanged", revision: 3 }),
     ).toMatchObject({ status: "unchanged" });
@@ -763,6 +1850,10 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
         plannerVersion: 2,
       },
       dagRevision: 1,
+      dag: {
+        revision: 1,
+        tasks: [{ taskId: "t1", title: "Ship", layer: 0, deps: [], state: "review" }],
+      },
       tasks: [
         {
           taskId: "t1",
@@ -777,14 +1868,49 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
           protocolFailures: 0,
           evidenceReturns: 0,
           reworkCount: 1,
+          qualityFailures: 2,
+          currentTier: "B",
+          escalations: [],
+          blockedBy: null,
           waitingReason: null,
           frozen: false,
         },
       ],
-      locks: [],
+      locks: [
+        {
+          claimId: "claim-hot",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "hot",
+          path: "repo:hotspot",
+          access: "write",
+          frozen: false,
+        },
+        {
+          claimId: "claim-tool",
+          taskId: "t1",
+          repoId: "repo-1",
+          kind: "tool",
+          path: "npm:install",
+          access: "write",
+          frozen: false,
+        },
+      ],
       capacity: { configuredLimit: 4, effectiveLimit: 4, inUse: 1 },
       budgets: [],
-      decisions: [],
+      decisions: [
+        {
+          decisionId: "66666666-6666-4666-8666-666666666666",
+          category: "D1",
+          state: "open",
+          subjectId: null,
+          summary: "A decision",
+          createdAt: NOW,
+          answeredAction: null,
+          controlNonceDigest: "d".repeat(64),
+          nonce: "raw-control-nonce",
+        },
+      ],
       channels: [],
       alerts: [],
       metrics: {
@@ -796,14 +1922,234 @@ describe("RPC contracts reject unknown input and never leak ledger internals", (
         firstReviewAccepted: 0,
         coverage: "partial",
       },
+      capabilities: {
+        runEngine: 1,
+        observationOnly: true,
+        enabled: false,
+        supportedControls: [],
+      },
       issues: [],
     };
     const parsed = RunDetailViewSchema.parse(view);
-    const serialized = JSON.stringify(parsed);
-    for (const forbidden of ["nonce", "prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
+    expect(parsed.capabilities).toMatchObject({ observationOnly: true, enabled: false });
+    expect(parsed.tasks[0]).toMatchObject({
+      currentTier: "B",
+      qualityFailures: 2,
+      blockedBy: null,
+    });
+    const wrongTier = RunDetailViewSchema.safeParse({
+      ...view,
+      tasks: [{ ...view.tasks[0], currentTier: "S" }],
+    });
+    expect(wrongTier.success).toBe(false);
+    if (!wrongTier.success) {
+      expect(wrongTier.error.issues).toHaveLength(1);
+      expect(wrongTier.error.issues[0]?.path).toEqual(["tasks", 0, "currentTier"]);
+    }
+    const ready = RunGetOutputSchema.parse({
+      runContractVersion: 1,
+      status: "ready",
+      run: parsed,
+      history: {
+        events: [
+          {
+            seq: 1,
+            kind: "task_started",
+            at: NOW,
+            taskId: "t1",
+            summary: "started t1",
+          },
+        ],
+        nextCursor: null,
+      },
+      issues: [],
+    });
+    const serialized = JSON.stringify(ready);
+    for (const forbidden of ["prompt", "payloadHash", "semanticArgs", "recoverySend"]) {
       expect(serialized).not.toContain(forbidden);
     }
+    expect(serialized).not.toMatch(/nonce/iu);
+    expect(serialized).not.toContain("d".repeat(64));
     expect(parsed.tasks[0]).toMatchObject({ phase: "awaiting-rework", frozen: false });
+
+    // Q1: ready always carries run+history; the failure branches never do.
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        run: null,
+        history: { events: [], nextCursor: null },
+        issues: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        run: parsed,
+        issues: [],
+      }).success,
+    ).toBe(false);
+    for (const status of ["unknown-version", "corrupt", "missing"] as const) {
+      expect(
+        RunGetOutputSchema.safeParse({
+          runContractVersion: 1,
+          status,
+          run: null,
+          issues: [],
+        }).success,
+      ).toBe(true);
+    }
+
+    // 144 I2: a failure branch never carries a run, and a ready result needs both run and history.
+    for (const status of ["unknown-version", "corrupt", "missing"] as const) {
+      const withRun = RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status,
+        run: parsed,
+        issues: [],
+      });
+      expect(withRun.success, `${status} with a run`).toBe(false);
+      if (!withRun.success) {
+        expect(withRun.error.issues.map((issue) => issue.path.join("."))).toContain("run");
+      }
+    }
+    expect(
+      RunGetOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "ready",
+        history: { events: [], nextCursor: null },
+        issues: [],
+      }).success,
+      "ready without a run",
+    ).toBe(false);
+    // The view never carries history on unchanged or failure results: it is parsed away.
+    const unchangedWithHistory = RunGetOutputSchema.parse({
+      runContractVersion: 1,
+      status: "unchanged",
+      revision: 3,
+      history: { events: [], nextCursor: null },
+    });
+    expect("history" in unchangedWithHistory).toBe(false);
+
+    // 144 S4: an expired cursor is a fixed warning, and the first page still comes back.
+    const expired = runHistoryCursorExpiredIssue();
+    expect(expired.code).toBe("history-cursor-expired");
+    expect(RUN_HISTORY_CURSOR_EXPIRED).toBe(expired.code);
+    expect(RunIssueViewSchema.parse(expired)).toEqual(expired);
+    expect(expired).toMatchObject({ severity: "warning", action: "refresh" });
+    expect(RunGetOutputSchema.parse({ ...ready, issues: [expired] })).toMatchObject({
+      status: "ready",
+      issues: [{ code: "history-cursor-expired" }],
+    });
+
+    // R1b-1: layer is the topological depth, and deps must exist.
+    const dagNode = view.dag.tasks[0];
+    const firstRow = view.tasks[0];
+    if (!dagNode || !firstRow) throw new Error("fixture node/row missing");
+    const wrongLayer = {
+      ...view,
+      dag: { revision: 1, tasks: [{ ...dagNode, layer: 1 }] },
+    };
+    expect(RunDetailViewSchema.safeParse(wrongLayer).success).toBe(false);
+    const missingDep = {
+      ...view,
+      dag: { revision: 1, tasks: [{ ...dagNode, deps: ["missing"] }] },
+    };
+    expect(RunDetailViewSchema.safeParse(missingDep).success).toBe(false);
+    const secondRow = { ...firstRow, taskId: "t2", title: "Then" };
+    const dagSecond = { ...dagNode, taskId: "t2", title: "Then", deps: ["t1"], layer: 1 };
+    const twoRows = [firstRow, secondRow];
+    // Every case starts from this valid two-node graph and changes exactly one thing.
+    const validTwo = { ...view, dag: { revision: 1, tasks: [dagNode, dagSecond] }, tasks: twoRows };
+    expect(RunDetailViewSchema.safeParse(validTwo).success).toBe(true);
+
+    // Declaration order need not be topological: a diamond whose join node comes first is valid.
+    const thirdRow = { ...firstRow, taskId: "t3", title: "Join" };
+    const join = { ...dagNode, taskId: "t3", title: "Join", deps: ["t1", "t2"], layer: 2 };
+    const diamond = {
+      ...view,
+      dag: { revision: 1, tasks: [join, dagNode, dagSecond] },
+      tasks: [firstRow, secondRow, thirdRow],
+    };
+    expect(RunDetailViewSchema.safeParse(diamond).success).toBe(true);
+
+    const issuePaths = (candidate: unknown): string[] | null => {
+      const result = RunDetailViewSchema.safeParse(candidate);
+      return result.success ? null : result.error.issues.map((issue) => issue.path.join("."));
+    };
+    const dagCases: { id: string; dag: unknown; path: string; only?: boolean }[] = [
+      {
+        id: "revision",
+        dag: { revision: 2, tasks: [dagNode, dagSecond] },
+        path: "dag.revision",
+        only: true,
+      },
+      {
+        id: "title",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, title: "Other" }] },
+        path: "dag.tasks.1",
+        only: true,
+      },
+      {
+        id: "state",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, state: "done" }] },
+        path: "dag.tasks.1",
+        only: true,
+      },
+      {
+        id: "layer-disagrees-with-deps",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, layer: 0 }] },
+        path: "dag.tasks.1.layer",
+        only: true,
+      },
+      {
+        id: "self-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["t1", "t2"] }] },
+        path: "dag.tasks.1.deps",
+      },
+      {
+        id: "duplicate-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["t1", "t1"] }] },
+        path: "dag.tasks.1.deps",
+        only: true,
+      },
+      {
+        id: "missing-dep",
+        dag: { revision: 1, tasks: [dagNode, { ...dagSecond, deps: ["ghost"] }] },
+        path: "dag.tasks.1.deps",
+      },
+      {
+        id: "missing-dag-task",
+        dag: { revision: 1, tasks: [dagNode] },
+        path: "dag.tasks",
+        only: true,
+      },
+      {
+        id: "duplicate-dag-task",
+        dag: { revision: 1, tasks: [dagNode, dagSecond, dagSecond] },
+        path: "dag.tasks.2.taskId",
+        only: true,
+      },
+      {
+        id: "cycle",
+        dag: {
+          revision: 1,
+          tasks: [
+            { ...dagNode, deps: ["t2"], layer: 1 },
+            { ...dagSecond, deps: ["t1"], layer: 1 },
+          ],
+        },
+        path: "dag.tasks.0.deps",
+      },
+    ];
+    for (const entry of dagCases) {
+      const paths = issuePaths({ ...view, dag: entry.dag, tasks: twoRows });
+      expect(paths, entry.id).not.toBeNull();
+      expect(paths, entry.id).toContain(entry.path);
+      // A case that must fail for exactly one reason is not allowed to fail for another.
+      if (entry.only) expect(paths, entry.id).toEqual([entry.path]);
+    }
     // Compile-time guard: a parsed ledger record is structurally incompatible with the view.
     const ledgerRecord: RunRecord = RunRecordSchema.parse(runRecord());
     // @ts-expect-error a ledger record must not be assignable to the redacted view

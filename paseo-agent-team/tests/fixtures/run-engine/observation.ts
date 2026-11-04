@@ -3,13 +3,15 @@
 import {
   AT_CREATED,
   AT_UPDATED,
+  assignmentsForRun,
   DECISION_D4,
   DECISION_D6,
   NORMAL_RUN_LEDGER,
+  noncesForRun,
   spec,
-  T1,
-  T2,
-  T3,
+  t1,
+  t2,
+  t3,
   taskRecord,
   withLedger,
 } from "./base";
@@ -35,11 +37,13 @@ export const EVENT_STORM_50: readonly {
 /** RE6.6 / Y14: a permission prompt arrived while an intent was in flight; freeze, never answer. */
 export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-per",
+  nonceRegistry: noncesForRun("run-rec0re-per"),
+  assignments: assignmentsForRun("run-rec0re-per"),
   revision: 27,
   tasks: [
-    T1,
-    { ...T2, phase: "implementation", waitingReason: "permission-pending" } as RunTaskRecord,
-    T3,
+    t1,
+    { ...t2, phase: "implementation", waitingReason: "permission-pending" } as RunTaskRecord,
+    t3,
   ],
   events: [
     ...NORMAL_RUN_LEDGER.events,
@@ -47,7 +51,7 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
       seq: 8,
       kind: "permission_requested",
       at: AT_UPDATED,
-      payload: { taskId: "T2", agentId: "agent-b1", requestId: "perm-1" },
+      payload: { taskId: "t2", agentId: "agent-b1", requestId: "perm-1" },
     },
   ],
   decisions: [],
@@ -67,11 +71,12 @@ export const PERMISSION_PENDING_LEDGER: LedgerFixture = withLedger({
 /** RE6.6 / Y14: irreversible work waiting for an approval record; it must not be dispatched. */
 export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-irr",
+  nonceRegistry: noncesForRun("run-rec0re-irr").filter((entry) => entry.taskId === "t1"),
   revision: 28,
   tasks: [
-    T1,
+    t1,
     taskRecord(
-      spec("T2", "Publish release", {
+      spec("t2", "Publish release", {
         irreversible: {
           kind: "push",
           target: "refs/heads/main",
@@ -81,11 +86,12 @@ export const IRREVERSIBLE_UNAPPROVED_LEDGER: LedgerFixture = withLedger({
       }),
       { state: "ready", waitingReason: "awaiting-approval", attempts: 0 },
     ),
-    T3,
+    t3,
   ],
   resources: [],
-  assignments: [],
-  outbox: [],
+  assignments: assignmentsForRun("run-rec0re-irr").filter((entry) => entry.taskId === "t1"),
+  outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId === "t1"),
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts,
   approvals: [],
 });
 
@@ -104,6 +110,8 @@ export const EXTERNAL_ACTIVITY_CASE = {
 /** RE1.9 / Y17: a Run started before the engine was enabled has labels but no ledger. */
 export const LEGACY_RUN_WITHOUT_LEDGER = {
   runId: "run-legacy-0001",
+  nonceRegistry: noncesForRun("run-legacy-0001"),
+  assignments: assignmentsForRun("run-legacy-0001"),
   hasLedger: false,
   displaySource: "labels",
   engineAdoption: "none",
@@ -115,45 +123,42 @@ export const FINISHED_DECISION_LEDGER: LedgerFixture = withLedger({
   runId: "run-rec0re-fin",
   revision: 30,
   lifecycle: "finished",
-  tasks: [
-    T1,
-    {
-      ...T2,
-      state: "done",
-      phase: "review",
-      ref: { kind: "git-commit", value: "b7e4d10" },
-      changedFiles: ["src/t2.ts"],
-    } as RunTaskRecord,
-    {
-      ...T3,
-      state: "done",
-      ref: { kind: "git-commit", value: "e1a9c33" },
-      changedFiles: ["docs/run-engine/readme.md"],
-    } as RunTaskRecord,
-  ],
+  tasks: [t1],
   resources: [],
-  assignments: [],
-  outbox: [],
+  assignments: assignmentsForRun("run-rec0re-fin").filter((entry) => entry.taskId === "t1"),
+  outbox: NORMAL_RUN_LEDGER.outbox.filter((entry) => entry.taskId === "t1"),
+  nonceRegistry: noncesForRun("run-rec0re-fin").filter((entry) => entry.taskId === "t1"),
+  eventReceipts: NORMAL_RUN_LEDGER.eventReceipts,
   decisions: [
     {
       decisionId: DECISION_D6,
       category: "D6",
+      controlNonceDigest: "d".repeat(64),
       state: "open",
+      answer: null,
       dedupeKey: "run-rec0re-fin|D6|phase-end",
       subjectId: null,
       summary: "Phase complete; awaiting strategic close-out.",
       createdAt: AT_UPDATED,
       answeredAt: null,
+
+      cancelIntents: null,
+      resolution: null,
     },
     {
       decisionId: DECISION_D4,
       category: "D4",
+      controlNonceDigest: "d".repeat(64),
       state: "answered",
+      answer: { action: "increase-budget", taskIds: [], answeredAt: AT_UPDATED },
       dedupeKey: "run-rec0re-fin|D4|budget-final",
       subjectId: "seat-s1",
       summary: "Budget increase approved before the last task.",
       createdAt: AT_CREATED,
       answeredAt: AT_UPDATED,
+
+      cancelIntents: null,
+      resolution: null,
     },
   ],
 });

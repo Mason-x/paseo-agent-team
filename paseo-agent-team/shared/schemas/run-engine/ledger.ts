@@ -1,5 +1,38 @@
 import { z } from "zod";
 import { RoleTierSchema, TaskKindSchema } from "../team-mode";
+import {
+  DiffRefShape,
+  GitCommitRefShape,
+  ReportBlockerShape,
+  ReportCheckShape,
+  ReportCoverageShape,
+  ReportEvidenceFields,
+  ReportIdentityShape,
+  ReportIsolationShape,
+  ReportWorkspaceShape,
+  RunDigestSchema,
+  RunDispatchDutiesShape,
+  RunIdRefSchema,
+  RunIdSchema,
+  RunNonceSchema,
+  RunPathSchema,
+  RunSeqSchema,
+  RunTaskIdSchema,
+  RunTimeSchema,
+} from "./proof-shapes";
+
+export {
+  DiffRefShape,
+  GitCommitRefShape,
+  RunDigestSchema,
+  RunIdRefSchema,
+  RunIdSchema,
+  RunNonceSchema,
+  RunPathSchema,
+  RunSeqSchema,
+  RunTaskIdSchema,
+  RunTimeSchema,
+} from "./proof-shapes";
 
 /**
  * Persisted Run Engine ledger (contract only; the store lives in server/run-engine).
@@ -27,17 +60,12 @@ export const RUN_MAX_TASKS = 64;
 export const RUN_SOFT_BYTES = 7 * 1024 * 1024;
 export const RUN_HARD_BYTES = 8 * 1024 * 1024;
 
-export const RunIdSchema = z
-  .string()
-  .max(96)
-  .regex(/^run-[a-z0-9]+-[a-z0-9]+$/);
-export const RunDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
-export const RunNonceSchema = z.string().uuid();
-export const RunTimeSchema = z.string().datetime();
-export const RunIdRefSchema = z.string().min(1).max(128);
-export const RunPathSchema = z.string().min(1).max(512);
+/** The ledger header digest as written by AtomicJsonCodec: "" on revision 1, then sha256:<64>. */
+export const RunHeaderDigestSchema = z.union([
+  z.literal(""),
+  z.string().regex(/^sha256:[a-f0-9]{64}$/),
+]);
 export const RunRevisionSchema = z.number().int().nonnegative();
-export const RunSeqSchema = z.number().int().nonnegative();
 
 export const RUN_TASK_STATES = [
   "pending",
@@ -55,10 +83,17 @@ export const RunTaskStateSchema = z.enum(RUN_TASK_STATES);
 export type RunTaskState = z.infer<typeof RunTaskStateSchema>;
 
 /**
- * Waiting sub-states inside `review`. `review/awaiting-rework` is `state:"review"` +
- * `phase:"awaiting-rework"` (no separate state value); R03/R05/R07 must read it this way.
+ * Review sub-states use state:"review" + phase; `awaiting-rework` is not a separate state.
+ * `frozen` belongs to `state:"blocked"` (cancellation waiting for quiescence) and keeps a claim.
  */
-export const RUN_TASK_PHASES = ["implementation", "review", "smoke", "awaiting-rework"] as const;
+export const RUN_TASK_PHASES = [
+  "implementation",
+  "review",
+  "smoke",
+  "awaiting-rework",
+  /** Cancellation blocked on quiescence: state stays blocked, its claim stays frozen. */
+  "frozen",
+] as const;
 export const RunTaskPhaseSchema = z.enum(RUN_TASK_PHASES);
 export type RunTaskPhase = z.infer<typeof RunTaskPhaseSchema>;
 
@@ -101,17 +136,6 @@ export const RUN_ASSIGNMENT_STATES = [
 export const RunAssignmentStateSchema = z.enum(RUN_ASSIGNMENT_STATES);
 
 /** Artifact identity of a delivery (05 §3). A diff hash is never a git ref. */
-export const GitCommitRefShape = {
-  kind: z.literal("git-commit"),
-  value: z.string().min(1).max(128),
-};
-export const DiffRefShape = {
-  kind: z.literal("diff-sha256"),
-  value: RunDigestSchema,
-  baseCommit: z.string().min(1).max(128),
-  patchPath: RunPathSchema,
-};
-
 export const RunArtifactRefSchema = z.discriminatedUnion("kind", [
   z.object(GitCommitRefShape).passthrough(),
   z.object(DiffRefShape).passthrough(),
@@ -144,13 +168,17 @@ export const RunIrreversibleSpecShape = {
 };
 export const RunIrreversibleSpecSchema = z.object(RunIrreversibleSpecShape).passthrough();
 
+/** Stored dispatch duties; the protocol overrides the nested object with strictObject. */
+export const RunDispatchDutiesSchema = z.object(RunDispatchDutiesShape).passthrough();
+export type RunDispatchDuties = z.infer<typeof RunDispatchDutiesSchema>;
+
 /** Stored task definition. The protocol's strict TaskSpec reuses this exact shape. */
 export const RunTaskSpecShape = {
-  id: z.string().min(1).max(64),
+  id: RunTaskIdSchema,
   title: z.string().min(1).max(120),
   goal: z.string().min(1).max(2000),
   group: z.string().min(1).max(64),
-  deps: z.array(z.string().min(1).max(64)).max(RUN_MAX_TASKS),
+  deps: z.array(RunTaskIdSchema).max(RUN_MAX_TASKS),
   level: RunLevelSchema,
   tier: RunTierSchema,
   execution: z.enum(["write", "read"]),
@@ -162,39 +190,185 @@ export const RunTaskSpecShape = {
   irreversible: RunIrreversibleSpecSchema.nullable(),
   reviewPolicy: z.literal("required"),
   implementationPolicy: z.enum(["default", "a-with-s-plan"]),
-  architectureTaskId: z.string().min(1).max(64).nullable(),
+  architectureTaskId: RunTaskIdSchema.nullable(),
+  dispatchDuties: RunDispatchDutiesSchema,
 };
-export const RunTaskSpecSchema = z.object(RunTaskSpecShape).passthrough();
+type TaskSpecRefineInput = {
+  id: string;
+  level: RunLevel;
+  tier: RunTier;
+  deps: readonly string[];
+  implementationPolicy: "default" | "a-with-s-plan";
+  architectureTaskId: string | null;
+  devSmoke: boolean;
+  dispatchDuties: { produce: string; review: string; smoke: string | null };
+};
+
+/** Shared by the stored task spec and the strict protocol DAG task spec. */
+export function refineTaskSpec(spec: TaskSpecRefineInput, ctx: z.RefinementCtx): void {
+  if (spec.devSmoke && spec.dispatchDuties.smoke === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["dispatchDuties", "smoke"],
+      message: "devSmoke requires a smoke duty",
+    });
+  }
+  if (!spec.devSmoke && spec.dispatchDuties.smoke !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["dispatchDuties", "smoke"],
+      message: "a non-devSmoke task must not declare a smoke duty",
+    });
+  }
+  const expected =
+    spec.level === "L1" || spec.level === "L2" ? "B" : spec.level === "L3" ? "A" : "S";
+  if (spec.implementationPolicy === "a-with-s-plan") {
+    if (spec.level !== "L4") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["level"],
+        message: "a-with-s-plan is only valid on L4",
+      });
+    }
+    if (spec.tier !== "A") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tier"],
+        message: "a-with-s-plan must execute at tier A",
+      });
+    }
+    if (spec.architectureTaskId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "a-with-s-plan requires an architecture task",
+      });
+    } else if (spec.architectureTaskId === spec.id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "architectureTaskId must not be the task itself",
+      });
+    } else if (!spec.deps.includes(spec.architectureTaskId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "architectureTaskId must be one of deps",
+      });
+    }
+  } else {
+    if (spec.tier !== expected) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tier"],
+        message: `tier must be ${expected} for ${spec.level}`,
+      });
+    }
+    if (spec.architectureTaskId !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["architectureTaskId"],
+        message: "default tasks must not name an architecture task",
+      });
+    }
+  }
+}
+
+export const RunTaskSpecSchema = z
+  .object(RunTaskSpecShape)
+  .passthrough()
+  .superRefine(refineTaskSpec);
 export type RunTaskSpec = z.infer<typeof RunTaskSpecSchema>;
 
 /** Evidence summary (05 §3): bounded, redacted, path-only; secrets never enter the ledger. */
 export const RunEvidenceShape = {
-  id: z.string().min(1).max(64),
-  command: z.string().min(1).max(2000).nullable(),
-  exitCode: z.number().int(),
-  summary: z.string().min(1).max(600),
-  artifactPath: RunPathSchema,
+  ...ReportEvidenceFields,
   ref: RunArtifactRefSchema,
-  coverage: z
-    .object({ lines: z.number().min(0).max(100), functions: z.number().min(0).max(100) })
-    .passthrough()
-    .optional(),
-  isolation: z
-    .object({ homePath: RunPathSchema, outsideRealHome: z.boolean() })
-    .passthrough()
-    .optional(),
+  coverage: z.object(ReportCoverageShape).passthrough().optional(),
+  isolation: z.object(ReportIsolationShape).passthrough().optional(),
 };
 export const RunEvidenceSchema = z.object(RunEvidenceShape).passthrough();
 export type RunEvidence = z.infer<typeof RunEvidenceSchema>;
 
-export const RunWorkspaceSchema = z
+export const RunWorkspaceSchema = z.object(ReportWorkspaceShape).passthrough();
+export type RunWorkspace = z.infer<typeof RunWorkspaceSchema>;
+
+const StoredArtifactRefSchema = z.discriminatedUnion("kind", [
+  z.object(GitCommitRefShape).passthrough(),
+  z.object(DiffRefShape).passthrough(),
+]);
+const StoredReportWorkspaceSchema = z.object(ReportWorkspaceShape).passthrough();
+const StoredReportEvidenceSchema = z
   .object({
-    id: RunIdRefSchema,
-    branch: z.string().min(1).max(256),
-    baseRef: z.string().min(1).max(256),
+    ...ReportEvidenceFields,
+    ref: StoredArtifactRefSchema,
+    coverage: z.object(ReportCoverageShape).passthrough().optional(),
+    isolation: z.object(ReportIsolationShape).passthrough().optional(),
   })
   .passthrough();
-export type RunWorkspace = z.infer<typeof RunWorkspaceSchema>;
+const StoredReportBlockerSchema = z.object(ReportBlockerShape).passthrough();
+const StoredReportCheckSchema = z.object(ReportCheckShape).passthrough();
+const StoredReportIdentityShape = {
+  ...ReportIdentityShape,
+  messageId: z.string().uuid(),
+};
+
+/** Canonical accepted producer report. Evidence qualification is a core gate, not schema. */
+export const RunStoredTaskReportSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      ...StoredReportIdentityShape,
+      status: z.literal("done"),
+      changedFiles: z.array(RunPathSchema).max(512),
+      ref: StoredArtifactRefSchema,
+      workspace: StoredReportWorkspaceSchema,
+      evidence: z.array(StoredReportEvidenceSchema).min(1).max(64),
+    })
+    .passthrough(),
+  z
+    .object({
+      ...StoredReportIdentityShape,
+      status: z.enum(["blocked", "failed"]),
+      reasonCode: z.string().min(1).max(64),
+      summary: z.string().min(1).max(1000),
+      evidence: z.array(StoredReportEvidenceSchema).max(64),
+    })
+    .passthrough(),
+]);
+export type RunStoredTaskReport = z.infer<typeof RunStoredTaskReportSchema>;
+
+export const RunStoredReviewSchema = z
+  .object({
+    ...StoredReportIdentityShape,
+    reviewedRef: StoredArtifactRefSchema,
+    verdict: z.enum(["可合入", "修改后合入", "不可合入"]),
+    blockers: z.array(StoredReportBlockerSchema).max(40),
+    probes: z.array(StoredReportEvidenceSchema).max(64),
+  })
+  .passthrough();
+export type RunStoredReview = z.infer<typeof RunStoredReviewSchema>;
+
+export const RunStoredSmokeReportSchema = z
+  .object({
+    ...StoredReportIdentityShape,
+    testedRef: StoredArtifactRefSchema,
+    devHost: z.string().min(1).max(256),
+    devServerId: z.string().min(1).max(128),
+    devHome: RunPathSchema,
+    checks: z.array(StoredReportCheckSchema).min(1).max(64),
+  })
+  .passthrough();
+export type RunStoredSmokeReport = z.infer<typeof RunStoredSmokeReportSchema>;
+
+export const RunAcceptedProofSchema = z.union([
+  RunStoredTaskReportSchema,
+  RunStoredReviewSchema,
+  RunStoredSmokeReportSchema,
+]);
+export type RunAcceptedProof = z.infer<typeof RunAcceptedProofSchema>;
+
+export const RunDeliverySchema = z.object({ producerAssignmentId: RunIdRefSchema }).passthrough();
+export type RunDelivery = z.infer<typeof RunDeliverySchema>;
 
 /**
  * Static-quiescence evidence (05 §4 B1). It records what was observed; it does not decide.
@@ -206,7 +380,15 @@ export const RunCancellationEvidenceSchema = z
     assignmentId: RunIdRefSchema,
     lastTurnId: z.string().min(1).max(128).nullable(),
     endedEventKey: z.string().min(1).max(256).nullable(),
-    refreshObservedAt: RunTimeSchema,
+    /** The actual refresh observation backing quiescence; a timestamp alone is not evidence. */
+    refresh: z
+      .object({
+        agentId: RunIdRefSchema,
+        status: z.enum(["idle", "closed", "missing"]),
+        activeTurn: z.literal(false),
+        observedAt: RunTimeSchema,
+      })
+      .passthrough(),
     /** Must be ≥ the observationSeq at the refresh that produced this evidence. */
     observationSeq: RunSeqSchema,
     cancelIntentId: RunIdRefSchema,
@@ -261,7 +443,7 @@ export type RunReopenGrant = z.infer<typeof RunReopenGrantSchema>;
 export const RunAssignmentSchema = z
   .object({
     assignmentId: RunIdRefSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
     seatId: RunIdRefSchema,
     agentId: RunIdRefSchema,
     profileId: RunIdRefSchema,
@@ -276,7 +458,10 @@ export const RunAssignmentSchema = z
     workspace: RunWorkspaceSchema.nullable(),
     attempt: z.number().int().min(1),
     nonce: RunNonceSchema,
-    messageId: z.string().uuid().nullable(),
+    messageId: z.string().uuid(),
+    delivery: RunDeliverySchema.nullable(),
+    acceptedProof: RunAcceptedProofSchema.nullable(),
+    endedEventKey: z.string().min(1).max(256).nullable(),
     turnId: z.string().min(1).max(128).nullable(),
     state: RunAssignmentStateSchema,
     createdAt: RunTimeSchema,
@@ -287,14 +472,67 @@ export const RunAssignmentSchema = z
     reopenOfAssignmentId: RunIdRefSchema.nullable().optional(),
     supersededByAssignmentId: RunIdRefSchema.nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((assignment, ctx) => {
+    const producer =
+      assignment.purpose === "member" ||
+      assignment.purpose === "coordinator" ||
+      assignment.purpose === "reopen";
+    const review = assignment.purpose === "reviewer";
+    const smoke = assignment.purpose === "smoker";
+    if ((review || smoke) && assignment.delivery === null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "reviewer/smoker must bind a producer delivery",
+        path: ["delivery"],
+      });
+    }
+    if (!review && !smoke && assignment.delivery !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "only reviewer/smoker may bind a producer delivery",
+        path: ["delivery"],
+      });
+    }
+    if (review && assignment.acceptedProof !== null) {
+      if (!RunStoredReviewSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "reviewer acceptedProof must be a review report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (smoke && assignment.acceptedProof !== null) {
+      if (!RunStoredSmokeReportSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "smoker acceptedProof must be a smoke report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (producer && assignment.acceptedProof !== null) {
+      if (!RunStoredTaskReportSchema.safeParse(assignment.acceptedProof).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "producer acceptedProof must be a task report",
+          path: ["acceptedProof"],
+        });
+      }
+    } else if (!producer && assignment.acceptedProof !== null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "control assignments cannot carry acceptedProof",
+        path: ["acceptedProof"],
+      });
+    }
+  });
 export type RunAssignment = z.infer<typeof RunAssignmentSchema>;
 
 export const RunNonceEntrySchema = z
   .object({
     nonce: RunNonceSchema,
     runId: RunIdSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
     assignmentId: RunIdRefSchema.nullable(),
     attempt: z.number().int().min(1),
     phase: RunTaskPhaseSchema,
@@ -384,18 +622,34 @@ export const RunSeatSnapshotSchema = z
   .passthrough();
 export type RunSeatSnapshot = z.infer<typeof RunSeatSnapshotSchema>;
 
+/**
+ * `hot`/`tool` are repo-level named resources persisted as claims. They conflict only by exact
+ * (case-sensitive) name equality: no directory coverage and no path normalization/filesystem
+ * validation. For these kinds `path` carries the name (non-empty, <=512) and `access` must be
+ * write. R03b implements the conflict behavior; the schema only carries the value.
+ */
 export const RunResourceClaimSchema = z
   .object({
     claimId: RunIdRefSchema,
-    taskId: z.string().min(1).max(64),
+    taskId: RunTaskIdSchema,
+    originAssignmentId: RunIdRefSchema,
     repoId: z.string().min(1).max(256),
-    kind: z.enum(["file", "directory"]),
+    kind: z.enum(["file", "directory", "hot", "tool"]),
     path: RunPathSchema,
     access: z.enum(["read", "write"]),
     frozen: z.boolean(),
     createdAt: RunTimeSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((claim, ctx) => {
+    if ((claim.kind === "hot" || claim.kind === "tool") && claim.access !== "write") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access"],
+        message: "hot/tool claims must be write claims",
+      });
+    }
+  });
 
 export const RunBudgetEntrySchema = z
   .object({
@@ -408,18 +662,195 @@ export const RunBudgetEntrySchema = z
   })
   .passthrough();
 
+export const RUN_DECISION_ANSWER_ACTIONS = [
+  "replan",
+  "assign-seat",
+  "increase-budget",
+  "retry",
+  "cancel",
+  "defer-channel",
+  "resume-seat",
+  "reject",
+] as const;
+export const RunDecisionAnswerActionSchema = z.enum(RUN_DECISION_ANSWER_ACTIONS);
+
+export const RUN_CANCELLATION_CAUSES = [
+  "cancel-requested",
+  "dag-revised",
+  "run-cancelled",
+] as const;
+export const RunLocalCancellationSchema = z
+  .object({
+    reason: z.literal("cancel-before-send"),
+    at: RunTimeSchema,
+    eventSeq: RunSeqSchema,
+    cause: z.enum(RUN_CANCELLATION_CAUSES),
+  })
+  .passthrough();
+export type RunLocalCancellation = z.infer<typeof RunLocalCancellationSchema>;
+
+export const RunDecisionBindingSchema = z
+  .object({
+    assignmentId: RunIdRefSchema,
+    intentId: RunIdRefSchema,
+  })
+  .passthrough();
+export type RunDecisionBinding = z.infer<typeof RunDecisionBindingSchema>;
+
+const canonicallySorted = (values: readonly string[]) =>
+  values.every((value, index) => index === 0 || values[index - 1] < value);
+
+export const RunNoEffectsWitnessSchema = z
+  .object({
+    kind: z.literal("no-effects-cancel"),
+    taskId: RunTaskIdSchema,
+    localIntentIds: z.array(RunIdRefSchema).max(4096),
+  })
+  .passthrough()
+  .superRefine((witness, ctx) => {
+    if (!canonicallySorted(witness.localIntentIds)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["localIntentIds"],
+        message: "localIntentIds must be sorted and unique",
+      });
+    }
+  });
+export type RunNoEffectsWitness = z.infer<typeof RunNoEffectsWitnessSchema>;
+
+export const RunResolutionSchema = z
+  .object({
+    reason: z.literal("no-in-flight"),
+    at: RunTimeSchema,
+    eventSeq: RunSeqSchema,
+    cause: z.enum(RUN_CANCELLATION_CAUSES),
+    witness: RunNoEffectsWitnessSchema,
+  })
+  .passthrough();
+export type RunResolution = z.infer<typeof RunResolutionSchema>;
+
 export const RunDecisionPointSchema = z
   .object({
     decisionId: z.string().uuid(),
     category: z.enum(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]),
-    state: z.enum(["open", "answered", "waiting-human"]),
+    /** SHA-256 of the engine-generated control nonce (bare 64hex); never the nonce itself. */
+    controlNonceDigest: RunDigestSchema,
+    state: z.enum(["open", "answered", "waiting-human", "superseded"]),
     dedupeKey: z.string().min(1).max(256),
+    cancelIntents: z.array(RunDecisionBindingSchema).max(4096).nullable(),
     subjectId: RunIdRefSchema.nullable(),
     summary: z.string().min(1).max(4096),
+    /** The answer survives checkpoint compression; required exactly when state=answered. */
+    answer: z
+      .object({
+        action: RunDecisionAnswerActionSchema,
+        taskIds: z.array(RunTaskIdSchema).max(64),
+        answeredAt: RunTimeSchema,
+      })
+      .passthrough()
+      .nullable(),
     createdAt: RunTimeSchema,
     answeredAt: RunTimeSchema.nullable(),
+    resolution: RunResolutionSchema.nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((decision, ctx) => {
+    if (Object.hasOwn(decision, "cancelIntentId")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntentId"],
+        message: "cancelIntentId is superseded by cancelIntents",
+      });
+    }
+    const cancelDecision =
+      decision.category === "D1" &&
+      decision.subjectId !== null &&
+      decision.dedupeKey === `cancel:${decision.subjectId}`;
+    if (cancelDecision && decision.cancelIntents === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntents"],
+        message: "a D1 cancel decision must carry cancelIntents",
+      });
+    }
+    if (!cancelDecision && decision.cancelIntents !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelIntents"],
+        message: "cancelIntents is only valid on a D1 cancel decision",
+      });
+    }
+    if (decision.cancelIntents !== null) {
+      const ids = decision.cancelIntents.map((binding) => binding.assignmentId);
+      if (!canonicallySorted(ids)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cancelIntents"],
+          message: "cancelIntents must be sorted by unique assignmentId",
+        });
+      }
+    }
+    if (decision.state === "superseded") {
+      if (!cancelDecision || decision.resolution === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["resolution"],
+          message: "superseded requires a D1 cancel resolution",
+        });
+      } else if (Date.parse(decision.resolution.at) < Date.parse(decision.createdAt)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["resolution", "at"],
+          message: "resolution.at must not predate createdAt",
+        });
+      }
+    } else if (decision.resolution !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["resolution"],
+        message: "resolution is only valid on superseded decisions",
+      });
+    }
+    if (decision.state === "answered") {
+      if (decision.answer === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["answer"],
+          message: "an answered decision must record its answer",
+        });
+      } else {
+        if (decision.answeredAt === null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "an answered decision must record answeredAt",
+          });
+        } else if (decision.answeredAt !== decision.answer.answeredAt) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must equal answer.answeredAt",
+          });
+        }
+        if (
+          decision.answeredAt !== null &&
+          Date.parse(decision.answeredAt) < Date.parse(decision.createdAt)
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["answeredAt"],
+            message: "answeredAt must not predate createdAt",
+          });
+        }
+      }
+    } else if (decision.answer !== null || decision.answeredAt !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["answer"],
+        message: "only answered decisions may carry an answer/answeredAt",
+      });
+    }
+  });
 
 export const RunApprovalSchema = z
   .object({
@@ -479,7 +910,7 @@ export const RunMetricsBookSchema = z
  */
 export const RunModelPlanBasisSchema = z
   .object({
-    launchPlanFingerprint: RunDigestSchema,
+    p1PlanHash: RunDigestSchema,
     mode: z.string().min(1).max(64),
     targetWorkspaceId: z.string().min(1).max(128).nullable(),
     task: z.string().min(1).max(4000),
@@ -557,6 +988,22 @@ export const RunModelPlanBasisSchema = z
   .passthrough();
 export type RunModelPlanBasis = z.infer<typeof RunModelPlanBasisSchema>;
 
+/**
+ * One B→A/A→S escalation. `atAttempt` is the attempt that just failed (not the next attempt that
+ * will be dispatched); the reducer records the failure first, then appends this escalation.
+ * The chain is validated against the frozen spec tier.
+ */
+export const RunTaskEscalationSchema = z
+  .object({
+    fromTier: RunTierSchema,
+    toTier: RunTierSchema,
+    atAttempt: z.number().int().min(1),
+    qualityFailures: z.number().int().nonnegative(),
+    at: RunTimeSchema,
+  })
+  .passthrough();
+export type RunTaskEscalation = z.infer<typeof RunTaskEscalationSchema>;
+
 export const RunTaskRecordSchema = z
   .object({
     spec: RunTaskSpecSchema,
@@ -571,12 +1018,95 @@ export const RunTaskRecordSchema = z
     evidenceReturns: z.number().int().nonnegative(),
     reworkCount: z.number().int().nonnegative(),
     qualityFailures: z.number().int().nonnegative(),
-    escalations: z.array(z.record(z.string(), z.unknown())).max(16),
+    escalations: z.array(RunTaskEscalationSchema).max(2),
     frozenClaimId: RunIdRefSchema.nullable(),
     /** Explicit decision that released a frozen/blocked task (05 §4 B1); never implicit. */
     releaseDecisionId: z.string().uuid().nullable(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((task, ctx) => {
+    for (const key of ["report", "reviews", "smokeReport"] as const) {
+      if (Object.hasOwn(task, key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is no longer a task mirror; acceptedProof is the only authority`,
+        });
+      }
+    }
+    if (task.phase === "frozen" && task.state !== "blocked") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "frozen is only valid while the task is blocked",
+      });
+    }
+    if (task.phase === "awaiting-rework" && task.state !== "review") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase"],
+        message: "awaiting-rework is only valid on a review task",
+      });
+    }
+    for (const [index, escalation] of task.escalations.entries()) {
+      const previous = index === 0 ? undefined : task.escalations[index - 1];
+      if (escalation.qualityFailures === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures must be positive",
+        });
+      }
+      if (previous !== undefined && escalation.qualityFailures <= previous.qualityFailures) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures must strictly increase",
+        });
+      }
+      if (previous !== undefined && escalation.atAttempt <= previous.atAttempt) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "atAttempt"],
+          message: "escalation atAttempt must strictly increase",
+        });
+      }
+      if (escalation.qualityFailures > task.qualityFailures) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "qualityFailures"],
+          message: "escalation qualityFailures exceeds the task total",
+        });
+      }
+      if (escalation.atAttempt > task.attempts) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "atAttempt"],
+          message: "escalation atAttempt exceeds the task attempts",
+        });
+      }
+    }
+    let current = task.spec.tier;
+    for (const [index, escalation] of task.escalations.entries()) {
+      if (escalation.fromTier !== current) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "fromTier"],
+          message: `escalation must start from ${current}`,
+        });
+      }
+      const next = current === "B" ? "A" : current === "A" ? "S" : null;
+      if (next === null || escalation.toTier !== next) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["escalations", index, "toTier"],
+          message: next === null ? "S cannot escalate" : `escalation must go to ${next}`,
+        });
+        break;
+      }
+      current = escalation.toTier;
+    }
+  });
 export type RunTaskRecord = z.infer<typeof RunTaskRecordSchema>;
 
 /**
@@ -597,6 +1127,7 @@ const IntentBaseShape = {
   recoverySendCount: z.number().int().nonnegative().max(1),
   createdAt: RunTimeSchema,
   confirmedAt: RunTimeSchema.nullable(),
+  localCancellation: RunLocalCancellationSchema.nullable(),
 };
 
 export const RunEffectIntentSchema = z
@@ -605,7 +1136,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("dispatch"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema,
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -614,7 +1145,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("create-agent"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -623,7 +1154,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("create-workspace"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -632,7 +1163,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("wake"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -641,7 +1172,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("archive"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         semanticArgs: z.record(z.string(), z.unknown()),
       })
@@ -650,7 +1181,7 @@ export const RunEffectIntentSchema = z
       .object({
         ...IntentBaseShape,
         kind: z.literal("reopen"),
-        taskId: z.string().min(1).max(64),
+        taskId: RunTaskIdSchema,
         assignmentId: RunIdRefSchema.nullable(),
         controlAttempt: z.number().int().min(1),
         semanticArgs: z.record(z.string(), z.unknown()),
@@ -672,6 +1203,13 @@ export const RunEffectIntentSchema = z
       .passthrough(),
   ])
   .superRefine((intent, ctx) => {
+    if (intent.localCancellation !== null && intent.state !== "failed") {
+      ctx.addIssue({
+        code: "custom",
+        message: "localCancellation is only valid on a failed intent",
+        path: ["localCancellation"],
+      });
+    }
     // Branch exclusivity is semantic, not a "future field": a business intent must not fake a
     // control counter, and a probe must not smuggle a task scope.
     const isControl = intent.kind === "probe" || intent.kind === "reopen";
@@ -765,12 +1303,18 @@ export const RunPolicySnapshotSchema = z
   .passthrough();
 export type RunPolicySnapshot = z.infer<typeof RunPolicySnapshotSchema>;
 
+/**
+ * Schema v1 is frozen once R05 persists it. A later shape change must bump the version or add an
+ * explicit tolerant read path; old shapes are corrupt, never unknown-version.
+ */
 export const RunRecordSchema = z
   .object({
     schemaVersion: z.literal(RUN_SCHEMA_VERSION),
     runId: RunIdSchema,
-    revision: RunRevisionSchema,
-    previousDigest: RunDigestSchema,
+    // The persisted root is the codec header: validateHeader (atomic-json.ts) requires revision >= 1.
+    // Only this field is tightened; RunRevisionSchema stays non-negative for the other structures.
+    revision: RunRevisionSchema.min(1),
+    previousDigest: RunHeaderDigestSchema,
     createdAt: RunTimeSchema,
     updatedAt: RunTimeSchema,
     hostBinding: z.object({ serverId: z.string().min(1).max(128) }).passthrough(),
@@ -826,5 +1370,28 @@ export const RunRecordSchema = z
     alerts: z.array(RunAlertSchema).max(1024),
     metrics: RunMetricsBookSchema,
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((record, ctx) => {
+    if (record.revision === 1 && record.previousDigest !== "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "first revision must not have a previous digest",
+      });
+    }
+    if (record.revision !== 1 && record.previousDigest === "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["previousDigest"],
+        message: "only the first revision may omit the previous digest",
+      });
+    }
+    if (record.launch.modelPlan.p1PlanHash !== record.team.modelPlanHash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["team", "modelPlanHash"],
+        message: "modelPlanHash must equal launch.modelPlan.p1PlanHash",
+      });
+    }
+  });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
