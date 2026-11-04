@@ -142,6 +142,45 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("maxMembers editor writes", () => {
+  test.each(["0", "65", "2.5", "", "1e1", "9007199254740992"])(
+    "an invalid edited limit %s never writes",
+    async (value) => {
+      const editor = await mount();
+      await change(editor.root, value);
+      await save(editor.root);
+      expect(field(editor.root).props.error).toBe(zh.maxMembersInvalid);
+      expect(transport.write).not.toHaveBeenCalled();
+      expect(editor.onClose).not.toHaveBeenCalled();
+      await editor.unmount();
+    },
+  );
+
+  test.each(["1", "64"])("accepts an edited boundary of %s", async (value) => {
+    const editor = await mount();
+    await change(editor.root, value);
+    await save(editor.root);
+    const { economy: _economy, ...retained } = raw;
+    expect(transport.write).toHaveBeenCalledWith({
+      revision: "rev-1",
+      values: { ...retained, maxMembers: Number(value) },
+    });
+    await editor.unmount();
+  });
+
+  test("an untouched legacy limit above 64 closes without a write", async () => {
+    transport.read.mockResolvedValue({
+      status: "ready",
+      revision: "rev-large",
+      values: { ...raw, maxMembers: 100 },
+    });
+    const editor = await mount();
+    expect(text(editor.root)).toContain(zh.maxMembersLegacy(100));
+    await save(editor.root);
+    expect(transport.write).not.toHaveBeenCalled();
+    expect(editor.onClose).toHaveBeenCalledTimes(1);
+    await editor.unmount();
+  });
+
   test("an unchanged value closes without a write or another probe", async () => {
     const editor = await mount();
     expect(text(editor.root)).toContain(zh.retiredPreferences);
