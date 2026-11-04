@@ -1036,7 +1036,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         </>
       ) : null}
       <MaxMembersEditor
-        key={host.id}
+        key={`max-members-${host.id}`}
         theme={theme}
         open={maxMembersOpen}
         onSaved={() => {
@@ -1047,7 +1047,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
         onClose={() => setMaxMembersOpen(false)}
       />
       <PresetSyncDialog
-        key={host.id}
+        key={`preset-sync-${host.id}`}
         theme={theme}
         layout={layout}
         open={syncOpen}
