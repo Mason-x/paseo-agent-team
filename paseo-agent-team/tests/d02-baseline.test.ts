@@ -2,11 +2,9 @@ import { describe, expect, test } from "vitest";
 import { hashLaunchPlan } from "../server/launch-hash";
 import { buildLaunchPlan } from "../shared/domain/launch-plan";
 import { toModeLaunchPreview } from "../shared/domain/launch-preview";
-import type { EconomyPolicy, HostSnapshot } from "../shared/domain/mode-resolver";
-import type { PaseoProfile, ProviderAvailability } from "../shared/paseo/adapter";
+import type { HostSnapshot } from "../shared/domain/mode-resolver";
 import type { Role } from "../shared/schemas/role";
 import type { Team } from "../shared/schemas/team";
-import type { TeamMode } from "../shared/schemas/team-mode";
 import {
   allAvailable,
   architect,
@@ -18,313 +16,246 @@ import {
 } from "./fixtures";
 import { D02_BASELINE_COORD, D02_BASELINE_LEGACY } from "./fixtures/d02-baseline";
 
-const profiles: PaseoProfile[] = [claudeOpus, codexXhigh];
-const EMPTY: EconomyPolicy = { pool: [], taskOrder: {}, profileBudget: {} };
-const CAP_LEGACY = { onDemand: false, expansion: false, collaboration: false };
-const CAP_COLLAB = { onDemand: true, expansion: true, collaboration: true };
-const BASE = {
-  workspaceId: "ws-baseline",
-  task: "Baseline launch task",
-  runId: "baseline-run",
-  maxMembers: 8,
-};
-
-type Case = {
-  mode: TeamMode;
-  variant: string;
-  roles: readonly Role[];
-  team: Team;
-  host: HostSnapshot;
-  economy: EconomyPolicy;
-  capabilities: typeof CAP_LEGACY;
-};
-
-function teamWith(members: Team["members"]): Team {
-  return { ...codingTeam, members };
-}
-
-const baseMembers: Team["members"] = [
+const profiles = [claudeOpus, codexXhigh];
+const capabilities = { onDemand: false, expansion: false, collaboration: false };
+const members: Team["members"] = [
   { roleId: "architect", enabled: true },
   { roleId: "developer", instanceLabel: "Backend", enabled: true },
 ];
-
-function legacyCases(): Case[] {
-  const variants: Record<string, Omit<Case, "mode" | "capabilities" | "variant">> = {
-    normal: {
-      roles: [techLead, architect, developer],
-      team: teamWith(baseMembers),
-      host: { status: "ready", profiles, availability: allAvailable },
-      economy: EMPTY,
-    },
-    poolUnavailable: {
-      roles: [techLead, architect, developer],
-      team: teamWith(baseMembers),
-      host: {
-        status: "ready",
-        profiles,
-        availability: [
-          { provider: "claude", available: true },
-          { provider: "codex", available: false },
-        ],
-      },
-      economy: {
-        pool: [{ profileId: "codex-xhigh", enabled: true, family: "deepseek" }],
-        taskOrder: {},
-        profileBudget: {},
-      },
-    },
-    availabilityUnverified: {
-      roles: [techLead, architect, developer],
-      team: teamWith(baseMembers),
-      host: { status: "ready", profiles, availability: [], availabilityUnverified: true },
-      economy: EMPTY,
-    },
-    disabledRole: {
-      roles: [techLead, architect, { ...developer, enabled: false }],
-      team: teamWith(baseMembers),
-      host: { status: "ready", profiles, availability: allAvailable },
-      economy: EMPTY,
-    },
-    duplicateLabels: {
-      roles: [techLead, architect, developer],
-      team: teamWith([
-        { roleId: "developer", instanceLabel: "Backend", enabled: true },
-        { roleId: "developer", instanceLabel: "backend", enabled: true },
-      ]),
-      host: { status: "ready", profiles, availability: allAvailable },
-      economy: EMPTY,
-    },
-    duplicateLabelsUnverified: {
-      roles: [techLead, architect, developer],
-      team: teamWith([
-        { roleId: "developer", instanceLabel: "Backend", enabled: true },
-        { roleId: "developer", instanceLabel: "backend", enabled: true },
-      ]),
-      host: { status: "ready", profiles, availability: [], availabilityUnverified: true },
-      economy: EMPTY,
-    },
-  };
-  return (["sota", "economy", "collaborative"] as const).flatMap((mode) =>
-    Object.entries(variants).map(([variant, input]) => ({
-      ...input,
-      mode,
-      variant,
-      capabilities: mode === "collaborative" ? CAP_COLLAB : CAP_LEGACY,
-    })),
-  );
-}
-
-const opusOnly = (role: Role): Role => ({
-  ...role,
-  preferredProfiles: [{ profileId: claudeOpus.id, nameSnapshot: claudeOpus.name }],
-  fallbackProfiles: [],
-});
-const coordinatorFallback: Role = {
-  ...techLead,
-  fallbackProfiles: [{ profileId: codexXhigh.id, nameSnapshot: codexXhigh.name }],
-};
-const coordinatorMissing: Role = {
-  ...techLead,
-  fallbackProfiles: [{ profileId: "missing-coordinator-profile" }],
-};
-const CLAUDE_DOWN: readonly ProviderAvailability[] = [
-  { provider: "claude", available: false },
-  { provider: "codex", available: true },
-];
-const COORD_MEMBER: Team["members"] = [
+const duplicateMembers: Team["members"] = [
   { roleId: "developer", instanceLabel: "Backend", enabled: true },
+  { roleId: "developer", instanceLabel: "backend", enabled: true },
+];
+const available: HostSnapshot = { status: "ready", profiles, availability: allAvailable };
+const unverified: HostSnapshot = {
+  status: "ready",
+  profiles,
+  availability: [],
+  availabilityUnverified: true,
+};
+const codexDown: HostSnapshot = {
+  status: "ready",
+  profiles,
+  availability: [
+    { provider: "claude", available: true },
+    { provider: "codex", available: false },
+  ],
+};
+const claudeDown: HostSnapshot = {
+  status: "ready",
+  profiles,
+  availability: [
+    { provider: "claude", available: false },
+    { provider: "codex", available: true },
+  ],
+};
+
+type Case = { variant: string; roles: readonly Role[]; team: Team; host: HostSnapshot };
+const baseRoles = [techLead, architect, developer];
+const teamWith = (next: Team["members"]): Team => ({ ...codingTeam, members: next });
+const cases: Case[] = [
+  { variant: "normal", roles: baseRoles, team: teamWith(members), host: available },
+  { variant: "poolUnavailable", roles: baseRoles, team: teamWith(members), host: codexDown },
+  {
+    variant: "availabilityUnverified",
+    roles: baseRoles,
+    team: teamWith(members),
+    host: unverified,
+  },
+  {
+    variant: "disabledRole",
+    roles: [techLead, architect, { ...developer, enabled: false }],
+    team: teamWith(members),
+    host: available,
+  },
+  {
+    variant: "duplicateLabels",
+    roles: baseRoles,
+    team: teamWith(duplicateMembers),
+    host: available,
+  },
+  {
+    variant: "duplicateLabelsUnverified",
+    roles: baseRoles,
+    team: teamWith(duplicateMembers),
+    host: unverified,
+  },
 ];
 
-function coordCases(): Case[] {
-  const cases: Case[] = [];
-  for (const mode of ["sota", "economy", "collaborative"] as const) {
-    cases.push({
-      mode,
-      variant: "coordinatorFallback",
-      roles: [coordinatorFallback, developer],
-      team: teamWith(COORD_MEMBER),
-      host: { status: "ready", profiles, availability: CLAUDE_DOWN },
-      economy: EMPTY,
-      capabilities: CAP_LEGACY,
-    });
-    cases.push({
-      mode,
-      variant: "coordinatorUnavailable",
-      roles: [coordinatorMissing, developer],
-      team: teamWith(COORD_MEMBER),
-      host: { status: "ready", profiles, availability: CLAUDE_DOWN },
-      economy: EMPTY,
-      capabilities: CAP_LEGACY,
-    });
-  }
-  cases.push({
-    mode: "economy-all",
-    variant: "oldPlannerEconomyAll",
-    roles: [opusOnly(techLead), opusOnly(architect), opusOnly(developer)],
-    team: {
-      ...codingTeam,
-      memberCreation: "eager",
-      members: [
-        { roleId: "architect", enabled: true },
-        { roleId: "developer", instanceLabel: "Backend", enabled: true },
-      ],
-    },
-    host: { status: "ready", profiles, availability: allAvailable },
-    economy: EMPTY,
-    capabilities: CAP_LEGACY,
+function runCase(input: Case) {
+  const plan = buildLaunchPlan({
+    team: input.team,
+    roles: input.roles,
+    profiles,
+    availability: input.host.status === "ready" ? input.host.availability : [],
+    host: input.host,
+    workspaceId: "ws-baseline",
+    task: "Baseline launch task",
+    runId: "baseline-run",
+    maxMembers: 8,
+    runtimeCapabilities: capabilities,
+    daemonConfig: {},
   });
-  return cases;
+  const fingerprint = hashLaunchPlan({
+    team: plan.team,
+    roles: input.roles,
+    plan,
+    host: input.host,
+    target: { kind: "workspace", workspaceId: "ws-baseline" },
+    task: "Baseline launch task",
+    maxMembers: 8,
+    runtimeCapabilities: capabilities,
+  });
+  return { plan, fingerprint, preview: toModeLaunchPreview(plan, fingerprint) };
 }
 
-function economyAllCase(): Case {
-  const cases = coordCases();
-  const found = cases.find((entry) => entry.variant === "oldPlannerEconomyAll");
-  if (!found) throw new Error("missing economy-all case");
-  return found;
+type Golden = {
+  mode: string;
+  variant: string;
+  seats: Array<{
+    seatId: string;
+    logicalSeatId: string;
+    roleId: string;
+    purpose: string;
+    activation: string;
+    profile: string | null;
+    source: string;
+  }>;
+  coordinator: { roleId: string; profile: string; source: string };
+  counts: {
+    logical: number;
+    physical: number;
+    eager: number;
+    deferred: number;
+    escalation: number;
+  };
+  issues: Array<{
+    code: string;
+    severity: string;
+    params: Record<string, string | number | boolean>;
+    roleId?: string;
+    seatId?: string;
+  }>;
+  warnings: string[];
+  blockers: string[];
+};
+
+function golden(rows: readonly Record<string, unknown>[], variant: string): Golden {
+  const entry = rows.find((row) => row.mode === "sota" && row.variant === variant);
+  if (!entry) throw new Error(`missing SOTA baseline ${variant}`);
+  return entry as Golden;
 }
 
-function issueView(issue: {
-  code: string;
-  severity: string;
-  params: Record<string, string | number | boolean>;
-  roleId?: string;
-  seatId?: string;
-}) {
+function issueView(issue: Golden["issues"][number]) {
+  const { mode: _retiredMode, ...params } = issue.params;
   return {
     code: issue.code,
     severity: issue.severity,
-    params: issue.params,
+    params,
     ...(issue.roleId === undefined ? {} : { roleId: issue.roleId }),
     ...(issue.seatId === undefined ? {} : { seatId: issue.seatId }),
   };
 }
 
-function runCase(c: Case) {
-  const plan = buildLaunchPlan({
-    ...BASE,
-    team: c.team,
-    roles: c.roles,
-    profiles: c.host.status === "ready" ? c.host.profiles : [],
-    availability: c.host.status === "ready" ? c.host.availability : [],
-    mode: c.mode,
-    host: c.host,
-    economy: c.economy,
-    runtimeCapabilities: c.capabilities,
-    daemonConfig: {},
-  });
-  const fingerprint = hashLaunchPlan({
-    team: plan.team,
-    roles: c.roles,
-    plan,
-    host: c.host,
-    economy: c.economy,
-    target: { kind: "workspace", workspaceId: BASE.workspaceId },
-    task: BASE.task,
-    maxMembers: BASE.maxMembers,
-    runtimeCapabilities: c.capabilities,
-  });
-  const preview = toModeLaunchPreview(plan, fingerprint, [], c.economy);
-  return { plan, fingerprint, preview };
+function currentSeats(plan: ReturnType<typeof buildLaunchPlan>) {
+  return plan.seats.map((seat) => ({
+    seatId: seat.seatId,
+    logicalSeatId: seat.logicalSeatId,
+    roleId: seat.roleId,
+    purpose: seat.purpose,
+    activation: seat.activation,
+    profile: seat.selected.profile.id,
+    source: seat.selected.source,
+  }));
 }
 
-function legacyActual(c: Case) {
-  const { plan, fingerprint, preview } = runCase(c);
-  return {
-    mode: c.mode,
-    variant: c.variant,
-    capabilities: c.capabilities,
-    seats: plan.seats.map((seat) => ({
-      seatId: seat.seatId,
-      logicalSeatId: seat.logicalSeatId,
-      roleId: seat.roleId,
-      purpose: seat.purpose,
-      activation: seat.activation,
-      profile: seat.selected.profile?.id ?? null,
-      source: seat.selected.source,
-      budget: seat.selected.budget,
-      budgetBasis: seat.selected.budgetBasis,
-      standby: seat.selected.standby,
-      unavailable: seat.selected.unavailable,
-      issues: seat.selected.issues.map(issueView),
-    })),
-    coordinator: {
-      roleId: plan.coordinator.role.id,
-      profile: plan.coordinator.profile.id,
-      source: plan.coordinator.source,
-    },
-    counts: plan.seatCounts,
-    budget: plan.seatBudget,
-    issues: plan.seatIssues.map(issueView),
-    warnings: plan.warnings,
-    blockers: plan.blockers,
-    preview,
-    fingerprint,
-  };
+function oldSeats(expected: Golden) {
+  return expected.seats.map((seat) => ({
+    seatId: seat.seatId,
+    logicalSeatId: seat.logicalSeatId,
+    roleId: seat.roleId,
+    purpose: seat.purpose,
+    activation: seat.activation,
+    profile: seat.profile,
+    source: seat.source,
+  }));
 }
 
-function coordActual(c: Case) {
-  const { plan, fingerprint, preview } = runCase(c);
-  return {
-    mode: c.mode,
-    variant: c.variant,
-    caps: c.capabilities,
-    coordinator: {
-      roleId: plan.coordinator.role.id,
-      profile: plan.coordinator.profile.id,
-      source: plan.coordinator.source,
-    },
-    seats: plan.seats.map((seat) => ({
-      seatId: seat.seatId,
-      roleId: seat.roleId,
-      profile: seat.selected.profile?.id ?? null,
-      source: seat.selected.source,
-      budget: seat.selected.budget,
-      budgetBasis: seat.selected.budgetBasis,
-    })),
-    counts: plan.seatCounts,
-    budget: plan.seatBudget,
-    issues: plan.seatIssues.map((issue) => ({
-      code: issue.code,
-      severity: issue.severity,
-      params: issue.params,
-    })),
-    warnings: plan.warnings,
-    blockers: plan.blockers,
-    preview,
-    fingerprint,
-  };
-}
-
-describe("D02 golden baseline", () => {
-  test("18 legacy-mode groups match the fa58137 literals", () => {
-    const cases = legacyCases();
-    expect(cases).toHaveLength(D02_BASELINE_LEGACY.length);
-    cases.forEach((entry, index) => {
-      expect(legacyActual(entry)).toEqual(D02_BASELINE_LEGACY[index]);
-    });
+describe("D02 flagship baseline", () => {
+  test("preserves flagship seats, coordinator, counts and safety outcomes from the literals", () => {
+    expect(cases).toHaveLength(6);
+    for (const entry of cases) {
+      const expected = golden(D02_BASELINE_LEGACY, entry.variant);
+      const { plan, preview } = runCase(entry);
+      expect(currentSeats(plan), entry.variant).toEqual(oldSeats(expected));
+      expect(
+        {
+          roleId: plan.coordinator.role.id,
+          profile: plan.coordinator.profile.id,
+          source: plan.coordinator.source,
+        },
+        entry.variant,
+      ).toEqual(expected.coordinator);
+      expect(plan.seatCounts, entry.variant).toMatchObject({
+        logical: expected.counts.logical,
+        physical: expected.counts.physical,
+        eager: expected.counts.eager,
+        deferred: expected.counts.deferred,
+        escalation: expected.counts.escalation,
+      });
+      expect(plan.seatIssues.map(issueView), entry.variant).toEqual(expected.issues.map(issueView));
+      expect(plan.blockers, entry.variant).toEqual(expected.blockers);
+      expect(plan.warnings, entry.variant).toEqual(expected.warnings);
+      expect(
+        preview.seats.map((seat) => seat.seatId),
+        entry.variant,
+      ).toEqual(expected.seats.map((seat) => seat.seatId));
+    }
   });
 
-  test("coordinator warnings/failure match the fa58137 literals", () => {
-    const cases = coordCases().filter((entry) => entry.variant !== "oldPlannerEconomyAll");
-    expect(cases).toHaveLength(D02_BASELINE_COORD.length - 1);
-    cases.forEach((entry, index) => {
-      expect(coordActual(entry)).toEqual(D02_BASELINE_COORD[index]);
-    });
+  test("preserves the old coordinator fallback and failure outcomes", () => {
+    for (const [variant, fallbackId] of [
+      ["coordinatorFallback", codexXhigh.id],
+      ["coordinatorUnavailable", "missing-coordinator-profile"],
+    ] as const) {
+      const expected = golden(D02_BASELINE_COORD, variant);
+      const lead = { ...techLead, fallbackProfiles: [{ profileId: fallbackId }] };
+      const { plan, preview } = runCase({
+        variant,
+        roles: [lead, developer],
+        team: teamWith([{ roleId: "developer", instanceLabel: "Backend", enabled: true }]),
+        host: claudeDown,
+      });
+      expect(
+        {
+          roleId: plan.coordinator.role.id,
+          profile: plan.coordinator.profile.id,
+          source: plan.coordinator.source,
+        },
+        variant,
+      ).toEqual(expected.coordinator);
+      expect(plan.warnings, variant).toEqual(expected.warnings);
+      expect(plan.blockers, variant).toEqual(expected.blockers);
+      expect(preview.coordinator.profile?.id ?? "missing", variant).toBe(
+        expected.coordinator.profile,
+      );
+    }
   });
 
-  test("T11: economy-all used to launch on original bindings and now routes or blocks", () => {
-    const before = D02_BASELINE_COORD[D02_BASELINE_COORD.length - 1];
-    expect(before).toMatchObject({
-      variant: "oldPlannerEconomyAll",
-      blockers: [],
-      coordinator: { profile: claudeOpus.id, source: "role-preferred" },
-    });
-    const { plan } = runCase(economyAllCase());
-    expect(plan.blockers.length).toBeGreaterThan(0);
-    expect(
-      plan.seats.every(
-        (seat) => seat.selected.source === "economy-pool" || seat.selected.source === "unavailable",
-      ),
-    ).toBe(true);
+  test("old stored mode and collaboration do not change the flagship plan or hash", () => {
+    const base = cases[0];
+    if (!base) throw new Error("missing baseline case");
+    const expected = runCase(base);
+    for (const mode of ["economy", "economy-all", "collaborative", "future-mode"]) {
+      const actual = runCase({
+        ...base,
+        team: { ...base.team, mode, collaboration: { replicas: 3, judgeRoleId: "architect" } },
+      });
+      expect(currentSeats(actual.plan), mode).toEqual(currentSeats(expected.plan));
+      expect(actual.plan.blockers, mode).toEqual(expected.plan.blockers);
+      expect(actual.plan.warnings, mode).toEqual(expected.plan.warnings);
+      expect(actual.fingerprint, mode).toBe(expected.fingerprint);
+      expect(actual.preview.requestedMode, mode).toBe("sota");
+    }
   });
 });
