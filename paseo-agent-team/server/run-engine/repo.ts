@@ -157,6 +157,41 @@ export async function deliveredFiles(
   return { ok: true, files: diff.stdout.split("\0").filter((entry) => entry !== "") };
 }
 
+export type EvidenceRootCheck =
+  | { ok: true; root: string }
+  | { ok: false; reason: "not-absolute" | "unusable" | "inside-repo" | "contains-repo" };
+
+/** The marker that asks the Engine to choose the evidence root of a Run. */
+export const AUTO_EVIDENCE_ROOT = "auto";
+
+/**
+ * The directory every assignment's evidence directory lives under. `auto` is a per-Run directory
+ * under the Paseo home; anything else is the Team's own choice. Either way it must be absolute and
+ * outside the repository (see `prepareEvidenceDir`), and it is created here. The returned root keeps
+ * forward slashes, because the quality gate compares reported paths with it as text.
+ */
+export async function ensureEvidenceRoot(
+  repo: RepoFacts,
+  configured: string,
+  paseoHome: string,
+  runId: string,
+): Promise<EvidenceRootCheck> {
+  const chosen =
+    configured === AUTO_EVIDENCE_ROOT ? `${paseoHome}/agent-team-evidence/${runId}` : configured;
+  const root = chosen.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (root.startsWith("//") || !path.isAbsolute(root)) return { ok: false, reason: "not-absolute" };
+  let real: string;
+  try {
+    await mkdir(root, { recursive: true });
+    real = await realpath(root);
+  } catch {
+    return { ok: false, reason: "unusable" };
+  }
+  if (contains(repo.root, real)) return { ok: false, reason: "inside-repo" };
+  if (contains(real, repo.root)) return { ok: false, reason: "contains-repo" };
+  return { ok: true, root };
+}
+
 export type EvidenceDir =
   | { ok: true; dir: string }
   | { ok: false; reason: "not-absolute" | "unusable" | "inside-repo" | "contains-repo" };

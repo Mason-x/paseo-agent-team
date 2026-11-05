@@ -20,6 +20,8 @@ import type { RunStore } from "./store";
  * evidence leaves it frozen for a decision; a timeout is not a reason to send again (AC04/AC05/AC10).
  */
 export type DispatchIntent = Extract<RunEffectIntent, { kind: "dispatch" }>;
+/** What the executor sends: a task dispatch, or a wake (the plan request to the coordinator). */
+export type SendableIntent = Extract<RunEffectIntent, { kind: "dispatch" | "wake" }>;
 
 export type EffectsOptions = {
   store: Pick<RunStore, "get" | "update">;
@@ -28,7 +30,7 @@ export type EffectsOptions = {
    * Rebuilds the exact prompt for an intent from the ledger. The intent stores only a hash of it,
    * so the text is never persisted or exposed. Returning `null` means "cannot build it".
    */
-  compile(intent: DispatchIntent, record: RunRecord): string | null;
+  compile(intent: SendableIntent, record: RunRecord): string | null;
   clock?: { now(): string };
   /**
    * What the host does with a message that lands mid-turn. Constant for the life of a Run on
@@ -59,8 +61,8 @@ export function payloadHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-function isDispatch(intent: RunEffectIntent): intent is DispatchIntent {
-  return intent.kind === "dispatch";
+function isSendable(intent: RunEffectIntent): intent is SendableIntent {
+  return intent.kind === "dispatch" || intent.kind === "wake";
 }
 
 function errorCode(error: unknown): string {
@@ -119,7 +121,7 @@ export function createEffects(options: EffectsOptions) {
   async function reconcileUnknown(runId: string, report: OutboxReport): Promise<void> {
     const record = await snapshot(runId);
     if (!record) return;
-    for (const intent of record.outbox.filter(isDispatch)) {
+    for (const intent of record.outbox.filter(isSendable)) {
       if (intent.state === "sending") {
         // The process died (or the commit of the result failed) after `sending` was written.
         if (await settle(runId, intent.id, "outcome-unknown", "interrupted")) {
@@ -148,7 +150,7 @@ export function createEffects(options: EffectsOptions) {
     for (let sentCount = 0; sentCount < maxPerCall; ) {
       const record = await snapshot(runId);
       if (!record) return;
-      const dispatches = record.outbox.filter(isDispatch);
+      const dispatches = record.outbox.filter(isSendable);
       // An agent whose last delivery is unresolved gets nothing more until that is settled.
       const blocked = new Set(
         dispatches
