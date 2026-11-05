@@ -83,6 +83,11 @@ export type DispatchProposal = {
   qualification: string;
 };
 
+/** A producer is dispatched for a ready task, and again for a task sent back for rework. */
+function producerDispatchable(task: Pick<RunTaskRecord, "state">): boolean {
+  return task.state === "ready" || task.state === "rework";
+}
+
 function rosterSeat(
   record: Pick<RunRecord, "roster">,
   seatId: string,
@@ -100,7 +105,7 @@ export function eligibleSeats(
   ctx: SchedulerContext,
 ): SeatEligibility {
   const task = record.tasks.find((entry) => entry.spec.id === taskId);
-  if (task?.state !== "ready") {
+  if (!task || !producerDispatchable(task)) {
     return { candidates: [], denials: [], blocked: "not-ready" };
   }
   return evaluateSeats(record, dispatchRequirement(task, "produce"), ctx, new Set());
@@ -263,7 +268,7 @@ export function planDispatchWithReasons(
   const proposals: DispatchProposal[] = [];
   const blocked: DispatchBlock[] = [];
   for (const task of record.tasks) {
-    if (task.state !== "ready") continue;
+    if (!producerDispatchable(task)) continue;
     const eligibility = eligibleSeats(record, task.spec.id, { ...ctx, seats });
     const choice = eligibility.candidates[0];
     if (!choice) {

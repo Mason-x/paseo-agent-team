@@ -51,6 +51,7 @@ function judged(
   purpose: "reviewer" | "smoker",
   options: ReviewRunOptions = {},
   mutate?: (record: RunRecord) => void,
+  version?: number,
 ): { record: RunRecord; intent: Dispatch; evidenceDir: string } {
   const record = reviewRun({ ...options, devSmoke: purpose === "smoker" || options.devSmoke });
   if (purpose === "smoker") {
@@ -81,7 +82,7 @@ function judged(
     now: NOW,
     payload: {
       hash: "0".repeat(64),
-      templateVersion: templateVersionFor(purpose) ?? 0,
+      templateVersion: version ?? templateVersionFor(purpose) ?? 0,
       semanticArgs:
         purpose === "reviewer"
           ? reviewerSemanticArgs(task.spec, facts)
@@ -394,13 +395,18 @@ describe("the reports the judge prompts describe", () => {
 });
 
 describe("template versions are frozen", () => {
-  // Any change to a rendered byte must be a new version. These hashes pin version 1 of each
-  // judge's prompt for a fixed ledger; a failure here means "add version 2", not "update the hash".
-  test("reviewer v1 and smoker v1 render exactly these bytes", () => {
-    const reviewer = judged("reviewer");
+  // Any change to a rendered byte must be a new version. These hashes pin every registered version
+  // of the judges' prompts for a fixed ledger; a failure here means "add a version", not "update
+  // the hash". Reviewer v1 stays registered for intents that were committed with it.
+  test("reviewer v1, reviewer v2 and smoker v1 render exactly these bytes", () => {
+    const reviewer = judged("reviewer", {}, undefined, 1);
+    const reviewerV2 = judged("reviewer", {}, undefined, 2);
     const smoker = judged("smoker", { reviewed: true });
-    expect(REVIEWER_TEMPLATE_VERSION).toBe(1);
+    expect(REVIEWER_TEMPLATE_VERSION).toBe(2);
     expect(SMOKER_TEMPLATE_VERSION).toBe(1);
+    expect(sha256(compileDispatch(reviewerV2.intent, reviewerV2.record) ?? "")).toBe(
+      "b7441ee543d1e00ac2a7073589ca50f4f99ff0829564e75e07fdb9a5cbea0b27",
+    );
     expect(sha256(compileDispatch(reviewer.intent, reviewer.record) ?? "")).toBe(
       "6a44d5f3700d3761605ae928a86c9ea8789145e4f7f0d68c99c8098410d16fa5",
     );
