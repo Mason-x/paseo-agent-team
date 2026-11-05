@@ -258,6 +258,8 @@ export const zh = {
   memberProfileFail: (label: string, reason: string) =>
     `无法解析 ${label} 的 Profile（${reason}）。`,
   profileMissing: (label: string) => `Profile ${label} 缺失。`,
+  profileModelPrefixed: (name: string, provider: string, model: string) =>
+    `Profile「${name}」的 model「${model}」以自己的 provider「${provider}/」开头。宿主只按第一个“/”拆分，会把它当作模型名的一部分（启动时传给宿主的是 ${provider}/${model}）；若这不是网关里的真实模型 ID，该成员可能因找不到模型而失败。`,
   providerUnavailable: (provider: string, reason?: string) =>
     `Provider ${provider} 不可用${reason ? `：${reason}` : ""}。`,
   usingFallback: (name: string) => `首选 Profile 缺失或不可用，改用备选 ${name}。`,

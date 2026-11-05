@@ -53,6 +53,18 @@ export type LaunchPlan = {
   blockers: string[];
 };
 
+/**
+ * The host splits `provider/model` on the FIRST slash and keeps the rest as the model, so a
+ * Profile whose `model` already starts with its own provider ends up with a model such as
+ * `codex/gpt-6.1-sol`. Slashes in a model are legitimate (gateway ids), so this only warns.
+ */
+export function modelRepeatsProvider(profile: Pick<PaseoProfile, "provider" | "model">): boolean {
+  const provider = profile.provider.trim().toLowerCase();
+  return (
+    provider.length > 0 && (profile.model ?? "").trim().toLowerCase().startsWith(`${provider}/`)
+  );
+}
+
 function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
   return value.slice(0, max - 1).trimEnd();
@@ -274,6 +286,18 @@ export function buildLaunchPlan(input: {
   for (const entry of modelPlan.issues) {
     if (entry.severity !== "warning") continue;
     warnings.push(warningIssueText(entry, seatPlan.seats));
+  }
+
+  // One warning per Profile, however many seats use it. Never a blocker.
+  const prefixWarned = new Set<string>();
+  const selectedProfiles = [
+    ...(modelPlan.coordinator.selection ? [modelPlan.coordinator.selection.profile] : []),
+    ...seatPlan.seats.map((seat) => seat.selected.profile),
+  ];
+  for (const profile of selectedProfiles) {
+    if (prefixWarned.has(profile.id) || !modelRepeatsProvider(profile)) continue;
+    prefixWarned.add(profile.id);
+    warnings.push(zh.profileModelPrefixed(profile.name, profile.provider, profile.model ?? ""));
   }
 
   // An enabled-but-unusable Run Engine block never falls back to the coordinator chain.

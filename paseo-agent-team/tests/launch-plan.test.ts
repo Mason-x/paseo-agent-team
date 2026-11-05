@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildLaunchPlan } from "../shared/domain/launch-plan";
+import { buildLaunchPlan, modelRepeatsProvider } from "../shared/domain/launch-plan";
 import { LABELS } from "../shared/paseo/labels";
 import {
   allAvailable,
@@ -22,6 +22,70 @@ const base = {
   runId: "run-1",
   maxMembers: 8,
 };
+
+describe("modelRepeatsProvider", () => {
+  test("is true only when the model starts with its own provider and a slash", () => {
+    expect(modelRepeatsProvider({ provider: "codex", model: "codex/gpt-6.1-sol" })).toBe(true);
+    expect(modelRepeatsProvider({ provider: "Codex", model: " CODEX/gpt-6.1-sol" })).toBe(true);
+    expect(modelRepeatsProvider({ provider: "codex", model: "gpt-6.1-sol" })).toBe(false);
+    expect(modelRepeatsProvider({ provider: "codex", model: "codex" })).toBe(false);
+    expect(modelRepeatsProvider({ provider: "codex", model: "codexx/gpt" })).toBe(false);
+    expect(modelRepeatsProvider({ provider: "codex" })).toBe(false);
+    expect(modelRepeatsProvider({ provider: "", model: "/gpt" })).toBe(false);
+  });
+
+  test("gateway model ids with slashes are not flagged", () => {
+    expect(
+      modelRepeatsProvider({ provider: "codex", model: "remote-magpie/auto/gpt-6.1-sol" }),
+    ).toBe(false);
+    expect(
+      modelRepeatsProvider({ provider: "omp", model: "magpie/remote-magpie/auto/grok-4.6" }),
+    ).toBe(false);
+    expect(
+      modelRepeatsProvider({ provider: "claude", model: "remote-magpie/codex/gpt-6.1-terra" }),
+    ).toBe(false);
+  });
+});
+
+describe("profile model prefix warning", () => {
+  const prefixed = { ...codexXhigh, model: "codex/gpt-6.1-sol" };
+
+  test("warns without blocking, naming the Profile and the model the host would store", () => {
+    const plan = buildLaunchPlan({ ...base, profiles: [claudeOpus, prefixed] });
+    expect(plan.blockers).toEqual([]);
+    const warning = plan.warnings.filter((line) => line.includes("codex/gpt-6.1-sol"));
+    expect(warning).toHaveLength(1);
+    expect(warning[0]).toContain(prefixed.name);
+    expect(warning[0]).toContain("codex/codex/gpt-6.1-sol");
+  });
+
+  test("a healthy plan has no such warning", () => {
+    const plan = buildLaunchPlan(base);
+    expect(plan.warnings.some((line) => line.includes("以自己的 provider"))).toBe(false);
+  });
+
+  test("two seats sharing the flagged Profile produce one warning", () => {
+    const plan = buildLaunchPlan({
+      ...base,
+      profiles: [claudeOpus, prefixed],
+      team: {
+        ...codingTeam,
+        members: [
+          { roleId: "developer", instanceLabel: "Backend", enabled: true },
+          { roleId: "developer", instanceLabel: "Frontend", enabled: true },
+        ],
+      },
+    });
+    expect(plan.seats).toHaveLength(2);
+    expect(plan.warnings.filter((line) => line.includes("以自己的 provider"))).toHaveLength(1);
+  });
+
+  test("a flagged Profile that no seat uses is not reported", () => {
+    const unused = { ...claudeOpus, id: "unused", name: "Unused", model: "claude/opus" };
+    const plan = buildLaunchPlan({ ...base, profiles: [claudeOpus, codexXhigh, unused] });
+    expect(plan.warnings.some((line) => line.includes("Unused"))).toBe(false);
+  });
+});
 
 describe("buildLaunchPlan", () => {
   test("builds titles, labels, and a kickoff for a healthy team", () => {
