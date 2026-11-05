@@ -25,6 +25,8 @@ export type EngineViewProps = {
   /** Older history pages already loaded by the caller, newest page first. */
   older?: readonly RunHistoryPage[];
   loadingOlder?: boolean;
+  /** Render without its own scroller, for a page that already scrolls. */
+  embedded?: boolean;
   onRefresh: () => void;
   onLoadOlder: (cursor: string) => void;
 };
@@ -413,8 +415,9 @@ export function EngineView(props: EngineViewProps) {
     if (state?.kind === "unchanged") return null;
     return <EngineStatus theme={theme} state={state} onRefresh={onRefresh} />;
   }
+  const Frame = props.embedded ? EmbeddedFrame : ScrollView;
   return (
-    <ScrollView>
+    <Frame>
       <View style={{ padding: layout.compact ? 12 : 16, gap: 12 }}>
         <Header theme={theme} model={model} />
         {model.readOnly ? <Muted theme={theme}>{zh.readOnly}</Muted> : null}
@@ -444,6 +447,11 @@ export function EngineView(props: EngineViewProps) {
           onLoadOlder={onLoadOlder}
         />
       </View>
-    </ScrollView>
+    </Frame>
   );
+}
+
+/** Inside a page that already scrolls: no second vertical scroller. */
+function EmbeddedFrame({ children }: { children: ReactNode }) {
+  return <View>{children}</View>;
 }

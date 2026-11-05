@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import {
   createDesignHooks,
   DESIGN_AGENT_LABEL,
@@ -11,6 +11,10 @@ import { createDesignPlanner } from "./server/designer/planning";
 import { createDesignService } from "./server/designer/service";
 import { createDesignJobStore, type DesignJobStore } from "./server/designer/store";
 import { createLaunchService } from "./server/launch-service";
+import { createObserverHost } from "./server/run-engine/host";
+import { createRunObserver, type ObserverHookEvent } from "./server/run-engine/observer";
+import { createRunQueries } from "./server/run-engine/queries";
+import { createRunStore } from "./server/run-engine/store";
 import { createTeamPlanService } from "./server/team-plan-service";
 import { exampleCatalog, previewDefaultCatalog } from "./server/templates";
 import { confirmPendingBoot } from "./server/version/boot";
@@ -34,6 +38,7 @@ import {
   launchStatusRpc,
   teamPlanRpc,
 } from "./shared/rpc";
+import { runGetRpc, runListRpc } from "./shared/rpc/run-engine";
 import { preferencesSettings, rolesSettings, teamsSettings } from "./shared/settings";
 import {
   versionCheckRpc,
@@ -158,6 +163,48 @@ export default function contribute(server: PluginServerContext) {
   });
   const designHooks = createDesignHooks({ service: designer, log });
 
+  // Run Engine, batch B: observation only. The store is the single writer of the run ledger; the
+  // observer only records host facts as receipts, and the RPCs below can only read. Nothing here
+  // creates an agent, sends a message, cancels, or advances a task.
+  const runStore = createRunStore({ home: process.env.PASEO_HOME, log });
+  let runStoreInitializing: Promise<void> | null = null;
+  const ensureRunStore = (): Promise<void> => {
+    if (runStore.ready) return Promise.resolve();
+    if (runStoreInitializing) return runStoreInitializing;
+    if (closing || !process.env.PASEO_HOME) return Promise.resolve();
+    const attempt = runStore
+      .initialize()
+      .catch((error: unknown) => {
+        log("run ledger initialization failed", error);
+      })
+      .finally(() => {
+        if (runStoreInitializing === attempt) runStoreInitializing = null;
+      });
+    runStoreInitializing = attempt;
+    return attempt;
+  };
+  void ensureRunStore();
+  const runQueries = createRunQueries({ store: runStore, ensureReady: ensureRunStore });
+  const runObserver = createRunObserver({ store: runStore, log });
+  let reconciling = false;
+  const observeRunEvent = async (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) => {
+    await ensureRunStore();
+    await runObserver.ingest(event);
+    if (runStore.ready && runObserver.buffered > 0) await runObserver.flush();
+    if (runObserver.needsReconcile && runStore.ready && !reconciling) {
+      reconciling = true;
+      try {
+        await runObserver.reconcile(createObserverHost(paseo));
+      } finally {
+        reconciling = false;
+      }
+    }
+  };
+  const guardedObserve = (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) =>
+    observeRunEvent(event, paseo).catch((error: unknown) => {
+      log(`run observer failed on ${event.name}`, error);
+    });
+
   server.handle(launchPreviewRpc, (input, { paseo }) => launches.preview(input, paseo));
   server.handle(launchStartRpc, (input, { paseo }) => launches.start(input, paseo));
   server.handle(launchStatusRpc, ({ runId }) => ({
@@ -239,6 +286,54 @@ export default function contribute(server: PluginServerContext) {
     ),
   );
 
+  server.handle(runListRpc, (input) => runQueries.list(input));
+  server.handle(runGetRpc, (input) => runQueries.get(input));
+
+  const stopRunHooks = [
+    server.on("agent.turn_started", (event, { paseo }) =>
+      guardedObserve(
+        { name: "agent.turn_started", agentId: event.agent.id, turnId: event.turnId },
+        paseo,
+      ),
+    ),
+    server.on("agent.turn_ended", (event, { paseo }) =>
+      guardedObserve(
+        {
+          name: "agent.turn_ended",
+          agentId: event.agent.id,
+          turnId: event.turnId,
+          outcome: { kind: event.outcome.kind },
+        },
+        paseo,
+      ),
+    ),
+    server.on("agent.permission_requested", (event, { paseo }) =>
+      guardedObserve(
+        {
+          name: "agent.permission_requested",
+          agentId: event.agent.id,
+          requestId: event.request.id,
+        },
+        paseo,
+      ),
+    ),
+    server.on("agent.permission_resolved", (event, { paseo }) =>
+      guardedObserve(
+        { name: "agent.permission_resolved", agentId: event.agent.id, requestId: event.requestId },
+        paseo,
+      ),
+    ),
+    server.on("agent.created", (event, { paseo }) =>
+      guardedObserve({ name: "agent.created", agentId: event.agent.id }, paseo),
+    ),
+    server.on("agent.closed", (event, { paseo }) =>
+      guardedObserve({ name: "agent.closed", agentId: event.agent.id }, paseo),
+    ),
+    server.on("agent.archived", (event, { paseo }) =>
+      guardedObserve({ name: "agent.archived", agentId: event.agent.id }, paseo),
+    ),
+  ];
+
   const stopDesignHook = server.on(
     DESIGN_TURN_ENDED_EVENT,
     createDesignTurnEndedHandler({
@@ -257,7 +352,11 @@ export default function contribute(server: PluginServerContext) {
   return async () => {
     closing = true;
     stopDesignHook();
+    for (const stop of stopRunHooks) stop();
     await initializing;
     await designer.dispose();
+    await runStoreInitializing;
+    // Releases the ledger lock so a reloaded plugin can take over as the single writer.
+    await runStore.close();
   };
 }

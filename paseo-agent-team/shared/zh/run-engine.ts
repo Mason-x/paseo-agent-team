@@ -204,6 +204,23 @@ export const runEngineZh = {
     } as Record<string, string>,
   },
 
+  list: {
+    title: "Engine 运行",
+    observeOnly: "目前只读观察：不会派发或改动任务",
+    open: "查看",
+    close: "收起",
+    needsAttention: "需关注",
+    loadFailed: "读取 Engine 运行列表失败",
+    health: {
+      corrupt: "台账损坏，已保留原文件",
+      "unknown-version": "由更新版本写入，已保留原文件",
+      unavailable: "暂时无法读取",
+      ok: "正常",
+    } as Record<string, string>,
+    healthRun: (id: string) => `运行 ${id}`,
+    healthStore: "台账存储",
+  },
+
   notices: {
     "history-cursor-expired": "历史翻页位置已失效，已回到最新一页",
     unknown: (code: string) => `服务端提示：${code}`,

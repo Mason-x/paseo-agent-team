@@ -1027,6 +1027,7 @@ export function AgentTeamsScreen({ theme, layout, host, navigation, params }: Pl
             ) : tab === "runs" ? (
               <RunsTab
                 theme={theme}
+                layout={layout}
                 hostId={host.id}
                 navigation={navigation}
                 legacyRuns={preferences.values.recentRuns}

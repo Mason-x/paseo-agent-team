@@ -25,7 +25,8 @@ import { GhostIconButton } from "../shared/buttons";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
-import type { PluginTheme } from "../shared/theme";
+import type { PluginLayout, PluginTheme } from "../shared/theme";
+import { EngineRunsSection } from "./engine/EngineRunsSection";
 import { useTeamRuns } from "./use-team-runs";
 
 const CLOCK_INTERVAL_MS = 30_000;
@@ -238,8 +239,39 @@ function FilterChips({
   );
 }
 
-/** Live progress of every Team run on this host, across workspaces. */
+/**
+ * Engine runs (ledger-backed, read-only) above the label-derived runs. The two lists never share
+ * state: an Engine run is not rebuilt from labels, and a labelled run gets no ledger invented.
+ */
 export function RunsTab({
+  theme,
+  layout,
+  hostId,
+  navigation,
+  legacyRuns,
+}: {
+  theme: PluginTheme;
+  layout: Pick<PluginLayout, "compact">;
+  hostId: string;
+  navigation: Navigation;
+  /** Runs recorded in preferences by versions that did not label the task on the agent. */
+  legacyRuns: readonly RunSummary[];
+}) {
+  return (
+    <View style={{ gap: 12 }}>
+      <EngineRunsSection theme={theme} layout={layout} hostId={hostId} />
+      <LabelledRunsTab
+        theme={theme}
+        hostId={hostId}
+        navigation={navigation}
+        legacyRuns={legacyRuns}
+      />
+    </View>
+  );
+}
+
+/** Live progress of every Team run on this host, across workspaces. */
+function LabelledRunsTab({
   theme,
   hostId,
   navigation,
@@ -248,7 +280,6 @@ export function RunsTab({
   theme: PluginTheme;
   hostId: string;
   navigation: Navigation;
-  /** Runs recorded in preferences by versions that did not label the task on the agent. */
   legacyRuns: readonly RunSummary[];
 }) {
   const paseo = usePaseo();
