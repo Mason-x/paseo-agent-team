@@ -366,7 +366,10 @@ P08 的故障用例随对应工作包交付，不等到最后才测试。共享�
 
 Outbox 执行器只消费已 `prepared` 的意图。生成这些意图的“派发事件构造器”不存在：`task-dispatched` 要求调用方事先拼好完整的 `assignment`、`nonce`、`intent` 与 `claims`，reducer 只校验、不生成。动手前需要定下以下几点；其中带 ★ 的会改变用户可见行为或合同，按“合同变更先落实”处理。
 
-1. ★ **每个 assignment 的工作区策略。** `RunAssignment.workspace` 含 `id/branch/baseRef`，`dispatchLabels` 也按“任务 + 尝试”生成分支名，暗示每次尝试一个独立 worktree（要经 `create-workspace` 意图创建）。备选：整个 Run 共用启动时的 Workspace，只在 assignment 里记录它。前者隔离好、成本高、多一类意图；后者简单，但并行写同一目录要靠资源锁兜住。
+1. ★ **每个 assignment 的工作区策略：已决定，方案 B（2026-11-05）。** 整个 Run 共用启动时的 Workspace，不创建每任务 worktree，也不新增 `create-workspace` 意图；`dispatchLabels` 的分支名生成在本轮不使用。`RunAssignment.workspace` 记录这个共用 Workspace。
+   - **代价：** 并行写同一目录没有 worktree 隔离，只靠资源锁约束 Engine 自己的派发（4.2 节已声明锁管不到手工编辑）。因此同一 Run 内会写同一文件的任务必须由锁串行，且 `configuredConcurrency` 的默认值要偏保守。
+   - **遗留（合同层）：** `workspace.branch` 与 `baseRef` 是必填非空字符串，成员报告里的 `workspace` 还要与 assignment 一致。它们必须取自启动 Workspace 的真实 git 状态（当前分支与基准引用）。非 git 目录没有可填的值：要么对非 git Workspace 阻断 Engine 启动，要么做合同变更。默认按前者处理，写入启动校验，除非另行决定。
+   - **遗留（质量门）：** 交付物是 `git-commit` 或 `diff` 引用；共用目录下多个任务的提交会交错，审查绑定的 `ref` 必须是该任务自己的提交，需要在构造器里约束成员只提交自己范围内的文件。
 2. **意图状态的推进不走 reducer。** reducer 没有“已发送/已确认/结果不明”事件，本次以纯函数 `transitionIntent` 在台账内推进并写 `intent-*` 审计事件，不改 schema、不改 reducer 词汇。若希望这些转换也成为 reducer 的受控事件，需要合同变更。
 3. ★ **派发提示词模板。** 意图只存 `payloadHash`、`templateVersion` 与 `semanticArgs`，执行器通过注入的 `compile(intent, record)` 重建原文并核对哈希。模板内容（如何告知成员 nonce、strict 报告块格式、范围与验收）尚未写，它决定成员的实际行为，需要评审。
 4. **路径真实性校验。** `findLockConflicts` 只接受 `verified: true` 的范围，而 realpath、8.3 短名、junction 的校验是“宿主适配器”的职责，目前没有实现。没有它就无法授予写资源，等同于不能派发写任务。
@@ -374,4 +377,4 @@ Outbox 执行器只消费已 `prepared` 的意图。生成这些意图的“派�
 6. **跨 Run 资源授予。** `store.update` 会把其他 Run 的占用交给 mutator；构造器必须在同一个同步 mutator 里用它做冲突判断，且 `otherResources.trusted === false` 时拒绝授予。
 7. **席位运行时事实。** `SchedulerContext.seats` 需要 `idle`、`permissionPending`、`channelState` 等实时事实，来源是 Paseo 的 `current()/refresh()` 与台账里的渠道状态，调用方负责解析。
 
-建议顺序：先定 1 与 3，再写构造器（含 4-6）与 `service.ts` 的单任务单席位路径，最后接 DAG 接纳。
+建议顺序：1 已定；先定 3，再写构造器（含 4-6）与 `service.ts` 的单任务单席位路径，最后接 DAG 接纳。
