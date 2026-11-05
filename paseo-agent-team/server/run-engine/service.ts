@@ -539,6 +539,9 @@ export function createEngineService(options: EngineServiceOptions) {
   async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
+    // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
+    // its DAG, have nothing to send.
+    if (read.record.lifecycle !== "active") return { status: "idle" };
     const work = nextWork(read.record);
     if (!work) return { status: "idle" };
     return work.kind === "produce"
