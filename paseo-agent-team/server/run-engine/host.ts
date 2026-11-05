@@ -1,3 +1,8 @@
+import type {
+  PortTimelineCursor,
+  PortTimelinePage,
+  PortTimelineRefetchOptions,
+} from "../../shared/paseo/port";
 import type { ObserverHost } from "./observer";
 import {
   buildReplyWindow,
@@ -7,24 +12,19 @@ import {
 } from "./protocol";
 
 /**
- * The slice of the Paseo agent handle the observer reads. Structural on purpose: shared modules
- * cannot import client types, and this keeps a host upgrade pointing at exactly these calls.
- * Nothing here sends, creates, cancels or archives.
+ * The slice of the Paseo agent handle the observer reads. The page and option types come from the
+ * shared port (one place a host upgrade has to be checked); the handle is cut down to the
+ * read-only timeline so the observer cannot send, create, cancel or archive.
  */
-export type TimelineCursor = { epoch: string; seq: number };
+export type TimelineCursor = PortTimelineCursor;
 
-export type TimelineRefetchPage = TimelinePageLike & {
-  startCursor: TimelineCursor | null;
-};
+export type TimelineRefetchPage = TimelinePageLike & PortTimelinePage;
 
 export interface ObservedAgentPort {
   timeline: {
-    refetch(options: {
-      direction: "tail" | "before" | "after";
-      cursor?: TimelineCursor;
-      limit?: number;
-      projection?: "canonical" | "projected";
-    }): Promise<TimelineRefetchPage>;
+    refetch(
+      options: PortTimelineRefetchOptions & { direction: "tail" | "before" | "after" },
+    ): Promise<TimelineRefetchPage>;
   };
 }
 

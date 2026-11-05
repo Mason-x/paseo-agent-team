@@ -9,6 +9,20 @@ export const runEngineZh = {
   loading: "正在读取 Run 台账…",
   readOnly: "只读观察模式：此处不提供任何写入操作",
 
+  /** Launch gate for `Team.runEngine`; reasons are shown as blockers/warnings in the launch preview. */
+  launch: {
+    invalid: (issues: readonly string[]) =>
+      `团队的 Run 引擎配置无效，已阻止启动（不会改用旧流程）：${issues.join("；")}`,
+    invalidButDisabled: (issues: readonly string[]) =>
+      `团队的 Run 引擎配置无效，但已标记为关闭，按旧流程启动：${issues.join("；")}`,
+    seatDuplicate: (seatId: string) => `Run 引擎配置里的席位 ${seatId} 重复`,
+    seatUnknown: (seatId: string) => `Run 引擎配置里的席位 ${seatId} 不在团队的启用成员中`,
+    seatMissing: (seatId: string) => `团队成员席位 ${seatId} 没有对应的 Run 引擎席位配置`,
+    noEnabledSeat: "Run 引擎配置里没有启用的席位",
+    unsupported:
+      "该团队已启用 Run 引擎，但当前版本尚不能执行 Engine Run；为避免静默改用旧流程，已阻止启动",
+  },
+
   lifecycle: {
     bootstrapping: "启动中",
     "awaiting-dag": "等待任务图",

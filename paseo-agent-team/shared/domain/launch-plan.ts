@@ -12,6 +12,7 @@ import {
   compileMemberSystemPrompt,
 } from "./prompt-compiler";
 import type { ModeIssue } from "./role-execution";
+import { engineLaunchGate, resolveTeamRunEngine } from "./run-engine/team-config";
 import type { PlannedSeat, RuntimeCapabilities, SeatBudgetCounts, SeatCounts } from "./seat-plan";
 import { buildTeamModelPlan } from "./team-model-plan";
 import { coordinatorToolsBlocker } from "./tools-readiness";
@@ -177,6 +178,8 @@ export function buildLaunchPlan(input: {
   host?: HostSnapshot;
   /** Runtime capability flags; absent means this version supports no deferred work. */
   runtimeCapabilities?: RuntimeCapabilities;
+  /** Whether this build can execute an Engine Run. Absent = no, so enabled Teams are refused. */
+  runEngineSupported?: boolean;
   /** Raw daemon config, used to confirm the coordinator can reach Paseo's delegation tools. */
   daemonConfig?: unknown;
 }): LaunchPlan {
@@ -272,6 +275,15 @@ export function buildLaunchPlan(input: {
     if (entry.severity !== "warning") continue;
     warnings.push(warningIssueText(entry, seatPlan.seats));
   }
+
+  // An enabled-but-unusable Run Engine block never falls back to the coordinator chain.
+  const engineGate = engineLaunchGate({
+    resolution: resolveTeamRunEngine(team),
+    logicalSeatIds: seatPlan.seats.map((seat) => seat.logicalSeatId),
+    engineSupported: input.runEngineSupported === true,
+  });
+  blockers.push(...engineGate.blockers);
+  warnings.push(...engineGate.warnings);
 
   let enabledCount = 0;
   for (const member of team.members) {

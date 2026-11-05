@@ -38,6 +38,10 @@ export const TeamSchema = z
     // settings store parses the whole catalog document, so bad provenance must not invalidate it.
     source: z.string().optional(),
     designer: StoredDesignerOriginSchema.optional().catch(undefined),
+    // Run Engine block (H-R1=A). Kept as stored and NOT parsed here: a malformed block must
+    // survive a round-trip untouched and must not invalidate the Teams catalog or silently
+    // vanish. `resolveTeamRunEngine` (domain/run-engine/team-config.ts) is the only reader.
+    runEngine: z.unknown().optional(),
   })
   .passthrough()
   .refine((team) => !team.members.some((member) => member.roleId === team.coordinatorRoleId), {

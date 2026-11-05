@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   asRecord,
   createPaseoAdapter,
@@ -303,5 +303,38 @@ describe("createPaseoAdapter", () => {
     await adapter.archiveAgent("coord-1");
     expect(sent).toEqual([{ agentId: "coord-1", text: "go" }]);
     expect(archived).toEqual(["coord-1"]);
+  });
+
+  test("sendMessage without options calls the host with the text alone", async () => {
+    const send = vi.fn(async (..._args: unknown[]) => {});
+    const { port } = fakePort();
+    port.agents.ref.mockImplementation(() => ({ send, archive: async () => ({}) }));
+    await createPaseoAdapter(port).sendMessage("a1", "go");
+    expect(send.mock.calls).toEqual([["go"]]);
+  });
+
+  test("sendMessage passes messageId and activeTurnBehavior through unchanged", async () => {
+    const send = vi.fn(async (..._args: unknown[]) => {});
+    const { port } = fakePort();
+    port.agents.ref.mockImplementation(() => ({ send, archive: async () => ({}) }));
+    const options = { messageId: "m-1", activeTurnBehavior: "steer" as const };
+    await createPaseoAdapter(port).sendMessage("a1", "go", options);
+    expect(send.mock.calls).toEqual([["go", options]]);
+  });
+
+  test("createAgent forwards an idempotencyKey only when one is given", async () => {
+    const { port, created } = fakePort();
+    const adapter = createPaseoAdapter(port);
+    const input = {
+      workspaceId: "ws-1",
+      title: "Seat",
+      labels: {},
+      systemPrompt: "Seat.",
+      profile: { id: "p", name: "Any", provider: "codex" },
+    };
+    await adapter.createAgent({ ...input, idempotencyKey: "run-1:seat-a" });
+    await adapter.createAgent(input);
+    expect(created[0]?.options.idempotencyKey).toBe("run-1:seat-a");
+    expect(created[1]?.options).not.toHaveProperty("idempotencyKey");
   });
 });

@@ -1,5 +1,11 @@
 import type { McpServers } from "../schemas/role";
-import type { PaseoPort, PortMcpServer, PortWorkspace, PortWorkspaceSource } from "./port";
+import type {
+  PaseoPort,
+  PortMcpServer,
+  PortSendOptions,
+  PortWorkspace,
+  PortWorkspaceSource,
+} from "./port";
 
 export type PaseoProfile = {
   id: string;
@@ -80,6 +86,8 @@ export type CreateMemberInput = {
   profile: PaseoProfile;
   mcpServers?: McpServers;
   prompt?: string;
+  /** Lets an unknown create result be re-checked without creating a second agent. */
+  idempotencyKey?: string;
 };
 
 export type ProfilesUnavailableError = Error & { code: "profiles-unavailable" };
@@ -100,7 +108,7 @@ export interface PaseoAdapter {
   listProjects(): Promise<ProjectSummary[]>;
   createWorkspace(input: CreateWorkspaceInput): Promise<WorkspaceSummary>;
   createAgent(input: CreateMemberInput): Promise<{ agentId: string }>;
-  sendMessage(agentId: string, text: string): Promise<void>;
+  sendMessage(agentId: string, text: string, options?: PortSendOptions): Promise<void>;
   archiveAgent(agentId: string): Promise<void>;
 }
 
@@ -260,6 +268,7 @@ export function createPaseoAdapter(paseo: PaseoPort): PaseoAdapter {
 
     async createAgent(input: CreateMemberInput) {
       const created = await paseo.workspaces.ref(input.workspaceId).agents.create({
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
         parent: input.parentAgentId,
         title: input.title.slice(0, 60),
         labels: input.labels,
@@ -276,8 +285,10 @@ export function createPaseoAdapter(paseo: PaseoPort): PaseoAdapter {
       return { agentId: created.id };
     },
 
-    async sendMessage(agentId: string, text: string) {
-      await paseo.agents.ref(agentId).send(text);
+    async sendMessage(agentId: string, text: string, options?: PortSendOptions) {
+      const handle = paseo.agents.ref(agentId);
+      // Without options the call is identical to the original two-argument form.
+      await (options ? handle.send(text, options) : handle.send(text));
     },
 
     async archiveAgent(agentId: string) {
