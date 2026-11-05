@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
+  deliveredFiles,
   dispatchWorkspace,
   inspectRepo,
   type RepoFacts,
@@ -130,6 +131,66 @@ describe("inspectRepo and dispatchWorkspace", () => {
       expect((await facts(recased)).repoId).toBe((await facts(dir)).repoId);
     },
   );
+});
+
+describe("deliveredFiles", () => {
+  function head(dir: string): string {
+    return run(dir, "rev-parse", "HEAD").trim();
+  }
+
+  test("lists what the delivered commit changed against the base, renames as delete plus add", async () => {
+    const dir = await makeRepo();
+    const base = head(dir);
+    await writeFile(path.join(dir, "src", "a.ts"), "export const a = 1;\n");
+    await writeFile(path.join(dir, "src", "b.ts"), "export const b = 1;\n");
+    run(dir, "add", "-A");
+    run(dir, "commit", "-q", "-m", "work 1");
+    run(dir, "mv", "src/b.ts", "src/c.ts");
+    run(dir, "commit", "-q", "-m", "work 2");
+    const repo = await facts(dir);
+    const result = await deliveredFiles(repo, base, head(dir));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect([...result.files].sort()).toEqual(["src/a.ts", "src/c.ts"]);
+    }
+    // No change at all is an empty list, not an error.
+    expect(await deliveredFiles(repo, head(dir), head(dir))).toEqual({ ok: true, files: [] });
+  });
+
+  test("a commit that is not on the base's line of history says nothing about the work", async () => {
+    const dir = await makeRepo();
+    const base = head(dir);
+    run(dir, "checkout", "-q", "-b", "side");
+    await writeFile(path.join(dir, "side.txt"), "x");
+    run(dir, "add", "-A");
+    run(dir, "commit", "-q", "-m", "side");
+    const sideHead = head(dir);
+    run(dir, "checkout", "-q", "main");
+    await writeFile(path.join(dir, "main.txt"), "x");
+    run(dir, "add", "-A");
+    run(dir, "commit", "-q", "-m", "main work");
+    const mainHead = head(dir);
+    const repo = await facts(dir);
+    expect(await deliveredFiles(repo, mainHead, sideHead)).toEqual({
+      ok: false,
+      reason: "not-descendant",
+    });
+    expect((await deliveredFiles(repo, base, mainHead)).ok).toBe(true);
+  });
+
+  test("an unknown commit and anything that is not a plain hex ref are refused before git sees them", async () => {
+    const dir = await makeRepo();
+    const base = head(dir);
+    const repo = await facts(dir);
+    expect(await deliveredFiles(repo, base, "d".repeat(40))).toEqual({
+      ok: false,
+      reason: "unknown-commit",
+    });
+    for (const bad of ["--output=evil", "main", "HEAD~1", "abc", "", `${base} --stat`]) {
+      expect(await deliveredFiles(repo, base, bad)).toEqual({ ok: false, reason: "bad-ref" });
+      expect(await deliveredFiles(repo, bad, base)).toEqual({ ok: false, reason: "bad-ref" });
+    }
+  });
 });
 
 describe("verifyScopes", () => {

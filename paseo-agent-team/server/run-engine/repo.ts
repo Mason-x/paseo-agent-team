@@ -121,6 +121,42 @@ export function dispatchWorkspace(repo: RepoFacts, workspaceId: string): Dispatc
   return { ok: true, workspace: { id: workspaceId, branch: repo.branch, baseRef: repo.headSha } };
 }
 
+export type DeliveredFiles =
+  | { ok: true; files: string[] }
+  | { ok: false; reason: "bad-ref" | "unknown-commit" | "not-descendant" | "git-error" };
+
+const HEX_REF = /^[0-9a-f]{7,64}$/iu;
+
+/**
+ * The files a delivered commit really changed relative to the commit the work started from. The
+ * quality gate only sees what the report claims; this is the ground truth it is compared with.
+ * Renames count as a delete plus an add so both paths are checked against the scope. The delivery
+ * must descend from the base: a commit on some other line of history says nothing about the work.
+ */
+export async function deliveredFiles(
+  repo: RepoFacts,
+  baseRef: string,
+  deliveryRef: string,
+): Promise<DeliveredFiles> {
+  if (!HEX_REF.test(baseRef) || !HEX_REF.test(deliveryRef)) return { ok: false, reason: "bad-ref" };
+  const exists = await git(repo.root, ["cat-file", "-e", `${deliveryRef}^{commit}`]);
+  if (!exists.ok) return { ok: false, reason: "unknown-commit" };
+  const ancestry = await git(repo.root, ["merge-base", "--is-ancestor", baseRef, deliveryRef]);
+  if (!ancestry.ok) {
+    return { ok: false, reason: ancestry.code === 1 ? "not-descendant" : "git-error" };
+  }
+  const diff = await git(repo.root, [
+    "diff",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    baseRef,
+    deliveryRef,
+  ]);
+  if (!diff.ok) return { ok: false, reason: "git-error" };
+  return { ok: true, files: diff.stdout.split("\0").filter((entry) => entry !== "") };
+}
+
 export type EvidenceDir =
   | { ok: true; dir: string }
   | { ok: false; reason: "not-absolute" | "unusable" | "inside-repo" | "contains-repo" };

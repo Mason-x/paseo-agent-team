@@ -8,10 +8,7 @@ import { inspectRepo } from "../../server/run-engine/repo";
 import { createEngineService, type EngineServiceOptions } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_EXCLUSIVE_RESOURCE } from "../../shared/domain/run-engine/dispatch-builder";
-import {
-  compileDispatch,
-  PRODUCER_TEMPLATE_VERSION,
-} from "../../shared/domain/run-engine/prompt-template";
+import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import type { PaseoEnginePort, PortAgentSnapshot, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import {
@@ -22,6 +19,12 @@ import {
   withLedger,
 } from "../fixtures/run-engine/base";
 import { readyRun } from "./support/ready-run";
+import {
+  JUDGE_SEAT_REVIEW,
+  JUDGE_SEAT_SMOKE,
+  type ReviewRunOptions,
+  reviewRun,
+} from "./support/review-run";
 
 /**
  * Failure modes this file guards, end to end with a real store and a real git repository:
@@ -113,7 +116,7 @@ function fakeHost(options: { snapshot?: PortAgentSnapshot; send?: () => Promise<
   return { port, sent };
 }
 
-/** Deliberately not the real template (plan 11.4 item 3 is undecided). It ignores `payloadHash`. */
+/** A stand-in for the real template: tests that care about the text pass `compileDispatch`. */
 const PLACEHOLDER_COMPILE: EngineServiceOptions["compile"] = (intent, record) =>
   `PLACEHOLDER ${record.runId} ${intent.assignmentId} ${intent.messageId}`;
 
@@ -130,23 +133,38 @@ function makeService(
     store,
     port: host.port,
     effects,
-    resolveSeat: (_record, seatId) =>
-      seatId === "seat-b1"
-        ? {
-            profile: {
-              id: PROFILE_HAIKU.id,
-              name: PROFILE_HAIKU.name,
-              provider: PROFILE_HAIKU.provider,
-              model: PROFILE_HAIKU.model,
-              family: PROFILE_HAIKU.family,
-            },
-            available: true,
-            order: 0,
-          }
-        : null,
+    resolveSeat: (_record, seatId) => {
+      if (seatId === "seat-b1") {
+        return {
+          profile: {
+            id: PROFILE_HAIKU.id,
+            name: PROFILE_HAIKU.name,
+            provider: PROFILE_HAIKU.provider,
+            model: PROFILE_HAIKU.model,
+            family: PROFILE_HAIKU.family,
+          },
+          available: true,
+          order: 0,
+        };
+      }
+      // The judges: another provider and family than the producer's.
+      if (seatId === JUDGE_SEAT_REVIEW || seatId === JUDGE_SEAT_SMOKE) {
+        return {
+          profile: {
+            id: "profile-dev-luna",
+            name: "DEV Luna",
+            provider: "codex",
+            model: "gpt-6-luna",
+            family: "luna",
+          },
+          available: true,
+          order: seatId === JUDGE_SEAT_REVIEW ? 1 : 2,
+        };
+      }
+      return null;
+    },
     resolveWorkspace: () => ({ workspaceId: WORKSPACE_ID, directory: repoDir }),
     compile: PLACEHOLDER_COMPILE,
-    templateVersion: 1,
     ...overrides,
   });
 }
@@ -164,6 +182,234 @@ async function stored(runId = RUN_ID): Promise<RunRecord> {
   if (read.status !== "ok") throw new Error(`run ${runId} unreadable: ${read.status}`);
   return read.record;
 }
+
+function gitOut(cwd: string, ...args: string[]): string {
+  return execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=probe",
+      "-c",
+      "user.email=probe@example.invalid",
+      "-c",
+      "core.autocrlf=false",
+      ...args,
+    ],
+    { cwd, windowsHide: true, encoding: "utf8" },
+  ).trim();
+}
+
+/** Commits `files` as the producer's delivery and returns the base it started from and the new head. */
+async function deliver(
+  files: Record<string, string> = { "src/t1.ts": "export const t1 = 1;\n" },
+): Promise<{ baseSha: string; headSha: string }> {
+  const baseSha = gitOut(repoDir, "rev-parse", "HEAD");
+  for (const [file, content] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(repoDir, file)), { recursive: true });
+    await writeFile(path.join(repoDir, file), content);
+    git(repoDir, "add", "--", file);
+  }
+  git(repoDir, "commit", "-q", "-m", "deliver t1");
+  return { baseSha, headSha: gitOut(repoDir, "rev-parse", "HEAD") };
+}
+
+async function seedReview(
+  delivery: { baseSha: string; headSha: string },
+  options: ReviewRunOptions = {},
+  mutate: (record: RunRecord) => void = () => undefined,
+): Promise<RunRecord> {
+  const record = reviewRun({ runId: RUN_ID, repoId, evidenceRoot, ...delivery, ...options });
+  mutate(record);
+  await store.create(record);
+  return record;
+}
+
+describe("dispatchNext: reviewer and smoker", () => {
+  test("a delivered task goes to an independent reviewer, who is told what was really delivered", async () => {
+    const delivery = await deliver();
+    await seedReview(delivery);
+    const host = fakeHost();
+    const result = await makeService(host, { compile: compileDispatch }).dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({
+      status: "dispatched",
+      taskId: "t1",
+      purpose: "reviewer",
+      seatId: JUDGE_SEAT_REVIEW,
+    });
+    expect(host.sent).toHaveLength(1);
+    expect(host.sent[0]?.agentId).toBe("agent-b2");
+    const text = host.sent[0]?.text ?? "";
+    expect(text).toContain(delivery.headSha);
+    expect(text).toContain(delivery.baseSha);
+
+    const record = await stored();
+    const reviewer = record.assignments.find(
+      (entry) =>
+        entry.purpose === "reviewer" && entry.taskId === "t1" && entry.state === "assigned",
+    );
+    expect(reviewer).toMatchObject({
+      delivery: { producerAssignmentId: "assignment-t1-a1" },
+      workspace: { branch: "main", baseRef: delivery.headSha },
+    });
+    const intent = record.outbox.find((entry) => entry.assignmentId === reviewer?.assignmentId);
+    expect(intent).toMatchObject({ state: "confirmed", recipient: "agent-b2" });
+    expect(intent?.payloadHash).toBe(payloadHash(text));
+    // The judge takes no new claims, and one reservation lands on its seat.
+    expect(record.resources.map((entry) => entry.claimId).sort()).toEqual([
+      "claim-t1-file",
+      "claim-t1-repo",
+    ]);
+    expect(
+      record.budgets.entries.find((entry) => entry.subjectId === JUDGE_SEAT_REVIEW)?.reserved,
+    ).toBe(1);
+    // Judging did not touch the working tree.
+    const after = await inspectRepo(repoDir);
+    expect(after.ok && after.repo.clean).toBe(true);
+  });
+
+  test("while a delivered task is being judged the next task does not start", async () => {
+    const delivery = await deliver();
+    await seedReview(delivery);
+    const host = fakeHost();
+    const service = makeService(host, { compile: compileDispatch });
+    expect((await service.dispatchNext(RUN_ID)).status).toBe("dispatched");
+
+    // t2 is ready, but t1 still holds the repository.
+    const next = await service.dispatchNext(RUN_ID);
+    expect(next).toMatchObject({ status: "blocked", taskId: "t2", reason: "lock-conflict" });
+    expect(host.sent).toHaveLength(1);
+  });
+
+  test("a delivered task whose judge is already out is not sent a second one", async () => {
+    const delivery = await deliver();
+    await seedReview(delivery, {}, (record) => {
+      // t2 waits for t1; a pending task with no open dependency would be made ready again.
+      const t2 = record.tasks.find((task) => task.spec.id === "t2");
+      if (t2) {
+        t2.state = "pending";
+        t2.spec.deps = ["t1"];
+      }
+    });
+    const host = fakeHost();
+    const service = makeService(host, { compile: compileDispatch });
+    expect((await service.dispatchNext(RUN_ID)).status).toBe("dispatched");
+    expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+    expect(host.sent).toHaveLength(1);
+  });
+
+  test("with every judge busy the task waits, and the producer's own seat is never offered", async () => {
+    const delivery = await deliver();
+    await seedReview(delivery);
+    const host = fakeHost({ snapshot: { status: "running", activeTurn: { id: "t" } } });
+    const result = await makeService(host).dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({ status: "waiting", taskId: "t1", reason: "no-seat" });
+    if (result.status === "waiting") {
+      expect(result.denials).toContainEqual({ seatId: "seat-b1", reason: "same-as-producer" });
+      expect(result.denials).toContainEqual({ seatId: JUDGE_SEAT_REVIEW, reason: "busy" });
+    }
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test.each([
+    [
+      "a commit on top of the delivery",
+      async () => {
+        await writeFile(path.join(repoDir, "src", "late.ts"), "x");
+        git(repoDir, "add", "--", "src/late.ts");
+        git(repoDir, "commit", "-q", "-m", "late");
+      },
+      "delivery-not-at-head",
+    ],
+    [
+      "a switched branch",
+      async () => {
+        git(repoDir, "checkout", "-q", "-b", "elsewhere");
+      },
+      "delivery-branch-changed",
+    ],
+    [
+      "an untracked file",
+      async () => {
+        await writeFile(path.join(repoDir, "stray.txt"), "x");
+      },
+      "workspace-dirty",
+    ],
+    [
+      "a rewound branch",
+      async () => {
+        git(repoDir, "reset", "-q", "--hard", "HEAD~1");
+      },
+      "delivery-not-at-head",
+    ],
+  ])(
+    "%s blocks the review and leaves ledger and host untouched",
+    async (_name, disturb, reason) => {
+      const delivery = await deliver();
+      const before = await seedReview(delivery);
+      await disturb();
+      const host = fakeHost();
+      const result = await makeService(host, { compile: compileDispatch }).dispatchNext(RUN_ID);
+
+      expect(result).toMatchObject({ status: "blocked", taskId: "t1", reason });
+      expect(host.sent).toHaveLength(0);
+      expect((await stored()).revision).toBe(before.revision);
+    },
+  );
+
+  test("a delivery whose real diff is not what the report claimed is not reviewed", async () => {
+    const delivery = await deliver({
+      "src/t1.ts": "export const t1 = 1;\n",
+      "src/extra.ts": "export const extra = 1;\n",
+    });
+    // The report claims only src/t1.ts.
+    await seedReview(delivery);
+    const host = fakeHost();
+    const result = await makeService(host).dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      taskId: "t1",
+      reason: "delivery-diff-mismatch",
+    });
+    if (result.status === "blocked") {
+      expect(result.detail).toEqual({
+        claimed: ["src/t1.ts"],
+        actual: expect.arrayContaining(["src/t1.ts", "src/extra.ts"]),
+      });
+    }
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test("a reviewed task with a smoke goes to the smoker, on the registered DEV target", async () => {
+    const delivery = await deliver();
+    await seedReview(delivery, { devSmoke: true, reviewed: true });
+    const host = fakeHost();
+    const result = await makeService(host, { compile: compileDispatch }).dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({
+      status: "dispatched",
+      taskId: "t1",
+      purpose: "smoker",
+      seatId: JUDGE_SEAT_SMOKE,
+    });
+    expect(host.sent[0]?.agentId).toBe("agent-m1");
+    const text = host.sent[0]?.text ?? "";
+    expect(text).toContain("127.0.0.1:6799");
+    expect(text).toContain(delivery.headSha);
+    expect(text).toContain("smoke-report");
+  });
+
+  test("a smoke is not started before the review has passed", async () => {
+    const delivery = await deliver();
+    // A smoke task whose only reviewer has not reported: the reviewer is the next work, not a smoker.
+    await seedReview(delivery, { devSmoke: true });
+    const host = fakeHost();
+    const result = await makeService(host).dispatchNext(RUN_ID);
+    expect(result).toMatchObject({ status: "dispatched", purpose: "reviewer" });
+  });
+});
 
 describe("dispatchNext", () => {
   test("commits a dispatch, sends exactly its prompt, and the ledger hash is that prompt's", async () => {
@@ -343,10 +589,7 @@ describe("dispatchNext", () => {
   test("with the real producer template the sent prompt carries this assignment's identity", async () => {
     await seed();
     const host = fakeHost();
-    const service = makeService(host, {
-      compile: compileDispatch,
-      templateVersion: PRODUCER_TEMPLATE_VERSION,
-    });
+    const service = makeService(host, { compile: compileDispatch });
     const result = await service.dispatchNext(RUN_ID);
     expect(result).toMatchObject({ status: "dispatched" });
 
