@@ -63,7 +63,13 @@
 3. **协调者 Profile 无法解析时，只显示为普通启动阻断。** 设计师和启动预览都缺少"去选 Profile / 去绑定"的引导。
 4. **宿主行为：`plugin remove` 会清空整个插件设置目录。** 之后打开 Team 页会对空目录自动导入默认 Role。需要在 README 写明：升级请用版本面板或原地 reload，不要先 remove 再重装。
 4a. **质量门不能继承真实的 `PASEO_HOME`。**（已修复，遗留设计问题）`verify:package` 加载 server bundle 时曾用进程的 `PASEO_HOME` 初始化设计账本，首次运行会读到真实账本锁。门禁现在会在系统 TEMP 下新建隔离目录并断言不在 `%USERPROFILE%\.paseo`。遗留：服务端应从宿主上下文而不是 `process.env` 取数据目录，需另行评估。
-4b. **团队启动创建的 Codex 成员 model 带 provider 前缀，会话返回 400。**（缺陷待查）成员会话的 `model` 为 `codex/gpt-6.1-sol`，Codex 以 `model_not_found` 拒绝；同一 Profile 经 `create_agent(provider="codex/gpt-6.1-sol")` 新建时 `model` 为 `gpt-6.1-sol`，运行正常。嫌疑是 adapter 拼出 `provider/model` 后，启动路径又把整串作为 `model` 传给宿主。Claude/omp 成员未受影响或宿主对其容错。需在 DEV 复现并检查 `shared/paseo/adapter.ts` 的 profile 投影。
+4b. **团队启动创建的 Codex 成员 model 带 provider 前缀，会话返回 400。**（2026-11-05 已复核：不是适配器缺陷，原因指向 Profile 数据；待加预防提示）成员会话的 `model` 为 `codex/gpt-6.1-sol`，Codex 以 `model_not_found` 拒绝。
+   - **宿主规则：** SDK 的 `PaseoAgentConfig` 只有 `provider` 一个字段（`provider/model` 格式），宿主按**第一个** `/` 拆分，其余原样作为 `model`。适配器的 `profileProvider` 自 10-24 起未改动，用的就是这个唯一的传法。
+   - **DEV 实测（daemon `0.13.0-beta.1`）：** 发送 `codex/gpt-6-luna` → `gpt-6-luna`；发送 `codex/gpt-6.1-sol` → `gpt-6.1-sol`（即原先的 `create_agent` 对照）；发送 `codex/codex/gpt-6.1-sol` → `codex/gpt-6.1-sol`（即本缺陷的症状）。用当前代码经启动 RPC 启动 `e2e-team`，3 个成员的 `config.model` 均无前缀。
+   - **真实记录：** 带 `codex/` 前缀的只有 10-27 17:07 同一个 run（`run-mvqxu974-yql6`）的 2 个成员；10-24、10-26 同团队同模型成员正常，17:15 重试已是网关 ID `remote-magpie/auto/gpt-6.1-sol`。当前 Profile 的 `model` 已是网关 ID，当时的 Profile 值无法还原，所以“当时 Profile 的 `model` 自带 `codex/` 前缀”是与全部证据一致的推断，不是直接证据。
+   - **用户补充：** 之后接入了 magpie 中转模型，Profile 的 `model` 随之换成网关 ID，此后没有再出现。这与“症状来自当时的 Profile 数据”一致；但换之前 Profile 的具体值没有记录，仍不是直接证据。
+   - **注意：** 带 `/` 的 model 本身常见且合法（网关 ID、`magpie/...`、claude 的 `remote-magpie/codex/...`），不能一概视为错误。
+   - **未做：** 在预览里对“model 以自身 provider 加 `/` 开头”（如 provider `codex`、model `codex/...`）给出警告而不阻断；未验证 `0.15.0`（用户当前安装版本）的拆分规则，DEV 只有 `0.13.0-beta.1`。
 
 ### P2
 
