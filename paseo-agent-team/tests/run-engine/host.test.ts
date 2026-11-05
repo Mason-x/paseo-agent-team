@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   createObserverHost,
+  findDispatchEcho,
   type ObservedHostPort,
   type TimelineRefetchPage,
 } from "../../server/run-engine/host";
@@ -127,5 +128,97 @@ describe("observer host", () => {
     await expect(createObserverHost(failing).replyWindow("a", DISPATCH)).rejects.toThrow(
       "daemon unreachable",
     );
+  });
+});
+
+describe("findDispatchEcho", () => {
+  const dispatchEntry = entry(3, "user_message", "t-7", { messageId: DISPATCH });
+
+  test("finds the id on the newest page and reports its turn", async () => {
+    const fake = port(page([dispatchEntry]));
+    await expect(findDispatchEcho(fake.value, "agent-b1", DISPATCH)).resolves.toEqual({
+      status: "found",
+      turnId: "t-7",
+    });
+    expect(fake.calls).toEqual(["agent-b1:tail:-:canonical"]);
+  });
+
+  test("also matches the clientMessageId echo", async () => {
+    const byClient = entry(3, "user_message", "t-7", { clientMessageId: DISPATCH });
+    await expect(
+      findDispatchEcho(port(page([byClient])).value, "agent-b1", DISPATCH),
+    ).resolves.toMatchObject({ status: "found" });
+  });
+
+  test("walks back across older pages", async () => {
+    const tail = page([entry(6, "assistant_message", "t-8", { text: "x" })], {
+      hasOlder: true,
+      startCursor: { epoch: "e1", seq: 6 },
+    });
+    const fake = port(tail, [page([dispatchEntry], { hasNewer: true })]);
+    await expect(findDispatchEcho(fake.value, "agent-b1", DISPATCH)).resolves.toMatchObject({
+      status: "found",
+    });
+    expect(fake.calls).toEqual(["agent-b1:tail:-:canonical", "agent-b1:before:6:canonical"]);
+  });
+
+  test("a message of another id, or an assistant message with that id, is not an echo", async () => {
+    const other = entry(3, "user_message", "t-7", { messageId: "someone-else" });
+    const lookalike = entry(4, "assistant_message", "t-7", { messageId: DISPATCH });
+    await expect(
+      findDispatchEcho(port(page([other, lookalike])).value, "agent-b1", DISPATCH),
+    ).resolves.toEqual({ status: "absent" });
+  });
+
+  test("absent only after the whole timeline was read consistently", async () => {
+    const tail = page([entry(6, "assistant_message", "t-8")], {
+      hasOlder: true,
+      startCursor: { epoch: "e1", seq: 6 },
+    });
+    const root = page([entry(1, "user_message", "t-1", { messageId: "first" })]);
+    await expect(findDispatchEcho(port(tail, [root]).value, "agent-b1", DISPATCH)).resolves.toEqual(
+      { status: "absent" },
+    );
+  });
+
+  test.each([
+    ["a gap", { gap: true }],
+    ["a stale cursor", { staleCursor: true }],
+    ["a reset", { reset: true }],
+  ])("%s makes the read unverifiable, not absent", async (_name, over) => {
+    await expect(
+      findDispatchEcho(port(page([], over)).value, "agent-b1", DISPATCH),
+    ).resolves.toEqual({ status: "unverifiable", reason: "inconsistent-read" });
+  });
+
+  test("an epoch change between pages is unverifiable", async () => {
+    const tail = page([entry(6, "assistant_message", "t-8")], {
+      hasOlder: true,
+      startCursor: { epoch: "e1", seq: 6 },
+    });
+    const older = page([], { epoch: "e2" });
+    await expect(
+      findDispatchEcho(port(tail, [older]).value, "agent-b1", DISPATCH),
+    ).resolves.toEqual({ status: "unverifiable", reason: "inconsistent-read" });
+  });
+
+  test("running out of pages is unverifiable", async () => {
+    const more = (seq: number) =>
+      page([entry(seq, "assistant_message", "t-8")], {
+        hasOlder: true,
+        startCursor: { epoch: "e1", seq },
+      });
+    const fake = port(more(9), [more(8), more(7)]);
+    await expect(
+      findDispatchEcho(fake.value, "agent-b1", DISPATCH, { maxPages: 2 }),
+    ).resolves.toEqual({ status: "unverifiable", reason: "too-many-pages" });
+    expect(fake.calls).toHaveLength(2);
+  });
+
+  test("a host error propagates", async () => {
+    const failing: ObservedHostPort = {
+      agents: { ref: () => ({ timeline: { refetch: () => Promise.reject(new Error("down")) } }) },
+    };
+    await expect(findDispatchEcho(failing, "a", DISPATCH)).rejects.toThrow("down");
   });
 });

@@ -42,6 +42,55 @@ function holdsDispatch(page: TimelinePageLike, messageId: string): boolean {
   );
 }
 
+export type DispatchEcho =
+  /** The host timeline carries a user_message with this id: it was delivered. */
+  | { status: "found"; turnId: string | null }
+  /** The whole timeline was read, consistently, and the id is not in it. */
+  | { status: "absent" }
+  /** The read was partial or inconsistent (pages, gap, stale cursor, reset, epoch change). */
+  | { status: "unverifiable"; reason: "too-many-pages" | "inconsistent-read" };
+
+/**
+ * Looks for the echo of a sent message id, newest page first. Read-only. A timeline the host
+ * reports as incomplete is `unverifiable`, never `absent`: not finding the message in part of the
+ * history says nothing about whether it was delivered. Even `absent` only means "not there now" —
+ * the caller must not turn it into a blind resend.
+ */
+export async function findDispatchEcho(
+  port: ObservedHostPort,
+  agentId: string,
+  messageId: string,
+  options: { maxPages?: number; pageLimit?: number } = {},
+): Promise<DispatchEcho> {
+  const maxPages = options.maxPages ?? PROTOCOL_MAX_PAGES;
+  const limit = options.pageLimit ?? PAGE_LIMIT;
+  const handle = port.agents.ref(agentId);
+  let epoch: string | null = null;
+  let page = await handle.timeline.refetch({ direction: "tail", limit, projection: "canonical" });
+  for (let pages = 1; ; pages += 1) {
+    if (page.gap || page.staleCursor || page.reset || (epoch !== null && page.epoch !== epoch)) {
+      return { status: "unverifiable", reason: "inconsistent-read" };
+    }
+    epoch = page.epoch;
+    const hit = page.entries.find(
+      (entry) =>
+        entry.item.type === "user_message" &&
+        (entry.item.messageId === messageId || entry.item.clientMessageId === messageId),
+    );
+    if (hit) return { status: "found", turnId: hit.turnId ?? null };
+    if (!page.hasOlder) return { status: "absent" };
+    if (pages >= maxPages || page.startCursor === null) {
+      return { status: "unverifiable", reason: "too-many-pages" };
+    }
+    page = await handle.timeline.refetch({
+      direction: "before",
+      cursor: page.startCursor,
+      limit,
+      projection: "canonical",
+    });
+  }
+}
+
 /**
  * Reads the canonical timeline backwards from the tail until the dispatch message is on a page,
  * then asks `buildReplyWindow` whether that is a complete reply. Running out of pages before the
