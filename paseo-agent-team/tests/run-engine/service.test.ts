@@ -18,6 +18,7 @@ import {
   PROFILE_HAIKU,
   withLedger,
 } from "../fixtures/run-engine/base";
+import { recordReview } from "./support/judge-flow";
 import { readyRun } from "./support/ready-run";
 import {
   JUDGE_SEAT_REVIEW,
@@ -409,6 +410,99 @@ describe("dispatchNext: reviewer and smoker", () => {
     const result = await makeService(host).dispatchNext(RUN_ID);
     expect(result).toMatchObject({ status: "dispatched", purpose: "reviewer" });
   });
+});
+
+describe("dispatchNext: rework", () => {
+  const FINDING = { id: "b1", summary: "parse() is off by one", path: "src/t1.ts" };
+
+  /** A delivered task whose reviewer has asked for changes: the task is back for rework. */
+  async function sentBack() {
+    const delivery = await deliver();
+    const before = await seedReview(delivery);
+    const host = fakeHost();
+    const service = makeService(host, { compile: compileDispatch });
+    const reviewed = await service.dispatchNext(RUN_ID);
+    if (reviewed.status !== "dispatched") throw new Error("expected a reviewer dispatch");
+    await store.update(RUN_ID, (current) =>
+      recordReview(
+        current,
+        reviewed.assignmentId,
+        { verdict: "修改后合入", blockers: [FINDING] },
+        new Date().toISOString(),
+      ),
+    );
+    expect((await stored()).tasks.find((task) => task.spec.id === "t1")?.state).toBe("rework");
+    return { delivery, before, host, service };
+  }
+
+  test("a task sent back goes to a producer again, told what was found and where to continue", async () => {
+    const { delivery, host, service } = await sentBack();
+    const claimsBefore = (await stored()).resources;
+    const result = await service.dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({
+      status: "dispatched",
+      taskId: "t1",
+      purpose: "member",
+      seatId: "seat-b1",
+    });
+    expect(host.sent).toHaveLength(2);
+    const text = host.sent[1]?.text ?? "";
+    expect(text).toContain("【返工说明】");
+    expect(text).toContain(FINDING.summary);
+    expect(text).toContain(delivery.headSha);
+
+    const record = await stored();
+    const t1 = record.tasks.find((task) => task.spec.id === "t1");
+    expect(t1).toMatchObject({ state: "assigned", attempts: 2, reworkCount: 1 });
+    const assignment = record.assignments.find(
+      (entry) => entry.taskId === "t1" && entry.attempt === 2 && entry.purpose === "member",
+    );
+    // The new attempt starts from where the delivered commit left the branch.
+    expect(assignment?.workspace).toMatchObject({ branch: "main", baseRef: delivery.headSha });
+    const intent = record.outbox.find((entry) => entry.assignmentId === assignment?.assignmentId);
+    expect(intent).toMatchObject({ state: "confirmed", recipient: "agent-b1" });
+    expect(intent?.payloadHash).toBe(payloadHash(text));
+    expect(record.resources).toEqual(claimsBefore);
+  });
+
+  test.each([
+    [
+      "a commit on top of the delivery",
+      async () => {
+        await writeFile(path.join(repoDir, "src", "late.ts"), "x");
+        git(repoDir, "add", "--", "src/late.ts");
+        git(repoDir, "commit", "-q", "-m", "late");
+      },
+      "delivery-not-at-head",
+    ],
+    [
+      "a switched branch",
+      async () => {
+        git(repoDir, "checkout", "-q", "-b", "elsewhere");
+      },
+      "delivery-branch-changed",
+    ],
+    [
+      "an untracked file",
+      async () => {
+        await writeFile(path.join(repoDir, "stray.txt"), "x");
+      },
+      "workspace-dirty",
+    ],
+  ])(
+    "%s blocks the rework and leaves ledger and host untouched",
+    async (_name, disturb, reason) => {
+      const { host, service } = await sentBack();
+      const before = await stored();
+      await disturb();
+      const result = await service.dispatchNext(RUN_ID);
+
+      expect(result).toMatchObject({ status: "blocked", taskId: "t1", reason });
+      expect(host.sent).toHaveLength(1);
+      expect((await stored()).revision).toBe(before.revision);
+    },
+  );
 });
 
 describe("dispatchNext", () => {

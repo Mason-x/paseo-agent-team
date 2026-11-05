@@ -10,6 +10,7 @@ import { checkReviewGate, devEndpoint, producerEpoch } from "../../shared/domain
 import {
   producerSemanticArgs,
   reviewerSemanticArgs,
+  reworkSemanticArgs,
   smokerSemanticArgs,
   templateVersionFor,
 } from "../../shared/domain/run-engine/prompt-template";
@@ -128,8 +129,10 @@ type Work =
  */
 function nextWork(record: RunRecord): Work | null {
   for (const task of record.tasks) {
-    if (task.state === "ready") return { kind: "produce", task };
+    if (task.state === "ready" || task.state === "rework") return { kind: "produce", task };
     if (task.state !== "review") continue;
+    // Sent back for rework but the judges are not all finished yet: nothing to dispatch.
+    if (task.phase === "awaiting-rework") continue;
     const resolved = resolveD(record, task.spec.id);
     if (resolved.kind !== "ok") continue;
     const producerId = resolved.d.producer.assignmentId;
@@ -290,8 +293,22 @@ export function createEngineService(options: EngineServiceOptions) {
     task: RunTaskRecord,
   ): Promise<DispatchNextResult> {
     const taskId = task.spec.id;
-    const version = templateVersionFor("member");
+    const rework = task.state === "rework";
+    const version = templateVersionFor("member", { rework });
     if (version === null) return { status: "blocked", taskId, reason: "template-missing" };
+    // A rework continues from the previous delivery, which must still be what the repository holds.
+    let previousDelivery: { branch: string; commit: string } | null = null;
+    if (rework) {
+      const resolved = resolveD(record, taskId);
+      const { producer, proof } = resolved.kind === "ok" ? resolved.d : {};
+      if (!producer || !proof || producer.workspace === null || proof.ref.kind !== "git-commit") {
+        return { status: "blocked", taskId, reason: "delivery-missing" };
+      }
+      previousDelivery = {
+        branch: producer.workspace.branch,
+        commit: proof.ref.value.toLowerCase(),
+      };
+    }
 
     const context: SchedulerContext = {
       now: clock.now(),
@@ -319,6 +336,14 @@ export function createEngineService(options: EngineServiceOptions) {
         detail: inspected.detail,
       };
     }
+    if (previousDelivery !== null) {
+      if (inspected.repo.branch !== previousDelivery.branch) {
+        return { status: "blocked", taskId, reason: "delivery-branch-changed" };
+      }
+      if (inspected.repo.headSha?.toLowerCase() !== previousDelivery.commit) {
+        return { status: "blocked", taskId, reason: "delivery-not-at-head" };
+      }
+    }
     const workspace = dispatchWorkspace(inspected.repo, location.workspaceId);
     if (!workspace.ok)
       return { status: "blocked", taskId, reason: `workspace-${workspace.reason}` };
@@ -338,10 +363,10 @@ export function createEngineService(options: EngineServiceOptions) {
       return { status: "blocked", taskId, reason: `evidence-root-${evidence.reason}` };
     }
     // Pinned now so the prompt can be rebuilt byte for byte later from the ledger alone.
-    const semanticArgs = producerSemanticArgs(task.spec, {
-      repoRoot: inspected.repo.root,
-      evidenceDir: evidence.dir,
-    });
+    const argFacts = { repoRoot: inspected.repo.root, evidenceDir: evidence.dir };
+    const semanticArgs = rework
+      ? reworkSemanticArgs(task.spec, argFacts)
+      : producerSemanticArgs(task.spec, argFacts);
 
     return commit(
       runId,
