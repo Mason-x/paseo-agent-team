@@ -65,7 +65,8 @@ export type SeatDenial = {
     | "duty"
     | "mode"
     | "disabled-profile"
-    | "disabled-channel";
+    | "disabled-channel"
+    | "same-as-producer";
 };
 
 export type SeatEligibility = {
@@ -102,7 +103,34 @@ export function eligibleSeats(
   if (task?.state !== "ready") {
     return { candidates: [], denials: [], blocked: "not-ready" };
   }
-  const requirement = dispatchRequirement(task, "produce");
+  return evaluateSeats(record, dispatchRequirement(task, "produce"), ctx, new Set());
+}
+
+/**
+ * Seats for the review or smoke of a delivered task. The task must be in `review`; seats named in
+ * `exclude` (the producer's) are denied so a delivery is never judged by its own author. Family
+ * independence needs Profile data this module does not have; the caller applies it.
+ */
+export function eligibleReviewSeats(
+  record: Pick<RunRecord, "tasks" | "roster" | "policy">,
+  taskId: string,
+  action: "review" | "smoke",
+  ctx: SchedulerContext,
+  exclude: ReadonlySet<string>,
+): SeatEligibility {
+  const task = record.tasks.find((entry) => entry.spec.id === taskId);
+  if (task?.state !== "review") {
+    return { candidates: [], denials: [], blocked: "not-ready" };
+  }
+  return evaluateSeats(record, dispatchRequirement(task, action), ctx, exclude);
+}
+
+function evaluateSeats(
+  record: Pick<RunRecord, "roster" | "policy">,
+  requirement: ReturnType<typeof dispatchRequirement>,
+  ctx: SchedulerContext,
+  exclude: ReadonlySet<string>,
+): SeatEligibility {
   if (requirement.kind !== "required") {
     return { candidates: [], denials: [], blocked: "no-seat" };
   }
@@ -110,6 +138,10 @@ export function eligibleSeats(
   const denials: SeatDenial[] = [];
   const candidates: SeatChoice[] = [];
   for (const seat of ctx.seats) {
+    if (exclude.has(seat.seatId)) {
+      denials.push({ seatId: seat.seatId, reason: "same-as-producer" });
+      continue;
+    }
     const roster = rosterSeat(record, seat.seatId);
     if (!roster?.enabled || !seat.enabled) {
       denials.push({ seatId: seat.seatId, reason: "disabled" });

@@ -7,9 +7,13 @@ import type {
   RunWorkspace,
 } from "../../schemas/run-engine/ledger";
 import { type BudgetPredebit, predebit } from "./budget";
+import { resolveD } from "./delivery-binding";
+import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
+import { devEndpoint, producerEpoch } from "./gates";
 import { findLockConflicts, type LockConflict, type VerifiedScope } from "./locks";
 import { type ReduceFacts, type ReduceResult, reduceRun } from "./reducer";
-import type { RunDispatchEvent } from "./transitions";
+import { reviewRequirement } from "./tier";
+import { assignmentPhase, type RunDispatchEvent } from "./transitions";
 
 /**
  * Producer dispatch constructor (plan 11.4). `task-dispatched` makes the caller assemble the whole
@@ -19,8 +23,9 @@ import type { RunDispatchEvent } from "./transitions";
  * It is pure. Every identifier and the clock come from the caller, so a stored record plus the same
  * input always yields the same event, and nothing here can send a message.
  *
- * M2 scope: producer purposes only (`member`, `coordinator`). Reviewer and smoker dispatch bind a
- * delivery and come with the review path.
+ * `buildDispatch` is the producer path (`member`, `coordinator`). `buildReviewDispatch` is the
+ * reviewer and smoker path: it binds the assignment to the task's current delivery, takes no claims
+ * (the task keeps the ones it was granted until it is done) and does no lock check.
  */
 
 /**
@@ -84,7 +89,14 @@ export type DispatchRefusal =
   | "lock-conflict"
   | "budget-missing"
   | "budget-exhausted"
-  | "duplicate-dispatch";
+  | "duplicate-dispatch"
+  // Review and smoke only:
+  | "delivery-missing"
+  | "seat-unqualified"
+  | "seat-not-independent"
+  | "family-not-independent"
+  | "smoke-checklist-invalid"
+  | "dev-target-invalid";
 
 export type DispatchBuild =
   | {
@@ -277,6 +289,172 @@ export function buildDispatch(record: RunRecord, input: DispatchBuildInput): Dis
       nonce,
       intent,
       claims,
+      reissueOfAssignmentId: null,
+    },
+  };
+}
+
+export type ReviewDispatchInput = {
+  taskId: string;
+  seatId: string;
+  purpose: "reviewer" | "smoker";
+  profile: DispatchProfile;
+  /** Taken from real git state at dispatch; its `baseRef` is the HEAD being reviewed or smoked. */
+  workspace: RunWorkspace;
+  reason: string;
+  /** Smoke only: the registered DEV target this smoker is to use. */
+  devServerId?: string;
+  ids: { assignmentId: string; nonce: string; messageId: string; intentId: string };
+  now: string;
+  payload: DispatchBuildInput["payload"];
+};
+
+/** Smoke check ids double as the report's check ids: they must be usable as such. */
+export function smokeChecklistUsable(checklist: readonly string[]): boolean {
+  return (
+    checklist.length > 0 &&
+    new Set(checklist).size === checklist.length &&
+    checklist.every((id) => id.length > 0 && id.length <= 64)
+  );
+}
+
+/**
+ * Reviewer or smoker dispatch for the task's current delivery. Independence is checked here and
+ * again by the gates: the seat and agent must differ from the producer's, and an L1 review needs a
+ * different model family. The reducer remains the final judge of phase and capacity.
+ */
+export function buildReviewDispatch(record: RunRecord, input: ReviewDispatchInput): DispatchBuild {
+  const task = record.tasks.find((entry) => entry.spec.id === input.taskId);
+  if (!task) return { ok: false, reason: "task-missing" };
+  if (task.state !== "review") return { ok: false, reason: "task-not-dispatchable" };
+  const resolved = resolveD(record, task.spec.id);
+  if (resolved.kind !== "ok") return { ok: false, reason: "delivery-missing" };
+  const producer = resolved.d.producer;
+
+  const smoke = input.purpose === "smoker";
+  const requirement = dispatchRequirement(task, smoke ? "smoke" : "review");
+  if (requirement.kind !== "required") return { ok: false, reason: "seat-unqualified" };
+  const seat = record.roster.find((entry) => entry.seatId === input.seatId);
+  if (!seat?.enabled || seat.agentId === null) return { ok: false, reason: "seat-unavailable" };
+  if (!structuralSeats(record.roster, requirement).some((entry) => entry.seatId === seat.seatId)) {
+    return { ok: false, reason: "seat-unqualified" };
+  }
+  if (seat.seatId === producer.seatId || seat.agentId === producer.agentId) {
+    return { ok: false, reason: "seat-not-independent" };
+  }
+  if (!smoke && reviewRequirement(producerEpoch(task, producer)).level === "L1") {
+    if (producer.family === null || input.profile.family === null) {
+      return { ok: false, reason: "family-not-independent" };
+    }
+    if (producer.family === input.profile.family) {
+      return { ok: false, reason: "family-not-independent" };
+    }
+  }
+  if (smoke) {
+    if (!smokeChecklistUsable(task.spec.smokeChecklist)) {
+      return { ok: false, reason: "smoke-checklist-invalid" };
+    }
+    const target = record.policy.devTargets.find((entry) => entry.serverId === input.devServerId);
+    if (!target || devEndpoint(target.host) === null) {
+      return { ok: false, reason: "dev-target-invalid" };
+    }
+  }
+
+  const { ids } = input;
+  const idempotencyKey = `dispatch:${record.runId}:${ids.assignmentId}`;
+  if (
+    record.outbox.some(
+      (intent) => intent.messageId === ids.messageId || intent.idempotencyKey === idempotencyKey,
+    ) ||
+    record.assignments.some((entry) => entry.assignmentId === ids.assignmentId) ||
+    record.nonceRegistry.some((entry) => entry.nonce === ids.nonce)
+  ) {
+    return { ok: false, reason: "duplicate-dispatch" };
+  }
+  const reservation = predebit(record, {
+    seatId: seat.seatId,
+    intentKey: idempotencyKey,
+    messageId: ids.messageId,
+    amount: 1,
+    revision: record.revision,
+  });
+  if (reservation.status === "already-counted") return { ok: false, reason: "duplicate-dispatch" };
+  if (reservation.status === "exhausted") {
+    return {
+      ok: false,
+      reason: reservation.reason === "missing" ? "budget-missing" : "budget-exhausted",
+    };
+  }
+
+  const assignment: RunAssignment = {
+    assignmentId: ids.assignmentId,
+    taskId: task.spec.id,
+    seatId: seat.seatId,
+    agentId: seat.agentId,
+    profileId: input.profile.id,
+    profileName: input.profile.name,
+    provider: input.profile.provider,
+    model: input.profile.model,
+    family: input.profile.family,
+    channelId: seat.channelId,
+    tier: seat.tier,
+    reason: input.reason,
+    purpose: input.purpose,
+    workspace: input.workspace,
+    attempt: producer.attempt,
+    nonce: ids.nonce,
+    messageId: ids.messageId,
+    delivery: { producerAssignmentId: producer.assignmentId },
+    acceptedProof: null,
+    endedEventKey: null,
+    turnId: null,
+    state: "assigned",
+    createdAt: input.now,
+    startedAt: null,
+    endedAt: null,
+  };
+  const nonce: RunNonceEntry = {
+    nonce: ids.nonce,
+    runId: record.runId,
+    taskId: task.spec.id,
+    assignmentId: ids.assignmentId,
+    attempt: producer.attempt,
+    phase: assignmentPhase(assignment),
+    agentId: seat.agentId,
+    seatId: seat.seatId,
+    issuedAt: input.now,
+    acceptedAt: null,
+    acceptedEventKey: null,
+    revokedAt: null,
+    revokeReason: null,
+  };
+  const intent: RunEffectIntent = {
+    id: ids.intentId,
+    kind: "dispatch",
+    recipient: seat.agentId,
+    messageId: ids.messageId,
+    idempotencyKey,
+    payloadHash: input.payload.hash,
+    templateVersion: input.payload.templateVersion,
+    state: "prepared",
+    recoverySendCount: 0,
+    createdAt: input.now,
+    confirmedAt: null,
+    localCancellation: null,
+    taskId: task.spec.id,
+    assignmentId: ids.assignmentId,
+    semanticArgs: input.payload.semanticArgs ?? {},
+  };
+  return {
+    ok: true,
+    budget: reservation,
+    event: {
+      kind: "task-dispatched",
+      taskId: task.spec.id,
+      assignment,
+      nonce,
+      intent,
+      claims: [],
       reissueOfAssignmentId: null,
     },
   };

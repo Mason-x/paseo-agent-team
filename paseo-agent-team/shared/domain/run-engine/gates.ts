@@ -351,7 +351,8 @@ function actorSettled(record: RunRecord, assignment: RunRecord["assignments"][nu
   return isNormalEnded(record, assignment);
 }
 
-function devEndpoint(host: string): string | null {
+/** The host:port a smoke report may name; null for credentials, no port, or the default 6767 daemon. */
+export function devEndpoint(host: string): string | null {
   try {
     const url = new URL(host.includes("://") ? host : `http://${host}`);
     if (url.username || url.password || url.port === "" || url.port === "6767") return null;
