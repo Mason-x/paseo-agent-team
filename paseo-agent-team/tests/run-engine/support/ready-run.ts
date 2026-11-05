@@ -14,7 +14,9 @@ import {
  * (agent-b1) free. Pass `runId` and `repoId` for a record a real store can hold and a real
  * repository can verify: the scopes of every task then name that repository.
  */
-export function readyRun(options: { runId?: string; repoId?: string } = {}): RunRecord {
+export function readyRun(
+  options: { runId?: string; repoId?: string; evidenceRoot?: string } = {},
+): RunRecord {
   const runId = options.runId ?? RUN_ID;
   const fresh = options.runId !== undefined;
   const record = withLedger(
@@ -40,6 +42,21 @@ export function readyRun(options: { runId?: string; repoId?: string } = {}): Run
   record.nonceRegistry = record.nonceRegistry.filter((entry) => entry.nonce !== NONCE_T2);
   record.outbox = record.outbox.filter((entry) => entry.id !== INTENT_T2);
   record.resources = [];
+  if (options.evidenceRoot !== undefined) {
+    // The finished task's stored proof must stay under the new root or the ledger invariants refuse it.
+    const from = record.policy.evidenceRoot;
+    record.policy.evidenceRoot = options.evidenceRoot;
+    const rebase = (value: string) =>
+      value.startsWith(`${from}/`) ? `${options.evidenceRoot}${value.slice(from.length)}` : value;
+    for (const entry of record.assignments) {
+      const proof = entry.acceptedProof as {
+        evidence?: { artifactPath: string }[];
+        checks?: { evidencePath: string }[];
+      } | null;
+      for (const item of proof?.evidence ?? []) item.artifactPath = rebase(item.artifactPath);
+      for (const item of proof?.checks ?? []) item.evidencePath = rebase(item.evidencePath);
+    }
+  }
   if (options.repoId !== undefined) {
     for (const task of record.tasks) {
       for (const scope of task.spec.scopes) scope.repoId = options.repoId;

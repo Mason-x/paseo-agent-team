@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { applyDispatch, buildDispatch } from "../../shared/domain/run-engine/dispatch-builder";
+import { producerSemanticArgs } from "../../shared/domain/run-engine/prompt-template";
 import {
   planDispatchWithReasons,
   type SchedulerContext,
@@ -10,7 +11,7 @@ import {
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
-import { dispatchWorkspace, inspectRepo, verifyScopes } from "./repo";
+import { dispatchWorkspace, inspectRepo, prepareEvidenceDir, verifyScopes } from "./repo";
 import type { RunStore } from "./store";
 
 /**
@@ -22,8 +23,9 @@ import type { RunStore } from "./store";
  * which is safe: the committed update re-checks the task, the seat, the locks and the budget
  * against the record it actually holds, and the reducer refuses a stale choice.
  *
- * Not here yet: DAG admission, review and smoke dispatch, rework, and the real prompt template.
- * `compile` is injected and must ignore `payloadHash`, which is not known until it has run.
+ * Not here yet: DAG admission, review and smoke dispatch, and rework. `compile` is injected (the
+ * production one is `compileDispatch` in `prompt-template.ts`) and must ignore `payloadHash`, which
+ * is not known until it has run. The semantic arguments pinned here are the producer template's.
  */
 
 export type SeatSource = {
@@ -188,6 +190,19 @@ export function createEngineService(options: EngineServiceOptions) {
     const short = stamp.replace(/-/gu, "").slice(0, 8);
     const attempt = task.attempts + 1;
     const assignmentId = `assignment-${taskId}-a${attempt}-${short}`;
+    const evidence = await prepareEvidenceDir(
+      inspected.repo,
+      record.policy.evidenceRoot,
+      assignmentId,
+    );
+    if (!evidence.ok) {
+      return { status: "blocked", taskId, reason: `evidence-root-${evidence.reason}` };
+    }
+    // Pinned now so the prompt can be rebuilt byte for byte later from the ledger alone.
+    const semanticArgs = producerSemanticArgs(task.spec, {
+      repoRoot: inspected.repo.root,
+      evidenceDir: evidence.dir,
+    });
     const holder: { result: DispatchNextResult | null } = { result: null };
 
     await options.store.update(runId, (current, update) => {
@@ -208,7 +223,11 @@ export function createEngineService(options: EngineServiceOptions) {
         },
         now: clock.now(),
         // Replaced below: the real hash is that of the prompt compiled from the finished record.
-        payload: { hash: "0".repeat(64), templateVersion: options.templateVersion },
+        payload: {
+          hash: "0".repeat(64),
+          templateVersion: options.templateVersion,
+          semanticArgs,
+        },
       });
       if (!built.ok) {
         holder.result = {

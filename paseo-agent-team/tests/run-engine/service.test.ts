@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -8,6 +8,10 @@ import { inspectRepo } from "../../server/run-engine/repo";
 import { createEngineService, type EngineServiceOptions } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_EXCLUSIVE_RESOURCE } from "../../shared/domain/run-engine/dispatch-builder";
+import {
+  compileDispatch,
+  PRODUCER_TEMPLATE_VERSION,
+} from "../../shared/domain/run-engine/prompt-template";
 import type { PaseoEnginePort, PortAgentSnapshot, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import {
@@ -34,6 +38,7 @@ const WORKSPACE_ID = "ws-start";
 let home: string;
 let repoDir: string;
 let repoId: string;
+let evidenceRoot: string;
 let store: RunStore;
 
 function git(cwd: string, ...args: string[]): void {
@@ -64,6 +69,7 @@ beforeEach(async () => {
   if (!inspected.ok) throw new Error("fixture repository is not readable");
   repoId = inspected.repo.repoId;
 
+  evidenceRoot = path.join(home, "evidence").replaceAll("\\", "/");
   await mkdir(path.join(home, "paseo"));
   store = createRunStore({ home: path.join(home, "paseo"), lock: { acquireTimeoutMs: 300 } });
   await store.initialize();
@@ -146,7 +152,8 @@ function makeService(
 }
 
 async function seed(mutate: (record: RunRecord) => void = () => undefined): Promise<RunRecord> {
-  const record = readyRun({ runId: RUN_ID, repoId });
+  // Evidence lives outside the repository; the fixture's relative "evidence" would not be allowed.
+  const record = readyRun({ runId: RUN_ID, repoId, evidenceRoot });
   mutate(record);
   await store.create(record);
   return record;
@@ -288,6 +295,72 @@ describe("dispatchNext", () => {
     expect(result).toMatchObject({ status: "blocked", taskId: "t2", reason: "lock-conflict" });
     expect(host.sent).toHaveLength(0);
     expect((await stored()).assignments.some((entry) => entry.taskId === "t2")).toBe(false);
+  });
+
+  test("the evidence directory is created outside the repository before the dispatch", async () => {
+    await seed();
+    const host = fakeHost();
+    const result = await makeService(host).dispatchNext(RUN_ID);
+    if (result.status !== "dispatched") throw new Error("expected a dispatch");
+    const intent = (await stored()).outbox.find(
+      (entry) => entry.kind === "dispatch" && entry.taskId === "t2",
+    );
+    const dir = (intent?.semanticArgs as { evidenceDir?: string } | undefined)?.evidenceDir;
+    expect(dir).toBe(`${evidenceRoot}/${result.assignmentId}`);
+    // The directory exists, and creating it did not dirty the working tree.
+    await expect(stat(dir ?? "")).resolves.toBeTruthy();
+    const after = await inspectRepo(repoDir);
+    expect(after.ok && after.repo.clean).toBe(true);
+  });
+
+  test("an evidence root that is relative or inside the repository blocks the dispatch", async () => {
+    // No evidenceRoot override: the fixture's own root is the relative "evidence".
+    await store.create(readyRun({ runId: RUN_ID, repoId }));
+    const relative = fakeHost();
+    expect(await makeService(relative).dispatchNext(RUN_ID)).toEqual({
+      status: "blocked",
+      taskId: "t2",
+      reason: "evidence-root-not-absolute",
+    });
+
+    await store.create(
+      readyRun({
+        runId: "run-inside-a1",
+        repoId,
+        evidenceRoot: path.join(repoDir, "evidence").replaceAll("\\", "/"),
+      }),
+    );
+    const host = fakeHost();
+    expect(await makeService(host).dispatchNext("run-inside-a1")).toEqual({
+      status: "blocked",
+      taskId: "t2",
+      reason: "evidence-root-inside-repo",
+    });
+    expect(relative.sent).toHaveLength(0);
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test("with the real producer template the sent prompt carries this assignment's identity", async () => {
+    await seed();
+    const host = fakeHost();
+    const service = makeService(host, {
+      compile: compileDispatch,
+      templateVersion: PRODUCER_TEMPLATE_VERSION,
+    });
+    const result = await service.dispatchNext(RUN_ID);
+    expect(result).toMatchObject({ status: "dispatched" });
+
+    const record = await stored();
+    const assignment = record.assignments.find((entry) => entry.taskId === "t2");
+    const text = host.sent[0]?.text ?? "";
+    expect(text).toContain(assignment?.nonce);
+    expect(text).toContain(assignment?.assignmentId);
+    expect(text).toContain(assignment?.workspace?.baseRef);
+    const intent = record.outbox.find(
+      (entry) => entry.kind === "dispatch" && entry.taskId === "t2",
+    );
+    // The ledger's hash is the hash of what a fresh compile of the stored record produces.
+    expect(intent?.payloadHash).toBe(payloadHash(compileDispatch(intent as never, record) ?? ""));
   });
 
   test("two concurrent calls mint one assignment and send one message", async () => {

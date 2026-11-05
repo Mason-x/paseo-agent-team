@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { normalizeLogicalPath, type VerifiedScope } from "../../shared/domain/run-engine/locks";
 import type { RunTaskSpec, RunWorkspace } from "../../shared/schemas/run-engine/ledger";
@@ -119,6 +119,38 @@ export function dispatchWorkspace(repo: RepoFacts, workspaceId: string): Dispatc
   if (repo.headSha === null) return { ok: false, reason: "no-commit" };
   if (!repo.clean) return { ok: false, reason: "dirty" };
   return { ok: true, workspace: { id: workspaceId, branch: repo.branch, baseRef: repo.headSha } };
+}
+
+export type EvidenceDir =
+  | { ok: true; dir: string }
+  | { ok: false; reason: "not-absolute" | "unusable" | "inside-repo" | "contains-repo" };
+
+/**
+ * The assignment's evidence directory: `<evidenceRoot>/<assignmentId>`, created here, outside the
+ * repository. The quality gate only compares the reported path's text against `evidenceRoot`, so the
+ * returned `dir` keeps the policy's spelling (forward slashes); the real location is checked
+ * separately. A root inside the working tree would make every member's log a dirty-tree file.
+ */
+export async function prepareEvidenceDir(
+  repo: RepoFacts,
+  evidenceRoot: string,
+  assignmentId: string,
+): Promise<EvidenceDir> {
+  const normalized = evidenceRoot.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (normalized.startsWith("//") || !path.isAbsolute(normalized)) {
+    return { ok: false, reason: "not-absolute" };
+  }
+  const dir = `${normalized}/${assignmentId}`;
+  let real: string;
+  try {
+    await mkdir(dir, { recursive: true });
+    real = await realpath(dir);
+  } catch {
+    return { ok: false, reason: "unusable" };
+  }
+  if (contains(repo.root, real)) return { ok: false, reason: "inside-repo" };
+  if (contains(real, repo.root)) return { ok: false, reason: "contains-repo" };
+  return { ok: true, dir };
 }
 
 export type ScopeRefusal =
