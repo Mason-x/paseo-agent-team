@@ -240,7 +240,8 @@ export function createEngineService(options: EngineServiceOptions) {
       }
       const applied = applyDispatch(current, built, {
         now: clock.now(),
-        newId: (kind) => `${kind}-${uuid()}`,
+        // The only ids the reducer asks for are decision ids, and the ledger requires a UUID.
+        newId: () => uuid(),
       });
       if (!applied.ok) {
         holder.result = {
