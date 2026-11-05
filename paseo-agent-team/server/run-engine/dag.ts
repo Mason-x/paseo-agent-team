@@ -60,6 +60,35 @@ function latestPlanRequest(record: RunRecord, agentId: string) {
   return sent.at(-1);
 }
 
+/**
+ * The DAG is the plan request's completion. The ledger counts a message that belongs to no
+ * assignment as an unsettled effect for as long as it stays in the outbox (an orphan `wake` blocks
+ * `run-finished` on purpose), so the request leaves the outbox when the plan it asked for is in,
+ * and an audit event keeps the fact that it was sent and answered.
+ */
+function consumePlanRequests(record: RunRecord, agentId: string, now: string): RunRecord {
+  const consumed = record.outbox.filter(
+    (intent) => intent.kind === "wake" && intent.recipient === agentId,
+  );
+  if (consumed.length === 0) return record;
+  const seq = record.counters.eventsThroughSeq + 1;
+  return {
+    ...record,
+    outbox: record.outbox.filter((intent) => !consumed.includes(intent)),
+    counters: { ...record.counters, eventsThroughSeq: seq },
+    events: [
+      ...record.events,
+      {
+        seq,
+        kind: "plan-request-settled",
+        at: now,
+        payload: { intentIds: consumed.map((intent) => intent.id) },
+      },
+    ],
+    updatedAt: now,
+  };
+}
+
 export function createDagIntake(options: DagIntakeOptions) {
   const clock = options.clock ?? { now: () => new Date().toISOString() };
   const uuid = options.ids?.uuid ?? (() => randomUUID());
@@ -200,7 +229,7 @@ export function createDagIntake(options: DagIntakeOptions) {
         return null;
       }
       holder.result = { status: "admitted", tasks: again.block.tasks.length };
-      return reduced.next;
+      return consumePlanRequests(reduced.next, agentId, now);
     });
 
     // A refusal found only inside the commit is shown the same way as one found before it.

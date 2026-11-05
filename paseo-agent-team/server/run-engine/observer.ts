@@ -280,15 +280,34 @@ export function createRunObserver(options: ObserverOptions) {
           continue;
         }
         summary.runsScanned += 1;
+        // What the Run is waiting on: each open assignment's dispatch, and, until its DAG is in,
+        // the coordinator's reply to the newest plan request.
+        const waiting: { agentId: string; messageId: string }[] = [];
         for (const assignment of read.record.assignments) {
           if (assignment.state !== "assigned" && assignment.state !== "in_progress") continue;
+          waiting.push({ agentId: assignment.agentId, messageId: assignment.messageId });
+        }
+        const lifecycle = read.record.lifecycle;
+        if (lifecycle === "bootstrapping" || lifecycle === "awaiting-dag") {
+          const coordinator = read.record.roster.find((seat) => seat.seatId === "coordinator");
+          const plan = read.record.outbox.findLast(
+            (intent) =>
+              intent.kind === "wake" &&
+              intent.recipient === coordinator?.agentId &&
+              ["sending", "confirmed", "outcome-unknown"].includes(intent.state),
+          );
+          if (coordinator?.agentId && plan) {
+            waiting.push({ agentId: coordinator.agentId, messageId: plan.messageId });
+          }
+        }
+        for (const item of waiting) {
           summary.turnsChecked += 1;
           let window: ReplyWindow;
           try {
-            window = await host.replyWindow(assignment.agentId, assignment.messageId);
+            window = await host.replyWindow(item.agentId, item.messageId);
           } catch (error) {
             summary.hostErrors += 1;
-            log(`reconcile could not read ${assignment.agentId}`, error);
+            log(`reconcile could not read ${item.agentId}`, error);
             continue;
           }
           if (!window.complete) {
@@ -297,7 +316,7 @@ export function createRunObserver(options: ObserverOptions) {
           }
           const normalized = normalize({
             name: "agent.turn_ended",
-            agentId: assignment.agentId,
+            agentId: item.agentId,
             turnId: window.turnId,
           });
           if ("skip" in normalized) continue;

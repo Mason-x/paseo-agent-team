@@ -135,6 +135,13 @@ describe("settleCoordinator", () => {
       inspected.repo.repoId,
     ]);
     expect(readDagControl(after)?.acceptedAt).not.toBeNull();
+    // The plan request is answered: it leaves the outbox (an orphan wake would keep the Run from
+    // ever finishing) and the audit trail says so.
+    expect(after.outbox.some((intent) => intent.kind === "wake")).toBe(false);
+    expect(after.events.at(-1)).toMatchObject({
+      kind: "plan-request-settled",
+      payload: { intentIds: ["intent-plan-1"] },
+    });
     expect(h.onAdmitted).toHaveBeenCalledWith(RUN_ID);
 
     // The same reply again changes nothing.
