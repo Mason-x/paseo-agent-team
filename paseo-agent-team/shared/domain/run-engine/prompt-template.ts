@@ -1,4 +1,7 @@
 import type { RunEffectIntent, RunRecord, RunTaskSpec } from "../../schemas/run-engine/ledger";
+import { resolveProducerProof } from "./delivery-binding";
+import { smokeChecklistUsable } from "./dispatch-builder";
+import { devEndpoint } from "./gates";
 
 /**
  * Dispatch prompt templates (plan 11.4 item 3). `compileDispatch` is the function the outbox
@@ -15,14 +18,39 @@ import type { RunEffectIntent, RunRecord, RunTaskSpec } from "../../schemas/run-
  * the member's reply, but a member that echoes the prompt would otherwise echo a protocol block.
  * The block format is described in words.
  *
- * Only the producer template exists. Reviewer and smoker compile to `null` until they are built.
+ * Three templates: `producer` (member, coordinator, reopen), `reviewer` and `smoker`. The reviewer
+ * and smoker texts take the delivery they judge (producer base, delivered ref, changed files) from
+ * the producer's accepted proof in the ledger, never from a "current" pointer, so they stay
+ * reproducible. Repair and cancel-interrupt messages have no template: they need contract changes.
  */
 
 export const PRODUCER_TEMPLATE_VERSION = 1;
+export const REVIEWER_TEMPLATE_VERSION = 1;
+export const SMOKER_TEMPLATE_VERSION = 1;
 
 type DispatchIntent = Extract<RunEffectIntent, { kind: "dispatch" }>;
 
-const PRODUCER_PURPOSES = ["member", "coordinator", "reopen"];
+type TemplateName = "producer" | "reviewer" | "smoker";
+
+const TEMPLATE_OF_PURPOSE: Readonly<Record<string, TemplateName>> = {
+  member: "producer",
+  coordinator: "producer",
+  reopen: "producer",
+  reviewer: "reviewer",
+  smoker: "smoker",
+};
+
+const VERSION_OF_TEMPLATE: Readonly<Record<TemplateName, number>> = {
+  producer: PRODUCER_TEMPLATE_VERSION,
+  reviewer: REVIEWER_TEMPLATE_VERSION,
+  smoker: SMOKER_TEMPLATE_VERSION,
+};
+
+/** The template version a new dispatch of this purpose is committed with; null if none exists. */
+export function templateVersionFor(purpose: string): number | null {
+  const template = TEMPLATE_OF_PURPOSE[purpose];
+  return template === undefined ? null : VERSION_OF_TEMPLATE[template];
+}
 
 /** Task fields the member sees, pinned at dispatch. Picked by name so spec growth is not leaked. */
 const SNAPSHOT_FIELDS = [
@@ -38,28 +66,49 @@ const SNAPSHOT_FIELDS = [
   "irreversible",
 ] as const;
 
-export type ProducerSemanticArgs = {
-  template: "producer";
+export type DispatchSemanticArgs = {
+  template: TemplateName;
   /** Real path of the working tree root, as verified at dispatch. */
   repoRoot: string;
   /** Where this assignment's evidence goes: outside the repository, created before dispatch. */
   evidenceDir: string;
   taskSnapshot: Record<string, unknown>;
+  /** Smoke only: the registered DEV target, resolved from `policy.devTargets` when compiling. */
+  devServerId?: string;
 };
+export type ProducerSemanticArgs = DispatchSemanticArgs & { template: "producer" };
 
-export function producerSemanticArgs(
+type ArgFacts = { repoRoot: string; evidenceDir: string };
+
+function semanticArgs(
+  template: TemplateName,
   spec: RunTaskSpec,
-  facts: { repoRoot: string; evidenceDir: string },
-): ProducerSemanticArgs {
+  facts: ArgFacts,
+): DispatchSemanticArgs {
   const snapshot: Record<string, unknown> = {};
   for (const field of SNAPSHOT_FIELDS) snapshot[field] = spec[field];
   return {
-    template: "producer",
+    template,
     repoRoot: facts.repoRoot,
     evidenceDir: facts.evidenceDir,
     // A deep copy through the canonical form: it must be plain JSON, and it cannot alias the spec.
     taskSnapshot: JSON.parse(canonicalJson(snapshot)) as Record<string, unknown>,
   };
+}
+
+export function producerSemanticArgs(spec: RunTaskSpec, facts: ArgFacts): ProducerSemanticArgs {
+  return semanticArgs("producer", spec, facts) as ProducerSemanticArgs;
+}
+
+export function reviewerSemanticArgs(spec: RunTaskSpec, facts: ArgFacts): DispatchSemanticArgs {
+  return semanticArgs("reviewer", spec, facts);
+}
+
+export function smokerSemanticArgs(
+  spec: RunTaskSpec,
+  facts: ArgFacts & { devServerId: string },
+): DispatchSemanticArgs {
+  return { ...semanticArgs("smoker", spec, facts), devServerId: facts.devServerId };
 }
 
 const GENERIC_ESCAPES: Record<string, string> = {
@@ -184,29 +233,118 @@ const PRODUCER_BODY: string[] = [
   "停止后续的业务操作并列出已知事实。",
 ];
 
-function renderProducerV1(ctx: RenderContext): string {
-  return `${[...COMMON(ctx), ...PRODUCER_BODY].join("\n")}\n`;
-}
+const REVIEWER_BODY: string[] = [
+  "",
+  "【职责：review】",
+  "",
+  "你是独立审查者：只审查，不修改项目文件，不提交，不委派修复。执行事实里的 delivery 是被审的交付：",
+  "producerBaseRef 是生产者开始工作时的 HEAD，deliveryRef 是它交付的提交，changedFiles 是它声称改动的文件。",
+  "workspace.baseRef 是本次审查派发时的 HEAD，不是 producerBaseRef，不要用它计算差异。",
+  "",
+  "先核对仓库根目录、当前分支、工作树是否干净，以及当前 HEAD 是否等于 deliveryRef.value。不符时停止并说明，",
+  "不要切换分支、检出别的提交、清理或重置。审查的是 producerBaseRef 到 deliveryRef 的差异（用只读的 git 命令读取）。",
+  "把差异与任务资料的 scopes、acceptance、evidence 逐项对照，检查正确性、边界情况、回归风险，并核对 changedFiles",
+  "是否与实际差异一致、是否都在 write 范围内。需要验证时只做不会改动工作树的只读操作；会向工作树写入的命令",
+  "（生成构建产物、覆盖率目录等）不要运行，除非把输出重定向到证据目录。无法验证的内容如实说明，不要假定通过。",
+  "结束前再核对一次 HEAD 和工作树没有变化。",
+  "",
+  "协议块的块名是 review-report，JSON 顶层除身份字段外必须有：",
+  "- reviewedRef：与执行事实中 delivery.deliveryRef 完全相同的对象；",
+  '- verdict：只能是 "可合入"、"修改后合入"、"不可合入" 之一；',
+  "- blockers：数组，每项只有 id、summary、path（路径字符串，或 null）；没有阻断项时是空数组；",
+  "- probes：数组，每项是 evidence 对象（只有 id、command、exitCode、summary、artifactPath、ref，ref 与 deliveryRef 相同，",
+  "  artifactPath 位于执行事实中的证据目录之下，用正斜杠）；没有实际执行的探针时是空数组。",
+  '只有完成了审查并且没有任何阻断项时才写 "可合入"。verdict 不是 "可合入"，或者 blockers 不为空，交付都会退回生产者返工，',
+  "所以每个阻断项要写明位置、影响和可复核的理由。",
+  "如果无法确认被审的提交、无法读取必要的资料，或者审查没有完成，只用简短的普通文字说明原因，不输出协议块；",
+  "不要把“无法审查”写成通过，也不要写成质量问题。",
+];
 
-const PRODUCER_RENDERERS = new Map<number, (ctx: RenderContext) => string>([[1, renderProducerV1]]);
+const SMOKER_BODY: string[] = [
+  "",
+  "【职责：smoke】",
+  "",
+  "你只在执行事实中 devTarget 登记的 DEV 目标上，对 delivery.deliveryRef 这个交付做冒烟检查。",
+  "先核对仓库根目录、当前分支、工作树是否干净，以及当前 HEAD 是否等于 deliveryRef.value。不符时停止并说明，",
+  "不要切换分支、检出别的提交、清理或重置；冒烟结束后再核对一次。",
+  "只使用 devTarget 里的 devHost、devServerId、devHome；不要操作任何真实用户的实例，不要使用默认 home，",
+  "不要自行提权或代答权限，不要改动工作树。DEV 目标不可用、与登记的信息不符，或者无法确定它是 DEV 时，停止并说明。",
+  "",
+  "任务资料里 smokeChecklist 的每个字符串，既是检查的内容，也是报告里必须原样使用的检查 id。逐项执行，",
+  "把真实的证据（日志、截图等）保存在执行事实中的证据目录下，不要放进仓库。",
+  "",
+  "协议块的块名是 smoke-report，JSON 顶层除身份字段外必须有：",
+  "- testedRef：与 delivery.deliveryRef 完全相同的对象；",
+  "- devHost、devServerId、devHome：原样填写 devTarget 里的值；",
+  "- checks：对 smokeChecklist 里的每个 id 恰好一项，每项只有 id、result、evidencePath；",
+  '  result 只能是 "pass" 或 "fail"，evidencePath 是该项真实证据文件的路径，位于证据目录之下（用正斜杠）。',
+  '"fail" 只用于实际执行后观察到失败的检查。没有执行、不适用或结果不确定的检查，既不能写成 "pass"，也不能写成 "fail"；',
+  "只要有任何一项无法如实完成，就只用简短的普通文字说明原因，不输出协议块。",
+];
 
-function readArgs(
-  args: Record<string, unknown>,
-): { repoRoot: string; evidenceDir: string; taskSnapshot: Record<string, unknown> } | null {
-  const { template, repoRoot, evidenceDir, taskSnapshot } = args;
-  if (template !== "producer") return null;
+type Render = (ctx: RenderContext) => string;
+
+const RENDERERS: Readonly<Record<TemplateName, ReadonlyMap<number, Render>>> = {
+  producer: new Map([[1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY].join("\n")}\n`]]),
+  reviewer: new Map([[1, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY].join("\n")}\n`]]),
+  smoker: new Map([[1, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY].join("\n")}\n`]]),
+};
+
+type ReadArgs = {
+  repoRoot: string;
+  evidenceDir: string;
+  taskSnapshot: Record<string, unknown>;
+  devServerId: string | null;
+};
+
+function readArgs(args: Record<string, unknown>, expected: TemplateName): ReadArgs | null {
+  const { template, repoRoot, evidenceDir, taskSnapshot, devServerId } = args;
+  if (template !== expected) return null;
   if (typeof repoRoot !== "string" || repoRoot === "") return null;
   if (typeof evidenceDir !== "string" || evidenceDir === "") return null;
   if (typeof taskSnapshot !== "object" || taskSnapshot === null || Array.isArray(taskSnapshot)) {
     return null;
   }
-  return { repoRoot, evidenceDir, taskSnapshot: taskSnapshot as Record<string, unknown> };
+  if (expected === "smoker" && (typeof devServerId !== "string" || devServerId === "")) return null;
+  return {
+    repoRoot,
+    evidenceDir,
+    taskSnapshot: taskSnapshot as Record<string, unknown>,
+    devServerId: typeof devServerId === "string" ? devServerId : null,
+  };
+}
+
+/**
+ * What a reviewer or smoker judges, from the producer's accepted proof. Only a delivered git commit
+ * is supported: it is what the M2 producer template asks for, and the one ref kind whose HEAD a
+ * judge can compare against.
+ */
+function deliveryFacts(record: RunRecord, producerAssignmentId: string, taskId: string) {
+  const producer = record.assignments.find((entry) => entry.assignmentId === producerAssignmentId);
+  const proof = resolveProducerProof(record, producerAssignmentId);
+  if (!producer || producer.taskId !== taskId || producer.workspace === null || !proof) return null;
+  if (proof.ref.kind !== "git-commit") return null;
+  return {
+    producerAssignmentId,
+    producerBranch: producer.workspace.branch,
+    producerBaseRef: producer.workspace.baseRef,
+    deliveryRef: { kind: proof.ref.kind, value: proof.ref.value },
+    changedFiles: [...proof.changedFiles],
+  };
+}
+
+function devTargetFacts(record: RunRecord, devServerId: string) {
+  const targets = record.policy.devTargets.filter((entry) => entry.serverId === devServerId);
+  const [target] = targets;
+  if (targets.length !== 1 || !target || devEndpoint(target.host) === null) return null;
+  return { devServerId: target.serverId, devHost: target.host, devHome: target.home };
 }
 
 /**
  * Rebuilds the prompt text of a dispatch intent. Returns `null` when it cannot be rebuilt faithfully:
- * the intent does not match its assignment, the purpose has no template yet, the version is not
- * registered, or the pinned arguments are unusable. `null` means "do not send".
+ * the intent does not match its assignment, the purpose has no template, the version is not
+ * registered, the pinned arguments are unusable, or a judge's delivery or DEV target cannot be
+ * resolved from the ledger. `null` means "do not send".
  */
 export function compileDispatch(intent: DispatchIntent, record: RunRecord): string | null {
   const assignment = record.assignments.find((entry) => entry.assignmentId === intent.assignmentId);
@@ -215,14 +353,37 @@ export function compileDispatch(intent: DispatchIntent, record: RunRecord): stri
     assignment.taskId !== intent.taskId ||
     assignment.messageId !== intent.messageId ||
     assignment.agentId !== intent.recipient ||
-    assignment.workspace === null ||
-    !PRODUCER_PURPOSES.includes(assignment.purpose)
+    assignment.workspace === null
   ) {
     return null;
   }
-  const render = PRODUCER_RENDERERS.get(intent.templateVersion);
-  const args = readArgs(intent.semanticArgs);
+  const template = TEMPLATE_OF_PURPOSE[assignment.purpose];
+  if (template === undefined) return null;
+  const render = RENDERERS[template].get(intent.templateVersion);
+  const args = readArgs(intent.semanticArgs, template);
   if (!render || !args) return null;
+
+  const extra: Record<string, unknown> = {};
+  if (template !== "producer") {
+    const producerId = assignment.delivery?.producerAssignmentId;
+    if (producerId === undefined) return null;
+    const delivery = deliveryFacts(record, producerId, assignment.taskId);
+    if (!delivery) return null;
+    extra.delivery = delivery;
+    if (template === "smoker") {
+      const checklist = args.taskSnapshot.smokeChecklist;
+      if (
+        !Array.isArray(checklist) ||
+        !checklist.every((item) => typeof item === "string") ||
+        !smokeChecklistUsable(checklist)
+      ) {
+        return null;
+      }
+      const devTarget = devTargetFacts(record, args.devServerId ?? "");
+      if (!devTarget) return null;
+      extra.devTarget = devTarget;
+    }
+  }
   try {
     return render({
       identity: {
@@ -243,6 +404,7 @@ export function compileDispatch(intent: DispatchIntent, record: RunRecord): stri
         },
         repoRoot: args.repoRoot,
         evidenceDir: args.evidenceDir,
+        ...extra,
       },
       task: args.taskSnapshot,
     });

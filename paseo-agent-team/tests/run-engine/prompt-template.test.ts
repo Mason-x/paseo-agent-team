@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import { extractProtocolBlock } from "../../server/run-engine/protocol";
 import { applyDispatch, buildDispatch } from "../../shared/domain/run-engine/dispatch-builder";
@@ -87,6 +88,18 @@ function section(text: string, label: string): Record<string, unknown> {
   if (index < 0) throw new Error(`no section ${label}`);
   return JSON.parse(lines[index + 1] ?? "") as Record<string, unknown>;
 }
+
+describe("producer template version 1 is frozen", () => {
+  // Any change to a rendered byte must be a new version; a failure here means "add version 2",
+  // not "update the hash". The same applies to the reviewer and smoker pins in the judge tests.
+  test("renders exactly these bytes for a fixed ledger", () => {
+    const { record, intent } = dispatched();
+    const text = compileDispatch(intent, record) ?? "";
+    expect(createHash("sha256").update(text, "utf8").digest("hex")).toBe(
+      "1b0a9b9ae2b7566543c0eb2cb1cead2ccf17a4a218aecacb342adff53500b1ea",
+    );
+  });
+});
 
 describe("canonicalJson", () => {
   test("sorts keys, keeps array order, and is independent of insertion order", () => {
