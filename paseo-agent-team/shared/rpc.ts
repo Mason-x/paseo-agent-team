@@ -88,6 +88,16 @@ export const LaunchJobSchema = z.object({
   /** Never set by this version (the stored Team mode is not read); kept for older pages. */
   rawMode: z.string().optional(),
   planHash: z.string().optional(),
+  /**
+   * Present only for a Run the Run Engine started. `launchState` is the Run record's own launch
+   * state (`kickoff-pending` means the plan request went out without proof of delivery yet).
+   * Absent for the original coordinator chain, so older pages parse every job as before.
+   */
+  engine: z
+    .object({
+      launchState: z.enum(["preparing", "creating", "kickoff-pending", "running", "failed"]),
+    })
+    .optional(),
 });
 
 export type LaunchTarget = z.infer<typeof LaunchTargetSchema>;

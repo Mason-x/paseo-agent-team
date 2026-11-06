@@ -45,6 +45,24 @@ export function seatProfileOf(profile: PaseoProfile): SeatProfile {
   };
 }
 
+/** The start Workspace of an Engine Run: the whole Run shares it (plan 11.4, M2). */
+export type LaunchWorkspace = { id: string; directory: string };
+
+/**
+ * The start Workspace, frozen at launch in a passthrough field of `launch`. `resolveWorkspace` is
+ * synchronous in the service, so the real directory must be in the record: asking the host later
+ * would make every dispatch depend on a live read, and a moved Workspace would silently change
+ * where a running Run writes. `null` when the record has none (no dispatch is then possible).
+ */
+export function readLaunchWorkspace(record: Pick<RunRecord, "launch">): LaunchWorkspace | null {
+  const raw = (record.launch as Record<string, unknown>).workspace;
+  if (typeof raw !== "object" || raw === null) return null;
+  const { id, directory } = raw as Record<string, unknown>;
+  if (typeof id !== "string" || id === "") return null;
+  if (typeof directory !== "string" || directory === "") return null;
+  return { id, directory };
+}
+
 /**
  * Seat -> Profile, frozen at launch in a passthrough field of `launch`. A Profile that is renamed or
  * removed later does not change who a seat in a running Run is, and no kick has to read the host to
@@ -149,6 +167,8 @@ export type RunRecordInput = {
   /** Seat id (logical, or `coordinator`) -> the Profile that seat runs on. */
   seatProfiles: ReadonlyMap<string, SeatProfile>;
   coordinatorChannelId: string;
+  /** The start Workspace, frozen into `launch.workspace`. Omitted only by fixtures that inject it. */
+  workspace?: LaunchWorkspace;
 };
 
 export function buildRunRecord(input: RunRecordInput): RunRecord {
@@ -215,6 +235,7 @@ export function buildRunRecord(input: RunRecordInput): RunRecord {
       state: "preparing",
       modelPlan,
       seatProfiles,
+      ...(input.workspace ? { workspace: { ...input.workspace } } : {}),
       // No `dagControl` yet: the control nonce is made when the plan request is prepared, and its
       // digest, its text and the request's hash are committed together (`addPlanRequest`).
     } as RunRecord["launch"],

@@ -11,9 +11,9 @@ import { createDesignPlanner } from "./server/designer/planning";
 import { createDesignService } from "./server/designer/service";
 import { createDesignJobStore, type DesignJobStore } from "./server/designer/store";
 import { createLaunchService } from "./server/launch-service";
-import { createObserverHost } from "./server/run-engine/host";
-import { createRunObserver, type ObserverHookEvent } from "./server/run-engine/observer";
+import type { ObserverHookEvent } from "./server/run-engine/observer";
 import { createRunQueries } from "./server/run-engine/queries";
+import { createEngineRuntime } from "./server/run-engine/runtime";
 import { createRunStore } from "./server/run-engine/store";
 import { createTeamPlanService } from "./server/team-plan-service";
 import { exampleCatalog, previewDefaultCatalog } from "./server/templates";
@@ -93,7 +93,6 @@ export default function contribute(server: PluginServerContext) {
     teams: server.registerSettings(teamsSettings),
     preferences: server.registerSettings(preferencesSettings),
   };
-  const launches = createLaunchService(settings);
   const bootId = randomUUID();
   const versions = createVersionService({ bootId });
 
@@ -163,9 +162,11 @@ export default function contribute(server: PluginServerContext) {
   });
   const designHooks = createDesignHooks({ service: designer, log });
 
-  // Run Engine, batch B: observation only. The store is the single writer of the run ledger; the
-  // observer only records host facts as receipts, and the RPCs below can only read. Nothing here
-  // creates an agent, sends a message, cancels, or advances a task.
+  // Run Engine. The store is the single writer of the run ledger. The runtime owns the observer,
+  // the outbox executor, the dispatch service, report and DAG intake, and the driver; every host
+  // hook goes through `driver.onHook`, and the Paseo handle is bound the first time an RPC or hook
+  // supplies one (that also runs one recovery of the Runs that were live before a restart).
+  // Engine Runs are started only when `PASEO_AGENT_TEAM_RUN_ENGINE=1` is set on this daemon.
   const runStore = createRunStore({ home: process.env.PASEO_HOME, log });
   let runStoreInitializing: Promise<void> | null = null;
   const ensureRunStore = (): Promise<void> => {
@@ -185,28 +186,25 @@ export default function contribute(server: PluginServerContext) {
   };
   void ensureRunStore();
   const runQueries = createRunQueries({ store: runStore, ensureReady: ensureRunStore });
-  const runObserver = createRunObserver({ store: runStore, log });
-  let reconciling = false;
-  const observeRunEvent = async (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) => {
-    await ensureRunStore();
-    await runObserver.ingest(event);
-    if (runStore.ready && runObserver.buffered > 0) await runObserver.flush();
-    if (runObserver.needsReconcile && runStore.ready && !reconciling) {
-      reconciling = true;
-      try {
-        await runObserver.reconcile(createObserverHost(paseo));
-      } finally {
-        reconciling = false;
-      }
+  const engine = createEngineRuntime({ store: runStore, ensureReady: ensureRunStore, log });
+  const launches = createLaunchService({ ...settings, engine: engine.launchHost, log });
+  // A hook handler must never throw into the host, whatever the Engine does (also synchronously).
+  const guardedObserve = async (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) => {
+    try {
+      await engine.onHook(event, paseo);
+    } catch (error) {
+      log(`run engine failed on ${event.name}`, error);
     }
   };
-  const guardedObserve = (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) =>
-    observeRunEvent(event, paseo).catch((error: unknown) => {
-      log(`run observer failed on ${event.name}`, error);
-    });
 
-  server.handle(launchPreviewRpc, (input, { paseo }) => launches.preview(input, paseo));
-  server.handle(launchStartRpc, (input, { paseo }) => launches.start(input, paseo));
+  server.handle(launchPreviewRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return launches.preview(input, paseo);
+  });
+  server.handle(launchStartRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return launches.start(input, paseo);
+  });
   server.handle(launchStatusRpc, ({ runId }) => ({
     job: launches.status(runId),
   }));
@@ -286,8 +284,14 @@ export default function contribute(server: PluginServerContext) {
     ),
   );
 
-  server.handle(runListRpc, (input) => runQueries.list(input));
-  server.handle(runGetRpc, (input) => runQueries.get(input));
+  server.handle(runListRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return runQueries.list(input);
+  });
+  server.handle(runGetRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return runQueries.get(input);
+  });
 
   const stopRunHooks = [
     server.on("agent.turn_started", (event, { paseo }) =>

@@ -30,6 +30,12 @@ export type DriverOptions = {
   store: Pick<RunStore, "get" | "update" | "list" | "runsForAgent">;
   observer: Pick<RunObserver, "ingest" | "flush" | "reconcile">;
   host: ObserverHost;
+  /**
+   * The host `recover` reconciles with, when it must be stricter than `host`: reconcile records a
+   * turn as ended without a hook saying so, so it should not treat a running turn as finished.
+   * Defaults to `host`.
+   */
+  reconcileHost?: ObserverHost;
   intake: Pick<Intake, "settleAgent">;
   dagIntake: Pick<DagIntake, "settleCoordinator">;
   service: Pick<EngineService, "dispatchNext">;
@@ -169,7 +175,7 @@ export function createEngineDriver(options: DriverOptions) {
      */
     async recover(): Promise<{ runs: number }> {
       await options.observer.flush();
-      await options.observer.reconcile(options.host);
+      await options.observer.reconcile(options.reconcileHost ?? options.host);
       const listed = await options.store.list();
       let runs = 0;
       for (const entry of listed.entries) {

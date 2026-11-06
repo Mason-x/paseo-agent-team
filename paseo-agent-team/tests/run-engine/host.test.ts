@@ -131,6 +131,67 @@ describe("observer host", () => {
   });
 });
 
+describe("observer host that must see the agent idle (reconcile without a hook)", () => {
+  const complete = page([
+    entry(3, "user_message", "t-7", { messageId: DISPATCH }),
+    entry(4, "assistant_message", "t-7", { text: "half a plan" }),
+  ]);
+
+  function withSnapshot(
+    snapshot: { agent: { status: string; activeTurn?: unknown } } | null,
+    order: string[] = [],
+  ): ObservedHostPort {
+    return {
+      agents: {
+        ref: () => ({
+          timeline: {
+            async refetch() {
+              order.push("timeline");
+              return complete;
+            },
+          },
+          async refresh() {
+            order.push("refresh");
+            return snapshot;
+          },
+        }),
+      },
+    };
+  }
+
+  test.each([
+    ["running", { agent: { status: "running" } }],
+    ["initializing", { agent: { status: "initializing" } }],
+    ["an active turn", { agent: { status: "idle", activeTurn: { id: "t-8" } } }],
+    ["an unknown agent", null],
+  ])("%s is a turn that may still be open, not an empty reply", async (_name, snapshot) => {
+    const host = createObserverHost(withSnapshot(snapshot), { requireIdle: true });
+    expect(await host.replyWindow("agent-b1", DISPATCH)).toEqual({
+      complete: false,
+      reason: "turn-open",
+    });
+  });
+
+  test("an idle agent reads as before, and the snapshot is taken before the timeline", async () => {
+    const order: string[] = [];
+    const host = createObserverHost(withSnapshot({ agent: { status: "idle" } }, order), {
+      requireIdle: true,
+    });
+    expect(await host.replyWindow("agent-b1", DISPATCH)).toMatchObject({
+      complete: true,
+      text: "half a plan",
+    });
+    expect(order).toEqual(["refresh", "timeline"]);
+  });
+
+  test("without the option the snapshot is never read (the hook already said the turn ended)", async () => {
+    const order: string[] = [];
+    const host = createObserverHost(withSnapshot({ agent: { status: "running" } }, order));
+    expect(await host.replyWindow("agent-b1", DISPATCH)).toMatchObject({ complete: true });
+    expect(order).toEqual(["timeline"]);
+  });
+});
+
 describe("findDispatchEcho", () => {
   const dispatchEntry = entry(3, "user_message", "t-7", { messageId: DISPATCH });
 

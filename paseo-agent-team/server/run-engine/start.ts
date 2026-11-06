@@ -220,6 +220,7 @@ export async function startEngineRun(
     }),
     seatProfiles,
     coordinatorChannelId: plan.coordinator.profile.provider,
+    workspace: { id: plan.workspaceId, directory: input.workspaceDirectory },
   });
   (record.launch as Record<string, unknown>).systemPrompts = pinned;
   try {

@@ -21,6 +21,15 @@ export const runEngineZh = {
     noEnabledSeat: "Run 引擎配置里没有启用的席位",
     unsupported:
       "该团队已启用 Run 引擎，但当前版本尚不能执行 Engine Run；为避免静默改用旧流程，已阻止启动",
+    /** Engine start needs the ledger and the daemon's server id; `reason` is a short code. */
+    identityUnavailable: (reason: string) =>
+      `Run 引擎无法确定运行记录的存放位置（${reason}），已阻止启动；不会改用旧流程`,
+    workspaceNoDirectory: "无法读取该 Workspace 的目录，Run 引擎不能启动",
+    workspaceNotGit: (detail: string) =>
+      `Run 引擎需要 git 仓库作为 Workspace，当前目录不可用${detail ? `：${detail}` : ""}`,
+    workspaceDetached: "Workspace 处于游离 HEAD（没有分支），Run 引擎不能在上面提交",
+    workspaceDirty: "Workspace 的工作树不干净，Run 引擎只能在干净的分支上开始；请先提交或清理",
+    workspaceNoCommit: "Workspace 还没有任何提交，Run 引擎需要一个基准提交",
   },
 
   lifecycle: {

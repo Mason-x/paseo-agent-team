@@ -962,7 +962,8 @@ async function ensureEmptyDir(deps: VersionDeps, dir: string): Promise<string> {
   return dir;
 }
 
-async function readServerId(files: FilesPort, home: string): Promise<string | null> {
+/** The daemon's server id (`<PASEO_HOME>/server-id`); the Run Engine binds its records to it too. */
+export async function readServerId(files: FilesPort, home: string): Promise<string | null> {
   const text = (await readOptional(files, path.join(home, "server-id"), 4096))?.trim() ?? "";
   return text || null;
 }

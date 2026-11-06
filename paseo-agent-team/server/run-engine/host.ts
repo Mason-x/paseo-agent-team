@@ -26,6 +26,8 @@ export interface ObservedAgentPort {
       options: PortTimelineRefetchOptions & { direction: "tail" | "before" | "after" },
     ): Promise<TimelineRefetchPage>;
   };
+  /** Live snapshot; only read when the host is asked to `requireIdle`. */
+  refresh?(): Promise<{ agent: { status: string; activeTurn?: unknown } } | null>;
 }
 
 export type ObservedHostPort = {
@@ -95,16 +97,34 @@ export async function findDispatchEcho(
  * Reads the canonical timeline backwards from the tail until the dispatch message is on a page,
  * then asks `buildReplyWindow` whether that is a complete reply. Running out of pages before the
  * dispatch turns up is "unverifiable", never "no reply".
+ *
+ * `requireIdle` is for readers that act without a hook telling them a turn ended (the restart
+ * reconcile). `buildReplyWindow` calls the newest turn complete when the read reached the end of the
+ * timeline, which is also true while that turn is still being written; so the agent must be seen
+ * idle first, and a turn that may still be running is `turn-open`, not an empty reply. The snapshot
+ * is read before the timeline: idle at that moment means the turn was over before the read began.
  */
 export function createObserverHost(
   port: ObservedHostPort,
-  options: { maxPages?: number; pageLimit?: number } = {},
+  options: { maxPages?: number; pageLimit?: number; requireIdle?: boolean } = {},
 ): ObserverHost {
   const maxPages = options.maxPages ?? PROTOCOL_MAX_PAGES;
   const limit = options.pageLimit ?? PAGE_LIMIT;
   return {
     async replyWindow(agentId, dispatchMessageId): Promise<ReplyWindow> {
       const handle = port.agents.ref(agentId);
+      if (options.requireIdle && handle.refresh) {
+        const snapshot = await handle.refresh();
+        const agent = snapshot?.agent;
+        if (
+          !agent ||
+          agent.status === "running" ||
+          agent.status === "initializing" ||
+          agent.activeTurn
+        ) {
+          return { complete: false, reason: "turn-open" };
+        }
+      }
       const pages: TimelineRefetchPage[] = [];
       let page = await handle.timeline.refetch({
         direction: "tail",

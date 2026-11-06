@@ -734,3 +734,59 @@ describe("dispatchNext", () => {
     expect(host.sent).toHaveLength(1);
   });
 });
+
+describe("dispatchNext: the coordinator seat", () => {
+  // The Engine's coordinator seat has a Profile and an idle agent like any other, so the only thing
+  // keeping a task from it is that its duty is `coordinate`, never `implement` or `review`.
+  const everySeat = (profileId: string): EngineServiceOptions["resolveSeat"] => {
+    return (_record, seatId) => ({
+      profile: {
+        id: `${profileId}-${seatId}`,
+        name: seatId,
+        provider: "claude",
+        model: null,
+        family: "haiku",
+      },
+      available: true,
+      order: seatId === "seat-s1" ? 0 : 1,
+    });
+  };
+
+  test("is never given a task, even first in the roster and idle", async () => {
+    await seed();
+    const host = fakeHost();
+    const result = await makeService(host, { resolveSeat: everySeat("p") }).dispatchNext(RUN_ID);
+
+    expect(result).toMatchObject({ status: "dispatched", taskId: "t2", seatId: "seat-b1" });
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    const record = await stored();
+    expect(record.assignments.map((entry) => entry.seatId)).not.toContain("seat-s1");
+  });
+
+  test("is not offered as an alternative when the producer seat is busy", async () => {
+    await seed();
+    const host = fakeHost();
+    const refOf = host.port.agents.ref;
+    host.port.agents.ref = (agentId) => ({
+      ...refOf(agentId),
+      refresh: async () => ({
+        agent:
+          agentId === "agent-b1"
+            ? { status: "running", activeTurn: { id: "turn" } }
+            : { status: "idle", activeTurn: null },
+      }),
+    });
+    const result = await makeService(host, { resolveSeat: everySeat("p") }).dispatchNext(RUN_ID);
+
+    expect(result.status).toBe("waiting");
+    if (result.status !== "waiting") return;
+    // It is listed, and refused for what it is (tier S, duty `coordinate`), not for being busy
+    // or unavailable: it would be next in line the moment the producer seat could not take the task.
+    const coordinator = result.denials.find((denial) => denial.seatId === "seat-s1");
+    expect(["tier", "duty"]).toContain(coordinator?.reason);
+    expect(result.denials.find((denial) => denial.seatId === "seat-b1")).toMatchObject({
+      reason: "busy",
+    });
+    expect(host.sent).toEqual([]);
+  });
+});
