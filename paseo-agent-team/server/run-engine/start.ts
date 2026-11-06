@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { LaunchPlan, PlannedAgent } from "../../shared/domain/launch-plan";
 import { COORDINATOR_SEAT_ID } from "../../shared/domain/run-engine/dag-admission";
+import {
+  buildPlanSeats,
+  COORDINATOR_SYSTEM_VERSION,
+  compileCoordinatorSystem,
+  compileMemberSystem,
+  compilePlanRequest,
+  MEMBER_SYSTEM_VERSION,
+  PLAN_REQUEST_VERSION,
+  planRequestFacts,
+} from "../../shared/domain/run-engine/engine-prompts";
+import { devEndpoint } from "../../shared/domain/run-engine/gates";
 import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
 import {
   addPlanRequest,
@@ -72,8 +83,6 @@ export type EngineStartInput = {
   serverId: string;
   paseoHome: string;
   archiveOnLaunchFailure: boolean;
-  /** The Engine variants of the system prompts. Absent: the plan's own (the old chain's) text. */
-  systemPrompts?: { coordinator?: string; member?: (member: PlannedAgent) => string };
   onProgress?: (progress: { step: EngineStartStep; index?: number; total?: number }) => void;
 };
 
@@ -81,13 +90,18 @@ export type EngineStartDeps = {
   store: Pick<RunStore, "create" | "update" | "get">;
   adapter: Pick<PaseoAdapter, "createAgent" | "archiveAgent">;
   effects: Pick<Effects, "runOutbox">;
-  /** Rebuilds the plan request text from the intent and the ledger (plan 11.5, S5 owns the text). */
-  compilePlanRequest(intent: SendableIntent, record: RunRecord): string | null;
-  templateVersion: number;
+  /** Rebuilds the plan request text; tests may stand in. Default: the Engine's own. */
+  compilePlanRequest?(intent: SendableIntent, record: RunRecord): string | null;
+  /** Default: the current plan request version. */
+  templateVersion?: number;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
 };
+
+function compileWake(intent: SendableIntent, record: RunRecord): string | null {
+  return intent.kind === "wake" ? compilePlanRequest(intent, record) : null;
+}
 
 function describe(cause: unknown): string | undefined {
   if (cause instanceof Error) return cause.message;
@@ -149,9 +163,39 @@ export async function startEngineRun(
   }
   seatProfiles.set(COORDINATOR_SEAT_ID, seatProfileOf(plan.coordinator.profile));
 
+  // The Engine's own system prompts, never the plan's (the old chain's, which teach delegation).
+  // Each is pinned in the record by version and hash before any agent exists.
+  const systemPrompts = new Map<string, string>();
+  const pinned: Record<string, { template: string; version: number; hash: string }> = {};
+  const pin = (seatId: string, template: string, version: number, text: string) => {
+    systemPrompts.set(seatId, text);
+    pinned[seatId] = { template, version, hash: sha256Hex(text) };
+  };
+  pin(
+    COORDINATOR_SEAT_ID,
+    "coordinator-system",
+    COORDINATOR_SYSTEM_VERSION,
+    compileCoordinatorSystem({
+      teamName: plan.team.name,
+      operatingRules: plan.team.operatingRules,
+      role: plan.coordinator.role,
+    }),
+  );
+  for (const [seatId, member] of memberOfSeat) {
+    pin(
+      seatId,
+      "member-system",
+      MEMBER_SYSTEM_VERSION,
+      compileMemberSystem({
+        teamName: plan.team.name,
+        memberName: member.title,
+        role: member.role,
+      }),
+    );
+  }
+
   // --- preparing: the record, before any agent ------------------------------------------------
   input.onProgress?.({ step: "prepare" });
-  const dagNonce = uuid();
   const now = clock.now();
   const fingerprint = sha256Hex(
     JSON.stringify(
@@ -176,8 +220,8 @@ export async function startEngineRun(
     }),
     seatProfiles,
     coordinatorChannelId: plan.coordinator.profile.provider,
-    dagNonceDigest: sha256Hex(dagNonce),
   });
+  (record.launch as Record<string, unknown>).systemPrompts = pinned;
   try {
     await deps.store.create(record);
   } catch (cause) {
@@ -246,10 +290,7 @@ export async function startEngineRun(
       ...(parent === undefined ? {} : { parentAgentId: parent }),
       title: agent.title,
       labels: agent.labels,
-      systemPrompt:
-        agent.kind === "coordinator"
-          ? (input.systemPrompts?.coordinator ?? agent.systemPrompt)
-          : (input.systemPrompts?.member?.(agent) ?? agent.systemPrompt),
+      systemPrompt: systemPrompts.get(seatId) ?? "",
       profile: agent.profile,
       mcpServers: agent.role.mcpServers,
       idempotencyKey: `engine:${runId}:seat:${seatId}`,
@@ -293,25 +334,45 @@ export async function startEngineRun(
 
   // --- kickoff: the plan request goes through the outbox, once ---------------------------------
   input.onProgress?.({ step: "kickoff" });
+  // The control nonce is made here, not earlier: it enters the record in the same commit as its
+  // digest and the request it is rebuilt from, so no crash can leave a digest without its nonce.
+  const controlNonce = uuid();
   const request = {
     intentId: `intent-plan-${uuid().replace(/-/gu, "").slice(0, 8)}`,
     messageId: uuid(),
-    templateVersion: deps.templateVersion,
+    templateVersion: deps.templateVersion ?? PLAN_REQUEST_VERSION,
     task: plan.task,
-    controlNonce: dagNonce,
+    controlNonce,
+    controlNonceDigest: sha256Hex(controlNonce),
   };
   try {
     await commit((current) => {
       const moved = setLaunchState(current, "kickoff-pending", clock.now());
       if (!moved.ok) throw new Error(`launch state: ${moved.code}`);
+      // The roster as it is now (the agents exist) decides the agent keys the planner is shown.
+      const seats = buildPlanSeats(
+        moved.next,
+        new Map(
+          [...memberOfSeat].map(([seatId, member]) => [
+            seatId,
+            { memberName: member.title, role: member.role },
+          ]),
+        ),
+      );
       const prepared = addPlanRequest(moved.next, {
         ...request,
+        facts: planRequestFacts({
+          seats,
+          devTargetUsable: moved.next.policy.devTargets.some(
+            (target) => devEndpoint(target.host) !== null,
+          ),
+        }),
         payloadHash: "0".repeat(64),
         now: clock.now(),
       });
       const intent = prepared.outbox.find((entry) => entry.id === request.intentId);
       if (intent?.kind !== "wake") throw new Error("the plan request was not prepared");
-      const text = deps.compilePlanRequest(intent, prepared);
+      const text = (deps.compilePlanRequest ?? compileWake)(intent, prepared);
       if (text === null) throw new Error("the plan request cannot be built");
       intent.payloadHash = payloadHash(text);
       return prepared;

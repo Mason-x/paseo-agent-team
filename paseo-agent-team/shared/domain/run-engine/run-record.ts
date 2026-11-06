@@ -149,8 +149,6 @@ export type RunRecordInput = {
   /** Seat id (logical, or `coordinator`) -> the Profile that seat runs on. */
   seatProfiles: ReadonlyMap<string, SeatProfile>;
   coordinatorChannelId: string;
-  /** SHA-256 hex of the control nonce that will authorize the first DAG. */
-  dagNonceDigest: string;
 };
 
 export function buildRunRecord(input: RunRecordInput): RunRecord {
@@ -217,7 +215,8 @@ export function buildRunRecord(input: RunRecordInput): RunRecord {
       state: "preparing",
       modelPlan,
       seatProfiles,
-      dagControl: { nonceDigest: input.dagNonceDigest, issuedAt: now, acceptedAt: null },
+      // No `dagControl` yet: the control nonce is made when the plan request is prepared, and its
+      // digest, its text and the request's hash are committed together (`addPlanRequest`).
     } as RunRecord["launch"],
     team: {
       id: modelPlan.team.id,
@@ -336,19 +335,37 @@ export type PlanRequestInput = {
   /** The task text and the control nonce the request is rebuilt from. */
   task: string;
   controlNonce: string;
+  /** SHA-256 hex of `controlNonce`; shared code has no crypto, so the caller digests it. */
+  controlNonceDigest: string;
+  /** Everything else the request text is rebuilt from (the seat snapshot, the DEV target flag). */
+  facts: Record<string, unknown>;
   now: string;
 };
 
 /**
  * Adds the plan request: a `wake` to the coordinator. It carries no assignment (there is no task
  * yet), so the schema's task id is a placeholder, and it leaves the outbox when the DAG is admitted.
+ *
+ * The control nonce comes into the record here and nowhere earlier: its digest (`launch.dagControl`),
+ * its text (the intent's arguments, which the request is rebuilt from) and the request's hash land in
+ * one commit, so no crash can leave a digest whose nonce is lost. A Run gets one plan request and
+ * one nonce; asking again is refused rather than quietly replacing them.
  */
 export function addPlanRequest(record: RunRecord, input: PlanRequestInput): RunRecord {
   const coordinator = record.roster.find((seat) => seat.seatId === COORDINATOR_SEAT_ID);
   if (!coordinator || coordinator.agentId === null) {
     throw new Error("the coordinator has no agent yet");
   }
+  const launch = record.launch as Record<string, unknown>;
+  if (launch.dagControl !== undefined || record.outbox.some((entry) => entry.kind === "wake")) {
+    throw new Error("the plan request was already prepared");
+  }
   const next = structuredClone(record);
+  (next.launch as Record<string, unknown>).dagControl = {
+    nonceDigest: input.controlNonceDigest,
+    issuedAt: input.now,
+    acceptedAt: null,
+  };
   const intent: RunEffectIntent = {
     id: input.intentId,
     kind: "wake",
@@ -364,7 +381,12 @@ export function addPlanRequest(record: RunRecord, input: PlanRequestInput): RunR
     localCancellation: null,
     taskId: "plan",
     assignmentId: null,
-    semanticArgs: { purpose: "plan", task: input.task, controlNonce: input.controlNonce },
+    semanticArgs: {
+      ...input.facts,
+      purpose: "plan",
+      task: input.task,
+      controlNonce: input.controlNonce,
+    },
   };
   next.outbox.push(intent);
   audit(next, "plan-request-prepared", input.now, { intentId: input.intentId });

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { bindSeatAgent, setLaunchState } from "../../shared/domain/run-engine/run-record";
+import { readDagControl } from "../../shared/domain/run-engine/dag-admission";
+import {
+  addPlanRequest,
+  bindSeatAgent,
+  setLaunchState,
+} from "../../shared/domain/run-engine/run-record";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { bootstrapRun } from "./support/bootstrap-run";
 
@@ -52,6 +57,45 @@ describe("bindSeatAgent", () => {
       ok: false,
       code: "seat-missing",
     });
+  });
+});
+
+describe("addPlanRequest", () => {
+  const request = {
+    intentId: "intent-plan-1",
+    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    payloadHash: "9".repeat(64),
+    templateVersion: 1,
+    task: "do it",
+    controlNonce: "6f1c2a44-3b7e-4f0a-9a11-0000000000f1",
+    controlNonceDigest: "c".repeat(64),
+    facts: { template: "plan-request" },
+    now: NOW,
+  };
+
+  function fresh(): RunRecord {
+    const record = bootstrapRun();
+    record.outbox = [];
+    delete (record.launch as Record<string, unknown>).dagControl;
+    return record;
+  }
+
+  test("brings the digest, the nonce and the request into the record together", () => {
+    const next = addPlanRequest(fresh(), request);
+    expect(readDagControl(next)).toEqual({
+      nonceDigest: request.controlNonceDigest,
+      issuedAt: NOW,
+      acceptedAt: null,
+    });
+    const intent = next.outbox.find((entry) => entry.kind === "wake");
+    expect(intent?.semanticArgs).toMatchObject({ controlNonce: request.controlNonce });
+  });
+
+  test("a Run gets one plan request and one nonce: asking again is refused", () => {
+    const once = addPlanRequest(fresh(), request);
+    expect(() => addPlanRequest(once, { ...request, intentId: "intent-plan-2" })).toThrow(
+      "already prepared",
+    );
   });
 });
 

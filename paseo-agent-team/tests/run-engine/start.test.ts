@@ -20,6 +20,7 @@ import {
   REPO_ALIAS,
   readDagControl,
 } from "../../shared/domain/run-engine/dag-admission";
+import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { readSeatProfiles } from "../../shared/domain/run-engine/run-record";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
@@ -293,6 +294,66 @@ describe("startEngineRun", () => {
       acceptedAt: null,
     });
     expect(JSON.stringify(record.launch)).not.toContain(nonce);
+  });
+
+  test("no control nonce exists while the agents are being created: it comes with the plan request", async () => {
+    let seen: RunRecord | null = null;
+    const { deps } = setup({
+      onCreate: async () => {
+        seen ??= await stored();
+      },
+    });
+    await startEngineRun(deps, input());
+    const first = seen as unknown as RunRecord;
+    expect(readDagControl(first)).toBeNull();
+    expect(first.outbox).toEqual([]);
+    // Once the request is in the record, digest, text and hash all agree.
+    const record = await stored();
+    const intent = record.outbox.find((entry) => entry.kind === "wake");
+    expect(readDagControl(record)?.nonceDigest).toBe(
+      sha256Hex(String(intent?.semanticArgs.controlNonce)),
+    );
+  });
+
+  test("with the Engine's own texts: agents get the Engine system prompts, pinned by hash, and the real plan request goes out", async () => {
+    const agents = fakeAdapter();
+    const host = fakePort();
+    const effects = createEffects({ store, port: host.port, compile: compileEngineIntent });
+    const result = await startEngineRun({ store, adapter: agents.adapter, effects }, input());
+    expect(result).toMatchObject({ ok: true, launchState: "running" });
+    const record = await stored();
+
+    // Not the old chain's prompts: the tech lead Role's own text ("Delegate with send_agent_prompt.")
+    // is not an input, and the coordinator is told not to delegate.
+    const prompts = agents.requests.map((request) => request.systemPrompt);
+    expect(prompts).toHaveLength(3);
+    expect(prompts.some((text) => text.includes("Delegate with send_agent_prompt"))).toBe(false);
+    expect(prompts[0]).toContain("你是 Run Engine 的协调者");
+    expect(prompts.slice(1).every((text) => text.includes("受 Run Engine 控制的成员"))).toBe(true);
+
+    // Each prompt is pinned by version and hash before any agent exists.
+    const pinned = (record.launch as Record<string, unknown>).systemPrompts as Record<
+      string,
+      { template: string; version: number; hash: string }
+    >;
+    expect(pinned[COORDINATOR_SEAT_ID]).toEqual({
+      template: "coordinator-system",
+      version: 1,
+      hash: sha256Hex(prompts[0] ?? ""),
+    });
+    for (const [index, seat] of engine.seats.entries()) {
+      expect(pinned[seat.seatId]).toMatchObject({
+        template: "member-system",
+        hash: sha256Hex(prompts[index + 1] ?? ""),
+      });
+    }
+
+    // The request that was sent is the one the record rebuilds, with the nonce and the roster in it.
+    const intent = record.outbox.find((entry) => entry.kind === "wake");
+    expect(intent?.payloadHash).toBe(sha256Hex(host.sent[0]?.text ?? ""));
+    expect(host.sent[0]?.text).toContain("【花名册 JSON】");
+    expect(host.sent[0]?.text).toContain(String(intent?.semanticArgs.controlNonce));
+    expect(host.sent[0]?.text).toContain("Add a login page.");
   });
 
   test("the seats' Profiles are frozen, with the model family the model id shows", async () => {
