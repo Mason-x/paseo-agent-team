@@ -30,11 +30,18 @@ import { devEndpoint } from "./gates";
  * reproducible. Repair and cancel-interrupt messages have no template: they need contract changes.
  */
 
-export const PRODUCER_TEMPLATE_VERSION = 1;
-export const REWORK_TEMPLATE_VERSION = 1;
-/** Version 2 adds the cumulative base for a delivery that follows a rework; version 1 is frozen. */
-export const REVIEWER_TEMPLATE_VERSION = 2;
-export const SMOKER_TEMPLATE_VERSION = 1;
+/**
+ * Producer, rework and smoker version 2 and reviewer version 3 rewrite only the report paragraphs.
+ * They name every key the strict schema requires ("缺一不可") and say what to do when there is no
+ * delivery ref. DEV (haiku producer) left `ref` out of an evidence entry because the version 1 text
+ * read as if `ref` were optional, and the strict schema refuses the whole report with no repair yet.
+ * Version 1 of each template stays registered and byte-identical for intents already in an outbox.
+ */
+export const PRODUCER_TEMPLATE_VERSION = 2;
+export const REWORK_TEMPLATE_VERSION = 2;
+/** Version 2 adds the cumulative base for a delivery that follows a rework; version 3 the report text. */
+export const REVIEWER_TEMPLATE_VERSION = 3;
+export const SMOKER_TEMPLATE_VERSION = 2;
 
 type DispatchIntent = Extract<RunEffectIntent, { kind: "dispatch" }>;
 
@@ -218,7 +225,8 @@ const COMMON = (ctx: RenderContext): string[] => [
   "格式错误的报告会被拒收，不会被猜测或修复；已有产物保留，由人处理。不要为了通过检查而猜测事实或填写不存在的证据。",
 ];
 
-const PRODUCER_BODY: string[] = [
+/** Frozen: producer and rework version 1. */
+const PRODUCER_BODY_V1: string[] = [
   "",
   "【职责：produce】",
   "",
@@ -258,7 +266,8 @@ const PRODUCER_BODY: string[] = [
   "停止后续的业务操作并列出已知事实。",
 ];
 
-const REVIEWER_BODY: string[] = [
+/** Frozen: reviewer versions 1 and 2. */
+const REVIEWER_BODY_V1: string[] = [
   "",
   "【职责：review】",
   "",
@@ -285,7 +294,8 @@ const REVIEWER_BODY: string[] = [
   "不要把“无法审查”写成通过，也不要写成质量问题。",
 ];
 
-const SMOKER_BODY: string[] = [
+/** Frozen: smoker version 1. */
+const SMOKER_BODY_V1: string[] = [
   "",
   "【职责：smoke】",
   "",
@@ -303,6 +313,130 @@ const SMOKER_BODY: string[] = [
   "- devHost、devServerId、devHome：原样填写 devTarget 里的值；",
   "- checks：对 smokeChecklist 里的每个 id 恰好一项，每项只有 id、result、evidencePath；",
   '  result 只能是 "pass" 或 "fail"，evidencePath 是该项真实证据文件的路径，位于证据目录之下（用正斜杠）。',
+  '"fail" 只用于实际执行后观察到失败的检查。没有执行、不适用或结果不确定的检查，既不能写成 "pass"，也不能写成 "fail"；',
+  "只要有任何一项无法如实完成，就只用简短的普通文字说明原因，不输出协议块。",
+];
+
+/**
+ * Producer and rework version 2. The report paragraphs list, object by object, every key the strict
+ * schema requires ("缺一不可"), and give a blocked or failed report an empty `evidence` because those
+ * reports have no delivery ref to put in an entry.
+ */
+const PRODUCER_BODY_V2: string[] = [
+  "",
+  "【职责：produce】",
+  "",
+  "先核对仓库根目录、当前分支、HEAD 和工作树是否与执行事实相符。workspace.baseRef 是派发时的 HEAD，不是交付后的提交。",
+  "工作树已有未提交的改动、分支或 HEAD 不符、或发现范围外的变更时，停止：不要清理、重置、切换分支、覆盖，",
+  "也不要替别人处理这些状态。",
+  "",
+  "只修改 scopes 中 access 为 write 的范围；范围不足、需要不可逆或对外的操作、有权限请求尚未解决时，停止并报告。",
+  "不要代答权限，不要自行提权。无法提交时不要声称已经提交。",
+  "",
+  "execution 为 write 的任务：在当前分支提交本任务范围内的改动。不要使用 git add -A 或 git commit -a，",
+  "逐一暂存明确的文件并在提交前检查暂存清单；不要 reset、clean、amend，不要切换分支，不要处理范围外的文件。",
+  "交付 ref 必须是实际提交的完整 Git commit SHA（取 git rev-parse HEAD 的完整输出，不是缩写）。",
+  "提交的结果不确定时，停止，不要再次提交，在报告里说明已知事实。",
+  "execution 为 read 的任务：不修改项目文件，ref 使用你实际核对到的当前 HEAD，changedFiles 填空数组。",
+  "",
+  "按任务资料逐项核对 acceptance 和 evidence。只有实际执行并成功的检查才能写成成功；evidence 的 command 必须与",
+  "任务要求的 command 原文一致。检查的日志和结果只写入执行事实中的证据目录，不要把它们放进仓库或提交。",
+  "提交后在最终交付的 ref 上执行要求的验证；如果验证改变了工作树、需要再次修改或无法确认结果，停止并说明，不要自行清理。",
+  "报告 done 之前再核对一次：git status --porcelain --untracked-files=all 的输出为空，HEAD 等于交付 SHA。",
+  "不满足时不要报告 done；验证在工作树里留下了文件时，报告 blocked（reasonCode 用 WORKSPACE_DIRTY），在 summary 里写明有哪些文件，不要自行清理。",
+  "",
+  "协议块的块名是 task-report，JSON 顶层除身份字段外必须是下面三种形态之一。不同形态的键不能混用，也不能添加未列出的键：",
+  '1. 完成：status 为 "done"，另有下面四个键，缺一不可：changedFiles、ref、workspace、evidence。完成形态没有 summary 和 reasonCode，不要写。',
+  "   - changedFiles：路径数组，必须与 git -c core.quotepath=false diff --name-only --no-renames A B 的输出一致",
+  "     （A 是 workspace.baseRef，B 是交付 SHA；相对仓库根、正斜杠、不带 ./ 前缀、不是绝对路径），并且都在 write 范围内；read 任务写 []；",
+  '   - ref：{"kind":"git-commit","value":"完整提交 SHA"}；',
+  '   - workspace：{"id":…,"branch":…,"baseRef":…}，缺一不可：id、branch、baseRef，值原样取自执行事实中的 workspace；',
+  "   - evidence：数组，任务资料要求的每个 evidence id 各一条，id 不得重复，条目的写法见后。",
+  '2. 需要权限、资料、范围调整，或任务规格有冲突需要人决定：status 为 "blocked"，另有下面三个键，缺一不可：reasonCode、summary、evidence。',
+  '3. 已经执行但验证失败，或确认在当前约束下无法完成：status 为 "failed"，另有与 blocked 相同的三个键。',
+  "   blocked 和 failed 的三个键：reasonCode 是 1–64 个字符；summary 是 1–1000 个字符，写明已经做了什么、已执行命令的返回码和日志路径、",
+  "   已知的工作树和提交状态（已经产生提交的写出完整提交 SHA）、阻塞原因和需要的决定，不确定的部分明确写“不确定”；",
+  "   evidence 必须写成空数组 []：这两种报告没有交付 ref，而 evidence 的每个条目都必须带 ref，所以它们不列条目，已执行的命令和返回码写在 summary 里。",
+  "   这两种报告的顶层不要添加 changedFiles、ref、workspace（这条只针对报告顶层，和完成报告里每个 evidence 条目必须带的 ref 无关）。",
+  "",
+  "完成报告里 evidence 的每个条目是一个对象，必须同时包含这六个键，缺一不可：id、command、exitCode、summary、artifactPath、ref。",
+  "每个条目都要自带这六个键，不要因为顶层已经有 ref 就在条目里省略 ref。各键的写法：",
+  "- id：与任务资料里该 evidence 要求项的 id 完全相同；",
+  "- command：与该要求项的 command 原文逐字一致（任务资料 JSON 把 < > 和反引号写成 \\u003c \\u003e \\u0060，那只是 JSON 转义，报告里写还原后的字符）；",
+  "  要求项的 command 为 null 时，写你实际执行的命令字符串，确实没有命令的检查写 null；",
+  "- exitCode：整数，不是字符串，command 为 null 时也要写整数；完成报告里必须是 0。没有可证明的结果就报告 blocked，不要假定 0；",
+  "- summary：1–600 个字符，写实际观察到的结果；",
+  "- artifactPath：该检查真实的输出或日志文件的路径，必须以执行事实中 evidenceDir 的值逐字开头",
+  "  （保持它的正斜杠和盘符写法，不要改成 /c/ 这类 shell 形式，路径里不含 . 或 .. 段），后面接文件名；",
+  '- ref：与顶层 ref 逐字相同的完整对象，形如 {"kind":"git-commit","value":"完整提交 SHA"}；不能只写 SHA 字符串，也不能省略。',
+  "另有两个键只在条件满足时才写：",
+  '- coverage：{"lines":数字,"functions":数字}，两个键缺一不可，是 0–100 的百分数（不是 0–1 的小数），取自本次实际覆盖率输出。',
+  "  任务资料里该要求项带 minLines 或 minFunctions 时，该条目必须带 coverage，且数值不得低于要求的最小值；拿不到实际测量值就报告 blocked（EVIDENCE_UNAVAILABLE），不要估计；",
+  '- isolation：{"homePath":"隔离 home 的路径","outsideRealHome":true}，两个键缺一不可。',
+  "  任务资料里该要求项的 requiresIsolatedHome 为 true 时，该条目必须带 isolation：homePath 必须在真实 home 之外，路径里不得含 .paseo 目录，",
+  "  并且该命令必须真的在这个隔离 home 下运行；做不到就报告 blocked，不要写 true。",
+  "不得虚构命令、返回码、覆盖率、隔离状态或证据文件。",
+  "输出前逐项自查：顶层键齐全，完成报告的每个 evidence 条目六个键齐全且 ref 与顶层 ref 相同，没有未列出的键。",
+  "",
+  "建议的 reasonCode：PERMISSION_REQUIRED、WORKSPACE_DIRTY、OUT_OF_SCOPE_CHANGE、COMMIT_UNAVAILABLE、EVIDENCE_UNAVAILABLE、",
+  "TASK_INFEASIBLE、TEST_FAILED、OUTCOME_UNKNOWN。提交或其他业务副作用的结果不确定时用 blocked 加 OUTCOME_UNKNOWN，",
+  "停止后续的业务操作并列出已知事实。",
+];
+
+/** Reviewer version 3: the same review as version 2, with the report spelled out key by key. */
+const REVIEWER_BODY_V3: string[] = [
+  "",
+  "【职责：review】",
+  "",
+  "你是独立审查者：只审查，不修改项目文件，不提交，不委派修复。执行事实里的 delivery 是被审的交付：",
+  "producerBaseRef 是生产者开始工作时的 HEAD，deliveryRef 是它交付的提交，changedFiles 是它声称改动的文件。",
+  "workspace.baseRef 是本次审查派发时的 HEAD，不是 producerBaseRef，不要用它计算差异。",
+  "",
+  "先核对仓库根目录、当前分支、工作树是否干净，以及当前 HEAD 是否等于 deliveryRef.value。不符时停止并说明，",
+  "不要切换分支、检出别的提交、清理或重置。审查的是 producerBaseRef 到 deliveryRef 的差异（用只读的 git 命令读取）。",
+  "把差异与任务资料的 scopes、acceptance、evidence 逐项对照，检查正确性、边界情况、回归风险，并核对 changedFiles",
+  "是否与实际差异一致、是否都在 write 范围内。需要验证时只做不会改动工作树的只读操作；会向工作树写入的命令",
+  "（生成构建产物、覆盖率目录等）不要运行，除非把输出重定向到证据目录。无法验证的内容如实说明，不要假定通过。",
+  "结束前再核对一次 HEAD 和工作树没有变化。",
+  "",
+  "协议块的块名是 review-report，JSON 顶层除身份字段外必须有下面四个键，缺一不可：reviewedRef、verdict、blockers、probes。不要添加其他键，审查意见都写进 blockers。",
+  '- reviewedRef：与执行事实中 delivery.deliveryRef 完全相同的对象，形如 {"kind":"git-commit","value":"完整提交 SHA"}；',
+  '- verdict：只能是 "可合入"、"修改后合入"、"不可合入" 之一；',
+  "- blockers：数组，至多 40 项，没有阻断项时写 []。每项是对象，必须同时包含这三个键，缺一不可：id、summary、path。",
+  "  id 是 1–64 个字符的自拟编号；summary 是 1–600 个字符（写不下就只写要点，超长会使整份报告作废）；",
+  "  path 是相关文件的仓库内相对路径字符串，没有对应文件时写 null，不要写空字符串，也不要省略这个键；",
+  "- probes：数组，你实际执行过的每条探针命令一项，没有执行时写 []。每项是对象，必须同时包含这六个键，缺一不可：id、command、exitCode、summary、artifactPath、ref。",
+  "  每项都要自带 ref，不要因为顶层已有 reviewedRef 就省略。id 是 1–64 个字符的自拟编号；command 是实际执行的命令字符串，没有命令写 null；",
+  "  exitCode 是命令真实返回码的整数，失败的探针照实写，不要求为 0；summary 是 1–600 个字符；",
+  "  artifactPath 是该探针真实输出文件的路径，必须以执行事实中 evidenceDir 的值逐字开头（保持它的正斜杠写法，路径里不含 . 或 .. 段）；",
+  '  ref 是与 deliveryRef 逐字相同的完整对象，形如 {"kind":"git-commit","value":"完整提交 SHA"}。',
+  '只有完成了审查并且没有任何阻断项时才写 "可合入"。verdict 不是 "可合入"，或者 blockers 不为空，交付都会退回生产者返工，',
+  '而返工的生产者只能看到 blockers，所以 verdict 不是 "可合入" 时 blockers 至少要有一项，每个阻断项要写明位置、影响和可复核的理由。',
+  "只是建议、风格或不影响合入的意见不要写进 blockers（写了就会触发返工）；需要时在协议块之外用普通文字简述。",
+  "如果无法确认被审的提交、无法读取必要的资料，或者审查没有完成，只用简短的普通文字说明原因，不输出协议块；",
+  "不要把“无法审查”写成通过，也不要写成质量问题。",
+];
+
+/** Smoker version 2: the same smoke as version 1, with the report spelled out key by key. */
+const SMOKER_BODY_V2: string[] = [
+  "",
+  "【职责：smoke】",
+  "",
+  "你只在执行事实中 devTarget 登记的 DEV 目标上，对 delivery.deliveryRef 这个交付做冒烟检查。",
+  "先核对仓库根目录、当前分支、工作树是否干净，以及当前 HEAD 是否等于 deliveryRef.value。不符时停止并说明，",
+  "不要切换分支、检出别的提交、清理或重置；冒烟结束后再核对一次。",
+  "只使用 devTarget 里的 devHost、devServerId、devHome；不要操作任何真实用户的实例，不要使用默认 home，",
+  "不要自行提权或代答权限，不要改动工作树。DEV 目标不可用、与登记的信息不符，或者无法确定它是 DEV 时，停止并说明。",
+  "",
+  "任务资料里 smokeChecklist 的每个字符串，既是检查的内容，也是报告里必须原样使用的检查 id。逐项执行，",
+  "把真实的证据（日志、截图等）保存在执行事实中的证据目录下，不要放进仓库。",
+  "",
+  "协议块的块名是 smoke-report，JSON 顶层除身份字段外必须有下面五个键，缺一不可：testedRef、devHost、devServerId、devHome、checks。不要添加其他键。",
+  '- testedRef：与 delivery.deliveryRef 完全相同的对象，形如 {"kind":"git-commit","value":"完整提交 SHA"}；',
+  "- devHost、devServerId、devHome：三个字符串，逐字取自执行事实 devTarget 里的同名值，不要改写、补全或规范化（包括大小写和末尾的斜杠）；",
+  "- checks：数组，对 smokeChecklist 里的每个 id 恰好一项，不多、不少、不重复。每项是对象，必须同时包含这三个键，缺一不可：id、result、evidencePath。",
+  '  id 是 smokeChecklist 里的字符串原样；result 只能是 "pass" 或 "fail"；',
+  "  evidencePath 是该项真实证据文件的路径，必须以执行事实中 evidenceDir 的值逐字开头（保持它的正斜杠写法，路径里不含 . 或 .. 段）。",
   '"fail" 只用于实际执行后观察到失败的检查。没有执行、不适用或结果不确定的检查，既不能写成 "pass"，也不能写成 "fail"；',
   "只要有任何一项无法如实完成，就只用简短的普通文字说明原因，不输出协议块。",
 ];
@@ -333,15 +467,23 @@ const REVIEWER_REWORK_NOTE: string[] = [
 type Render = (ctx: RenderContext) => string;
 
 const RENDERERS: Readonly<Record<TemplateName, ReadonlyMap<number, Render>>> = {
-  producer: new Map([[1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY].join("\n")}\n`]]),
+  producer: new Map([
+    [1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V1].join("\n")}\n`],
+    [2, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V2].join("\n")}\n`],
+  ]),
   rework: new Map([
-    [1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY, ...REWORK_BODY].join("\n")}\n`],
+    [1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V1, ...REWORK_BODY].join("\n")}\n`],
+    [2, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V2, ...REWORK_BODY].join("\n")}\n`],
   ]),
   reviewer: new Map([
-    [1, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY].join("\n")}\n`],
-    [2, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY, ...REVIEWER_REWORK_NOTE].join("\n")}\n`],
+    [1, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V1].join("\n")}\n`],
+    [2, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V1, ...REVIEWER_REWORK_NOTE].join("\n")}\n`],
+    [3, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V3, ...REVIEWER_REWORK_NOTE].join("\n")}\n`],
   ]),
-  smoker: new Map([[1, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY].join("\n")}\n`]]),
+  smoker: new Map([
+    [1, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY_V1].join("\n")}\n`],
+    [2, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY_V2].join("\n")}\n`],
+  ]),
 };
 
 type ReadArgs = {

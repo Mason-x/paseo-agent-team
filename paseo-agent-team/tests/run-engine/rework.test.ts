@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import { extractProtocolBlock } from "../../server/run-engine/protocol";
 import {
@@ -9,6 +10,7 @@ import {
 import {
   compileDispatch,
   producerSemanticArgs,
+  REWORK_TEMPLATE_VERSION,
   reviewerSemanticArgs,
   reworkSemanticArgs,
   templateVersionFor,
@@ -288,6 +290,25 @@ describe("rework prompt", () => {
         record,
       ),
     ).toBeNull();
+  });
+});
+
+describe("rework template versions are frozen", () => {
+  // Any change to a rendered byte must be a new version. The intent is compiled again with each
+  // registered version; a failure here means "add a version", not "update the hash".
+  const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+
+  test("version 1 and version 2 render exactly these bytes for a fixed ledger", () => {
+    const { record, intent } = reworked();
+    expect(REWORK_TEMPLATE_VERSION).toBe(2);
+    expect(intent.templateVersion).toBe(REWORK_TEMPLATE_VERSION);
+    expect(sha256(compileDispatch({ ...intent, templateVersion: 1 }, record) ?? "")).toBe(
+      "aec21296378028226cfec17abb84dd398af7214f39178e723c17b8619b15db36",
+    );
+    expect(sha256(compileDispatch({ ...intent, templateVersion: 2 }, record) ?? "")).toBe(
+      "62db9d9eb6ff001e8ef5e53f5443ec1a6cbe145cf77d528052840079e4d27532",
+    );
+    expect(compileDispatch({ ...intent, templateVersion: 3 }, record)).toBeNull();
   });
 });
 

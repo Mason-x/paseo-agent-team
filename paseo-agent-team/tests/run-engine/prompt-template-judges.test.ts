@@ -397,21 +397,33 @@ describe("the reports the judge prompts describe", () => {
 describe("template versions are frozen", () => {
   // Any change to a rendered byte must be a new version. These hashes pin every registered version
   // of the judges' prompts for a fixed ledger; a failure here means "add a version", not "update
-  // the hash". Reviewer v1 stays registered for intents that were committed with it.
-  test("reviewer v1, reviewer v2 and smoker v1 render exactly these bytes", () => {
-    const reviewer = judged("reviewer", {}, undefined, 1);
-    const reviewerV2 = judged("reviewer", {}, undefined, 2);
-    const smoker = judged("smoker", { reviewed: true });
-    expect(REVIEWER_TEMPLATE_VERSION).toBe(2);
-    expect(SMOKER_TEMPLATE_VERSION).toBe(1);
-    expect(sha256(compileDispatch(reviewerV2.intent, reviewerV2.record) ?? "")).toBe(
-      "b7441ee543d1e00ac2a7073589ca50f4f99ff0829564e75e07fdb9a5cbea0b27",
-    );
-    expect(sha256(compileDispatch(reviewer.intent, reviewer.record) ?? "")).toBe(
+  // the hash". Older versions stay registered for intents that were committed with them.
+  test("reviewer v1, v2, v3 and smoker v1, v2 render exactly these bytes", () => {
+    const render = (purpose: "reviewer" | "smoker", version: number) => {
+      const { record, intent } = judged(
+        purpose,
+        { reviewed: purpose === "smoker" },
+        undefined,
+        version,
+      );
+      return sha256(compileDispatch(intent, record) ?? "");
+    };
+    expect(REVIEWER_TEMPLATE_VERSION).toBe(3);
+    expect(SMOKER_TEMPLATE_VERSION).toBe(2);
+    expect(render("reviewer", 1)).toBe(
       "6a44d5f3700d3761605ae928a86c9ea8789145e4f7f0d68c99c8098410d16fa5",
     );
-    expect(sha256(compileDispatch(smoker.intent, smoker.record) ?? "")).toBe(
+    expect(render("reviewer", 2)).toBe(
+      "b7441ee543d1e00ac2a7073589ca50f4f99ff0829564e75e07fdb9a5cbea0b27",
+    );
+    expect(render("reviewer", 3)).toBe(
+      "f0ce40250a4d4cf72f139fd411028cbc345c86aa82ad21be9ce211b41203262b",
+    );
+    expect(render("smoker", 1)).toBe(
       "8818d5bb22b565bbed86c5dbc88944c80ce6f110f71ad3c589e08658612e7425",
+    );
+    expect(render("smoker", 2)).toBe(
+      "a78ce1560f255ef02195fa2b67f6cba0cbf0debb116c603de4eef2112a46c761",
     );
   });
 });

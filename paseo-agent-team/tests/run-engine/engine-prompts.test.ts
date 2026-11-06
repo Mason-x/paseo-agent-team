@@ -43,7 +43,14 @@ function sha256(text: string): string {
 }
 
 /** A Run that has agents on every seat and whose plan request has just been prepared. */
-function prepared(options: { task?: string; role?: typeof ROLE; sameAgent?: boolean } = {}): {
+function prepared(
+  options: {
+    task?: string;
+    role?: typeof ROLE;
+    sameAgent?: boolean;
+    templateVersion?: number;
+  } = {},
+): {
   record: RunRecord;
   intent: Wake;
 } {
@@ -81,7 +88,7 @@ function prepared(options: { task?: string; role?: typeof ROLE; sameAgent?: bool
     intentId: "intent-plan-1",
     messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
     payloadHash: "0".repeat(64),
-    templateVersion: PLAN_REQUEST_VERSION,
+    templateVersion: options.templateVersion ?? PLAN_REQUEST_VERSION,
     task,
     controlNonce: NONCE,
     controlNonceDigest: sha256(NONCE),
@@ -180,7 +187,7 @@ describe("compilePlanRequest", () => {
 
   test("returns null rather than guess when it cannot be rebuilt faithfully", () => {
     const { record, intent } = prepared();
-    expect(compilePlanRequest({ ...intent, templateVersion: 2 }, record)).toBeNull();
+    expect(compilePlanRequest({ ...intent, templateVersion: 3 }, record)).toBeNull();
     expect(compilePlanRequest({ ...intent, recipient: "agent-b1" }, record)).toBeNull();
     expect(compilePlanRequest({ ...intent, semanticArgs: {} }, record)).toBeNull();
     for (const patch of [
@@ -281,8 +288,59 @@ describe("system prompts", () => {
   });
 });
 
+describe("plan request versions", () => {
+  test("version 2 says dispatchDuties is an object of duty names from the roster, version 1 does not", () => {
+    const v2 = prepared();
+    const v1 = prepared({ templateVersion: 1 });
+    expect(PLAN_REQUEST_VERSION).toBe(2);
+    const text2 = compilePlanRequest(v2.intent, v2.record) ?? "";
+    const text1 = compilePlanRequest(v1.intent, v1.record) ?? "";
+    expect(text2).toContain("必须是对象");
+    expect(text2).toContain('{"produce":"implement","review":"review","smoke":null}');
+    expect(text1).not.toContain("必须是对象");
+    // Only the dispatchDuties lines differ, so nothing else a planner relies on moved.
+    const keep = (text: string) =>
+      text
+        .split("\n")
+        .filter(
+          (line) =>
+            !line.includes("dispatchDuties") &&
+            !/^ {2}(produce 和 review 的值|devSmoke 为 true|（例如|例：)/u.test(line),
+        );
+    expect(keep(text2)).toEqual(keep(text1));
+  });
+
+  test("the DEV failure: dispatchDuties as an array is refused by name, the object form is read", () => {
+    const fenced = (duties: unknown) => {
+      const block = dagBlock("run-plan01-a1", planTasks(), { nonce: NONCE });
+      const tasks = (block.tasks as unknown as Record<string, unknown>[]).map((task) => ({
+        ...task,
+        dispatchDuties: duties,
+      }));
+      return `\x60\x60\x60task-dag\n${JSON.stringify({ ...block, tasks })}\n\x60\x60\x60\n`;
+    };
+    const array = extractProtocolBlock(fenced(["produce", "review"]), { expected: "task-dag" });
+    expect(array.status).toBe("rejected");
+    if (array.status === "rejected") {
+      expect(JSON.stringify(array)).toContain("dispatchDuties");
+    }
+    const object = extractProtocolBlock(
+      fenced({ produce: "implement", review: "review", smoke: null }),
+      { expected: "task-dag" },
+    );
+    expect(object.status).toBe("block");
+  });
+
+  test("an unregistered version is not rendered", () => {
+    for (const templateVersion of [0, 3]) {
+      const { record, intent } = prepared({ templateVersion });
+      expect(compilePlanRequest(intent, record)).toBeNull();
+    }
+  });
+});
+
 describe("version 1 is frozen", () => {
-  // A failure here means "add version 2", not "update the hash".
+  // A failure here means "add the next version", not "update the hash".
   test("the three texts render exactly these bytes for a fixed input", () => {
     const { record, intent } = prepared();
     const plan = compilePlanRequest(intent, record) ?? "";
@@ -301,7 +359,12 @@ describe("version 1 is frozen", () => {
       memberName: "Backend dev",
       role: ROLE,
     });
-    expect(sha256(plan)).toBe("2ff5162b75263a9fbb23e52ebe375dde5eefcf9b98c8eec0efb2e00ac532eda1");
+    expect(sha256(plan)).toBe("50c58bde7e19cb746a2e7713dfc160c145d4da7b20b84081e6442ec5520d93a6");
+    // Version 1 is still rendered for plan requests prepared before version 2 existed.
+    const v1 = prepared({ templateVersion: 1 });
+    expect(sha256(compilePlanRequest(v1.intent, v1.record) ?? "")).toBe(
+      "2ff5162b75263a9fbb23e52ebe375dde5eefcf9b98c8eec0efb2e00ac532eda1",
+    );
     expect(sha256(coordinator)).toBe(
       "5938d9f2d3e6d88c6b3b81b0f35b61507551f39bed67c61dca789ea964b84d48",
     );

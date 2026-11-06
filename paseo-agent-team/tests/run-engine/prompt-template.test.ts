@@ -27,7 +27,10 @@ type Dispatch = Extract<RunEffectIntent, { kind: "dispatch" }>;
 const REPO_ROOT = "C:/work/repo";
 const EVIDENCE_DIR = "C:/work/evidence/assignment-t2-a1-abcd1234";
 
-function dispatched(mutateTask?: (record: RunRecord) => void): {
+function dispatched(
+  mutateTask?: (record: RunRecord) => void,
+  version = PRODUCER_TEMPLATE_VERSION,
+): {
   record: RunRecord;
   intent: Dispatch;
 } {
@@ -63,7 +66,7 @@ function dispatched(mutateTask?: (record: RunRecord) => void): {
     now: "2026-11-05T12:00:00.000Z",
     payload: {
       hash: "0".repeat(64),
-      templateVersion: PRODUCER_TEMPLATE_VERSION,
+      templateVersion: version,
       semanticArgs: producerSemanticArgs(task.spec, {
         repoRoot: REPO_ROOT,
         evidenceDir: EVIDENCE_DIR,
@@ -89,14 +92,23 @@ function section(text: string, label: string): Record<string, unknown> {
   return JSON.parse(lines[index + 1] ?? "") as Record<string, unknown>;
 }
 
-describe("producer template version 1 is frozen", () => {
-  // Any change to a rendered byte must be a new version; a failure here means "add version 2",
-  // not "update the hash". The same applies to the reviewer and smoker pins in the judge tests.
-  test("renders exactly these bytes for a fixed ledger", () => {
-    const { record, intent } = dispatched();
-    const text = compileDispatch(intent, record) ?? "";
-    expect(createHash("sha256").update(text, "utf8").digest("hex")).toBe(
+describe("producer template versions are frozen", () => {
+  // Any change to a rendered byte must be a new version; a failure here means "add a version",
+  // not "update the hash". The same applies to the rework, reviewer and smoker pins.
+  const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+
+  test("version 1 renders exactly these bytes for a fixed ledger", () => {
+    const { record, intent } = dispatched(undefined, 1);
+    expect(sha256(compileDispatch(intent, record) ?? "")).toBe(
       "1b0a9b9ae2b7566543c0eb2cb1cead2ccf17a4a218aecacb342adff53500b1ea",
+    );
+  });
+
+  test("version 2 renders exactly these bytes for the same ledger", () => {
+    expect(PRODUCER_TEMPLATE_VERSION).toBe(2);
+    const { record, intent } = dispatched(undefined, 2);
+    expect(sha256(compileDispatch(intent, record) ?? "")).toBe(
+      "d8754f6b5d89b349a3528fd07b7c73544b7ca07c14b67ebbe23bf0d81670ec91",
     );
   });
 });
@@ -212,7 +224,9 @@ describe("compileDispatch", () => {
 
   test("returns null instead of guessing when the intent cannot be rebuilt faithfully", () => {
     const { record, intent } = dispatched();
-    expect(compileDispatch({ ...intent, templateVersion: 2 }, record)).toBeNull();
+    expect(
+      compileDispatch({ ...intent, templateVersion: PRODUCER_TEMPLATE_VERSION + 1 }, record),
+    ).toBeNull();
     expect(compileDispatch({ ...intent, templateVersion: 0 }, record)).toBeNull();
     expect(
       compileDispatch({ ...intent, messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1" }, record),
