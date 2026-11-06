@@ -2,6 +2,7 @@ import { sha256Hex } from "../../../server/run-engine/digest";
 import {
   COORDINATOR_DUTY,
   COORDINATOR_SEAT_ID,
+  REPO_ALIAS,
   withDagControl,
 } from "../../../shared/domain/run-engine/dag-admission";
 import type { RunRecord } from "../../../shared/schemas/run-engine/ledger";
@@ -10,7 +11,6 @@ import {
   AT_CREATED,
   assignmentsForRun,
   noncesForRun,
-  REPO_ID,
   RUN_ID,
   spec,
   withLedger,
@@ -101,7 +101,7 @@ export function bootstrapRun(options: BootstrapOptions = {}): RunRecord {
 type TaskSpec = RunTaskDagBlock["tasks"][number];
 
 /** Two tasks, t2 after t1, each writing its own file; the repository id is the caller's choice. */
-export function planTasks(repoId: string = REPO_ID): TaskSpec[] {
+export function planTasks(repoId: string = REPO_ALIAS): TaskSpec[] {
   const scope = (file: string) => [{ repoId, kind: "file", path: file, access: "write" }];
   return [
     spec("t1", "Core API surface", { scopes: scope("src/t1.ts") }) as unknown as TaskSpec,

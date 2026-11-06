@@ -76,8 +76,56 @@ describe("checkDag: a plan that can run", () => {
     expect(result.block.tasks[1]?.deps).toEqual(["t1"]);
   });
 
-  test("the canonical id is accepted as it is", () => {
+  test("the default plan, written with the alias, has no issue", () => {
     expect(codes()).toEqual([]);
+  });
+
+  test("the real repository id is not copied by the model: only the alias is accepted", () => {
+    const record = bootstrapRun({ runId: "run-dag001-a1" });
+    const result = checkDag(record, dagBlock("run-dag001-a1", planTasks(REPO_ID)), input());
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.issues.map((issue) => issue.code)).toContain("unknown-repository");
+  });
+
+  test("a plan's control id must be _dag, not a decision id", () => {
+    expect(codes(undefined, undefined, { taskId: "_decision:abc" })).toContain("control-task-id");
+  });
+
+  test.each(["src/../t1.ts", "./src/t1.ts", "src/.git/hooks/x", ".GIT/config"])(
+    "the path %s is refused even where normalization would fold it",
+    (bad) => {
+      expect(
+        codes(undefined, (tasks) => {
+          const scope = t1(tasks).scopes[0];
+          if (scope) scope.path = bad;
+        }),
+      ).toContain("invalid-scope-path");
+    },
+  );
+
+  test("every seat that may produce needs its own independent reviewer, not just one of them", () => {
+    // A second implementer on the same agent as the only reviewer: it could be picked to produce,
+    // and then nobody independent is left to review it.
+    expect(
+      codes((r) => {
+        r.roster.push({
+          seatId: "seat-b3",
+          tier: "B",
+          agentId: "agent-b2",
+          channelId: "claude",
+          duties: ["implement"],
+          enabled: true,
+        });
+        r.budgets.entries.push({
+          scope: "seat",
+          subjectId: "seat-b3",
+          limit: 6,
+          reserved: 0,
+          confirmed: 0,
+          observedTurns: 0,
+        });
+      }),
+    ).toContain("no-independent-reviewer");
   });
 
   test("an accepted plan goes through the reducer and makes the first task ready", () => {

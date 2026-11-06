@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -200,15 +200,29 @@ describe("settleCoordinator", () => {
   });
 
   test("a plan that leaves the repository, or names another one, is refused with the paths", async () => {
+    // A path the pure checks cannot see through: a junction inside the repository that points out.
+    const outside = path.join(home, "outside");
+    await mkdir(outside);
+    await symlink(outside, path.join(repoDir, "escape"), "junction");
     const escaping = planTasks(REPO_ALIAS);
     const scope = escaping[0]?.scopes[0];
-    if (scope) scope.path = ".git/config";
+    if (scope) scope.path = "escape/payload.ts";
     const h = harness(() => window(fence(dagBlock(RUN_ID, escaping))));
     await turnEnded(h);
     const [result] = await h.intake.settleCoordinator(COORDINATOR_AGENT);
     expect(result).toMatchObject({ status: "refused" });
     expect(result?.status === "refused" && result.reasons).toContain(
-      "scope-rejected:git-internal:.git/config",
+      "scope-rejected:escapes-repo:escape/payload.ts",
+    );
+
+    // The git directory and `..` are refused before the repository is looked at.
+    const gitDir = planTasks(REPO_ALIAS);
+    const gitScope = gitDir[0]?.scopes[0];
+    if (gitScope) gitScope.path = ".git/config";
+    const direct = harness(() => window(fence(dagBlock(RUN_ID, gitDir))));
+    const [refusedGit] = await direct.intake.settleCoordinator(COORDINATOR_AGENT);
+    expect(refusedGit?.status === "refused" && refusedGit.reasons).toContain(
+      "invalid-scope-path:t1:.git/config",
     );
 
     const stranger = harness(() => window(fence(dagBlock(RUN_ID, planTasks("repo-someone-else")))));
@@ -220,7 +234,7 @@ describe("settleCoordinator", () => {
     expect(after.lifecycle).toBe("awaiting-dag");
     expect(after.tasks).toEqual([]);
     expect(readDagControl(after)?.acceptedAt).toBeNull();
-    expect(after.alerts).toHaveLength(2);
+    expect(after.alerts).toHaveLength(3);
   });
 
   test("after a refusal a corrected plan is admitted: the nonce was not spent", async () => {

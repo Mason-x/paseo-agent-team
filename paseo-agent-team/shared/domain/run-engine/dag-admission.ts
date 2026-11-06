@@ -100,6 +100,8 @@ export function checkDag(
     add("lifecycle", undefined, record.lifecycle);
   }
   if (block.runId !== record.runId) add("run-mismatch");
+  // The protocol's control-id union also allows decision ids; a plan is `_dag` and nothing else.
+  if (block.taskId !== "_dag") add("control-task-id", undefined, block.taskId);
   if (block.dagRevision !== 1 || block.expectedDagRevision !== 0) add("revision");
   const coordinator = record.roster.find(
     (seat) => seat.seatId === COORDINATOR_SEAT_ID && seat.duties.includes(COORDINATOR_DUTY),
@@ -161,10 +163,16 @@ export function checkDag(
     if (task.execution === "read" && writes.length > 0) add("read-task-with-write-scope", task.id);
 
     const scopes = task.scopes.map((scope) => {
-      if (scope.repoId !== input.canonicalRepoId && scope.repoId !== REPO_ALIAS) {
-        add("unknown-repository", task.id, scope.repoId);
+      // The model writes the alias only; the real id is the Engine's to put there, never copied.
+      if (scope.repoId !== REPO_ALIAS) add("unknown-repository", task.id, scope.repoId);
+      // normalizeLogicalPath folds `a/../b` into `b`; a plan that spells it that way is refused.
+      const parts = scope.path.split(/[\\/]+/u);
+      if (
+        !normalizeLogicalPath(scope.path).ok ||
+        parts.some((part) => part === ".." || part === "." || part.toLowerCase() === ".git")
+      ) {
+        add("invalid-scope-path", task.id, scope.path);
       }
-      if (!normalizeLogicalPath(scope.path).ok) add("invalid-scope-path", task.id, scope.path);
       return { ...scope, repoId: input.canonicalRepoId };
     });
 
@@ -179,7 +187,9 @@ export function checkDag(
     const reviewers = candidates(task, "review");
     if (reviewers.length === 0) add("no-reviewer-seat", task.id);
     const needsFamily = reviewRequirement({ spec: task, escalations: [] }).level === "L1";
-    const reviewable = producers.some((producer) =>
+    // Any seat that may be chosen to produce must have its own independent judges: the scheduler
+    // picks the producer by availability, so a plan only one producer could finish is refused.
+    const reviewable = producers.every((producer) =>
       reviewers.some((reviewer) => {
         if (!independent(producer, reviewer)) return false;
         if (!needsFamily) return true;
@@ -198,7 +208,7 @@ export function checkDag(
       const smokers = candidates(task, "smoke");
       if (smokers.length === 0) add("no-smoker-seat", task.id);
       else if (
-        !producers.some((producer) => smokers.some((smoker) => independent(producer, smoker)))
+        !producers.every((producer) => smokers.some((smoker) => independent(producer, smoker)))
       ) {
         add("no-independent-smoker", task.id);
       }
