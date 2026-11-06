@@ -371,6 +371,7 @@ describe("report inspection", () => {
     expect(await observer.inspectReport(input, host({ [key]: complete("all good") }))).toEqual({
       status: "missing",
       turnId: "turn-3",
+      anchor: MESSAGE_T2,
     });
     expect(
       await observer.inspectReport(

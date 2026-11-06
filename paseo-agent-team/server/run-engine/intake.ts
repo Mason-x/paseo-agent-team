@@ -1,9 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
+import {
+  compileRepairRequest,
+  REPAIR_REQUEST_VERSION,
+} from "../../shared/domain/run-engine/engine-prompts";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
+import {
+  type RepairIssue,
+  requestReportRepair,
+  settleRepairs,
+} from "../../shared/domain/run-engine/report-repair";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunAssignment, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunProtocolBlock } from "../../shared/schemas/run-engine/protocol";
+import { payloadHash } from "./effects";
 import type { ObserverHost, RunObserver } from "./observer";
 import { type UnverifiableReason, verifyReportOwnership } from "./protocol";
 import type { RunStore } from "./store";
@@ -20,7 +30,9 @@ import type { RunStore } from "./store";
  * What it will not do: guess. A reply that cannot be read completely is left for a later try; a
  * reply with no block, a rejected block or a report that is not the assignee's changes no state and
  * only records why the task is not moving. The member's artifacts stay, the claims stay, and no new
- * message is sent. Asking the member to repair the report is a separate, later piece (plan P05).
+ * message is sent. Asking the member to repair the report is opt-in (`options.repair`): a missing or
+ * refused block then gets a bounded number of repair requests (`report-repair.ts`) before the task is
+ * left waiting as above.
  */
 
 export type IntakeResult =
@@ -45,6 +57,11 @@ export type IntakeOptions = {
   host: ObserverHost;
   clock?: { now(): string };
   ids?: { uuid(): string };
+  /**
+   * Turns on report repair. `send` runs the outbox of the Run after a repair request was committed
+   * (the intake itself sends nothing). Without it a bad report only leaves its reason on the task.
+   */
+  repair?: { send(runId: string): Promise<unknown> };
   /** Called after a report was committed, so the next unit of work can be dispatched. */
   onSettled?: (runId: string) => void;
   log?: (message: string, detail?: unknown) => void;
@@ -92,21 +109,76 @@ export function createIntake(options: IntakeOptions) {
     };
   }
 
-  /** Writes only "why this task is not moving"; changes nothing else. */
+  /**
+   * Writes "why this task is not moving". With repair on, a report that is missing or refused by
+   * the parser also gets a repair request, once per message that was read and within the budget; the
+   * request is committed with the reason, and sent after the commit.
+   */
   async function recordProblem(
     runId: string,
     assignmentId: string,
     reason: string,
+    repairable?: { anchor: string; turnId: string; issues: readonly RepairIssue[] },
   ): Promise<IntakeResult> {
+    let requested = false;
+    let open = false;
     await options.store.update(runId, (current) => {
       const assignment = current.assignments.find((entry) => entry.assignmentId === assignmentId);
       if (!assignment || !awaitingReport(current, assignment)) return null;
+      const now = clock.now();
+      if (repairable !== undefined && options.repair !== undefined) {
+        // Only a turn that ended on its own can be asked again; a turn that failed or was
+        // interrupted is a host problem, and a repair would not fix it.
+        const ended = current.eventReceipts.find(
+          (receipt) =>
+            receipt.kind === "turn_ended" &&
+            receipt.agentId === assignment.agentId &&
+            receipt.turnId === repairable.turnId,
+        );
+        if (ended === undefined) {
+          // The reply being read belongs to a turn that is still running (a repeated hook for the
+          // previous turn reads the newest repair's window): nothing to judge, nothing to note.
+          open = true;
+          return null;
+        }
+        const outcome = (ended as { outcome?: unknown } | undefined)?.outcome;
+        if (outcome === undefined || outcome === "completed") {
+          const draft = requestReportRepair(current, {
+            assignmentId,
+            anchor: repairable.anchor,
+            reason,
+            issues: repairable.issues,
+            intentId: `intent-repair-${uuid().replace(/-/gu, "").slice(0, 12)}`,
+            messageId: uuid(),
+            payloadHash: "0".repeat(64),
+            templateVersion: REPAIR_REQUEST_VERSION,
+            now,
+          });
+          if (draft.ok) {
+            const intent = draft.next.outbox.at(-1);
+            const text = intent?.kind === "wake" ? compileRepairRequest(intent, draft.next) : null;
+            if (intent !== undefined && text !== null) {
+              intent.payloadHash = payloadHash(text);
+              requested = true;
+              return draft.next;
+            }
+          }
+        }
+      }
       const noted = noteTask(current, assignment.taskId, reason, {
-        now: clock.now(),
+        now,
         detail: { assignmentId },
       });
       return noted.ok && noted.changed ? noted.next : null;
     });
+    if (open) return { status: "turn-not-ended" };
+    if (requested) {
+      try {
+        await options.repair?.send(runId);
+      } catch (error) {
+        log(`repair request for ${assignmentId} could not be sent`, error);
+      }
+    }
     return { status: "problem", assignmentId, reason };
   }
 
@@ -132,9 +204,17 @@ export function createIntake(options: IntakeOptions) {
       case "unverifiable":
         return { status: "unverifiable", reason: inspected.reason };
       case "missing":
-        return recordProblem(runId, assignmentId, "report-missing");
+        return recordProblem(runId, assignmentId, "report-missing", {
+          anchor: inspected.anchor,
+          turnId: inspected.turnId,
+          issues: [],
+        });
       case "rejected":
-        return recordProblem(runId, assignmentId, `report-rejected:${inspected.reason}`);
+        return recordProblem(runId, assignmentId, `report-rejected:${inspected.reason}`, {
+          anchor: inspected.anchor,
+          turnId: inspected.turnId,
+          issues: inspected.issues ?? [],
+        });
       case "report":
         break;
     }
@@ -219,6 +299,9 @@ export function createIntake(options: IntakeOptions) {
         }
         working = reduced.next;
       }
+      // The repair requests of this assignment are answered now; they leave the outbox like the
+      // plan request does, so a confirmed message cannot keep the Run from finishing.
+      working = settleRepairs(working, assignmentId, now);
       holder.result = {
         status: "settled",
         assignmentId,

@@ -1,9 +1,6 @@
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
-import type {
-  RunAssignment,
-  RunEventReceipt,
-  RunRecord,
-} from "../../shared/schemas/run-engine/ledger";
+import { REPORT_KINDS_BY_PURPOSE, replyAnchor } from "../../shared/domain/run-engine/report-repair";
+import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type {
   RunProtocolBlock,
   RunProtocolBlockName,
@@ -52,12 +49,15 @@ export type ObserverHost = {
 export type ReportInspection =
   | { status: "unknown-assignment" }
   | { status: "unverifiable"; reason: UnverifiableReason }
-  | { status: "missing"; turnId: string }
+  | { status: "missing"; turnId: string; anchor: string }
   | {
       status: "rejected";
       reason: string;
       kind?: RunProtocolBlockName;
       issues?: ProtocolIssue[];
+      turnId: string;
+      /** The message whose reply was read: the dispatch, or the newest repair request. */
+      anchor: string;
     }
   | {
       status: "report";
@@ -97,16 +97,6 @@ const RECEIPT_KIND = {
   "agent.closed": "closed",
   "agent.archived": "archived",
 } as const;
-
-/** The kinds an assignment's reply may carry. A judge may also say it could not do its job. */
-const KINDS_BY_PURPOSE: Record<RunAssignment["purpose"], readonly RunProtocolBlockName[] | null> = {
-  member: ["task-report"],
-  coordinator: ["task-report"],
-  reopen: ["task-report"],
-  reviewer: ["review-report", "task-report"],
-  smoker: ["smoke-report", "task-report"],
-  probe: null,
-};
 
 type Buffered = { event: ObserverHookEvent; at: number };
 
@@ -286,7 +276,10 @@ export function createRunObserver(options: ObserverOptions) {
         const waiting: { agentId: string; messageId: string }[] = [];
         for (const assignment of read.record.assignments) {
           if (assignment.state !== "assigned" && assignment.state !== "in_progress") continue;
-          waiting.push({ agentId: assignment.agentId, messageId: assignment.messageId });
+          waiting.push({
+            agentId: assignment.agentId,
+            messageId: replyAnchor(read.record, assignment),
+          });
         }
         const lifecycle = read.record.lifecycle;
         if (lifecycle === "bootstrapping" || lifecycle === "awaiting-dag") {
@@ -347,21 +340,29 @@ export function createRunObserver(options: ObserverOptions) {
         (entry) => entry.assignmentId === input.assignmentId,
       );
       if (!assignment) return { status: "unknown-assignment" };
-      const expected = KINDS_BY_PURPOSE[assignment.purpose];
+      const expected = REPORT_KINDS_BY_PURPOSE[assignment.purpose] as
+        | readonly RunProtocolBlockName[]
+        | null;
       if (expected === null) return { status: "unknown-assignment" };
-      const window = await host.replyWindow(input.agentId, assignment.messageId);
+      // After a repair request went out, the report to read is the reply to that request.
+      const anchor = replyAnchor(record, assignment);
+      const window = await host.replyWindow(input.agentId, anchor);
       if (!window.complete) return { status: "unverifiable", reason: window.reason };
       const extracted = extractProtocolBlock(window.text, { expected });
       if (extracted.status === "unverifiable") {
         return { status: "unverifiable", reason: extracted.reason };
       }
-      if (extracted.status === "none") return { status: "missing", turnId: window.turnId };
+      if (extracted.status === "none") {
+        return { status: "missing", turnId: window.turnId, anchor };
+      }
       if (extracted.status === "rejected") {
         return {
           status: "rejected",
           reason: extracted.reason,
           kind: extracted.kind,
           issues: extracted.issues,
+          turnId: window.turnId,
+          anchor,
         };
       }
       const ownership = verifyReportOwnership(

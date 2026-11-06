@@ -13,6 +13,7 @@ import { createRunObserver } from "../../server/run-engine/observer";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
+import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
@@ -138,6 +139,17 @@ function fakeHost() {
     reply: (agentId: string, text: string) =>
       add(agentId, turns.get(agentId) ?? "turn-plan", { type: "assistant_message", text }),
     turnOf: (agentId: string) => turns.get(agentId) ?? "turn-plan",
+    /** The text of the agent's newest assistant message. */
+    lastReply: (agentId: string) =>
+      [...entries(agentId)].reverse().find((entry) => entry.item.type === "assistant_message")?.item
+        .text ?? "",
+    /** Changes the agent's newest assistant message, e.g. to break the report it holds. */
+    rewriteLastReply: (agentId: string, change: (text: string) => string) => {
+      const entry = [...entries(agentId)]
+        .reverse()
+        .find((item) => item.item.type === "assistant_message");
+      if (entry) entry.item = { ...entry.item, text: change(entry.item.text ?? "") };
+    },
     lastSent: (agentId: string) => [...sent].reverse().find((entry) => entry.agentId === agentId),
   };
 }
@@ -147,7 +159,7 @@ type Host = ReturnType<typeof fakeHost>;
 function build(host: Host, overrides: Partial<DriverOptions> = {}) {
   const observerHost = createObserverHost(host.port);
   const observer = createRunObserver({ store });
-  const effects = createEffects({ store, port: host.port, compile: compileDispatch });
+  const effects = createEffects({ store, port: host.port, compile: compileEngineIntent });
   const profile = (family: string, id: string) => ({
     id,
     name: id,
@@ -176,7 +188,12 @@ function build(host: Host, overrides: Partial<DriverOptions> = {}) {
     resolveWorkspace,
     compile: compileDispatch,
   });
-  const intake = createIntake({ store, observer, host: observerHost });
+  const intake = createIntake({
+    store,
+    observer,
+    host: observerHost,
+    repair: { send: (runId) => effects.runOutbox(runId) },
+  });
   const dagIntake = createDagIntake({
     store,
     host: observerHost,
@@ -573,5 +590,114 @@ describe("kick", () => {
     const report = await driver.kick(RUN_ID);
     expect(report.dispatched).toBe(32);
     expect(dispatchNext).toHaveBeenCalledTimes(32);
+  });
+});
+
+describe("a report that cannot be used is asked for again", () => {
+  const SCHEMA_BREAK = (text: string) =>
+    text.replace('"status":"done"', '"status":"done","summary":"extra key the schema refuses"');
+
+  /** A Run with t1 handed to its producer, which did the work and replied with a broken report. */
+  async function brokenReport() {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    const good = host.lastReply("agent-b1");
+    host.rewriteLastReply("agent-b1", SCHEMA_BREAK);
+    return { host, driver, good };
+  }
+
+  const t1 = (record: RunRecord) => record.tasks.find((task) => task.spec.id === "t1");
+  const repairs = (record: RunRecord) =>
+    record.outbox.filter((intent) => intent.kind === "wake" && intent.assignmentId !== null);
+
+  test("a refused report gets one repair request, and the repaired report settles the task", async () => {
+    const { host, driver, good } = await brokenReport();
+    const before = host.sent.length;
+    await hook(host, driver, "agent-b1");
+
+    const asked = await stored();
+    expect(host.sent).toHaveLength(before + 1);
+    const request = host.lastSent("agent-b1");
+    expect(request?.text).toContain("【重发身份 JSON】");
+    expect(request?.text).toContain("report-rejected:schema-invalid");
+    // The repair does not repeat what the member wrote, and the task did not move.
+    expect(request?.text).not.toContain("extra key the schema refuses");
+    expect(states(asked)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(t1(asked)).toMatchObject({
+      protocolFailures: 1,
+      waitingReason: "report-repair-requested:report-rejected:schema-invalid",
+    });
+    expect(repairs(asked)).toHaveLength(1);
+    expect(repairs(asked)[0]?.state).toBe("confirmed");
+
+    // The member restates the same report; it is read from the reply to the repair request.
+    host.reply("agent-b1", good);
+    await hook(host, driver, "agent-b1");
+    const settled = await stored();
+    expect(states(settled)).toEqual({ t1: "review", t2: "pending" });
+    expect(repairs(settled)).toHaveLength(0);
+    expect(settled.events.some((event) => event.kind === "report-repair-settled")).toBe(true);
+    expect(host.lastSent("agent-b2")?.text).toContain("review");
+  });
+
+  test("a reply with no block is asked for again as missing", async () => {
+    const { host, driver } = await brokenReport();
+    host.rewriteLastReply("agent-b1", () => "All done, the module is committed.");
+    await hook(host, driver, "agent-b1");
+    expect(host.lastSent("agent-b1")?.text).toContain("report-missing");
+    expect(t1(await stored())?.waitingReason).toBe("report-repair-requested:report-missing");
+  });
+
+  test("a hook delivered again while the repair is out asks for nothing more", async () => {
+    const { host, driver } = await brokenReport();
+    const turn = host.turnOf("agent-b1");
+    await hook(host, driver, "agent-b1");
+    const sent = host.sent.length;
+    const asked = await stored();
+    await driver.onHook({ name: "agent.turn_ended", agentId: "agent-b1", turnId: turn });
+    expect(host.sent).toHaveLength(sent);
+    expect(t1(await stored())).toMatchObject({
+      protocolFailures: 1,
+      waitingReason: t1(asked)?.waitingReason,
+    });
+    expect(repairs(await stored())).toHaveLength(1);
+  });
+
+  test("the budget is the policy's protocolResends, then the task waits as before", async () => {
+    const { host, driver } = await brokenReport();
+    const limit = (await stored()).policy.perTask.protocolResends;
+    expect(limit).toBeGreaterThan(0);
+    const base = host.sent.length;
+    for (let round = 1; round <= limit; round += 1) {
+      await hook(host, driver, "agent-b1");
+      expect(host.sent).toHaveLength(base + round);
+      host.reply("agent-b1", SCHEMA_BREAK(host.lastReply("agent-b1") || "x"));
+      host.rewriteLastReply("agent-b1", () => "still not a report");
+    }
+    await hook(host, driver, "agent-b1");
+    const after = await stored();
+    expect(host.sent).toHaveLength(base + limit);
+    expect(t1(after)).toMatchObject({
+      protocolFailures: limit,
+      waitingReason: "report-missing",
+      state: "assigned",
+    });
+  });
+
+  test("a turn that did not end on its own is not asked again", async () => {
+    const { host, driver } = await brokenReport();
+    const before = host.sent.length;
+    await driver.onHook({
+      name: "agent.turn_ended",
+      agentId: "agent-b1",
+      turnId: host.turnOf("agent-b1"),
+      outcome: { kind: "failed" },
+    });
+    expect(host.sent).toHaveLength(before);
+    expect(t1(await stored())?.protocolFailures).toBe(0);
   });
 });

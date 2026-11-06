@@ -115,7 +115,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     compile: compileDispatch,
     log,
   });
-  const intake = createIntake({ store, observer, host, log });
+  const intake = createIntake({
+    store,
+    observer,
+    host,
+    repair: { send: (runId) => effects.runOutbox(runId) },
+    log,
+  });
   const dagIntake = createDagIntake({
     store,
     host,
