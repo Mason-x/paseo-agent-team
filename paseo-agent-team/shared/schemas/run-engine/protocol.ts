@@ -147,7 +147,12 @@ const TaskReportNotDoneShape = {
   status: z.enum(["blocked", "failed"]),
   reasonCode: z.string().min(1).max(64),
   summary: z.string().min(1).max(1000),
-  evidence: z.array(StrictEvidenceSchema).max(64),
+  /**
+   * Optional, read as `[]`. A blocked or failed report has no delivery ref, and every entry needs one,
+   * so the honest form is no entries; refusing a whole report for leaving the key out would turn an
+   * honest stop into a missing report. Nothing reads these entries.
+   */
+  evidence: z.array(StrictEvidenceSchema).max(64).default([]),
 };
 
 export const RunTaskReportBlockSchema = z.discriminatedUnion("status", [

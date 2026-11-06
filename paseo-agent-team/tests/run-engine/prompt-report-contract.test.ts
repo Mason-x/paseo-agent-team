@@ -79,7 +79,9 @@ describe("the prompts name every key the strict schema requires", () => {
     for (const dispatched of [producerDispatch(), reworkDispatch()]) {
       const text = textOf(dispatched);
       expect(listsExactly(text, required(DONE, ENVELOPE))).toBe(true);
-      expect(listsExactly(text, required(NOT_DONE, ENVELOPE))).toBe(true);
+      // The schema reads a missing `evidence` as [], but the text still asks for it: a report that
+      // names every key is the one that never depends on that leniency.
+      expect(listsExactly(text, [...required(NOT_DONE, ENVELOPE), "evidence"])).toBe(true);
       expect(listsExactly(text, required(EVIDENCE))).toBe(true);
       expect(listsExactly(text, required(WORKSPACE))).toBe(true);
     }
@@ -171,8 +173,8 @@ function notDoneReport(dispatched: Dispatched, status: "blocked" | "failed") {
     ...pick(required(NOT_DONE, ENVELOPE), {
       reasonCode: status === "blocked" ? "COMMIT_UNAVAILABLE" : "TEST_FAILED",
       summary: "ran the required command, exit code 0; git commit failed: no committer identity",
-      evidence: [],
     }),
+    evidence: [],
   };
 }
 
@@ -300,6 +302,31 @@ describe("a report made of the required keys alone passes the parser, the reduce
       { expected: "task-report" },
     );
     expect(refused).toMatchObject({ status: "rejected", reason: "schema-invalid" });
+  });
+
+  test("producer: a blocked or failed report that leaves evidence out is read as having none", () => {
+    const dispatched = producerDispatch();
+    for (const status of ["blocked", "failed"] as const) {
+      const { evidence: _evidence, ...bare } = notDoneReport(dispatched, status);
+      const parsed = extractProtocolBlock(fence("task-report", bare), { expected: "task-report" });
+      expect(parsed.status).toBe("block");
+      if (parsed.status === "block") {
+        expect((parsed.block as { evidence: unknown }).evidence).toEqual([]);
+      }
+      const after = accept(dispatched, "task-report", bare);
+      expect(stateOf(after, "t2")?.state).toBe(status);
+    }
+  });
+
+  test("a done report still needs its evidence", () => {
+    const dispatched = producerDispatch();
+    const { evidence: _evidence, ...bare } = doneReport(dispatched, ["src/t2.ts"]) as Record<
+      string,
+      unknown
+    >;
+    expect(
+      extractProtocolBlock(fence("task-report", bare), { expected: "task-report" }),
+    ).toMatchObject({ status: "rejected", reason: "schema-invalid" });
   });
 
   test("reviewer: a probe with its own ref, and a blocker whose path is null", () => {
