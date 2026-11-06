@@ -40,8 +40,8 @@ import { devEndpoint } from "./gates";
 export const PRODUCER_TEMPLATE_VERSION = 2;
 export const REWORK_TEMPLATE_VERSION = 2;
 /** Version 2 adds the cumulative base for a delivery that follows a rework; version 3 the report text. */
-export const REVIEWER_TEMPLATE_VERSION = 3;
-export const SMOKER_TEMPLATE_VERSION = 2;
+export const REVIEWER_TEMPLATE_VERSION = 4;
+export const SMOKER_TEMPLATE_VERSION = 3;
 
 type DispatchIntent = Extract<RunEffectIntent, { kind: "dispatch" }>;
 
@@ -455,6 +455,27 @@ const REWORK_BODY: string[] = [
   "无法解决其中某一项时，不要报告 done；用 blocked，在 summary 里写明是哪一项、为什么。",
 ];
 
+/**
+ * Reviewer v4 and smoker v3: the way out when the judge cannot do its job. Before this, a reviewer or
+ * smoker that could not run (DEV target unreachable, a verification command failing, no place to
+ * write evidence) had no report to send: the strict review and smoke reports only say pass or fail,
+ * so it wrote plain text, the Engine saw "no report", and the task waited with no reason. A blocked
+ * task-report freezes the task with the reason, as a producer's blocked report does.
+ */
+const JUDGE_CANNOT_NOTE: string[] = [
+  "",
+  "无法如实完成时的出口：因为环境或权限而做不了（仓库状态与派发信息不符、核验命令失败、DEV 目标不可达或无法确认身份、",
+  "没有可写入的证据目录），不要写本职责的报告，也不要编造通过或失败，而是只输出一个块名为 task-report 的协议块。",
+  "JSON 顶层是身份字段加下面四个键，缺一不可：status、reasonCode、summary、evidence，不要添加其他键，也不要写 changedFiles、ref、workspace。",
+  '- status：只能是 "blocked"；',
+  "- reasonCode：1–64 个字符，建议 ENVIRONMENT_UNAVAILABLE、DEV_TARGET_UNAVAILABLE、DELIVERY_MISMATCH、PERMISSION_REQUIRED、",
+  "  EVIDENCE_UNAVAILABLE、OUTCOME_UNKNOWN；",
+  "- summary：1–1000 个字符，写明已经做了什么、已执行命令的返回码、为什么停止、需要什么才能继续；不确定的部分写“不确定”；",
+  "- evidence：写成空数组 []。",
+  "这是“做不了”的出口，不是“没通过”：检查实际执行后发现问题，仍然写本职责的报告（审查写意见，冒烟写 fail）。",
+  "这个出口会冻结该任务并等人处理，所以只在确实无法完成时使用。",
+];
+
 const REVIEWER_REWORK_NOTE: string[] = [
   "",
   "【返工后的交付】",
@@ -479,10 +500,16 @@ const RENDERERS: Readonly<Record<TemplateName, ReadonlyMap<number, Render>>> = {
     [1, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V1].join("\n")}\n`],
     [2, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V1, ...REVIEWER_REWORK_NOTE].join("\n")}\n`],
     [3, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V3, ...REVIEWER_REWORK_NOTE].join("\n")}\n`],
+    [
+      4,
+      (ctx) =>
+        `${[...COMMON(ctx), ...REVIEWER_BODY_V3, ...REVIEWER_REWORK_NOTE, ...JUDGE_CANNOT_NOTE].join("\n")}\n`,
+    ],
   ]),
   smoker: new Map([
     [1, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY_V1].join("\n")}\n`],
     [2, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY_V2].join("\n")}\n`],
+    [3, (ctx) => `${[...COMMON(ctx), ...SMOKER_BODY_V2, ...JUDGE_CANNOT_NOTE].join("\n")}\n`],
   ]),
 };
 

@@ -318,11 +318,17 @@ describe("verifyReportOwnership", () => {
     );
   });
 
-  test("a task report cannot answer a review assignment and vice versa", () => {
+  test("a review report cannot answer a task assignment, and a task report cannot answer a probe", () => {
     expect(code(record(), {}, observed, "review-report")).toBe("wrong-purpose");
-    expect(code(record({ purpose: "reviewer", delivery: { producerAssignmentId: "a" } }))).toBe(
-      "wrong-purpose",
-    );
+    expect(code(record({ purpose: "probe" }))).toBe("wrong-purpose");
+  });
+
+  test("a judge may carry a task report (the reducer lets only a blocked one through)", () => {
+    const judge = record({ purpose: "reviewer", delivery: { producerAssignmentId: "a" } });
+    expect(code(judge)).toBe("ok");
+    expect(code(record({ purpose: "smoker", delivery: { producerAssignmentId: "a" } }))).toBe("ok");
+    // The judge's own kind is still its own: a smoke report does not answer a review.
+    expect(code(judge, {}, observed, "smoke-report")).toBe("wrong-purpose");
   });
 
   test("registry disagreement, revocation and replay are refused or flagged as duplicate", () => {

@@ -344,6 +344,42 @@ describe("the loop, from plan to finished Run", () => {
     expect(host.sent).toHaveLength(3);
   });
 
+  test("a reviewer that cannot review says so: the task freezes with the reason and nothing is sent", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    expect(states(await stored())).toEqual({ t1: "review", t2: "pending" });
+
+    const prompt = host.lastSent("agent-b2")?.text ?? "";
+    const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+    host.reply(
+      "agent-b2",
+      fence("task-report", {
+        ...identity,
+        status: "blocked",
+        reasonCode: "ENVIRONMENT_UNAVAILABLE",
+        summary: "the verification command returned a non-zero exit code; stopped",
+        evidence: [],
+      }),
+    );
+    const sentBefore = host.sent.length;
+    await hook(host, driver, "agent-b2");
+
+    const after = await stored();
+    expect(states(after)).toEqual({ t1: "blocked", t2: "pending" });
+    expect(after.tasks[0]).toMatchObject({
+      phase: "frozen",
+      waitingReason: "ENVIRONMENT_UNAVAILABLE",
+    });
+    expect(after.assignments.find((entry) => entry.purpose === "reviewer")?.state).toBe("ended");
+    // Not a rework, not a second reviewer, and the dependent task does not start.
+    expect(host.sent).toHaveLength(sentBefore);
+  });
+
   test("a hook delivered twice, or for an agent no Run knows, sends nothing more", async () => {
     const host = fakeHost();
     const { driver } = build(host);

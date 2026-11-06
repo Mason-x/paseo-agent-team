@@ -1105,12 +1105,23 @@ function applyEvent(
         block.runId !== next.runId ||
         block.attempt !== assignment.attempt ||
         block.nonce !== assignment.nonce ||
-        !["member", "coordinator", "reopen"].includes(assignment.purpose) ||
+        !["member", "coordinator", "reopen", "reviewer", "smoker"].includes(assignment.purpose) ||
         (block.messageId !== undefined && block.messageId !== assignment.messageId)
       ) {
         return reject("RUN_EVENT_INVALID", ["task-report", block.taskId], "identity-mismatch");
       }
-      if (task.state !== "assigned" && task.state !== "in_progress") {
+      // A reviewer or smoker that cannot do its job says so with a blocked task-report. Anything
+      // else from a judge (done, failed) is a report of the wrong kind, and only a judge whose
+      // turn the task is still waiting on may stop it.
+      const judge = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
+      if (judge) {
+        if (block.status !== "blocked") {
+          return reject("RUN_EVENT_INVALID", ["task-report", "status"], "judge-report-not-blocked");
+        }
+        if (task.state !== "review" || (task.phase !== "review" && task.phase !== "smoke")) {
+          return invalidTransition(block.taskId, task.state, "blocked");
+        }
+      } else if (task.state !== "assigned" && task.state !== "in_progress") {
         return invalidTransition(block.taskId, task.state, "review");
       }
       if (!liveAuthorized(next, assignment)) {

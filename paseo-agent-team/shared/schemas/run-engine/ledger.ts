@@ -494,19 +494,30 @@ export const RunAssignmentSchema = z
         path: ["delivery"],
       });
     }
+    // A judge that could not do its job holds a blocked task report instead of its own report.
+    const blockedTaskReport = (proof: unknown) => {
+      const parsed = RunStoredTaskReportSchema.safeParse(proof);
+      return parsed.success && parsed.data.status === "blocked";
+    };
     if (review && assignment.acceptedProof !== null) {
-      if (!RunStoredReviewSchema.safeParse(assignment.acceptedProof).success) {
+      if (
+        !RunStoredReviewSchema.safeParse(assignment.acceptedProof).success &&
+        !blockedTaskReport(assignment.acceptedProof)
+      ) {
         ctx.addIssue({
           code: "custom",
-          message: "reviewer acceptedProof must be a review report",
+          message: "reviewer acceptedProof must be a review report or a blocked task report",
           path: ["acceptedProof"],
         });
       }
     } else if (smoke && assignment.acceptedProof !== null) {
-      if (!RunStoredSmokeReportSchema.safeParse(assignment.acceptedProof).success) {
+      if (
+        !RunStoredSmokeReportSchema.safeParse(assignment.acceptedProof).success &&
+        !blockedTaskReport(assignment.acceptedProof)
+      ) {
         ctx.addIssue({
           code: "custom",
-          message: "smoker acceptedProof must be a smoke report",
+          message: "smoker acceptedProof must be a smoke report or a blocked task report",
           path: ["acceptedProof"],
         });
       }

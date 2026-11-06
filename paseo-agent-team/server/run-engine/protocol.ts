@@ -115,7 +115,7 @@ function isProtocolName(name: string): name is RunProtocolBlockName {
 
 export function extractProtocolBlock(
   text: string,
-  options: { expected?: RunProtocolBlockName } = {},
+  options: { expected?: RunProtocolBlockName | readonly RunProtocolBlockName[] } = {},
 ): ExtractResult {
   if (Buffer.byteLength(text, "utf8") > PROTOCOL_REPLY_MAX_BYTES) {
     return { status: "unverifiable", reason: "reply-too-large" };
@@ -130,7 +130,13 @@ export function extractProtocolBlock(
   if (!fence || !isProtocolName(fence.name)) return { status: "none" };
   const kind = fence.name;
   if (!fence.terminated) return { status: "rejected", reason: "unterminated-fence", kind };
-  if (options.expected !== undefined && options.expected !== kind) {
+  const allowed =
+    options.expected === undefined
+      ? null
+      : typeof options.expected === "string"
+        ? [options.expected]
+        : options.expected;
+  if (allowed !== null && !allowed.includes(kind)) {
     return { status: "rejected", reason: "unexpected-kind", kind };
   }
   const bytes = Buffer.byteLength(fence.body, "utf8");
@@ -266,7 +272,9 @@ type ReportBlock = Extract<
 >;
 
 const PURPOSES_BY_KIND: Record<string, readonly RunAssignment["purpose"][]> = {
-  "task-report": ["member", "coordinator", "reopen"],
+  // A reviewer or smoker may send a task-report too, but only a blocked one (it could not do its
+  // job); the reducer refuses any other status from them.
+  "task-report": ["member", "coordinator", "reopen", "reviewer", "smoker"],
   "review-report": ["reviewer"],
   "smoke-report": ["smoker"],
 };

@@ -98,12 +98,13 @@ const RECEIPT_KIND = {
   "agent.archived": "archived",
 } as const;
 
-const KIND_BY_PURPOSE: Record<RunAssignment["purpose"], RunProtocolBlockName | null> = {
-  member: "task-report",
-  coordinator: "task-report",
-  reopen: "task-report",
-  reviewer: "review-report",
-  smoker: "smoke-report",
+/** The kinds an assignment's reply may carry. A judge may also say it could not do its job. */
+const KINDS_BY_PURPOSE: Record<RunAssignment["purpose"], readonly RunProtocolBlockName[] | null> = {
+  member: ["task-report"],
+  coordinator: ["task-report"],
+  reopen: ["task-report"],
+  reviewer: ["review-report", "task-report"],
+  smoker: ["smoke-report", "task-report"],
   probe: null,
 };
 
@@ -346,7 +347,7 @@ export function createRunObserver(options: ObserverOptions) {
         (entry) => entry.assignmentId === input.assignmentId,
       );
       if (!assignment) return { status: "unknown-assignment" };
-      const expected = KIND_BY_PURPOSE[assignment.purpose];
+      const expected = KINDS_BY_PURPOSE[assignment.purpose];
       if (expected === null) return { status: "unknown-assignment" };
       const window = await host.replyWindow(input.agentId, assignment.messageId);
       if (!window.complete) return { status: "unverifiable", reason: window.reason };

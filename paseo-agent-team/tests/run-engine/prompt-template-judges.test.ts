@@ -398,7 +398,7 @@ describe("template versions are frozen", () => {
   // Any change to a rendered byte must be a new version. These hashes pin every registered version
   // of the judges' prompts for a fixed ledger; a failure here means "add a version", not "update
   // the hash". Older versions stay registered for intents that were committed with them.
-  test("reviewer v1, v2, v3 and smoker v1, v2 render exactly these bytes", () => {
+  test("reviewer v1 to v4 and smoker v1 to v3 render exactly these bytes", () => {
     const render = (purpose: "reviewer" | "smoker", version: number) => {
       const { record, intent } = judged(
         purpose,
@@ -408,8 +408,8 @@ describe("template versions are frozen", () => {
       );
       return sha256(compileDispatch(intent, record) ?? "");
     };
-    expect(REVIEWER_TEMPLATE_VERSION).toBe(3);
-    expect(SMOKER_TEMPLATE_VERSION).toBe(2);
+    expect(REVIEWER_TEMPLATE_VERSION).toBe(4);
+    expect(SMOKER_TEMPLATE_VERSION).toBe(3);
     expect(render("reviewer", 1)).toBe(
       "6a44d5f3700d3761605ae928a86c9ea8789145e4f7f0d68c99c8098410d16fa5",
     );
@@ -419,11 +419,17 @@ describe("template versions are frozen", () => {
     expect(render("reviewer", 3)).toBe(
       "f0ce40250a4d4cf72f139fd411028cbc345c86aa82ad21be9ce211b41203262b",
     );
+    expect(render("reviewer", 4)).toBe(
+      "32acaebcb69ffb7d75bf801bd2170d6d235b334c313792f4b98a66c2e9604833",
+    );
     expect(render("smoker", 1)).toBe(
       "8818d5bb22b565bbed86c5dbc88944c80ce6f110f71ad3c589e08658612e7425",
     );
     expect(render("smoker", 2)).toBe(
       "a78ce1560f255ef02195fa2b67f6cba0cbf0debb116c603de4eef2112a46c761",
+    );
+    expect(render("smoker", 3)).toBe(
+      "2299897e3848bd7516012afddc7848a6695814fb18014c7840a1dcec0a057f66",
     );
   });
 });

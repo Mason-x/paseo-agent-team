@@ -445,3 +445,80 @@ describe("every key the prompts call 缺一不可 is one the strict parser reall
     }
   });
 });
+
+describe("a reviewer or smoker that cannot do its job has a report to send", () => {
+  // DEV, 2026-11-06: a smoker whose check command failed had only pass or fail to say, wrote plain
+  // text, and the task waited on "report-missing" with no reason. A blocked task-report is the exit.
+  const blockedReport = (dispatched: Dispatched, extra: Record<string, unknown> = {}) => ({
+    ...identityOf(textOf(dispatched)),
+    status: "blocked",
+    reasonCode: "DEV_TARGET_UNAVAILABLE",
+    summary: "curl to the registered DEV host returned exit code 7; stopped, no check was run",
+    evidence: [],
+    ...extra,
+  });
+
+  test.each(["reviewer", "smoker"] as const)(
+    "the %s prompt names the keys of that report",
+    (purpose) => {
+      const text = textOf(judgeDispatch(purpose));
+      expect(listsExactly(text, ["status", ...required(NOT_DONE, ENVELOPE), "evidence"])).toBe(
+        true,
+      );
+      expect(text).toContain("task-report");
+      // The producer-only prompts do not offer it.
+      expect(textOf(producerDispatch())).not.toContain("做不了");
+    },
+  );
+
+  test.each(["reviewer", "smoker"] as const)(
+    "a blocked task-report from the %s freezes the task with the reason",
+    (purpose) => {
+      const dispatched = judgeDispatch(purpose);
+      const after = accept(dispatched, "task-report", blockedReport(dispatched));
+      expect(stateOf(after, "t1")).toMatchObject({
+        state: "blocked",
+        phase: "frozen",
+        waitingReason: "DEV_TARGET_UNAVAILABLE",
+      });
+      const judge = after.assignments.find(
+        (entry) => entry.assignmentId === dispatched.assignmentId,
+      );
+      expect(judge).toMatchObject({ state: "ended", acceptedProof: { status: "blocked" } });
+      expect(after.resources.filter((claim) => claim.taskId === "t1").every((c) => c.frozen)).toBe(
+        true,
+      );
+    },
+  );
+
+  test("a blocked report without evidence is read as having none, as a producer's is", () => {
+    const dispatched = judgeDispatch("smoker");
+    const { evidence: _evidence, ...bare } = blockedReport(dispatched);
+    const after = accept(dispatched, "task-report", bare);
+    expect(stateOf(after, "t1")?.state).toBe("blocked");
+  });
+
+  test("a judge cannot report done (the parser refuses it) or failed (the reducer does)", () => {
+    const dispatched = judgeDispatch("reviewer");
+    expect(() =>
+      accept(dispatched, "task-report", blockedReport(dispatched, { status: "done" })),
+    ).toThrow("parser refused");
+    expect(() =>
+      accept(dispatched, "task-report", blockedReport(dispatched, { status: "failed" })),
+    ).toThrow("judge-report-not-blocked");
+  });
+
+  test("a producer's report is not a judge's: a smoke report still needs a smoker", () => {
+    const dispatched = judgeDispatch("reviewer");
+    expect(() =>
+      recordReply(dispatched.record, dispatched.assignmentId, "smoke-report", (identity) => ({
+        ...identity,
+        testedRef: DELIVERED,
+        devHost: "127.0.0.1:1",
+        devServerId: "x",
+        devHome: "/x",
+        checks: [{ id: "a", result: "pass", evidencePath: "/x/a" }],
+      })),
+    ).toThrow();
+  });
+});

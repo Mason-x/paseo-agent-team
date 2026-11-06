@@ -7,6 +7,7 @@ import {
   RunStoredReviewSchema,
   type RunStoredSmokeReport,
   RunStoredSmokeReportSchema,
+  RunStoredTaskReportSchema,
   type RunTaskRecord,
 } from "../../schemas/run-engine/ledger";
 import {
@@ -444,6 +445,8 @@ export function historicalProofValid(
   if (action === "produce") return assignment.delivery === null;
   const delivery = resolveProducerProof(record, producer.assignmentId);
   if (!delivery) return false;
+  // A judge that could not do its job holds a blocked task-report instead of a verdict or checks.
+  if (RunStoredTaskReportSchema.safeParse(proof).data?.status === "blocked") return true;
   if (action === "review") {
     const review = RunStoredReviewSchema.safeParse(proof);
     return (
