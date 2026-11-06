@@ -199,10 +199,13 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
-function runtime(options: { supported?: boolean } = {}) {
+function runtime(options: { supported?: boolean; identityOk?: boolean } = {}) {
   return createEngineRuntime({
     store,
     ensureReady: async () => undefined,
+    // The machine's own git config must not decide these tests.
+    commitIdentity: async () =>
+      options.identityOk === false ? { ok: false, detail: "no committer" } : { ok: true },
     env: {
       PASEO_HOME: paseoHome.replaceAll("\\", "/"),
       ...(options.supported === false ? {} : { PASEO_AGENT_TEAM_RUN_ENGINE: "1" }),
@@ -295,6 +298,24 @@ describe("the launch host", () => {
       host.adapter,
     );
     expect(result).toMatchObject({ ok: false, step: "preflight", detail: "server-id-unavailable" });
+    expect(created).not.toHaveBeenCalled();
+    expect((await store.get(RUN_ID)).status).not.toBe("ok");
+  });
+
+  test("a Workspace git cannot commit in stops the start before any agent exists", async () => {
+    const host = fakeHost();
+    const created = vi.spyOn(host.adapter, "createAgent");
+    const wired = runtime({ identityOk: false });
+    expect(await wired.launchHost.commitIdentity(repoDir)).toEqual({
+      ok: false,
+      detail: "no committer",
+    });
+    const result = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    expect(result).toMatchObject({ ok: false, step: "preflight", detail: "no committer" });
     expect(created).not.toHaveBeenCalled();
     expect((await store.get(RUN_ID)).status).not.toBe("ok");
   });

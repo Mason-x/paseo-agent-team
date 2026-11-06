@@ -28,6 +28,12 @@ export const runEngineZh = {
     workspaceNotGit: (detail: string) =>
       `Run 引擎需要 git 仓库作为 Workspace，当前目录不可用${detail ? `：${detail}` : ""}`,
     workspaceDetached: "Workspace 处于游离 HEAD（没有分支），Run 引擎不能在上面提交",
+    reviewerTierMissing: (producerSeat: string, level: string, tier: string) =>
+      `席位 ${producerSeat} 生产的 ${level} 任务需要另一个 ${tier} 层、带 review 职责的独立审查席位，目前没有；协调者会如实声明无法为这类任务成计划`,
+    codexNeedsFullAccess: (seatId: string, duty: string) =>
+      `席位 ${seatId} 用 Codex 承担 ${duty}，但 Profile 不是 full-access 模式：沙箱模式下它可能无法提交，也写不进仓库外的证据目录`,
+    commitIdentityMissing: (detail: string) =>
+      `Workspace 的 git 没有可用的提交身份（user.name、user.email），成员无法提交；请先配置${detail ? `：${detail}` : ""}`,
     workspaceDirty: "Workspace 的工作树不干净，Run 引擎只能在干净的分支上开始；请先提交或清理",
     workspaceNoCommit: "Workspace 还没有任何提交，Run 引擎需要一个基准提交",
   },

@@ -305,6 +305,11 @@ export function buildLaunchPlan(input: {
     resolution: resolveTeamRunEngine(team),
     logicalSeatIds: seatPlan.seats.map((seat) => seat.logicalSeatId),
     engineSupported: input.runEngineSupported === true,
+    seatProfiles: seatPlan.seats.map((seat) => ({
+      seatId: seat.logicalSeatId,
+      provider: seat.selected.profile.provider,
+      modeId: seat.selected.profile.modeId,
+    })),
   });
   blockers.push(...engineGate.blockers);
   warnings.push(...engineGate.warnings);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { keepTeamMetadata } from "../../client/catalog/preset-metadata";
 import { buildLaunchPlan } from "../../shared/domain/launch-plan";
-import { resolveTeamRunEngine } from "../../shared/domain/run-engine/team-config";
+import { engineLaunchGate, resolveTeamRunEngine } from "../../shared/domain/run-engine/team-config";
 import { TeamSchema } from "../../shared/schemas/team";
 import { runEngineZh } from "../../shared/zh/run-engine";
 import {
@@ -216,5 +216,109 @@ describe("Team.runEngine round trip", () => {
 
   test("a Team without the block stays without it", () => {
     expect("runEngine" in TeamSchema.parse(stored)).toBe(false);
+  });
+});
+
+describe("the launch plan feeds the gate the Profiles its seats resolved to", () => {
+  test("a Codex seat that implements, without full access, is warned about in the plan", () => {
+    const result = plan(config(), { runEngineSupported: true });
+    const codexSeats = result.seats.filter((entry) => entry.selected.profile.provider === "codex");
+    // The fixture must really have a Codex seat, or this test would prove nothing.
+    expect(codexSeats.length).toBeGreaterThan(0);
+    for (const entry of codexSeats) {
+      expect(result.warnings).toContain(zh.codexNeedsFullAccess(entry.logicalSeatId, "implement"));
+    }
+    // One warning per Codex seat and none for the others.
+    expect(result.warnings.filter((text) => text.includes("Codex"))).toHaveLength(
+      codexSeats.length,
+    );
+  });
+});
+
+describe("engineLaunchGate warnings", () => {
+  const seatOf = (seatId: string, tier: string, duties: string[], enabled = true) => ({
+    seatId,
+    tier,
+    duties,
+    channelId: "claude",
+    enabled,
+  });
+  const gate = (
+    seats: ReturnType<typeof seatOf>[],
+    profiles: { seatId: string; provider: string; modeId?: string }[] = [],
+  ) =>
+    engineLaunchGate({
+      resolution: resolveTeamRunEngine({ runEngine: config({ seats }) }),
+      logicalSeatIds: seats.map((entry) => entry.seatId),
+      engineSupported: true,
+      seatProfiles: profiles,
+    });
+
+  test("a tier B producer with one tier A reviewer has no reviewer for level 1 work", () => {
+    const result = gate([seatOf("p", "B", ["implement"]), seatOf("r", "A", ["review"])]);
+    expect(result.blockers).toEqual([]);
+    expect(result.warnings).toEqual([zh.reviewerTierMissing("p", "L1", "B")]);
+  });
+
+  test("a tier B producer needs a tier B and a tier A reviewer, neither of them itself", () => {
+    const only = gate([seatOf("p", "B", ["implement", "review"]), seatOf("r", "A", ["review"])]);
+    expect(only.warnings).toEqual([zh.reviewerTierMissing("p", "L1", "B")]);
+    const both = gate([
+      seatOf("p", "B", ["implement"]),
+      seatOf("rb", "B", ["review"]),
+      seatOf("ra", "A", ["review"]),
+    ]);
+    expect(both.warnings).toEqual([]);
+  });
+
+  test("each producer tier names the reviewer tiers its levels need", () => {
+    const warnings = gate([
+      seatOf("pa", "A", ["implement"]),
+      seatOf("ps", "S", ["implement"]),
+      seatOf("rb", "B", ["review"]),
+    ]).warnings;
+    expect(warnings).toEqual([
+      zh.reviewerTierMissing("pa", "L3", "A"),
+      zh.reviewerTierMissing("ps", "L4", "S"),
+    ]);
+  });
+
+  test("a disabled reviewer does not count, and a roster without the duty names is not judged", () => {
+    const disabled = gate([
+      seatOf("p", "B", ["implement"]),
+      seatOf("rb", "B", ["review"], false),
+      seatOf("ra", "A", ["review"]),
+    ]);
+    expect(disabled.warnings).toEqual([zh.reviewerTierMissing("p", "L1", "B")]);
+    expect(gate([seatOf("p", "B", ["build"]), seatOf("r", "A", ["audit"])]).warnings).toEqual([]);
+  });
+
+  test("a Codex seat that produces or smokes without full access is warned about, reviewers are not", () => {
+    const seats = [
+      seatOf("p", "B", ["implement"]),
+      seatOf("s", "A", ["review", "smoke"]),
+      seatOf("r", "B", ["review"]),
+    ];
+    const codex = (modeId?: string) =>
+      ["p", "s", "r"].map((seatId) => ({ seatId, provider: "codex", modeId }));
+    const mentionsCodex = (warnings: string[]) => warnings.filter((text) => text.includes("Codex"));
+    expect(mentionsCodex(gate(seats, codex("auto")).warnings)).toEqual([
+      zh.codexNeedsFullAccess("p", "implement"),
+      zh.codexNeedsFullAccess("s", "smoke"),
+    ]);
+    expect(mentionsCodex(gate(seats, codex("full-access")).warnings)).toEqual([]);
+    const claude = ["p", "s", "r"].map((seatId) => ({ seatId, provider: "claude" }));
+    expect(mentionsCodex(gate(seats, claude).warnings)).toEqual([]);
+  });
+
+  test("a Team without the block gets none of them", () => {
+    expect(
+      engineLaunchGate({
+        resolution: resolveTeamRunEngine({}),
+        logicalSeatIds: [],
+        engineSupported: true,
+        seatProfiles: [{ seatId: "p", provider: "codex" }],
+      }),
+    ).toEqual({ blockers: [], warnings: [], engine: false });
   });
 });

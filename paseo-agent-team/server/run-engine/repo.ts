@@ -59,6 +59,19 @@ export type RepoFacts = {
   clean: boolean;
 };
 
+export type CommitIdentity = { ok: true } | { ok: false; detail: string };
+
+/**
+ * Whether git can name a committer here. Without `user.name` and `user.email` a member cannot commit
+ * and honestly reports COMMIT_UNAVAILABLE, so a Run that needs commits should not start on it.
+ */
+export async function commitIdentity(directory: string): Promise<CommitIdentity> {
+  const result = await git(directory, ["var", "GIT_COMMITTER_IDENT"]);
+  if (result.ok) return { ok: true };
+  const line = result.stderr.split(/\r?\n/u).find((entry) => entry.trim() !== "") ?? "";
+  return { ok: false, detail: line.trim().slice(0, 200) };
+}
+
 export type InspectRepo =
   | { ok: true; repo: RepoFacts }
   | { ok: false; reason: "not-git" | "git-error"; detail: string };

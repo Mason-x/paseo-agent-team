@@ -85,10 +85,14 @@ async function engineStartBlockers(
     return blockers;
   }
   const usable = dispatchWorkspace(inspected.repo, workspace.id);
-  if (usable.ok) return blockers;
-  if (usable.reason === "detached-head") blockers.push(text.workspaceDetached);
-  else if (usable.reason === "no-commit") blockers.push(text.workspaceNoCommit);
-  else blockers.push(text.workspaceDirty);
+  if (!usable.ok) {
+    if (usable.reason === "detached-head") blockers.push(text.workspaceDetached);
+    else if (usable.reason === "no-commit") blockers.push(text.workspaceNoCommit);
+    else blockers.push(text.workspaceDirty);
+    return blockers;
+  }
+  const committer = await host.commitIdentity(inspected.repo.root);
+  if (!committer.ok) blockers.push(text.commitIdentityMissing(committer.detail));
   return blockers;
 }
 

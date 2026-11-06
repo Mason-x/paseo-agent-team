@@ -78,6 +78,7 @@ function engineHost(
   overrides: {
     supported?: boolean;
     identity?: Awaited<ReturnType<EngineLaunchHost["identity"]>>;
+    committer?: Awaited<ReturnType<EngineLaunchHost["commitIdentity"]>>;
     result?: EngineStartResult;
   } = {},
 ) {
@@ -103,6 +104,8 @@ function engineHost(
         serverId: "srv-dev",
         paseoHome: home.replaceAll("\\", "/"),
       },
+    // The machine's own git config must not decide these tests.
+    commitIdentity: async () => overrides.committer ?? { ok: true },
     start,
   };
   return { host, start };
@@ -331,6 +334,16 @@ describe("what blocks an Engine start before anything is created", () => {
     expect(await blockedBy(service, port)).toEqual([zh.workspaceDirty]);
     expect(await service.start(onWorkspace, port)).toMatchObject({ ok: false });
     expect(start).not.toHaveBeenCalled();
+  });
+
+  test("a Workspace git cannot commit in, in the preview and at start", async () => {
+    const detail = "fatal: unable to auto-detect email address";
+    const { host, start } = engineHost({ committer: { ok: false, detail } });
+    const { service, port, created } = setup({ engine: host });
+    expect(await blockedBy(service, port)).toEqual([zh.commitIdentityMissing(detail)]);
+    expect(await service.start(onWorkspace, port)).toMatchObject({ ok: false });
+    expect(start).not.toHaveBeenCalled();
+    expect(created).toHaveLength(0);
   });
 
   test("a Workspace the host gives no directory for", async () => {

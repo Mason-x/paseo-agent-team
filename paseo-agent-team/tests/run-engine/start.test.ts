@@ -214,6 +214,8 @@ function setup(
     effects,
     compilePlanRequest,
     templateVersion: 1,
+    // The machine's own git config must not decide these tests.
+    commitIdentity: async () => ({ ok: true }),
   };
   return { agents, host, effects, deps };
 }
@@ -319,7 +321,10 @@ describe("startEngineRun", () => {
     const agents = fakeAdapter();
     const host = fakePort();
     const effects = createEffects({ store, port: host.port, compile: compileEngineIntent });
-    const result = await startEngineRun({ store, adapter: agents.adapter, effects }, input());
+    const result = await startEngineRun(
+      { store, adapter: agents.adapter, effects, commitIdentity: async () => ({ ok: true }) },
+      input(),
+    );
     expect(result).toMatchObject({ ok: true, launchState: "running" });
     const record = await stored();
 
@@ -517,6 +522,30 @@ describe("startEngineRun: failures", () => {
     expect(result).toMatchObject({
       ok: false,
       step: "preflight",
+      archived: false,
+      agentIdsKept: [],
+    });
+    expect(await store.get(RUN_ID)).toEqual({ status: "missing" });
+    expect(agents.requests).toHaveLength(0);
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test("a Workspace git cannot commit in stops the launch before anything exists", async () => {
+    const { agents, host, deps } = setup();
+    const result = await startEngineRun(
+      {
+        ...deps,
+        commitIdentity: async () => ({
+          ok: false,
+          detail: "fatal: unable to auto-detect email address",
+        }),
+      },
+      input(),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      step: "preflight",
+      detail: "fatal: unable to auto-detect email address",
       archived: false,
       agentIdsKept: [],
     });

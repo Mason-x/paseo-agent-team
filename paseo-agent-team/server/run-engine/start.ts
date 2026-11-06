@@ -29,7 +29,13 @@ import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { alertIdFor, sha256Hex } from "./digest";
 import { type Effects, payloadHash, type SendableIntent } from "./effects";
-import { dispatchWorkspace, ensureEvidenceRoot, inspectRepo } from "./repo";
+import {
+  type CommitIdentity,
+  commitIdentity,
+  dispatchWorkspace,
+  ensureEvidenceRoot,
+  inspectRepo,
+} from "./repo";
 import type { RunStore } from "./store";
 
 /**
@@ -94,6 +100,8 @@ export type EngineStartDeps = {
   compilePlanRequest?(intent: SendableIntent, record: RunRecord): string | null;
   /** Default: the current plan request version. */
   templateVersion?: number;
+  /** Whether git can name a committer in the Workspace. Default: `git var GIT_COMMITTER_IDENT`. */
+  commitIdentity?(directory: string): Promise<CommitIdentity>;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -141,6 +149,10 @@ export async function startEngineRun(
   const workspace = dispatchWorkspace(repo, plan.workspaceId);
   if (!workspace.ok) {
     return refuse("preflight", "启动 Workspace 没有可派发的干净分支", workspace.reason);
+  }
+  const identity = await (deps.commitIdentity ?? commitIdentity)(repo.root);
+  if (!identity.ok) {
+    return refuse("preflight", "启动 Workspace 的 git 没有可用的提交身份", identity.detail);
   }
   const evidence = await ensureEvidenceRoot(
     repo,

@@ -13,6 +13,7 @@ import { createEffects } from "./effects";
 import { createObserverHost } from "./host";
 import { createIntake } from "./intake";
 import { createRunObserver, type ObserverHookEvent } from "./observer";
+import { type CommitIdentity, commitIdentity } from "./repo";
 import { createEngineService, type SeatSource } from "./service";
 import { type EngineStartInput, type EngineStartResult, startEngineRun } from "./start";
 import type { RunStore } from "./store";
@@ -40,6 +41,8 @@ export type EngineLaunchHost = {
   supported: boolean;
   /** Where the ledger lives and which daemon it is bound to; unreadable means no Engine start. */
   identity(): Promise<EngineIdentity>;
+  /** Whether git can name a committer in `directory` (members cannot commit without it). */
+  commitIdentity(directory: string): Promise<CommitIdentity>;
   start(
     input: Omit<EngineStartInput, "serverId" | "paseoHome">,
     paseo: PaseoPort,
@@ -53,6 +56,8 @@ export type EngineRuntimeOptions = {
   ensureReady(): Promise<void>;
   env?: NodeJS.ProcessEnv;
   files?: FilesPort;
+  /** Overrides the git committer check; tests use it so they do not depend on the machine's git config. */
+  commitIdentity?: (directory: string) => Promise<CommitIdentity>;
   log?: (message: string, detail?: unknown) => void;
 };
 
@@ -193,6 +198,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     launchHost: {
       supported,
       identity: readIdentity,
+      commitIdentity: options.commitIdentity ?? commitIdentity,
       async start(input, paseo, adapter): Promise<EngineStartResult> {
         bind(paseo);
         const found = await readIdentity();
@@ -207,7 +213,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
           };
         }
         return startEngineRun(
-          { store, adapter, effects, log },
+          { store, adapter, effects, commitIdentity: options.commitIdentity, log },
           { ...input, serverId: found.serverId, paseoHome: found.paseoHome },
         );
       },

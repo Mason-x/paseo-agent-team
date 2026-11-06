@@ -70,6 +70,8 @@ export function engineLaunchGate(input: {
   resolution: TeamRunEngine;
   logicalSeatIds: readonly string[];
   engineSupported: boolean;
+  /** The Profile each planned seat resolved to, for the warnings that depend on it. */
+  seatProfiles?: readonly SeatProfileFacts[];
 }): EngineLaunchGate {
   const { resolution } = input;
   const zh = runEngineZh.launch;
@@ -100,5 +102,70 @@ export function engineLaunchGate(input: {
   if (!resolution.config.seats.some((seat) => seat.enabled)) blockers.push(zh.noEnabledSeat);
   if (!input.engineSupported) blockers.push(zh.unsupported);
 
-  return { blockers, warnings: [], engine: true };
+  const warnings = [
+    ...reviewerCoverageWarnings(resolution.config.seats),
+    ...codexAccessWarnings(resolution.config.seats, input.seatProfiles ?? []),
+  ];
+  return { blockers, warnings, engine: true };
+}
+
+/** The Profile facts a seat warning needs; `modeId` is the Profile's launch mode, if it has one. */
+export type SeatProfileFacts = { seatId: string; provider: string; modeId?: string };
+
+type SeatFacts = RunTeamEngineConfig["seats"][number];
+
+/** Duty names the Engine's own prompts use; a roster that names none of them is not judged. */
+const DUTY = { produce: "implement", review: "review", smoke: "smoke" } as const;
+
+/**
+ * The reviewer a task of each level needs (L1 -> B, L2 and L3 -> A, L4 -> S), seen from the seat
+ * that produces it: a B seat produces L1 and L2 work, an A seat L3, an S seat L4. A seat never
+ * reviews its own work, so a producer needs another enabled seat with the review duty at each tier.
+ * Warnings only: whether a Run needs a level is not known before the coordinator plans.
+ */
+const REVIEW_TIERS: Record<string, { tier: string; level: string }[]> = {
+  B: [
+    { tier: "B", level: "L1" },
+    { tier: "A", level: "L2" },
+  ],
+  A: [{ tier: "A", level: "L3" }],
+  S: [{ tier: "S", level: "L4" }],
+};
+
+function reviewerCoverageWarnings(seats: readonly SeatFacts[]): string[] {
+  const zh = runEngineZh.launch;
+  const enabled = seats.filter((seat) => seat.enabled);
+  const producers = enabled.filter((seat) => seat.duties.includes(DUTY.produce));
+  const reviewers = enabled.filter((seat) => seat.duties.includes(DUTY.review));
+  if (producers.length === 0 || reviewers.length === 0) return [];
+  const warnings: string[] = [];
+  for (const producer of producers) {
+    for (const need of REVIEW_TIERS[producer.tier] ?? []) {
+      const covered = reviewers.some(
+        (reviewer) => reviewer.seatId !== producer.seatId && reviewer.tier === need.tier,
+      );
+      if (!covered) {
+        warnings.push(zh.reviewerTierMissing(producer.seatId, need.level, need.tier));
+      }
+    }
+  }
+  return warnings;
+}
+
+function codexAccessWarnings(
+  seats: readonly SeatFacts[],
+  profiles: readonly SeatProfileFacts[],
+): string[] {
+  const zh = runEngineZh.launch;
+  const warnings: string[] = [];
+  for (const seat of seats) {
+    if (!seat.enabled) continue;
+    const duty = [DUTY.produce, DUTY.smoke].find((name) => seat.duties.includes(name));
+    if (duty === undefined) continue;
+    const profile = profiles.find((entry) => entry.seatId === seat.seatId);
+    if (profile?.provider === "codex" && profile.modeId !== "full-access") {
+      warnings.push(zh.codexNeedsFullAccess(seat.seatId, duty));
+    }
+  }
+  return warnings;
 }
