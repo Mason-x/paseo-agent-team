@@ -49,6 +49,8 @@ export type IntakeResult =
   | { status: "unverifiable"; reason: UnverifiableReason }
   /** The reply is complete but the host's turn_ended receipt is not recorded yet. */
   | { status: "turn-not-ended" }
+  /** What was read came from a message that is no longer the one to read (a newer repair went out). */
+  | { status: "stale" }
   | { status: "duplicate"; assignmentId: string }
   | { status: "problem"; assignmentId: string; reason: string }
   | {
@@ -382,11 +384,16 @@ export function createIntake(options: IntakeOptions) {
         holder.result = { status: "duplicate", assignmentId };
         return null;
       }
+      // The reply was read from `anchor` outside the lock. If a newer repair has gone out since, that
+      // read is of an older message: nothing from it is committed, and the next pass reads the new one.
+      if (replyAnchor(current, assignment) !== anchor) {
+        holder.result = { status: "stale" };
+        return null;
+      }
       if (witnesses !== null) {
         const currentWakes = repairWakes(current, assignmentId);
         if (
           !evidenceRepairOf(current, assignment) ||
-          replyAnchor(current, assignment) !== anchor ||
           currentWakes.length !== witnesses.length ||
           currentWakes.some(
             (wake, index) =>

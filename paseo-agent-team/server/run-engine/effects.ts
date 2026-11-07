@@ -9,6 +9,7 @@ import {
   evidenceRepairOf,
   validStoredEvidenceRepair,
 } from "../../shared/domain/run-engine/evidence-repair";
+import { isRepairWake } from "../../shared/domain/run-engine/report-repair";
 import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions";
@@ -203,8 +204,8 @@ export function createEffects(options: EffectsOptions) {
     intentId: string,
     to: IntentTarget,
     reason?: string,
-  ): Promise<{ ok: boolean; changed: boolean }> {
-    const holder = { ok: false, changed: false };
+  ): Promise<{ ok: boolean; changed: boolean; superseded: boolean }> {
+    const holder = { ok: false, changed: false, superseded: false };
     await options.store.update(runId, (current, context) => {
       const intent = current.outbox.find((entry) => entry.id === intentId);
       const assignment = current.assignments.find(
@@ -215,6 +216,23 @@ export function createEffects(options: EffectsOptions) {
       // The claim to send is taken in the commit that moves the intent, so a pause or an end that
       // landed after the snapshot of the caller still wins: nothing moves, nothing is sent.
       if (to === "sending" && !lifecycleMaySend(current.lifecycle)) return null;
+      // A report-format repair only makes sense while its assignment still waits for a report. If it
+      // does not (a report was accepted, the assignment ended) the request is out of date: it goes to
+      // `failed` in this same commit and nothing is sent. This races atomically with the intake.
+      if (to === "sending" && intent?.state === "prepared" && isRepairWake(intent)) {
+        const waiting =
+          assignment !== undefined &&
+          (assignment.state === "assigned" || assignment.state === "in_progress") &&
+          assignment.acceptedProof === null;
+        if (!waiting) {
+          const dropped = transitionIntent(current, intentId, "failed", {
+            now,
+            reason: "superseded-before-send",
+          });
+          holder.superseded = dropped.ok && dropped.changed;
+          return dropped.ok && dropped.changed ? dropped.next : null;
+        }
+      }
       if (to === "sending" && repair && assignment && intent) {
         const task = current.tasks.find((entry) => entry.spec.id === assignment.taskId);
         const head = producerHead(current, assignment.taskId);
@@ -364,7 +382,12 @@ export function createEffects(options: EffectsOptions) {
 
       // Commit the intent to `sending` first. If this throws, nothing was sent. Only the runner
       // whose commit made the move owns the send; anyone else stops and leaves it to that runner.
-      if (!(await settleDetailed(runId, intent.id, "sending")).changed) return;
+      const claim = await settleDetailed(runId, intent.id, "sending");
+      if (!claim.changed) {
+        if (!claim.superseded) return;
+        report.failed.push(intent.id);
+        continue;
+      }
       sentCount += 1;
       try {
         await options.port.agents

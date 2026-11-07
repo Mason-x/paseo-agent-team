@@ -14,10 +14,12 @@ import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
+import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { emptyReadRetries, readReadRetries } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import { replyAnchor, requestReportRepair } from "../../shared/domain/run-engine/report-repair";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
@@ -1088,6 +1090,81 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     expect(stopped.resources.every((claim) => claim.frozen)).toBe(true);
     // No decision is opened for it: a retry would discard the delivery and implement the task again.
     expect(stopped.decisions).toHaveLength(0);
+  });
+
+  test("a supplement read from a message that a newer repair has replaced is not taken in; the next pass reads the new one", async () => {
+    // The store the engine uses is watched: once armed, the first read of the ledger after the host's
+    // timeline was read (the intake's own sample of the Run) is followed by a newer repair going out.
+    const real = store;
+    const watch = { armed: false, hostRead: false, injected: false };
+    store = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "get") {
+          return async (runId: string) => {
+            const read = await target.get(runId);
+            if (watch.armed && watch.hostRead && !watch.injected) {
+              watch.injected = true;
+              await target.update(runId, (current) => {
+                const assignment = current.assignments
+                  .filter((entry) => entry.evidenceRepair !== undefined)
+                  .at(-1);
+                if (!assignment) return null;
+                const drafted = requestReportRepair(current, {
+                  assignmentId: assignment.assignmentId,
+                  anchor: replyAnchor(current, assignment),
+                  reason: "report-missing",
+                  issues: [],
+                  intentId: "intent-repair-race",
+                  messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+                  payloadHash: "0".repeat(64),
+                  templateVersion: 1,
+                  now: "2026-11-05T12:01:00.000Z",
+                });
+                if (!drafted.ok) return null;
+                const sending = transitionIntent(drafted.next, "intent-repair-race", "sending", {
+                  now: "2026-11-05T12:01:01.000Z",
+                });
+                return sending.ok ? sending.next : null;
+              });
+            }
+            return read;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const { host, driver } = await refused();
+    const realRef = host.port.agents.ref;
+    host.port.agents.ref = (agentId) => {
+      const ref = realRef(agentId);
+      return {
+        ...ref,
+        timeline: {
+          refetch: async (...args: Parameters<typeof ref.timeline.refetch>) => {
+            watch.hostRead = true;
+            return ref.timeline.refetch(...args);
+          },
+        },
+      };
+    };
+    expect(supplements(await stored())).toHaveLength(1);
+    supplement(host, "agent-b1");
+    watch.hostRead = false;
+    watch.armed = true;
+    await hook(host, driver, "agent-b1");
+
+    expect(watch.injected).toBe(true);
+    const after = await stored();
+    const asked = supplements(after)[0];
+    expect(asked).toMatchObject({ state: "assigned", acceptedProof: null });
+    expect(t1(after)).toMatchObject({ evidenceReturns: 1 });
+    expect(after.outbox.find((entry) => entry.id === "intent-repair-race")).toMatchObject({
+      state: "sending",
+    });
+    // Nothing was judged: no reviewer got anything.
+    expect(host.sent.some((entry) => entry.agentId === "agent-b2")).toBe(false);
+    store = real;
   });
 
   test("a request whose delivery is unknown stays sent once: claims freeze and nothing is re-sent", async () => {

@@ -573,3 +573,111 @@ describe("outbox: a Run that is not live sends nothing new (plan point 36)", () 
     expect(await intentState(store, "run-fx0045-a1")).toMatchObject({ state: "confirmed" });
   });
 });
+
+describe("outbox: a report-format repair is sent only while its assignment still waits for a report (plan point 37)", () => {
+  const RUN = "run-fx0050-a1";
+  const REPAIR = "intent-repair-1";
+  /** In the fixture t1's assignment has ended and holds its accepted proof; t2's still waits. */
+  const ENDED = { assignmentId: "assignment-t1-a1", taskId: "t1" };
+  const WAITING = { assignmentId: "assignment-t2-a1", taskId: "t2" };
+  const compile = (intent: { id: string }) => (intent.id === REPAIR ? PROMPT_T2 : null);
+
+  /** The original dispatches are confirmed; a prepared repair request aims at `target`. */
+  function repairRun(target: { assignmentId: string; taskId: string } = WAITING): RunRecord {
+    const record = preparedRun(RUN, HASH, {
+      t2: { state: "confirmed", confirmedAt: "2026-11-05T11:00:00.000Z" },
+    });
+    record.outbox.push({
+      id: REPAIR,
+      kind: "wake",
+      recipient: RECIPIENT,
+      messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+      idempotencyKey: `repair:${RUN}:${target.assignmentId}:1`,
+      payloadHash: HASH,
+      templateVersion: 1,
+      state: "prepared",
+      recoverySendCount: 0,
+      createdAt: "2026-11-05T11:30:00.000Z",
+      confirmedAt: null,
+      localCancellation: null,
+      ...target,
+      semanticArgs: {
+        purpose: "repair",
+        ordinal: 1,
+        limit: 3,
+        reason: "report-missing",
+        issues: [],
+        kinds: ["task-report"],
+      },
+    } as RunRecord["outbox"][number]);
+    return record;
+  }
+
+  test("a repair for an assignment that still waits is sent", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun());
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile }).runOutbox(RUN);
+    expect(report.sent).toEqual([REPAIR]);
+    expect(host.sent).toHaveLength(1);
+  });
+
+  test("a repair whose assignment has ended with its report accepted is failed in the same commit and never sent", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun(ENDED));
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile }).runOutbox(RUN);
+    expect(report).toMatchObject({ sent: [], failed: [REPAIR] });
+    expect(host.sent).toEqual([]);
+    expect(await intentState(store, RUN, REPAIR)).toMatchObject({ state: "failed" });
+    const read = await store.get(RUN);
+    if (read.status !== "ok") throw new Error("unreadable");
+    const event = read.record.events.find((entry) => entry.kind === "intent-failed");
+    expect(event?.payload.reason).toBe("superseded-before-send");
+  });
+
+  test("the report that lands after the caller read the ledger still stops the repair", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun());
+    const before = await store.get(RUN);
+    if (before.status !== "ok") throw new Error("unreadable");
+    // The repair now belongs to an assignment that has finished: it happened after the executor's snapshot.
+    await store.update(RUN, (current) => {
+      const intent = current.outbox.find((entry) => entry.id === REPAIR);
+      if (!intent) return null;
+      Object.assign(intent, ENDED);
+      return current;
+    });
+    const stale = { get: async () => before, update: store.update.bind(store) };
+    const host = fakeHost();
+    const report = await effectsFor(stale, host.port, { compile }).runOutbox(RUN);
+    expect(report.sent).toEqual([]);
+    expect(host.sent).toEqual([]);
+    expect(await intentState(store, RUN, REPAIR)).toMatchObject({ state: "failed" });
+  });
+
+  test("a failed repair does not hold up the next message to another agent", async () => {
+    const store = await openStore();
+    const record = repairRun(ENDED);
+    const dispatch = record.outbox.find((entry) => entry.id === INTENT_T1);
+    if (!dispatch) throw new Error("fixture lost the t1 intent");
+    // A second prepared message, for someone else, behind the repair in ledger order.
+    record.outbox.push({
+      ...structuredClone(dispatch),
+      id: "intent-after",
+      recipient: "agent-other",
+      messageId: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+      idempotencyKey: "dispatch-after",
+      payloadHash: HASH,
+      state: "prepared",
+      confirmedAt: null,
+      assignmentId: "assignment-t2-a1",
+      taskId: "t2",
+    } as RunRecord["outbox"][number]);
+    await seed(store, RUN, record);
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile: () => PROMPT_T2 }).runOutbox(RUN);
+    expect(report.failed).toEqual([REPAIR]);
+    expect(report.sent).toEqual(["intent-after"]);
+  });
+});
