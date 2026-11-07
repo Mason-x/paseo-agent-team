@@ -14,7 +14,7 @@
 | T4 `creating` 崩溃续办 | 未完成（需批准） | — | — | 判断：重建 `CreateMemberInput` 的信息没有冻结在记录里，见待批准 B13；没有写代码 |
 | T5a Runs 页控制 | 已做 | 6b96dcc（代码）+ 计划第 38 点 | 2929 | 重新规划、重试（带确认和按类别的说明）、催办；按服务端声明门控；去掉"只读观察"文案 |
 | T5b 为什么在等 / 因果时间线 | 已做 | 1f70aaa（代码）+ 计划第 39 点 | 2963 | 表驱动的 why/who/next 与事件原因；扫描服务端源码穷举原因码和事件 kind |
-| T5c Team 编辑器 runEngine | 未开始 | — | — | |
+| T5c Team 编辑器 runEngine | 已做 | 4bd0941（代码）+ 计划第 40 点 | 3005 | 启用开关、席位卡、7 个策略数字、实时阻断与警告；往返不丢未知字段 |
 | T5d 启动对话框 | 未开始 | — | — | |
 | T5e 刷新 | 未开始 | — | — | |
 | T5f 响应式与断线 | 未开始 | — | — | |
@@ -41,6 +41,11 @@
 
 ## 我自己做的判断
 
+- **T5c 新建 Run 引擎配置的默认值**（`shared/domain/run-engine/team-config-edit.ts` 的 `DEFAULT_ENGINE_LIMITS` 与 `defaultEngineBlock`）：并发 2；每任务 报告重发 2、证据退回 3、每层返工 2、实现尝试 6；每 Run 允许失败 3 个任务、协调者 12 回合；每个席位 12 个回合的预算（没有预算条目的席位会被判"预算缺失"而永远派发不出去，所以必须有）；证据目录 `auto`；DEV 目标留空；渠道留空让人填，不从 Profile 猜。这些数字是我按夹具和合同范围定的，只在人点开关新建配置时才会写进去，默认关闭。想改默认值：改 `DEFAULT_ENGINE_LIMITS`，测试里只有 `seatTurnBudget` 被断言。
+- **T5a 重试用的"原因"文字**：服务端要求 `reason` 必填（1–600 字），确认框里不再让人输入，由类别生成"从 Runs 页确认重试（D3）"。想让人手写原因：在 `EngineControls.tsx` 的确认框加输入，`control-runner.ts` 的 `retry` 已经把 `offer.reason` 原样发送。
+- **T5a/T5b 不按子类说明停下的原因**：决策 DTO 不带 `dedupeKey`，所以 D1 只能给"成员/判官停了或补报用尽"的合并说明。想分开要新字段，见 B10。
+- **T2 暂停时 prepared 的意图保持 prepared**，结束或取消的 Run 里的 prepared 意图也不转 failed，只是永不发送（不写新事件）。想转 failed：在 `effects.ts` 的 `lifecycleMaySend` 为假时对 prepared 意图调用 `transitionIntent(..., "failed", "run-not-live")`，要同步改计划第 36 点。
+
 ## 遇到的问题与绕法
 
 ## 没做或没做完
@@ -53,3 +58,4 @@
 - **T3**：biome 仅 2 条既有警告；tsc 通过；vitest 174 个文件 2862 通过（3 todo，T2 后 2855 加 7）；verify:package 通过。变异检查 10 项（`mut-t3.mjs`）：R01、R02（普通报告去掉 anchor 复核、比较错的 anchor）、R03（补证链同时去掉两层）、R06 到 R10（effects 的复核与 continue 行为）都被抓；R04、R05 存活，原因是补证链里"补报集合与回执"的复核与 anchor 复核互为后备，只去 anchor 一层行为不变（R03 同时去掉两层就被抓），属有意冗余；还原后逐字节一致。
 - **T5a**：biome 仅 2 条既有警告；tsc 通过；vitest 176 个文件 2929 通过（3 todo，T3 后 2862 加 67）；verify:package 通过。变异检查 21 项（`mut-t5a.mjs`）全部被抓到；还原后逐字节一致。没有在真实浏览器看布局（放在 DEV 阶段）。
 - **T5b**：biome 仅 2 条既有警告；tsc 通过；vitest 177 个文件 2963 通过（3 todo，T5a 后 2929 加 34）；verify:package 通过。变异检查 14 项（`mut-t5b.mjs`）全部被抓到（座位拒绝原因那一项第一次存活，改测试后被抓）；还原后逐字节一致。
+- **T5c**：biome 仅 2 条既有警告；tsc 通过；vitest 179 个文件 3005 通过（3 todo，T5b 后 2963 加 42）；verify:package 通过。变异检查 15 项（`mut-t5c.mjs`、`mut-t5c2.mjs`）全部被抓到；中途发现并修掉"刚启用的默认块被当作无法读取"的缺陷。
