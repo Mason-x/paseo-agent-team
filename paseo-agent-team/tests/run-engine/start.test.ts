@@ -216,6 +216,9 @@ function setup(
     templateVersion: 1,
     // The machine's own git config must not decide these tests.
     commitIdentity: async () => ({ ok: true }),
+    // The original behaviour: one more try with the same key, no waiting.
+    createAttempts: 2,
+    retryDelayMs: 0,
   };
   return { agents, host, effects, deps };
 }
@@ -552,6 +555,18 @@ describe("startEngineRun: failures", () => {
     expect(await store.get(RUN_ID)).toEqual({ status: "missing" });
     expect(agents.requests).toHaveLength(0);
     expect(host.sent).toHaveLength(0);
+  });
+
+  test("a create that fails twice with a transient error succeeds on the third try with the same key", async () => {
+    const { agents, deps } = setup({ failures: { [seatKey(COORDINATOR_SEAT_ID)]: 2 } });
+    const result = await startEngineRun({ ...deps, createAttempts: 3 }, input());
+    expect(result).toMatchObject({ ok: true, launchState: "running" });
+    const coordinatorCalls = agents.requests.filter(
+      (request) => request.idempotencyKey === seatKey(COORDINATOR_SEAT_ID),
+    );
+    expect(coordinatorCalls).toHaveLength(3);
+    // Still one agent per seat: the repeated key never made a second coordinator.
+    expect(agents.agents().size).toBe(3);
   });
 
   test("when the coordinator cannot be created the launch is failed on the Run, with an alert", async () => {

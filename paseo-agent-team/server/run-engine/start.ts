@@ -100,6 +100,13 @@ export type EngineStartDeps = {
   compilePlanRequest?(intent: SendableIntent, record: RunRecord): string | null;
   /** Default: the current plan request version. */
   templateVersion?: number;
+  /**
+   * How often one agent create is tried (same idempotency key every time, so asking again is safe).
+   * The host sometimes fails a create on a transient file error (Windows `EPERM` on rename). Default 3.
+   */
+  createAttempts?: number;
+  /** Pause before attempt n+1 is `n * retryDelayMs`. Default 750. */
+  retryDelayMs?: number;
   /** Whether git can name a committer in the Workspace. Default: `git var GIT_COMMITTER_IDENT`. */
   commitIdentity?(directory: string): Promise<CommitIdentity>;
   clock?: { now(): string };
@@ -308,12 +315,17 @@ export async function startEngineRun(
       mcpServers: agent.role.mcpServers,
       idempotencyKey: `engine:${runId}:seat:${seatId}`,
     };
-    let result: { agentId: string };
-    try {
-      result = await deps.adapter.createAgent(request);
-    } catch (first) {
-      log(`creating ${seatId} did not return cleanly; asking again with the same key`, first);
-      result = await deps.adapter.createAgent(request);
+    const attempts = Math.max(1, deps.createAttempts ?? 3);
+    const delay = deps.retryDelayMs ?? 750;
+    let result: { agentId: string } | undefined;
+    for (let attempt = 1; result === undefined; attempt += 1) {
+      try {
+        result = await deps.adapter.createAgent(request);
+      } catch (error) {
+        if (attempt >= attempts) throw error;
+        log(`creating ${seatId} did not return cleanly; asking again with the same key`, error);
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay * attempt));
+      }
     }
     created.push(result.agentId);
     await commit((current) => {
