@@ -180,6 +180,52 @@ export const runEngineZh = {
     other: "等待处理",
   },
 
+  /** The Run Engine block in the Team editor. */
+  teamEditor: {
+    title: "Run 引擎",
+    help: "让这个 Team 用 Run 引擎执行：协调者只给任务图，派发、审查、重试由引擎按规则做。需要宿主启用 PASEO_AGENT_TEAM_RUN_ENGINE，并且工作区是干净的 git 仓库。",
+    enable: "用 Run 引擎启动这个 Team",
+    statusLabel: {
+      absent: "未配置",
+      disabled: "已配置，未启用",
+      enabled: "已启用",
+      incomplete: "有待补全",
+      invalid: "无法读取",
+    } as Record<string, string>,
+    seats: "席位",
+    seatHelp:
+      "每个启用的 Team 成员对应一个席位。层级决定它能做哪一层的任务；职责决定它做什么；渠道通常是它的 Profile 的 provider（例如 claude、codex）。",
+    seatEnabled: "启用",
+    tier: "层级",
+    duties: "职责",
+    channel: "渠道",
+    channelPlaceholder: "例如 claude",
+    duty: { implement: "实现", review: "审查", smoke: "冒烟" } as Record<string, string>,
+    policy: "策略",
+    policyHelp:
+      "这些数字限制引擎能重试多少次、同时做几件事；超出范围的值保存前会被拒绝。预算、DEV 目标、证据目录等其余字段保持原样。",
+    numbers: {
+      configuredConcurrency: "同时进行的任务数",
+      protocolResends: "报告格式重发次数（每个任务）",
+      evidenceReturns: "证据退回次数（每个任务）",
+      reworkPerLayer: "每层返工次数",
+      implementationAttempts: "实现尝试次数上限",
+      failedTasks: "允许失败的任务数（每个 Run）",
+      strategicTurns: "协调者回合数上限（每个 Run）",
+    },
+    missingSeats: (ids: string) => `这些 Team 成员还没有席位：${ids}`,
+    orphanSeats: (ids: string) => `这些席位没有对应的 Team 成员，启动会被拒绝：${ids}`,
+    addMissing: "补上缺少的席位",
+    removeOrphans: "删除多余的席位",
+    invalidTitle: "已保存的 Run 引擎配置无法读取，保存 Team 时会原样保留",
+    invalidHelp: "编辑器不会改动它，也不会把它当作默认值。需要重新开始时再选下面的按钮。",
+    startFresh: "用默认值重新开始（会覆盖这份无法读取的配置）",
+    blockers: "启动会被拒绝",
+    warnings: "提醒",
+    ready: "检查通过：按当前配置启动会走 Run 引擎",
+    unknownKept: "配置里编辑器不认识的字段会原样保留",
+  },
+
   /** The three lines under a task, a decision and a history event. */
   explain: { why: "为什么在等", who: "谁来解除", next: "下一步" },
 
