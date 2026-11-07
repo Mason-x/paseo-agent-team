@@ -354,6 +354,9 @@ export function historyPage(
       events,
       nextCursor:
         hasMore && oldest ? encodeHistoryCursor(record.runId, oldest.seq, checkpoint) : null,
+      ...(record.checkpoint === undefined
+        ? {}
+        : { compactedThroughSeq: record.checkpoint.throughSeq }),
     },
     issues,
   };

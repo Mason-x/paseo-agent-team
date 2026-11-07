@@ -581,6 +581,8 @@ export type EngineModel = {
   alerts: AlertRowView[];
   history: HistoryRowView[];
   nextCursor: string | null;
+  /** Set when older events were folded into the checkpoint; shown after the last page. */
+  compactedThroughSeq: number | null;
   notices: string[];
 };
 
@@ -612,6 +614,7 @@ export function buildEngineModel(
     alerts: alertRows(run.alerts),
     history: historyRows(pages),
     nextCursor: (older.at(-1) ?? history).nextCursor,
+    compactedThroughSeq: (older.at(-1) ?? history).compactedThroughSeq ?? null,
     notices: state.notices,
   };
 }

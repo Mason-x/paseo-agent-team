@@ -7,6 +7,7 @@ import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { type FilesPort, nodeFiles } from "../version/process";
 import { readServerId } from "../version/service";
+import { createCompactor } from "./compact";
 import { createRunControl } from "./control";
 import { createDagIntake } from "./dag";
 import { createEngineDriver, type EngineDriver } from "./driver";
@@ -163,6 +164,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     service,
     outbox: { run: (runId) => effects.runOutbox(runId) },
     onPassed: (runId) => readRetry.sweep(runId),
+    compactor: createCompactor({ store, log }),
     log,
   });
   const control = createRunControl({

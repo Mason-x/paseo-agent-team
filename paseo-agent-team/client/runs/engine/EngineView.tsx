@@ -425,7 +425,11 @@ function HistoryList({
           </Text>
         </Pressable>
       ) : model.history.length > 0 ? (
-        <Muted theme={theme}>{zh.history.noMore}</Muted>
+        <Muted theme={theme}>
+          {model.compactedThroughSeq !== null
+            ? zh.history.compacted(model.compactedThroughSeq)
+            : zh.history.noMore}
+        </Muted>
       ) : null}
     </Section>
   );

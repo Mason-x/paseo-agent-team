@@ -154,6 +154,8 @@ export type RunHistoryEntryView = z.infer<typeof RunHistoryEntryViewSchema>;
 export const RunHistoryPageSchema = z.object({
   events: z.array(RunHistoryEntryViewSchema).max(50),
   nextCursor: Text(256).nullable(),
+  /** Events up to this sequence number were folded into the checkpoint and are no longer listed. */
+  compactedThroughSeq: z.number().int().nonnegative().optional(),
 });
 
 /** Frozen failure codes for R07 copy; lower-case hyphen style. */

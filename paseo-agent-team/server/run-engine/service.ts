@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
+  CAPACITY_REFUSE_ALERT,
+  CAPACITY_WARN_ALERT,
+  type CompactionLimits,
+  capacityIssue,
+} from "../../shared/domain/run-engine/compaction";
+import {
   judgedNothing,
   producerHead,
   resolveD,
@@ -30,6 +36,7 @@ import {
   smokerSemanticArgs,
   templateVersionFor,
 } from "../../shared/domain/run-engine/prompt-template";
+import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
 import {
   eligibleReviewSeats,
   planDispatchWithReasons,
@@ -42,6 +49,7 @@ import { reviewRequirement } from "../../shared/domain/run-engine/tier";
 import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
+import { alertIdFor } from "./digest";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
 import type { ReadFailure } from "./read-retry";
 import {
@@ -99,6 +107,8 @@ export type EngineServiceOptions = {
    * down so the read is tried again later (`read-retry.ts`); the dispatch is not retried by this.
    */
   onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
+  /** Lower thresholds for tests; the defaults are the ledger-sized ones in `compaction.ts`. */
+  capacityLimits?: Partial<CompactionLimits>;
   ids?: { uuid(): string };
   clock?: { now(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -717,14 +727,44 @@ export function createEngineService(options: EngineServiceOptions) {
     );
   }
 
+  /** One alert per kind, found again by its text, so asking again writes nothing. */
+  async function noteCapacity(runId: string, level: "refuse" | "warn"): Promise<void> {
+    const summary = level === "refuse" ? CAPACITY_REFUSE_ALERT : CAPACITY_WARN_ALERT;
+    try {
+      await options.store.update(runId, (current) => {
+        const raised = raiseAlert(
+          current,
+          {
+            alertId: alertIdFor(summary),
+            severity: level === "refuse" ? "critical" : "warning",
+            summary,
+          },
+          clock.now(),
+        );
+        return raised.changed ? raised.next : null;
+      });
+    } catch (error) {
+      log(`could not note the ledger capacity of ${runId}`, error);
+    }
+  }
+
   async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
     // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
     // its DAG, have nothing to send.
     if (read.record.lifecycle !== "active") return { status: "idle" };
+    // Near a ledger limit nothing new starts, so what is in flight can still be taken in and finished.
+    const capacity = capacityIssue(read.record, {
+      bytesHigh: read.needsCompaction,
+      limits: options.capacityLimits,
+    });
+    if (capacity !== null) await noteCapacity(runId, capacity.level);
     const work = nextWork(read.record);
     if (!work) return { status: "idle" };
+    if (capacity?.level === "refuse") {
+      return { status: "blocked", taskId: work.task.spec.id, reason: "ledger-capacity" };
+    }
     if (work.kind === "produce") return dispatchProducer(runId, read.record, work.task);
     if (work.kind === "evidence") return dispatchEvidence(runId, read.record, work.task);
     return dispatchJudge(runId, read.record, work.task, work.kind);

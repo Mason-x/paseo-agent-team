@@ -50,6 +50,11 @@ export const DISPATCH_BLOCKED_ZH: Record<string, WaitingText> = {
     who: YOU,
     next: `核对仓库里的改动；${KICK}`,
   },
+  "ledger-capacity": {
+    why: "这个 Run 的台账接近容量上限，停止了新的派发",
+    who: `${YOU}（收尾后重新启动一个 Run）`,
+    next: "进行中的工作会继续收尾；之后用新的 Run 做剩下的事",
+  },
   "evidence-not-repairable": {
     why: "证据被退回的原因不是补齐就能解决的（例如检查真的失败了）",
     who: `${YOU}（暂无入口，需要决策）`,
@@ -423,6 +428,10 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
   "intent-failed": { label: "消息作废", cause: "这条消息发出之前就不再需要或无法生成，没有发送" },
   "alert-raised": { label: "告警", cause: "出现了需要人知道的情况（见“渠道与告警”）" },
   "alert-resolved": { label: "告警解除", cause: "告警的原因消失了" },
+  "history-compacted": {
+    label: "历史已压缩",
+    cause: "事件太多，更早的历史被折叠成摘要，任务、占用、预算和决策都没有变",
+  },
   "read-retry-changed": {
     label: "重查宿主",
     cause: "宿主读取失败，Engine 按 1、2、4 秒间隔只读地重查（只提示，不自己恢复）",

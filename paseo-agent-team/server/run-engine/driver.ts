@@ -6,6 +6,7 @@ import {
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { Compactor } from "./compact";
 import type { DagIntake } from "./dag";
 import { sha256Hex } from "./digest";
 import type { Intake } from "./intake";
@@ -68,6 +69,8 @@ export type DriverOptions = {
    * were tried again and no longer matter. It must not move the Run; its failure is logged only.
    */
   onPassed?: (runId: string) => void | Promise<void>;
+  /** Folds the old events of a Run into its checkpoint at the start of a pass (`compact.ts`). */
+  compactor?: Pick<Compactor, "compactIfNeeded">;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -150,6 +153,13 @@ export function createEngineDriver(options: DriverOptions) {
   }
 
   async function pass(runId: string): Promise<KickReport> {
+    if (options.compactor) {
+      // Its own commit, before anything else of this pass; a failure is logged inside and does not stop the pass.
+      const read = await options.store.get(runId);
+      if (read.status === "ok") {
+        await options.compactor.compactIfNeeded(runId, { bytesHigh: read.needsCompaction });
+      }
+    }
     let dispatched = 0;
     let last: DispatchNextResult = { status: "idle" };
     for (let step = 0; step < MAX_STEPS; step += 1) {

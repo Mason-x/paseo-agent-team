@@ -357,6 +357,7 @@ export const runEngineZh = {
   history: {
     loadOlder: "加载更早",
     noMore: "没有更早的事件",
+    compacted: (n: number) => `更早的 ${n} 条历史已压缩成摘要，无法再展开`,
     kind: {
       "dag-accepted": "任务图已接受",
       "dag-revised": "任务图已修订",
