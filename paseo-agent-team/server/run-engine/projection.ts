@@ -38,7 +38,7 @@ export function supportedControlsOf(record: Pick<RunRecord, "lifecycle" | "decis
   const live = record.lifecycle !== "finished" && record.lifecycle !== "cancelled";
   const usable: Record<(typeof RUN_ACTION_CONTROLS)[number], boolean> = {
     replan: record.lifecycle === "awaiting-dag",
-    decide: record.decisions.some((decision) => answerableActions(decision).length > 0),
+    decide: record.decisions.some((decision) => answerableActions(record, decision).length > 0),
     kick: live,
     pause: record.lifecycle === "active",
     resume: record.lifecycle === "paused",
@@ -233,7 +233,7 @@ export function projectDetail(record: RunRecord): ProjectedDetail {
       summary: decision.summary,
       createdAt: decision.createdAt,
       answeredAction: decision.answer?.action ?? null,
-      actions: answerableActions(decision),
+      actions: answerableActions(record, decision),
     })),
     channels: record.channels.map((channel) => ({
       channelId: channel.channelId,

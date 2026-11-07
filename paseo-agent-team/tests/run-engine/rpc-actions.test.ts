@@ -115,6 +115,29 @@ describe("inputs", () => {
     ).toBe(true);
   });
 
+  test("decide accepts retry and cancel with nothing more, and the output may list the cancelled tasks", () => {
+    const ok = { ...base, decisionId: DECISION };
+    expect(RunDecideInputSchema.safeParse({ ...ok, answer: { action: "cancel" } }).success).toBe(
+      true,
+    );
+    expect(
+      RunDecideInputSchema.safeParse({ ...ok, answer: { action: "cancel", extra: 1 } }).success,
+    ).toBe(false);
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 5,
+      decisionId: DECISION,
+      taskId: "t1",
+      issues: [],
+    };
+    expect(RunDecideOutputSchema.safeParse(out).success).toBe(true);
+    expect(
+      RunDecideOutputSchema.safeParse({ ...out, cancelledTaskIds: ["t1", "t2"] }).success,
+    ).toBe(true);
+    expect(RunDecideOutputSchema.safeParse({ ...out, cancelledTaskIds: [""] }).success).toBe(false);
+  });
+
   test("kick: a Run id and nothing else", () => {
     expect(RunKickInputSchema.safeParse({ runContractVersion: 1, runId: RUN }).success).toBe(true);
     for (const bad of [

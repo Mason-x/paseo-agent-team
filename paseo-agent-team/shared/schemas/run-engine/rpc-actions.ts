@@ -85,9 +85,10 @@ export type RunReplanOutput = z.infer<typeof RunReplanOutputSchema>;
 // --- run.decide -----------------------------------------------------------------------------
 
 /** What a person can answer a decision with today. The other actions of the ledger come later. */
-export const RUN_DECIDE_ACTIONS = ["retry"] as const;
+export const RUN_DECIDE_ACTIONS = ["retry", "cancel"] as const;
 export const RunDecideAnswerSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("retry") }),
+  z.strictObject({ action: z.literal("cancel") }),
 ]);
 export type RunDecideAnswer = z.infer<typeof RunDecideAnswerSchema>;
 
@@ -105,6 +106,8 @@ export const RunDecideOutputSchema = z.object({
   decisionId: z.string().uuid(),
   /** The task the decision was about, when there is one. */
   taskId: Text(64).nullable(),
+  /** For `cancel`: the task and every task that depended on it, now cancelled. */
+  cancelledTaskIds: z.array(Text(64)).max(64).optional(),
   issues: z.array(RunIssueViewSchema).max(100),
 });
 export type RunDecideOutput = z.infer<typeof RunDecideOutputSchema>;

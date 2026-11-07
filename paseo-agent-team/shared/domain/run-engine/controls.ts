@@ -32,6 +32,20 @@ export type RetryOffer = {
   reason: string;
 };
 
+export type CancelOffer = {
+  decisionId: string;
+  category: string;
+  categoryLabel: string;
+  subject: string | null;
+  summary: string;
+  /** The titles of the tasks that are cancelled with it: everything that depends on it, through any chain. */
+  downstream: string[];
+  /** What the cancellation does, for the confirmation. */
+  explain: string;
+  /** The reason sent with the request. */
+  reason: string;
+};
+
 export type ControlsView = {
   /** The revision the page last read; the write is refused as `revision-conflict` if the Run moved on. */
   revision: number;
@@ -40,12 +54,14 @@ export type ControlsView = {
   pause: boolean;
   resume: boolean;
   retries: RetryOffer[];
+  cancels: CancelOffer[];
   /** False when there is nothing to offer at all (a finished Run, nothing waiting for a person). */
   any: boolean;
 };
 
 export function controlsOf(
-  run: Pick<RunDetailView, "revision" | "capabilities" | "decisions" | "tasks">,
+  run: Pick<RunDetailView, "revision" | "capabilities" | "decisions" | "tasks"> &
+    Partial<Pick<RunDetailView, "dag">>,
 ): ControlsView {
   const named = new Set(run.capabilities.supportedControls);
   const titleOf = new Map(run.tasks.map((task) => [task.taskId, task.title]));
@@ -66,6 +82,27 @@ export function controlsOf(
           reason: zh.controls.retry.reason(displayText(decision.category, 8)),
         }))
     : [];
+  const cancels: CancelOffer[] = named.has("decide")
+    ? run.decisions
+        .filter((decision) => isDecisionPending(decision) && decision.actions?.includes("cancel"))
+        .map((decision) => ({
+          decisionId: decision.decisionId,
+          category: decision.category,
+          categoryLabel:
+            zh.decisions.category[decision.category] ?? displayText(decision.category, 8),
+          subject:
+            decision.subjectId === null
+              ? null
+              : displayText(titleOf.get(decision.subjectId) ?? decision.subjectId, 120),
+          summary: displayText(decision.summary, 400, "—"),
+          downstream:
+            decision.subjectId === null
+              ? []
+              : downstreamTitles(run.dag?.tasks ?? [], decision.subjectId, titleOf),
+          explain: zh.controls.cancelTask.explain,
+          reason: zh.controls.cancelTask.reason(displayText(decision.category, 8)),
+        }))
+    : [];
   const replan = named.has("replan");
   const kick = named.has("kick");
   const pause = named.has("pause");
@@ -77,8 +114,30 @@ export function controlsOf(
     pause,
     resume,
     retries,
-    any: replan || kick || pause || resume || retries.length > 0,
+    cancels,
+    any: replan || kick || pause || resume || retries.length > 0 || cancels.length > 0,
   };
+}
+
+/** Titles of the tasks that depend on `taskId`, through any chain and still not finished, in the DAG's order. */
+function downstreamTitles(
+  nodes: readonly { taskId: string; title: string; deps: readonly string[]; state: string }[],
+  taskId: string,
+  titleOf: ReadonlyMap<string, string>,
+): string[] {
+  const found = new Set<string>([taskId]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const node of nodes) {
+      if (found.has(node.taskId) || !node.deps.some((dep) => found.has(dep))) continue;
+      found.add(node.taskId);
+      grew = true;
+    }
+  }
+  found.delete(taskId);
+  return nodes
+    .filter((node) => found.has(node.taskId) && node.state !== "cancelled")
+    .map((node) => displayText(titleOf.get(node.taskId) ?? node.title, 120));
 }
 
 /** What a retry does depends on what stopped the task; the category tells which of the three it was. */

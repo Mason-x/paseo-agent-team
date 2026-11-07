@@ -35,7 +35,14 @@ export type EngineViewProps = {
    */
   controls?: Pick<
     EngineControlsProps,
-    "state" | "onReplan" | "onRetry" | "onKick" | "onPause" | "onResume" | "onDismiss"
+    | "state"
+    | "onReplan"
+    | "onRetry"
+    | "onCancelTask"
+    | "onKick"
+    | "onPause"
+    | "onResume"
+    | "onDismiss"
   >;
   onRefresh: () => void;
   onLoadOlder: (cursor: string) => void;

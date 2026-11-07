@@ -70,6 +70,7 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("重试");
     expect(section).toContain(runEngineZh.controls.kick.button);
     expect(section).toContain(runEngineZh.controls.pause.button);
+    expect(section).toContain(runEngineZh.controls.cancelTask.button);
     expect(section).toContain(runEngineZh.controls.resume.button);
   });
 

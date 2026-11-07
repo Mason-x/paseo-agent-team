@@ -12,6 +12,7 @@ import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
 import { createLifecycleControl } from "../../server/run-engine/lifecycle";
 import { createRunObserver } from "../../server/run-engine/observer";
+import { projectDetail } from "../../server/run-engine/projection";
 import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
@@ -1161,8 +1162,66 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     const stopped = await stored();
     expect(t1(stopped)).toMatchObject({ state: "blocked", waitingReason: "EVIDENCE_UNAVAILABLE" });
     expect(stopped.resources.every((claim) => claim.frozen)).toBe(true);
-    // No decision is opened for it: a retry would discard the delivery and implement the task again.
-    expect(stopped.decisions).toHaveLength(0);
+    // A retry would discard the delivery and implement the task again, so the decision it gets has its
+    // own key (not `stuck:`) and offers only `cancel`.
+    expect(stopped.decisions).toHaveLength(1);
+    const opened = stopped.decisions[0];
+    expect(opened).toMatchObject({ category: "D1", state: "open", subjectId: "t1" });
+    expect(opened?.dedupeKey.startsWith("evidence-stuck:")).toBe(true);
+    const view = projectDetail(stopped);
+    if (!view.ok) throw new Error("projection failed");
+    expect(view.view.decisions.map((d) => d.actions)).toEqual([["cancel"]]);
+  });
+
+  test("the decision of a frozen supplement can only be answered with cancel: a retry is refused, a cancel releases the claim and the dependents", async () => {
+    const { host, driver } = await refused();
+    const prompt = host.lastSent("agent-b1")?.text ?? "";
+    const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+    host.reply(
+      "agent-b1",
+      fence("task-report", {
+        ...identity,
+        status: "failed",
+        reasonCode: "EVIDENCE_UNAVAILABLE",
+        summary: "the logs are gone",
+        evidence: [],
+      }),
+    );
+    await hook(host, driver, "agent-b1");
+    await driver.kick(RUN_ID);
+    const stopped = await stored();
+    const decision = stopped.decisions[0];
+    expect(decision?.dedupeKey.startsWith("evidence-stuck:")).toBe(true);
+    // Looking again opens nothing more.
+    await driver.kick(RUN_ID);
+    expect((await stored()).decisions).toHaveLength(1);
+
+    const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+    const ask = async (action: "retry" | "cancel") => ({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      decisionId: decision?.decisionId ?? "",
+      requestId: `ans-${action}`,
+      expectedRevision: (await stored()).revision,
+      reason: "from the test",
+      answer: { action },
+    });
+    const retry = await control.decide(await ask("retry"));
+    expect(retry).toMatchObject({ status: "rejected", issues: [{ code: "action-unsupported" }] });
+    expect((await stored()).revision).toBe(stopped.revision);
+
+    const sent = host.sent.length;
+    const cancelled = await control.decide(await ask("cancel"));
+    expect(cancelled).toMatchObject({ status: "applied", cancelledTaskIds: ["t1", "t2"] });
+    await control.idle();
+    const after = await stored();
+    expect(t1(after)).toMatchObject({ state: "cancelled" });
+    expect(after.resources).toEqual([]);
+    expect(after.decisions.find((d) => d.decisionId === decision?.decisionId)).toMatchObject({
+      state: "answered",
+      answer: { action: "cancel" },
+    });
+    expect(host.sent).toHaveLength(sent);
   });
 
   test("a supplement read from a message that a newer repair has replaced is not taken in; the next pass reads the new one", async () => {

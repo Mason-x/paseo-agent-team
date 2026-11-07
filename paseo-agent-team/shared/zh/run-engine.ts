@@ -21,6 +21,9 @@ const TASK_NOT_RELEASABLE_ZH: Record<string, string> = {
   "delivery-missing": "找不到可以返工的交付",
   cancellation: "任务正在取消",
   "task-missing": "找不到这个任务",
+  "dependent-active": "依赖它的任务已经开始，不能一起取消",
+  "cancel-not-released": "取消后占用没有释放",
+  "cancel-facts-missing": "服务端没有给出取消所需的信息",
 };
 
 function own(map: Record<string, string>, key: string): string {
@@ -63,6 +66,17 @@ export const runEngineZh = {
       title: "催办",
       help: "立即核对宿主、补收漏掉的报告、发出还没发出的消息，并推进一次。不会替成员完成任何任务，也不会放开冻结的占用。",
       button: "立即检查并推进",
+    },
+    cancelTask: {
+      button: "取消任务",
+      confirmTitle: "确认取消这个任务？",
+      confirm: "确认取消",
+      cancel: "返回",
+      reason: (category: string) => `从 Runs 页确认取消任务（${category}）`,
+      explain:
+        "任务会被取消，它占用的文件会释放，依赖它的任务也会一起取消。取消不会回滚代码：已经提交的改动留在分支上，需要的话请自己 revert。",
+      downstream: (titles: string) => `一起取消的任务：${titles}`,
+      noDownstream: "没有其他任务依赖它。",
     },
     pause: {
       title: "暂停派发",
@@ -115,7 +129,7 @@ export const runEngineZh = {
         `这个决策点目前不能在这里回应${typeof params.category === "string" ? `（${params.category}）` : ""}`,
       "action-unsupported": () => "当前版本不支持这个回应方式",
       "task-not-releasable": (params: Record<string, string | number | boolean>) =>
-        `任务还没有被证明已经停下，不能重试${typeof params.reason === "string" ? `（${own(TASK_NOT_RELEASABLE_ZH, params.reason)}）` : ""}`,
+        `任务还没有被证明已经停下，不能重试或取消${typeof params.reason === "string" ? `（${own(TASK_NOT_RELEASABLE_ZH, params.reason)}）` : ""}`,
       "run-not-active": (params: Record<string, string | number | boolean>) =>
         `Run 现在不在运行中${typeof params.lifecycle === "string" ? `（${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}，不能执行这个操作`,
       "lifecycle-not-allowed": (params: Record<string, string | number | boolean>) =>
@@ -405,7 +419,7 @@ export const runEngineZh = {
   list: {
     title: "Engine 运行",
     controlsHint:
-      "展开一个运行后可以重新规划、重试停下的任务、催办、暂停或继续；取消和批准还不能在这里做",
+      "展开一个运行后可以重新规划、重试停下的任务、催办、取消任务、暂停或继续；取消整个 Run 和批准还不能在这里做",
     observeOnly: "目前只读观察：不会派发或改动任务",
     open: "查看",
     close: "收起",

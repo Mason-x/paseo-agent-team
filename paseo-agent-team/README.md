@@ -179,7 +179,7 @@ cancelled Run sends nothing new.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
 waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
-cancel or approve from the Runs page yet, and it does not retry a transient failure after a
+cancel a whole Run or approve from the Runs page yet, and it does not retry a transient failure after a
 message was dispatched by itself. A Run holds at most 8192 events: old history is folded into a
 summary (it cannot be expanded again), and when the ledger nears a limit it stops starting new work
 and says so, so a very long Run is finished and restarted rather than overfilled. Acceptance status per scenario is in
@@ -187,7 +187,7 @@ and says so, so a very long Run is finished and restarted rather than overfilled
 
 **Follow and steer a Run.** **Agent Teams → 运行 → Engine 运行** lists the Runs and opens one: the
 task graph, each task with why it waits, who clears it and what happens next, locks, budgets,
-decisions, channels and alerts, and a history with the cause of each event. Five controls appear
+decisions, channels and alerts, and a history with the cause of each event. These controls appear
 only when the Run offers them:
 
 - **重新规划** (re-plan), while the Run waits for a task graph: asks the coordinator again, with a
@@ -195,6 +195,11 @@ only when the Run offers them:
 - **重试** (retry) on a decision the Engine opened for a stopped task (D1, D3, D4): after you
   confirm, the task gets one more attempt from where it stopped. Nothing is released until every
   turn of the task is proven ended.
+- **取消任务** (cancel a task), on the same decisions: the task and every task that depends on it are
+  cancelled and their claims released, once every turn of the task is proven ended. Nothing is sent to
+  a member and nothing is rolled back: what was committed stays on the branch, revert it yourself if
+  you do not want it. A decision for a task stopped by a member's answer to an evidence request offers
+  only this, because a retry would throw the delivery away.
 - **立即检查并推进** (kick): reads the host, takes in reports that were missed, sends what was
   prepared and not yet sent, and moves the Run on. It completes no task for a member.
 - **暂停派发** (pause), while the Run is running: nothing new is dispatched and no new message goes
@@ -216,9 +221,9 @@ you to try once more. A request is never applied twice.
   refuses to grant new write claims to any Run, in any repository. Do not roll back while an
   Engine Run is live.
 - If a member answers an evidence request with "blocked" or "failed", the task stays frozen with
-  its claims and no decision is opened; there is no Retry for it, because a retry would throw the
-  delivery away. Look at the member's conversation and decide by hand; cancel and re-assign
-  controls are not in the page yet.
+  its claims and a decision is opened that offers only 取消任务 (there is no Retry, because a retry
+  would throw the delivery away). Look at the member's conversation, then cancel the task or leave
+  it frozen; re-assigning is not in the page yet.
 - Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
   Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.

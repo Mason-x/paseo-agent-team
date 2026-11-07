@@ -107,6 +107,7 @@ export function explainDecision(
 ): TaskExplanation {
   const pending = isDecisionPending(decision);
   const canRetry = pending && decision.actions?.includes("retry") === true;
+  const canCancel = pending && decision.actions?.includes("cancel") === true;
   const why: Record<string, string> = {
     D1: "有成员或判官停下了，或成员的回合结束后没有可用的报告",
     D3: "S 层的质量阶梯用完了，任务失败",
@@ -117,13 +118,25 @@ export function explainDecision(
   if (!pending) {
     return { why: base, who: "已有结果", next: "这个决策已经处理，不需要再做什么" };
   }
-  return canRetry
-    ? { why: base, who: "你", next: "在上方“控制”里确认重试；一次只会再给任务一次尝试" }
-    : {
-        why: base,
-        who: "你（当前版本没有页面入口）",
-        next: "人工检查任务；取消、改派和追加预算还不能在这里做",
-      };
+  if (canRetry) {
+    return {
+      why: base,
+      who: "你",
+      next: "在上方“控制”里确认重试（一次只会再给任务一次尝试），或取消这个任务",
+    };
+  }
+  if (canCancel) {
+    return {
+      why: base,
+      who: "你",
+      next: "这个任务只能取消（重试会丢掉已有的交付）；在上方“控制”里确认，依赖它的任务会一起取消",
+    };
+  }
+  return {
+    why: base,
+    who: "你（当前版本没有页面入口）",
+    next: "人工检查任务；改派和追加预算还不能在这里做",
+  };
 }
 
 const WAITING_BY_BLOCK: Record<string, (task: RunTaskView) => TaskExplanation> = {

@@ -310,6 +310,13 @@ describe("explainDecision", () => {
     }
   });
 
+  test("a pending decision that can only be cancelled says so, and why a retry is not offered", () => {
+    const said = explainDecision(decision({ category: "D1", actions: ["cancel"] }));
+    expect(said.who).toBe("你");
+    expect(said.next).toContain("只能取消");
+    expect(said.next).not.toContain("没有页面入口");
+  });
+
   test("a pending decision without a retry says there is no entry for it here", () => {
     const said = explainDecision(decision({ category: "D5", actions: [] }));
     expect(said.who).toContain("没有页面入口");

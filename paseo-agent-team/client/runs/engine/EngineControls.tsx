@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type {
+  CancelOffer,
   ControlsView,
   NoticeTone,
   RetryOffer,
@@ -17,6 +18,7 @@ export type EngineControlsProps = {
   state: ControlState;
   onReplan: (reason: string) => void;
   onRetry: (offer: RetryOffer) => void;
+  onCancelTask: (offer: CancelOffer) => void;
   onKick: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -72,10 +74,22 @@ function ActionButton({
  * flight every button is disabled; the answer is said in words under the buttons.
  */
 export function EngineControls(props: EngineControlsProps) {
-  const { theme, view, state, onReplan, onRetry, onKick, onPause, onResume, onDismiss } = props;
+  const {
+    theme,
+    view,
+    state,
+    onReplan,
+    onRetry,
+    onCancelTask,
+    onKick,
+    onPause,
+    onResume,
+    onDismiss,
+  } = props;
   const [reason, setReason] = useState("");
   const [needReason, setNeedReason] = useState(false);
   const [confirming, setConfirming] = useState<RetryOffer | null>(null);
+  const [confirmingCancel, setConfirmingCancel] = useState<CancelOffer | null>(null);
   const busy = state.pending !== null;
 
   return (
@@ -154,6 +168,20 @@ export function EngineControls(props: EngineControlsProps) {
             label={`${zh.controls.retry.button} ${offer.subject ?? offer.categoryLabel}`}
             disabled={busy}
             onPress={() => setConfirming(offer)}
+          />
+        </View>
+      ))}
+
+      {view.cancels.map((offer) => (
+        <View key={`cancel-${offer.decisionId}`} style={{ gap: 4 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+            {[offer.categoryLabel, offer.subject].filter(Boolean).join(" · ")}
+          </Text>
+          <ActionButton
+            theme={theme}
+            label={`${zh.controls.cancelTask.button} ${offer.subject ?? offer.categoryLabel}`}
+            disabled={busy}
+            onPress={() => setConfirmingCancel(offer)}
           />
         </View>
       ))}
@@ -242,6 +270,28 @@ export function EngineControls(props: EngineControlsProps) {
           const offer = confirming;
           setConfirming(null);
           if (offer !== null) onRetry(offer);
+        }}
+      />
+      <ConfirmDialog
+        theme={theme}
+        open={confirmingCancel !== null}
+        title={zh.controls.cancelTask.confirmTitle}
+        body={
+          confirmingCancel === null
+            ? ""
+            : `${[confirmingCancel.categoryLabel, confirmingCancel.subject].filter(Boolean).join(" · ")}\n${confirmingCancel.explain}\n${
+                confirmingCancel.downstream.length === 0
+                  ? zh.controls.cancelTask.noDownstream
+                  : zh.controls.cancelTask.downstream(confirmingCancel.downstream.join("、"))
+              }`
+        }
+        confirmLabel={zh.controls.cancelTask.confirm}
+        cancelLabel={zh.controls.cancelTask.cancel}
+        onCancel={() => setConfirmingCancel(null)}
+        onConfirm={() => {
+          const offer = confirmingCancel;
+          setConfirmingCancel(null);
+          if (offer !== null) onCancelTask(offer);
         }}
       />
     </View>

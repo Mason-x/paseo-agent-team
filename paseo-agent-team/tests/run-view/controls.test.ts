@@ -93,6 +93,43 @@ describe("controlsOf: only what the server named is offered", () => {
     expect([paused.pause, paused.resume, paused.any]).toEqual([false, true, true]);
   });
 
+  test("a cancel is offered for a decision whose actions include it, and lists what goes with the task", () => {
+    const withDag = {
+      ...run({ decisions: [decision({ actions: ["retry", "cancel"] })] }),
+      dag: {
+        revision: 1,
+        tasks: [
+          { taskId: "T1", title: "Build the core", layer: 0, deps: [], state: "failed" },
+          { taskId: "T2", title: "Use the core", layer: 1, deps: ["T1"], state: "pending" },
+          { taskId: "T3", title: "Use the use", layer: 2, deps: ["T2"], state: "pending" },
+          { taskId: "T4", title: "Elsewhere", layer: 0, deps: [], state: "pending" },
+          { taskId: "T5", title: "Already gone", layer: 1, deps: ["T1"], state: "cancelled" },
+        ],
+      },
+    };
+    const view = controlsOf(withDag);
+    expect(view.cancels).toHaveLength(1);
+    expect(view.cancels[0]).toMatchObject({
+      decisionId: DECISION,
+      subject: "Build the core",
+      downstream: ["Use the core", "Use the use"],
+      explain: zh.controls.cancelTask.explain,
+    });
+    expect(view.any).toBe(true);
+    // Without the server naming `decide`, or without `cancel` among the decision's actions, nothing.
+    expect(
+      controlsOf({
+        ...withDag,
+        capabilities: { ...withDag.capabilities, supportedControls: ["kick"] },
+      }).cancels,
+    ).toEqual([]);
+    expect(controlsOf(run({ decisions: [decision({ actions: ["retry"] })] })).cancels).toEqual([]);
+    // A decision that can only be cancelled offers no retry.
+    const only = controlsOf(run({ decisions: [decision({ actions: ["cancel"] })] }));
+    expect([only.retries.length, only.cancels.length]).toEqual([0, 1]);
+    expect(only.cancels[0]?.downstream).toEqual([]);
+  });
+
   test("replan is offered only when the server names it", () => {
     expect(controlsOf(run({ supportedControls: ["kick"] })).replan).toBe(false);
     expect(controlsOf(run({ supportedControls: ["replan", "kick"] })).replan).toBe(true);
@@ -107,6 +144,7 @@ describe("controlsOf: only what the server named is offered", () => {
       pause: false,
       resume: false,
       retries: [],
+      cancels: [],
       any: false,
     });
   });

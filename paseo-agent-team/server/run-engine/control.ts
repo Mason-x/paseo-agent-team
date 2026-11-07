@@ -323,7 +323,12 @@ export function createRunControl(options: RunControlOptions) {
         status: "rejected" as const,
       };
       if (!loaded.ok) return { ...closed, revision: 0, issues: [loaded.issue] };
-      const outcome: { refused?: Refused; replayed?: string | null; applied?: string } = {};
+      const outcome: {
+        refused?: Refused;
+        replayed?: string | null;
+        applied?: string;
+        cancelled?: string[];
+      } = {};
       let written: Awaited<ReturnType<RunStore["update"]>>;
       try {
         written = await store.update(input.runId, (current) => {
@@ -334,6 +339,8 @@ export function createRunControl(options: RunControlOptions) {
             reason: input.reason,
             action: input.answer.action,
             now: clock.now(),
+            newId: () => uuid(),
+            controlNonceDigest: sha256Hex(uuid()),
           });
           if (!result.ok) {
             const params: Params =
@@ -369,6 +376,7 @@ export function createRunControl(options: RunControlOptions) {
             return null;
           }
           outcome.applied = result.taskId;
+          outcome.cancelled = result.cancelled;
           return result.next;
         });
       } catch (error) {
@@ -397,6 +405,7 @@ export function createRunControl(options: RunControlOptions) {
         revision,
         decisionId: input.decisionId,
         taskId: outcome.applied ?? null,
+        ...(outcome.cancelled === undefined ? {} : { cancelledTaskIds: outcome.cancelled }),
         issues: [],
       };
     },

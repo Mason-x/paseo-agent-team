@@ -213,6 +213,62 @@ describe("kick", () => {
   });
 });
 
+describe("cancelling a task", () => {
+  const cancelOffer = {
+    decisionId: DECISION,
+    category: "D4",
+    categoryLabel: "D4",
+    subject: "Build the core",
+    summary: "x",
+    downstream: ["Use the core"],
+    explain: "y",
+    reason: zh.controls.cancelTask.reason("D4"),
+  };
+
+  test("answers the decision with cancel, under the revision the page read, and says it was done", async () => {
+    const { runner, deps } = setup();
+    expect(await runner.cancelTask(cancelOffer, 9)).toBe(true);
+    expect(deps.decide).toHaveBeenCalledWith({
+      runContractVersion: RUN_CONTRACT_VERSION,
+      runId: "run-ctl-a1",
+      requestId: "req-1",
+      expectedRevision: 9,
+      reason: cancelOffer.reason,
+      decisionId: DECISION,
+      answer: { action: "cancel" },
+    });
+    expect(runner.state.notice?.tone).toBe("success");
+    expect(deps.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("a retry and a cancel of the same decision at the same revision are different requests", async () => {
+    const { runner, deps } = setup();
+    await runner.retry(offer, 9);
+    await runner.cancelTask(cancelOffer, 9);
+    const ids = vi.mocked(deps.decide).mock.calls.map((call) => call[0].requestId);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  test("a request that got no answer is asked again under the same id", async () => {
+    const decide = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({
+        ...BASE,
+        status: "applied",
+        revision: 6,
+        decisionId: DECISION,
+        taskId: "T1",
+        issues: [],
+      });
+    const { runner } = setup({ decide });
+    await runner.cancelTask(cancelOffer, 9);
+    expect(runner.state.notice?.text).toBe(zh.controls.result.transport);
+    await runner.cancelTask(cancelOffer, 9);
+    expect(decide.mock.calls.map((call) => call[0].requestId)).toEqual(["req-1", "req-1"]);
+  });
+});
+
 describe("pause and resume", () => {
   test.each(["pause", "resume"] as const)(
     "%s sends the revision the page read and a reason the page wrote",

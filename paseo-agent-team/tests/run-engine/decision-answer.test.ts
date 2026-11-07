@@ -98,16 +98,39 @@ describe("classifyDecision", () => {
   });
 
   test("offers `retry` only while the decision waits and is one it can answer", () => {
-    expect(answerableActions(decision())).toEqual(["retry"]);
-    expect(answerableActions(decision({ state: "waiting-human" }))).toEqual(["retry"]);
-    expect(answerableActions(decision({ state: "answered" }))).toEqual([]);
-    expect(answerableActions(decision({ state: "superseded" }))).toEqual([]);
-    expect(answerableActions(decision({ category: "D2", dedupeKey: "other:1" }))).toEqual([]);
+    const active = { lifecycle: "active" } as const;
+    expect(answerableActions(active, decision())).toEqual(["retry", "cancel"]);
+    expect(answerableActions(active, decision({ state: "waiting-human" }))).toEqual([
+      "retry",
+      "cancel",
+    ]);
+    expect(answerableActions(active, decision({ state: "answered" }))).toEqual([]);
+    expect(answerableActions(active, decision({ state: "superseded" }))).toEqual([]);
+    expect(answerableActions(active, decision({ category: "D2", dedupeKey: "other:1" }))).toEqual(
+      [],
+    );
+    // A decision of the evidence chain has no retry: it would throw the delivery away.
+    expect(
+      answerableActions(
+        active,
+        decision({ category: "D1", dedupeKey: "evidence-stuck:assignment-t1-a1" }),
+      ),
+    ).toEqual(["cancel"]);
+    // A Run that is not live answers nothing.
+    for (const lifecycle of [
+      "paused",
+      "bootstrapping",
+      "awaiting-dag",
+      "finished",
+      "cancelled",
+    ] as const) {
+      expect(answerableActions({ lifecycle }, decision())).toEqual([]);
+    }
   });
 });
 
 describe("answerDecision refuses what it should, and writes nothing", () => {
-  test("an unknown decision, a decision of another kind, an action that is not retry", () => {
+  test("an unknown decision, a decision of another kind, an action this build cannot take", () => {
     const record = withDecision();
     const before = structuredClone(record);
     expect(answerDecision(record, request(record, { decisionId: "x" }))).toEqual({
@@ -127,7 +150,7 @@ describe("answerDecision refuses what it should, and writes nothing", () => {
       ok: false,
       code: "decision-not-answerable",
     });
-    for (const action of ["reject", "cancel", "assign-seat", "increase-budget"]) {
+    for (const action of ["reject", "assign-seat", "increase-budget"]) {
       expect(answerDecision(record, request(record, { action }))).toEqual({
         ok: false,
         code: "action-unsupported",
@@ -215,7 +238,8 @@ describe("supportedControlsOf", () => {
     expect(live("awaiting-dag")).toEqual(["replan", "kick"]);
     expect(live("active")).toEqual(["kick", "pause"]);
     expect(live("active", [decision()])).toEqual(["decide", "kick", "pause"]);
-    expect(live("paused", [decision()])).toEqual(["decide", "kick", "resume"]);
+    // A paused Run answers nothing: the decision waits until it is resumed.
+    expect(live("paused", [decision()])).toEqual(["kick", "resume"]);
     expect(live("paused")).toEqual(["kick", "resume"]);
     expect(live("active", [decision({ state: "answered" })])).toEqual(["kick", "pause"]);
     expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual([

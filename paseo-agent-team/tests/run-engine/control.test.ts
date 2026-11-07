@@ -111,6 +111,8 @@ beforeEach(async () => {
     };
   }
   record.policy.evidenceRoot = evidenceRoot;
+  // The tests whose name says [v2] run on a v2 ledger, the rest on the base fixture (v1).
+  if (expect.getState().currentTestName?.includes("[v2]")) record.schemaVersion = 2;
   // Two attempts, then a person decides: the shortest road to a D4.
   record.policy.perTask.implementationAttempts = 2;
   await store.create(record);
@@ -828,7 +830,7 @@ describe("decide", () => {
     // The view says what can be answered and that it can.
     const view = projectDetail(frozen);
     if (!view.ok) throw new Error("projection failed");
-    expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry"]]);
+    expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry", "cancel"]]);
     expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick", "pause"]);
 
     const out = await b.control.decide(answer(decision?.decisionId ?? "", frozen.revision));
@@ -1138,6 +1140,205 @@ describe("decide", () => {
     expect(after.decisions).toHaveLength(1);
     expect(after.decisions[0]).toMatchObject({ category: "D1", state: "open", subjectId: "t1" });
   });
+  describe("cancel", () => {
+    const cancelAnswer = (decisionId: string, expectedRevision: number, over = {}) =>
+      answer(decisionId, expectedRevision, { answer: { action: "cancel" as const }, ...over });
+    const find = (record: RunRecord, taskId: string) =>
+      record.tasks.find((task) => task.spec.id === taskId);
+
+    /** What a cancellation leaves: both tasks cancelled, nothing claimed, nobody told anything. */
+    async function expectCancelled(host: Host, b: Built, sentBefore: number): Promise<RunRecord> {
+      await b.control.idle();
+      const after = await stored();
+      expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+      expect(after.resources).toEqual([]);
+      expect(after.lifecycle).toBe("finished");
+      expect(host.sent).toHaveLength(sentBefore);
+      return after;
+    }
+
+    test.each(["v1", "v2"] as const)(
+      "[%s] a D4: the task and everything that depends on it are cancelled, the claims go, the Run finishes, and nothing is sent",
+      async (version) => {
+        const host = fakeHost();
+        const b = build(host);
+        const frozen = await reachD4(host, b);
+        const decision = frozen.decisions.find((d) => d.category === "D4");
+        const sentBefore = host.sent.length;
+        const out = await b.control.decide(
+          cancelAnswer(decision?.decisionId ?? "", frozen.revision),
+        );
+        expect(out).toMatchObject({
+          status: "applied",
+          taskId: "t1",
+          cancelledTaskIds: ["t1", "t2"],
+          issues: [],
+        });
+        const after = await expectCancelled(host, b, sentBefore);
+        expect(after.schemaVersion).toBe(version === "v1" ? 1 : 2);
+
+        // The decision the person answered carries the request; the reducer's own D1 was answered for the
+        // release, names that decision, and is what the task's release is bound to.
+        const answered = after.decisions.find((d) => d.decisionId === decision?.decisionId);
+        expect(answered).toMatchObject({
+          state: "answered",
+          answer: { action: "cancel", taskIds: ["t1", "t2"], requestId: "ans-1" },
+        });
+        const release = after.decisions.find((d) => d.dedupeKey === "cancel:t1");
+        expect(release).toMatchObject({
+          category: "D1",
+          state: "answered",
+          answer: {
+            action: "cancel",
+            taskIds: ["t1"],
+            requestId: "ans-1",
+            via: decision?.decisionId,
+          },
+        });
+        expect(find(after, "t1")?.releaseDecisionId).toBe(release?.decisionId);
+
+        // The same answer again is the same answer; someone else's does not stand.
+        const replay = await b.control.decide(
+          cancelAnswer(decision?.decisionId ?? "", frozen.revision),
+        );
+        expect(replay).toMatchObject({ status: "replayed", taskId: "t1" });
+        const other = await b.control.decide(
+          cancelAnswer(decision?.decisionId ?? "", after.revision, { requestId: "ans-2" }),
+        );
+        expect(other).toMatchObject({
+          status: "rejected",
+          issues: [{ code: "decision-answered" }],
+        });
+        expect((await stored()).revision).toBe(after.revision);
+      },
+    );
+
+    test("a producer that reported blocked is cancelled, with its frozen claim released", async () => {
+      const host = fakeHost();
+      const b = build(host);
+      host.planRequestSent();
+      host.reply(COORDINATOR_AGENT, plan());
+      await hook(host, b.driver, COORDINATOR_AGENT);
+      stop(host, "agent-b1", "EVIDENCE_UNAVAILABLE");
+      await hook(host, b.driver, "agent-b1");
+      const frozen = await stored();
+      const decision = frozen.decisions.find((d) => d.state === "open");
+      expect(decision?.dedupeKey).toMatch(/^stuck:/u);
+      const sentBefore = host.sent.length;
+      const out = await b.control.decide(cancelAnswer(decision?.decisionId ?? "", frozen.revision));
+      expect(out).toMatchObject({ status: "applied", cancelledTaskIds: ["t1", "t2"] });
+      await expectCancelled(host, b, sentBefore);
+    });
+
+    test("a judge that could not judge: the task is cancelled, the delivery stays on the branch", async () => {
+      const host = fakeHost();
+      const b = build(host);
+      host.planRequestSent();
+      host.reply(COORDINATOR_AGENT, plan());
+      await hook(host, b.driver, COORDINATOR_AGENT);
+      produce(host, "agent-b1");
+      await hook(host, b.driver, "agent-b1");
+      stop(host, "agent-b2");
+      await hook(host, b.driver, "agent-b2");
+      const frozen = await stored();
+      const decision = frozen.decisions.find((d) => d.state === "open");
+      const sentBefore = host.sent.length;
+      const out = await b.control.decide(cancelAnswer(decision?.decisionId ?? "", frozen.revision));
+      expect(out.status).toBe("applied");
+      await expectCancelled(host, b, sentBefore);
+    });
+
+    test("work that is not proven stopped, or a dependent that already started, is not cancelled", async () => {
+      const host = fakeHost();
+      const b = build(host);
+      const frozen = await reachD4(host, b);
+      const decision = frozen.decisions.find((d) => d.category === "D4");
+      const ask = (record: RunRecord) =>
+        answerDecision(record, {
+          decisionId: decision?.decisionId ?? "",
+          requestId: "ans-1",
+          expectedRevision: record.revision,
+          reason: "stop",
+          action: "cancel",
+          now: "2026-11-08T00:00:00.000Z",
+          newId: (kind) => `${kind}-00000000-0000-4000-8000-000000000001`,
+          controlNonceDigest: "c".repeat(64),
+        });
+
+      const unsettled = structuredClone(frozen);
+      const reviewer = unsettled.assignments.findLast((a) => a.purpose === "reviewer");
+      if (!reviewer) throw new Error("no reviewer");
+      reviewer.state = "in_progress";
+      expect(ask(unsettled)).toEqual({
+        ok: false,
+        code: "task-not-releasable",
+        reason: "actors-unsettled",
+      });
+
+      const open = structuredClone(frozen);
+      open.outbox.push({
+        id: "intent-repair-left",
+        kind: "wake",
+        recipient: reviewer.agentId,
+        messageId: "99999999-9999-4999-8999-999999999999",
+        idempotencyKey: "repair:left",
+        payloadHash: "9".repeat(64),
+        templateVersion: 1,
+        state: "confirmed",
+        recoverySendCount: 0,
+        createdAt: frozen.updatedAt,
+        confirmedAt: frozen.updatedAt,
+        localCancellation: null,
+        taskId: "t1",
+        assignmentId: reviewer.assignmentId,
+        semanticArgs: { purpose: "repair" },
+      });
+      expect(ask(open)).toEqual({
+        ok: false,
+        code: "task-not-releasable",
+        reason: "effects-unsettled",
+      });
+
+      const started = structuredClone(frozen);
+      const dependent = find(started, "t2");
+      if (!dependent) throw new Error("no t2");
+      dependent.state = "ready";
+      expect(ask(started)).toEqual({
+        ok: false,
+        code: "task-not-releasable",
+        reason: "dependent-active",
+      });
+      // Nothing was written by any of those.
+      expect((await stored()).revision).toBe(frozen.revision);
+    });
+
+    test("a paused Run answers nothing: the decision offers no action and the answer is refused", async () => {
+      const host = fakeHost();
+      const b = build(host);
+      const frozen = await reachD4(host, b);
+      const decision = frozen.decisions.find((d) => d.category === "D4");
+      await store.update(RUN_ID, (current) => {
+        const paused = reduceRun(
+          current,
+          { kind: "run-paused" },
+          { now: new Date().toISOString(), newId: () => "x" },
+        );
+        return paused.ok ? paused.next : null;
+      });
+      const paused = await stored();
+      const view = projectDetail(paused);
+      if (!view.ok) throw new Error("projection failed");
+      expect(view.view.decisions.map((d) => d.actions)).toEqual([[]]);
+      expect(view.view.capabilities.supportedControls).not.toContain("decide");
+      const out = await b.control.decide(cancelAnswer(decision?.decisionId ?? "", paused.revision));
+      expect(out).toMatchObject({
+        status: "rejected",
+        issues: [{ code: "run-not-active", params: { lifecycle: "paused" } }],
+      });
+      expect((await stored()).revision).toBe(paused.revision);
+    });
+  });
+
   describe("a producer whose turn ended with nothing the Engine can use", () => {
     const garbage = (host: Host, text = "All done, trust me.") => host.reply("agent-b1", text);
 
@@ -1186,7 +1387,7 @@ describe("decide", () => {
         kind: "decision",
         ref: decision?.decisionId,
       });
-      expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry"]]);
+      expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry", "cancel"]]);
 
       const oldAssignment = stuck.assignments[0];
       const out = await b.control.decide(answer(decision?.decisionId ?? "", stuck.revision));
@@ -1217,6 +1418,33 @@ describe("decide", () => {
       judge(host, "agent-b2");
       await hook(host, b.driver, "agent-b2");
       expect(states(await stored()).t1).toBe("done");
+    });
+
+    test("a person who cancels instead: the attempt is closed on the turn that ended, its re-send and nonce go, and the task is cancelled", async () => {
+      const host = fakeHost();
+      const b = build(host);
+      await started(host, b, 1);
+      garbage(host);
+      await hook(host, b.driver, "agent-b1");
+      garbage(host, "Still done.");
+      await hook(host, b.driver, "agent-b1");
+      const stuck = await stored();
+      const decision = stuck.decisions.find((d) => d.state === "open");
+      expect(decision?.dedupeKey).toMatch(/^stuck:/u);
+      const oldAssignment = stuck.assignments[0];
+      const out = await b.control.decide(
+        answer(decision?.decisionId ?? "", stuck.revision, { answer: { action: "cancel" } }),
+      );
+      expect(out).toMatchObject({ status: "applied", cancelledTaskIds: ["t1", "t2"] });
+      await b.control.idle();
+      const after = await stored();
+      expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+      expect(after.resources).toEqual([]);
+      expect(after.outbox.filter((entry) => entry.kind === "wake")).toEqual([]);
+      const nonce = after.nonceRegistry.find((entry) => entry.nonce === oldAssignment?.nonce);
+      expect(nonce?.acceptedAt).toBeNull();
+      expect(nonce?.revokedAt).not.toBeNull();
+      expect(host.sent).toHaveLength(2);
     });
 
     test("a re-send that is committed and not yet sent is waited for: the same hook again opens no decision", async () => {

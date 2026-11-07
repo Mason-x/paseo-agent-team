@@ -1,5 +1,6 @@
 import {
   type ActionNotice,
+  type CancelOffer,
   decideNotice,
   kickNotice,
   pauseNotice,
@@ -130,6 +131,23 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
             reason: offer.reason,
             decisionId: offer.decisionId,
             answer: { action: "retry" },
+          }),
+        ),
+      );
+    },
+
+    cancelTask(offer: CancelOffer, expectedRevision: number): Promise<boolean> {
+      const signature = `cancel:${offer.decisionId}:${expectedRevision}`;
+      return run(`decide:${offer.decisionId}`, signature, async () =>
+        decideNotice(
+          await deps.decide({
+            runContractVersion: RUN_CONTRACT_VERSION,
+            runId: deps.runId,
+            requestId: requestIdFor(signature),
+            expectedRevision,
+            reason: offer.reason,
+            decisionId: offer.decisionId,
+            answer: { action: "cancel" },
           }),
         ),
       );

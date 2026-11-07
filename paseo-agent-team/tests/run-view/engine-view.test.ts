@@ -475,6 +475,7 @@ describe("EngineView controls", () => {
     state: { pending: null, notice: null } as never,
     onReplan: vi.fn(),
     onRetry: vi.fn(),
+    onCancelTask: vi.fn(),
     onKick: vi.fn(),
     onPause: vi.fn(),
     onResume: vi.fn(),
@@ -587,6 +588,48 @@ describe("EngineView controls", () => {
       category: "D3",
     });
     await renderer.act(async () => view.unmount());
+  });
+
+  test("a cancel is offered only when the decision's actions include it, and the confirmation names the tasks that go with it and says the code stays", async () => {
+    const calls = handlers();
+    const tasks = [task("T1", { title: "Core" }), task("T2", { title: "Use of core" })];
+    const base = runView({ tasks });
+    const view = await mount(
+      ready({
+        ...base,
+        dag: {
+          revision: 1,
+          tasks: base.dag.tasks.map((node) =>
+            node.taskId === "T2" ? { ...node, deps: ["T1"], layer: 1 } : node,
+          ),
+        },
+        capabilities: { ...base.capabilities, supportedControls: ["decide"] },
+        decisions: [{ ...retryDecision(), actions: ["retry", "cancel"] }],
+      }),
+      { controls: calls },
+    );
+    await press(view.root, `${zh.controls.cancelTask.button} Core`);
+    expect(calls.onCancelTask).not.toHaveBeenCalled();
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(zh.controls.cancelTask.explain);
+    expect(text).toContain(zh.controls.cancelTask.downstream("Use of core"));
+    expect(text).toContain("revert");
+    await press(view.root, zh.controls.cancelTask.confirm);
+    expect(calls.onCancelTask).toHaveBeenCalledTimes(1);
+    expect(calls.onCancelTask.mock.calls[0]?.[0]).toMatchObject({ decisionId: DECISION });
+    expect(calls.onRetry).not.toHaveBeenCalled();
+    await renderer.act(async () => view.unmount());
+
+    // No cancel action, no cancel button.
+    const plain = await mount(
+      withControls(["decide"], {
+        decisions: [retryDecision()],
+        tasks: [task("T1", { title: "Core" })],
+      }),
+      { controls: handlers() },
+    );
+    expect(button(plain.root, `${zh.controls.cancelTask.button} Core`)).toBeUndefined();
+    await renderer.act(async () => plain.unmount());
   });
 
   test("cancelling the confirmation sends nothing", async () => {
