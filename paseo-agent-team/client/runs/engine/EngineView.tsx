@@ -1,6 +1,7 @@
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { type ReactNode, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { controlsOf } from "../../../shared/domain/run-engine/controls";
 import {
   type Badge,
   buildEngineModel,
@@ -11,6 +12,7 @@ import {
 import type { RunHistoryPage } from "../../../shared/schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
+import { EngineControls, type EngineControlsProps } from "./EngineControls";
 import { EngineStatus } from "./EngineStatus";
 
 export type EngineViewProps = {
@@ -27,6 +29,11 @@ export type EngineViewProps = {
   loadingOlder?: boolean;
   /** Render without its own scroller, for a page that already scrolls. */
   embedded?: boolean;
+  /**
+   * The controls of this Run (replan, retry, kick). Left out, the view only observes: no button is
+   * drawn, and nothing is said about controls either.
+   */
+  controls?: Pick<EngineControlsProps, "state" | "onReplan" | "onRetry" | "onKick" | "onDismiss">;
   onRefresh: () => void;
   onLoadOlder: (cursor: string) => void;
 };
@@ -420,7 +427,9 @@ export function EngineView(props: EngineViewProps) {
     <Frame>
       <View style={{ padding: layout.compact ? 12 : 16, gap: 12 }}>
         <Header theme={theme} model={model} />
-        {model.readOnly ? <Muted theme={theme}>{zh.readOnly}</Muted> : null}
+        {props.controls && state.kind === "ready" ? (
+          <EngineControls theme={theme} view={controlsOf(state.run)} {...props.controls} />
+        ) : null}
         {model.notices.map((notice) => (
           <Muted key={notice} theme={theme}>
             {notice}

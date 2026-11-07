@@ -587,7 +587,6 @@ export type EngineModel = {
   history: HistoryRowView[];
   nextCursor: string | null;
   notices: string[];
-  readOnly: boolean;
 };
 
 export function buildEngineModel(
@@ -619,7 +618,6 @@ export function buildEngineModel(
     history: historyRows(pages),
     nextCursor: (older.at(-1) ?? history).nextCursor,
     notices: state.notices,
-    readOnly: run.capabilities.observationOnly,
   };
 }
 

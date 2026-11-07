@@ -1,0 +1,331 @@
+import { describe, expect, test } from "vitest";
+import {
+  controlsOf,
+  decideNotice,
+  issueText,
+  kickNotice,
+  replanNotice,
+  retryExplanation,
+  transportNotice,
+} from "../../shared/domain/run-engine/controls";
+import { RUN_CONTRACT_VERSION, type RunDetailView } from "../../shared/schemas/run-engine/rpc";
+import {
+  RUN_ACTION_CODES,
+  RUN_KICK_OUTCOMES,
+  type RunKickOutput,
+} from "../../shared/schemas/run-engine/rpc-actions";
+import { runEngineZh as zh } from "../../shared/zh/run-engine";
+
+const AT = "2026-10-29T01:02:03.000Z";
+const DECISION = "6f1c2a44-3b7e-4f0a-9a11-000000000001";
+
+type Decision = RunDetailView["decisions"][number];
+
+function decision(overrides: Partial<Decision> = {}): Decision {
+  return {
+    decisionId: DECISION,
+    category: "D3",
+    state: "open",
+    subjectId: "T1",
+    summary: "质量阶梯已用完",
+    createdAt: AT,
+    answeredAction: null,
+    actions: ["retry"],
+    ...overrides,
+  };
+}
+
+function run(
+  overrides: { supportedControls?: string[]; decisions?: Decision[]; revision?: number } = {},
+): Pick<RunDetailView, "revision" | "capabilities" | "decisions" | "tasks"> {
+  return {
+    revision: overrides.revision ?? 7,
+    capabilities: {
+      runEngine: 1,
+      observationOnly: true,
+      enabled: false,
+      supportedControls: overrides.supportedControls ?? ["kick", "decide"],
+    },
+    decisions: overrides.decisions ?? [decision()],
+    tasks: [
+      {
+        taskId: "T1",
+        title: "Build the core",
+        state: "failed",
+        phase: null,
+        level: "L2",
+        tier: "B",
+        execution: "write",
+        assignee: null,
+        attempts: 1,
+        protocolFailures: 0,
+        evidenceReturns: 0,
+        reworkCount: 0,
+        qualityFailures: 1,
+        currentTier: "B",
+        escalations: [],
+        blockedBy: null,
+        waitingReason: null,
+        frozen: false,
+      },
+    ],
+  };
+}
+
+describe("controlsOf: only what the server named is offered", () => {
+  test("kick and a retry are offered when the server names kick and decide", () => {
+    const view = controlsOf(run());
+    expect(view).toMatchObject({ revision: 7, replan: false, kick: true, any: true });
+    expect(view.retries).toHaveLength(1);
+    expect(view.retries[0]).toMatchObject({
+      decisionId: DECISION,
+      category: "D3",
+      subject: "Build the core",
+    });
+  });
+
+  test("replan is offered only when the server names it", () => {
+    expect(controlsOf(run({ supportedControls: ["kick"] })).replan).toBe(false);
+    expect(controlsOf(run({ supportedControls: ["replan", "kick"] })).replan).toBe(true);
+  });
+
+  test("nothing is offered for a Run that names no control, and the view says so", () => {
+    const view = controlsOf(run({ supportedControls: [] }));
+    expect(view).toEqual({ revision: 7, replan: false, kick: false, retries: [], any: false });
+  });
+
+  test("a retry needs both `decide` in the Run's controls and `retry` in the decision's own actions", () => {
+    expect(controlsOf(run({ supportedControls: ["kick"] })).retries).toEqual([]);
+    expect(controlsOf(run({ decisions: [decision({ actions: [] })] })).retries).toEqual([]);
+    // An older server sends no `actions` at all.
+    const { actions: _drop, ...bare } = decision();
+    expect(controlsOf(run({ decisions: [bare as Decision] })).retries).toEqual([]);
+  });
+
+  test("an answered or superseded decision is never offered", () => {
+    for (const state of ["answered", "superseded"] as const) {
+      expect(controlsOf(run({ decisions: [decision({ state })] })).retries).toEqual([]);
+    }
+    expect(
+      controlsOf(run({ decisions: [decision({ state: "waiting-human" })] })).retries,
+    ).toHaveLength(1);
+  });
+
+  test("the subject falls back to the task id, and to nothing for a decision without one", () => {
+    const view = controlsOf(
+      run({
+        decisions: [
+          decision({ subjectId: "T9" }),
+          decision({ decisionId: `${DECISION.slice(0, -1)}2`, subjectId: null }),
+        ],
+      }),
+    );
+    expect(view.retries.map((entry) => entry.subject)).toEqual(["T9", null]);
+  });
+
+  test("server text is cleaned before it is shown", () => {
+    const view = controlsOf(
+      run({ decisions: [decision({ summary: "**x**\n‮<b>", subjectId: "T1" })] }),
+    );
+    expect(view.retries[0]?.summary).toBe("**x** <b>");
+  });
+});
+
+describe("what a retry will do is said per kind of decision", () => {
+  test("D1, D3 and D4 each have their own sentence, and anything else a general one", () => {
+    const sentences = ["D1", "D3", "D4"].map(retryExplanation);
+    expect(new Set(sentences).size).toBe(3);
+    for (const sentence of sentences) expect(sentence.length).toBeGreaterThan(30);
+    expect(retryExplanation("D9")).toBe(zh.controls.retry.explainOther);
+    expect(retryExplanation("constructor")).toBe(zh.controls.retry.explainOther);
+  });
+
+  test("the explanation is attached to the offer, and so is the reason sent with the request", () => {
+    for (const category of ["D1", "D3", "D4"]) {
+      const [offer] = controlsOf(run({ decisions: [decision({ category })] })).retries;
+      expect(offer?.explain).toBe(retryExplanation(category));
+      expect(offer?.reason).toContain(category);
+    }
+  });
+});
+
+describe("every refusal code of the three controls has words", () => {
+  test.each(RUN_ACTION_CODES)("%s", (code) => {
+    const text = issueText({ code, params: {} });
+    expect(text.length).toBeGreaterThan(4);
+    expect(text).not.toContain("原因代码");
+    expect(text).not.toContain("undefined");
+  });
+
+  test("the codes use their parameters when they have them", () => {
+    expect(issueText({ code: "revision-conflict", params: { current: 12 } })).toContain("12");
+    expect(issueText({ code: "run-not-active", params: { lifecycle: "paused" } })).toContain(
+      zh.lifecycle.paused as string,
+    );
+    expect(issueText({ code: "replan-not-allowed", params: { lifecycle: "active" } })).toContain(
+      zh.lifecycle.active as string,
+    );
+    expect(
+      issueText({ code: "task-not-releasable", params: { reason: "effects-unsettled" } }),
+    ).toContain("送达");
+    expect(issueText({ code: "decision-not-answerable", params: { category: "D5" } })).toContain(
+      "D5",
+    );
+  });
+
+  test("a code this client does not know is still said, by its code", () => {
+    expect(issueText({ code: "something-new", params: {} })).toBe(
+      zh.controls.result.unknownCode("something-new"),
+    );
+    // Names that live on every object are not codes.
+    expect(issueText({ code: "constructor", params: {} })).toBe(
+      zh.controls.result.unknownCode("constructor"),
+    );
+  });
+
+  test("a parameter of an unexpected type does not break the sentence", () => {
+    expect(issueText({ code: "revision-conflict", params: { current: "x" } })).not.toContain("x版");
+    expect(issueText({ code: "task-not-releasable", params: { reason: "brand-new" } })).toContain(
+      "brand-new",
+    );
+  });
+});
+
+describe("what is said about an answer", () => {
+  const BASE = { runContractVersion: RUN_CONTRACT_VERSION } as const;
+  const issue = (code: string, params: Record<string, string | number | boolean> = {}) => ({
+    code,
+    severity: "error" as const,
+    path: [],
+    params,
+    action: "none" as const,
+  });
+
+  test("applied, replayed and rejected replan", () => {
+    expect(replanNotice({ ...BASE, status: "applied", revision: 8, epoch: 2, issues: [] })).toEqual(
+      { tone: "success", text: zh.controls.result.applied, refresh: true },
+    );
+    expect(
+      replanNotice({ ...BASE, status: "replayed", revision: 8, epoch: 2, issues: [] }),
+    ).toEqual({ tone: "neutral", text: zh.controls.result.replayed, refresh: true });
+    const refused = replanNotice({
+      ...BASE,
+      status: "rejected",
+      revision: 0,
+      epoch: null,
+      issues: [issue("plan-request-missing")],
+    });
+    expect(refused).toMatchObject({ tone: "danger", refresh: true });
+    expect(refused.text).toBe(issueText({ code: "plan-request-missing", params: {} }));
+  });
+
+  test("a revision conflict is a warning that asks for another look, and the Run is read again", () => {
+    const notice = replanNotice({
+      ...BASE,
+      status: "rejected",
+      revision: 0,
+      epoch: null,
+      issues: [issue("revision-conflict", { current: 9 })],
+    });
+    expect(notice).toMatchObject({ tone: "warning", refresh: true });
+    expect(notice.text).toContain("9");
+    expect(notice.text).toContain("再试");
+  });
+
+  test("a decision answer says the same things", () => {
+    const base = { ...BASE, revision: 4, decisionId: DECISION, taskId: "T1" };
+    expect(decideNotice({ ...base, status: "applied", issues: [] }).tone).toBe("success");
+    expect(decideNotice({ ...base, status: "replayed", issues: [] }).text).toBe(
+      zh.controls.result.replayed,
+    );
+    expect(
+      decideNotice({
+        ...base,
+        status: "rejected",
+        issues: [issue("task-not-releasable", { reason: "actors-unsettled" })],
+      }).text,
+    ).toContain("回合");
+  });
+
+  test("when several issues come back the first error is the one said", () => {
+    const notice = decideNotice({
+      ...BASE,
+      status: "rejected",
+      revision: 0,
+      decisionId: DECISION,
+      taskId: null,
+      issues: [{ ...issue("run-not-active"), severity: "warning" }, issue("decision-answered")],
+    });
+    expect(notice.text).toBe(issueText({ code: "decision-answered", params: {} }));
+  });
+
+  test("a rejected answer with no issue still says something", () => {
+    const notice = decideNotice({
+      ...BASE,
+      status: "rejected",
+      revision: 0,
+      decisionId: DECISION,
+      taskId: null,
+      issues: [],
+    });
+    expect(notice.text.length).toBeGreaterThan(0);
+  });
+
+  test.each(RUN_KICK_OUTCOMES)("kick outcome %s", (outcome) => {
+    const output: RunKickOutput = {
+      ...BASE,
+      status: "ok",
+      outcome,
+      dispatched: outcome === "dispatched" ? 2 : 0,
+      revision: 3,
+      reason: outcome === "blocked" ? "dispatch-blocked:workspace-dirty" : null,
+      issues: [],
+    };
+    const notice = kickNotice(output);
+    expect(notice.text.length).toBeGreaterThan(0);
+    expect(notice.refresh).toBe(true);
+    if (outcome === "dispatched") expect(notice.text).toContain("2");
+    if (outcome === "blocked") expect(notice.text).toContain("workspace-dirty");
+  });
+
+  test("a kick with no outcome is treated as nothing due, and a rejected kick says why", () => {
+    expect(
+      kickNotice({
+        ...BASE,
+        status: "ok",
+        outcome: null,
+        dispatched: 0,
+        revision: 1,
+        reason: null,
+        issues: [],
+      }).text,
+    ).toBe(zh.controls.result.kick.idle);
+    expect(
+      kickNotice({
+        ...BASE,
+        status: "rejected",
+        outcome: null,
+        dispatched: 0,
+        revision: 0,
+        reason: null,
+        issues: [issue("run-missing")],
+      }).text,
+    ).toBe(issueText({ code: "run-missing", params: {} }));
+  });
+
+  test("a request that never got an answer does not ask for a refresh", () => {
+    expect(transportNotice()).toEqual({
+      tone: "warning",
+      text: zh.controls.result.transport,
+      refresh: false,
+    });
+  });
+});
+
+describe("the page no longer claims to be read-only", () => {
+  test("the copy table has no read-only banner left, and the list hint names what can be done", () => {
+    expect(Object.hasOwn(zh, "readOnly")).toBe(false);
+    expect(zh.list.controlsHint).toContain("重试");
+    expect(zh.list.controlsHint).toContain("取消");
+  });
+});

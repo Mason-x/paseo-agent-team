@@ -3,11 +3,110 @@
  * until it merges this table, the view imports it directly. Keys are the frozen wire values
  * (task states, phases, failure codes, event kinds), never display strings.
  */
+const LIFECYCLE_ZH: Record<string, string> = {
+  bootstrapping: "启动中",
+  "awaiting-dag": "等待任务图",
+  active: "运行中",
+  paused: "已暂停",
+  finished: "已结束",
+  cancelled: "已取消",
+};
+
+const TASK_NOT_RELEASABLE_ZH: Record<string, string> = {
+  "effects-unsettled": "还有发给成员的消息是否送达没有确定",
+  "actors-unsettled": "还有成员的回合没有确认结束",
+  "turn-not-ended": "最后一个回合还没有确认结束",
+  "decision-stale": "这个决策已经过期，任务的状态变了",
+  "state-changed": "任务的状态已经变了",
+  "delivery-missing": "找不到可以返工的交付",
+  cancellation: "任务正在取消",
+  "task-missing": "找不到这个任务",
+};
+
+function own(map: Record<string, string>, key: string): string {
+  return Object.hasOwn(map, key) ? (map[key] as string) : key;
+}
+
 export const runEngineZh = {
   title: "Run 引擎",
   refresh: "刷新",
   loading: "正在读取 Run 台账…",
-  readOnly: "只读观察模式：此处不提供任何写入操作",
+  /** Shown when the Run has no control to offer (finished, cancelled, or nothing to answer). */
+  noControls: "这个 Run 现在没有可用的控制操作",
+
+  /** The controls of the Runs page. Every refusal code of `run.replan`, `run.decide` and `run.kick` has copy here. */
+  controls: {
+    title: "控制",
+    pending: "正在提交…",
+    replan: {
+      title: "重新规划",
+      help: "让协调者重新给出一份任务图。只在 Run 还在等待任务图时可用；发出的是一条新的计划请求，旧的未发出的会作废。",
+      reasonLabel: "原因（必填）",
+      reasonPlaceholder: "说明为什么要重新规划，会写进给协调者的请求里",
+      submit: "请求重新规划",
+      needReason: "请先写明原因",
+    },
+    retry: {
+      button: "重试",
+      confirmTitle: "确认重试这个任务？",
+      confirm: "确认重试",
+      cancel: "取消",
+      reason: (category: string) => `从 Runs 页确认重试（${category}）`,
+      explain: {
+        D3: "任务的质量阶梯已用完，任务处于失败状态。重试会再给它一次尝试：已有交付但没过审查或冒烟的，带着原来的占用回到返工；没有交付的，释放占用后重新来一次。计数不会清零，再失败会再开一个决策。",
+        D4: "任务的尝试次数已达上限，任务阻塞并冻结了占用。重试会再给它一次尝试，规则同上：有交付则返工，没有则释放占用后重新来一次。",
+        D1: "有成员或判官报告了阻塞或失败，或成员的回合已结束但没有可用报告、而且已追问到上限。重试只做一件事：交付仍在且审查没过，回到返工；成员没有交付，释放占用后重新来一次；判官做不了，重新送审；回合结束没有可用报告，先关闭这次尝试再重新来一次。所有相关回合都必须确实已结束，否则会被拒绝。",
+      } as Record<string, string>,
+      explainOther: "重试会让这个任务再来一次；不确定它为什么停下时，先看任务详情再决定。",
+    },
+    kick: {
+      title: "催办",
+      help: "立即核对宿主、补收漏掉的报告、发出还没发出的消息，并推进一次。不会替成员完成任何任务，也不会放开冻结的占用。",
+      button: "立即检查并推进",
+    },
+    result: {
+      applied: "已提交",
+      replayed: "这个请求已经提交过，没有重复执行",
+      refreshed: "已重新读取最新状态",
+      transport: "请求没有送达，请稍后重试（同一个请求不会重复执行）",
+      unknownCode: (code: string) => `被拒绝（原因代码 ${code}）`,
+      kick: {
+        idle: "没有需要推进的内容",
+        dispatched: (count: number) => `已发出 ${count} 条消息`,
+        waiting: "有任务在等席位",
+        blocked: (reason: string | null) =>
+          reason ? `有任务发不出去（${reason}）` : "有任务发不出去",
+        finished: "Run 已全部完成",
+        notActive: "Run 现在不在运行中（已结束、已取消、已暂停或还在等任务图）",
+      },
+    },
+    /** One entry for every code in `RUN_ACTION_CODES`; a test fails when a code has no copy. */
+    codes: {
+      "run-missing": () => "找不到这个 Run 的台账，可能已被清理",
+      "run-corrupt": () => "这个 Run 的台账已损坏，无法操作；需要人工检查",
+      "run-unknown-version": () => "这个 Run 由更新版本写入，请升级插件后再操作",
+      "revision-conflict": (params: Record<string, string | number | boolean>) =>
+        `Run 在你查看之后又有了变化${typeof params.current === "number" ? `（现在是第 ${params.current} 版）` : ""}，已重新读取；请确认后再试一次`,
+      "request-id-reused": () => "这个请求编号已经用于另一项内容，请重新发起",
+      "replan-not-allowed": (params: Record<string, string | number | boolean>) =>
+        `现在不能重新规划${typeof params.lifecycle === "string" ? `（Run 当前${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}：只有还在等任务图、且协调者尚未交出可用任务图时才可以`,
+      "plan-request-missing": () => "找不到当前的计划请求，无法重新规划",
+      "delivery-unresolved": () =>
+        "上一条发给协调者的消息是否送达还没有确定，为避免重复发送，暂时不能重新规划；稍后再试，或先点“立即检查并推进”",
+      "plan-unbuildable": () => "无法生成新的计划请求，请上报这个问题",
+      "decision-missing": () => "找不到这个决策点",
+      "decision-answered": () => "这个决策点已经被回应过了",
+      "decision-not-answerable": (params: Record<string, string | number | boolean>) =>
+        `这个决策点目前不能在这里回应${typeof params.category === "string" ? `（${params.category}）` : ""}`,
+      "action-unsupported": () => "当前版本不支持这个回应方式",
+      "task-not-releasable": (params: Record<string, string | number | boolean>) =>
+        `任务还没有被证明已经停下，不能重试${typeof params.reason === "string" ? `（${own(TASK_NOT_RELEASABLE_ZH, params.reason)}）` : ""}`,
+      "run-not-active": (params: Record<string, string | number | boolean>) =>
+        `Run 现在不在运行中${typeof params.lifecycle === "string" ? `（${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}，不能执行这个操作`,
+      "ledger-refused": () => "台账拒绝了这次修改，没有任何改动；请刷新后再试，持续出现请上报",
+    },
+    taskNotReleasable: TASK_NOT_RELEASABLE_ZH,
+  },
 
   /** Launch gate for `Team.runEngine`; reasons are shown as blockers/warnings in the launch preview. */
   launch: {
@@ -38,14 +137,7 @@ export const runEngineZh = {
     workspaceNoCommit: "Workspace 还没有任何提交，Run 引擎需要一个基准提交",
   },
 
-  lifecycle: {
-    bootstrapping: "启动中",
-    "awaiting-dag": "等待任务图",
-    active: "运行中",
-    paused: "已暂停",
-    finished: "已结束",
-    cancelled: "已取消",
-  } as Record<string, string>,
+  lifecycle: LIFECYCLE_ZH,
 
   level: {
     needsYou: "需处理",
@@ -235,6 +327,8 @@ export const runEngineZh = {
 
   list: {
     title: "Engine 运行",
+    controlsHint:
+      "展开一个运行后可以重新规划、重试停下的任务或催办；取消、暂停和批准还不能在这里做",
     observeOnly: "目前只读观察：不会派发或改动任务",
     open: "查看",
     close: "收起",
