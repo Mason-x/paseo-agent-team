@@ -29,6 +29,14 @@ function readyRevision(state: EngineState | null): number | null {
   return state?.kind === "ready" ? state.run.revision : null;
 }
 
+function sameNotices(held: EngineState | null, next: EngineState): boolean {
+  if (held?.kind !== "ready" || next.kind !== "ready") return false;
+  return (
+    held.notices.length === next.notices.length &&
+    held.notices.every((notice, index) => notice === next.notices[index])
+  );
+}
+
 /** A normal refresh: `run.get` with the revision the caller currently shows. */
 export function applyRefresh(session: EngineSession, raw: unknown): SessionStep {
   const next = engineGetState(raw);
@@ -41,6 +49,11 @@ export function applyRefresh(session: EngineSession, raw: unknown): SessionStep 
   if (next.kind === "ready") {
     const sameRevision = readyRevision(session.state) === next.run.revision;
     const sameRun = session.state?.kind === "ready" && session.state.run.runId === next.run.runId;
+    // The same Run at the revision already shown: nothing changed, so nothing repaints. Reconnecting,
+    // or a full answer asked for after an `unchanged` that did not line up, lands here.
+    if (sameRun && sameRevision && sameNotices(session.state, next)) {
+      return { session, needFull: false };
+    }
     // The first page is always the newest 50. Older pages loaded before are only contiguous with
     // it while nothing was appended, so any new revision drops them and the user pages again.
     return {

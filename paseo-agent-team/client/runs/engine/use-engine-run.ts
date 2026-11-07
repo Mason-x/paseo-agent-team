@@ -12,8 +12,14 @@ import {
   RUN_CONTRACT_VERSION,
   type RunListOutputSchema,
 } from "../../../shared/schemas/run-engine/rpc";
+import { usePageVisible } from "../../shared/use-page-visible";
+import { createPoller } from "./poller";
 
-/** Backstop only: hooks drive changes, and `unchanged` keeps an idle poll tiny. */
+/**
+ * Backstop only: hooks drive changes, and `unchanged` keeps an idle poll tiny. The poll runs only
+ * while the page is in front (`usePageVisible`), never overlaps itself (`createPoller`), and asks
+ * once at once when the page comes back.
+ */
 const POLL_MS = 5_000;
 const LIST_POLL_MS = 10_000;
 
@@ -26,6 +32,7 @@ export function useEngineRun(hostId: string, runId: string, active: boolean) {
   const [session, setSession] = useState<EngineSession>(EMPTY_SESSION);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const visible = usePageVisible();
   const sessionRef = useRef(session);
   const generation = useRef(0);
   sessionRef.current = session;
@@ -95,11 +102,11 @@ export function useEngineRun(hostId: string, runId: string, active: boolean) {
   }, [hostId, runId, commit]);
 
   useEffect(() => {
-    if (!active) return;
-    void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(timer);
-  }, [active, refresh]);
+    if (!active || !visible) return;
+    const poller = createPoller({ intervalMs: POLL_MS, tick: refresh });
+    poller.start();
+    return () => poller.stop();
+  }, [active, visible, refresh]);
 
   return { session, error, loadingOlder, refresh, loadOlder };
 }
@@ -109,6 +116,7 @@ type ListOutput = z.output<typeof RunListOutputSchema>;
 /** The Engine run list. Damaged runs come back as `health`, never hidden. */
 export function useEngineRuns(hostId: string) {
   const listRuns = useRpc(runListRpc);
+  const visible = usePageVisible();
   const [data, setData] = useState<{ host: string; value: ListOutput } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -123,10 +131,11 @@ export function useEngineRuns(hostId: string) {
   }, [hostId, listRuns]);
 
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), LIST_POLL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    if (!visible) return;
+    const poller = createPoller({ intervalMs: LIST_POLL_MS, tick: refresh });
+    poller.start();
+    return () => poller.stop();
+  }, [visible, refresh]);
 
   return {
     runs: data?.host === hostId ? data.value.runs : [],
