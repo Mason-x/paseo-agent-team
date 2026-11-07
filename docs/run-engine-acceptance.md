@@ -29,7 +29,7 @@
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查；派发之后的临时失败没有自动重试；预算耗尽不开决策 | B2、B3、B7 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停的发送侧与引擎内部入口已测；取消只有 reducer，没有引擎代码；`creating` 崩溃后无人续办；无任何 RPC | B4、B6、B13 | 无 |
-| AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层已覆盖；没有"Run 到字节上限时拒绝派发"的用例；事件上限 8192 没有压缩，长 Run 会写满 | B11 | 无 |
+| AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | B2 | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
@@ -196,8 +196,12 @@
 - tests/spec/ledger-real-fs.spec.test.ts :: rejects the loser when two processes commit from the same read
 - tests/run-engine/queries.test.ts :: missing, corrupt and unknown-version are distinct answers with a stable code
 - tests/run-engine/queries.test.ts :: pages newest first, never repeats a run, and lists damaged runs as health instead of hiding them
+- tests/run-engine/compaction.test.ts :: events from the creation of the oldest open assignment on are never taken
+- tests/run-engine/compaction.test.ts :: never touches the arrays that are the state, nor tasks, claims, budgets or decisions
+- tests/run-engine/compaction-store.test.ts :: at a limit nothing new starts, with a critical alert written once
+- tests/run-engine/compaction-store.test.ts :: a pass compacts first, once, and a Run with little history is left alone
 
-缺口：没有"Run 到字节上限时拒绝派发"的用例，只证明提交被拒；事件上限 8192 只是 schema 上限，没有压缩，长 Run 会写满后提交失败（B11）。
+缺口：回执（`eventReceipts`）与 nonce（`nonceRegistry`）是状态而不是历史，不能压缩，达到 6144 只告警、达到 7680 停止新的派发；没有在 DEV 验证（压缩要上千条事件）。
 
 ### AC16 旧 Run、新配置旧客户端、引擎关闭或配置损坏
 - tests/run-engine/ledger-versions.test.ts :: v1 initialize, queries, recovery and reopen do not migrate or reserialize bytes

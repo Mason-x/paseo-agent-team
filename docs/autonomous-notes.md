@@ -25,6 +25,7 @@
 | T7a 取消的内部能力 | 未做（机动项） | — | — | 见"没做或没做完" |
 | T7b 暂停的内部能力 | 已做 | 22d98a2（代码）+ 计划第 43 点 | 3064 | `lifecycle.ts` 的 pause/resume，不注册 RPC |
 | 第 5 节 DEV 验证 | 未做（可选） | — | — | 见"没做或没做完" |
+| A1 事件压缩与容量保护（Sonnet 实施 Opus 裁决项） | 已做 | caf8a26（代码）+ 计划第 44 点 | 3095 | 压缩进现有 checkpoint，不升版本；容量门 `ledger-capacity`；历史页 `compactedThroughSeq`；变异 10 项全抓到 |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 
 ## 待批准
@@ -300,6 +301,8 @@
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
+
+- **A1**：biome 仅 2 条既有警告；tsc 通过；vitest 187 个文件 3095 通过（3 todo，基线 3069 加 26）；verify:package 通过。变异检查 10 项（`a1.json`）全部被抓到。回滚演练：`ledger.ts`、`invariants.ts`、`transitions.ts`、`gates.ts` 相对 1811b0f 逐字节不变，上一版读压缩后的记录是构造上成立的。
 
 - **T0**：biome 2 条既有警告，tsc 通过，vitest 174 个文件 2844 通过（3 todo），verify:package 通过。
 - **T1**：只改文档，`git diff --check` 通过。
