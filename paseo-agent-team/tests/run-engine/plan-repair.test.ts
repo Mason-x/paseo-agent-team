@@ -273,7 +273,8 @@ describe("the plan re-send text", () => {
 
   test("returns null rather than guess when it cannot be rebuilt faithfully", () => {
     const { record, wake } = repaired();
-    expect(compilePlanRepair({ ...wake, templateVersion: 2 }, record)).toBeNull();
+    expect(compilePlanRepair({ ...wake, templateVersion: 3 }, record)).toBeNull();
+    expect(compilePlanRepair({ ...wake, templateVersion: 0 }, record)).toBeNull();
     expect(compilePlanRepair({ ...wake, recipient: "agent-b1" }, record)).toBeNull();
     expect(compilePlanRepair({ ...wake, assignmentId: "assignment-x" }, record)).toBeNull();
     for (const patch of [
@@ -313,8 +314,35 @@ describe("the plan re-send text", () => {
   // A failure here means "add the next version", not "update the hash".
   test("version 1 renders exactly these bytes for a fixed input", () => {
     const { record, wake } = repaired();
-    expect(sha256(compilePlanRepair(wake, record) ?? "")).toBe(
+    expect(sha256(compilePlanRepair({ ...wake, templateVersion: 1 }, record) ?? "")).toBe(
       "9f2a932bb0352dc7c900018b852bdfe2692cdc0cfa6b05e9dbaa4cd543e4921d",
     );
+  });
+
+  test("version 2 renders exactly these bytes for a fixed input", () => {
+    const { record, wake } = repaired();
+    expect(wake.templateVersion).toBe(2);
+    expect(sha256(compilePlanRepair(wake, record) ?? "")).toBe(
+      "909dfa4f6270291b605cf65a17309655bb129f76222e01cf8c139f6430808a70",
+    );
+  });
+
+  test("version 2 names the expected type and no longer says a null value is fine; version 1 is untouched", () => {
+    const { record, wake } = repaired();
+    const typed = {
+      ...wake,
+      semanticArgs: {
+        ...wake.semanticArgs,
+        issues: [{ path: "tasks.0.group", message: "invalid_type", expected: "string" }],
+      },
+    };
+    const v2 = compilePlanRepair(typed, record) ?? "";
+    expect(v2).toContain('"expected":"string"');
+    expect(v2).toContain("字符串键（例如 group、title、goal）不能写 null");
+    expect(v2).not.toContain("值是 null、[] 或 false 时键也要写出");
+    // Version 1 never showed an expected type, even when the stored issue carries one.
+    const v1 = compilePlanRepair({ ...typed, templateVersion: 1 }, record) ?? "";
+    expect(v1).not.toContain('"expected"');
+    expect(v1).toContain("值是 null、[] 或 false 时键也要写出");
   });
 });

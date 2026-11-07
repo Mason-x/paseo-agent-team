@@ -49,7 +49,7 @@ export type UnverifiableReason =
   | "turn-unknown"
   | "turn-open";
 
-export type ProtocolIssue = { path: string; message: string };
+export type ProtocolIssue = { path: string; message: string; expected?: string };
 
 export type ExtractResult =
   | { status: "block"; kind: RunProtocolBlockName; block: RunProtocolBlock; bytes: number }
@@ -156,11 +156,20 @@ export function extractProtocolBlock(
   }
   const parsed = BLOCK_SCHEMAS[kind].safeParse(value);
   if (!parsed.success) {
-    // Paths and generic messages only: a schema message must never echo submitted content.
-    const issues = parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
-      path: issue.path.join("."),
-      message: issue.code,
-    }));
+    // Paths and generic messages only: a schema message must never echo submitted content. For a
+    // wrong type the issue also names the type the schema wanted (a lower-case type word such as
+    // `string`; never the submitted value), because "invalid_type" alone lets a model guess.
+    const issues = parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
+      const expected =
+        issue.code === "invalid_type" && /^[a-z]{1,16}$/u.test(String(issue.expected))
+          ? String(issue.expected)
+          : undefined;
+      return {
+        path: issue.path.join("."),
+        message: issue.code,
+        ...(expected === undefined ? {} : { expected }),
+      };
+    });
     return { status: "rejected", reason: "schema-invalid", kind, issues };
   }
   return { status: "block", kind, block: parsed.data as RunProtocolBlock, bytes };

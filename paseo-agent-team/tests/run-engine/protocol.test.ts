@@ -109,6 +109,24 @@ describe("extractProtocolBlock", () => {
     expect(JSON.stringify(result)).not.toContain(secret);
   });
 
+  test("a wrong type names the type the schema wanted, never the submitted value", () => {
+    const secret = "TOP-SECRET-VALUE";
+    // `attempt` must be a number; a string is the wrong type and also the secret.
+    const result = extractProtocolBlock(reportFence({ ...report(), attempt: secret }));
+    expect(result).toMatchObject({ status: "rejected", reason: "schema-invalid" });
+    if (result.status !== "rejected") throw new Error("expected a rejection");
+    expect(result.issues).toContainEqual({
+      path: "attempt",
+      message: "invalid_type",
+      expected: "number",
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    // A problem that is not a wrong type carries no expected type.
+    const unknown = extractProtocolBlock(reportFence({ ...report(), extra: 1 }));
+    if (unknown.status !== "rejected") throw new Error("expected a rejection");
+    expect(unknown.issues?.every((issue) => issue.expected === undefined)).toBe(true);
+  });
+
   test("CRLF line endings do not change the outcome", () => {
     const crlf = reportFence().replaceAll("\n", "\r\n");
     expect(extractProtocolBlock(crlf).status).toBe("block");

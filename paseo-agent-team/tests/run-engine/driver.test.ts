@@ -157,7 +157,12 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
-function build(host: Host, overrides: Partial<DriverOptions> = {}) {
+function build(
+  host: Host,
+  overrides: Partial<DriverOptions> = {},
+  /** What sends a repair once it is committed; a process that dies before sending passes one that throws. */
+  repairSend?: (runId: string) => Promise<unknown>,
+) {
   const observerHost = createObserverHost(host.port);
   const observer = createRunObserver({ store });
   const effects = createEffects({ store, port: host.port, compile: compileEngineIntent });
@@ -193,14 +198,14 @@ function build(host: Host, overrides: Partial<DriverOptions> = {}) {
     store,
     observer,
     host: observerHost,
-    repair: { send: (runId) => effects.runOutbox(runId) },
+    repair: { send: repairSend ?? ((runId) => effects.runOutbox(runId)) },
   });
   const dagIntake = createDagIntake({
     store,
     host: observerHost,
     seatFamily: () => null,
     resolveWorkspace,
-    repair: { send: (runId) => effects.runOutbox(runId) },
+    repair: { send: repairSend ?? ((runId) => effects.runOutbox(runId)) },
   });
   const driver = createEngineDriver({
     store,
@@ -211,7 +216,7 @@ function build(host: Host, overrides: Partial<DriverOptions> = {}) {
     service,
     ...overrides,
   });
-  return { driver, observer, service };
+  return { driver, observer, service, effects };
 }
 
 async function stored(): Promise<RunRecord> {
@@ -652,6 +657,36 @@ describe("a report that cannot be used is asked for again", () => {
     await hook(host, driver, "agent-b1");
     expect(host.lastSent("agent-b1")?.text).toContain("report-missing");
     expect(t1(await stored())?.waitingReason).toBe("report-repair-requested:report-missing");
+  });
+
+  test("a repair that was committed but never sent goes out when the process comes back, once", async () => {
+    const host = fakeHost();
+    const crashing = build(host, {}, async () => {
+      throw new Error("the process died before it sent");
+    });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, crashing.driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    host.rewriteLastReply("agent-b1", SCHEMA_BREAK);
+    const before = host.sent.length;
+    await hook(host, crashing.driver, "agent-b1");
+
+    // The request is on the ledger and nothing was sent.
+    const stuck = repairs(await stored());
+    expect(stuck.map((intent) => intent.state)).toEqual(["prepared"]);
+    expect(host.sent).toHaveLength(before);
+
+    // The next process runs the outbox on recovery; the repair is sent, and not a second time.
+    const next = build(host, { outbox: { run: (runId) => next.effects.runOutbox(runId) } });
+    await next.driver.recover();
+    expect(host.sent).toHaveLength(before + 1);
+    expect(host.lastSent("agent-b1")?.text).toContain("【重发身份 JSON】");
+    expect(repairs(await stored()).map((intent) => intent.state)).toEqual(["confirmed"]);
+    // The scripted host never starts the member's next turn, so a second recovery would read the
+    // old turn again; the property here is that a confirmed message is never sent twice.
+    await next.effects.runOutbox(RUN_ID);
+    expect(host.sent).toHaveLength(before + 1);
   });
 
   test("a hook delivered again while the repair is out asks for nothing more", async () => {

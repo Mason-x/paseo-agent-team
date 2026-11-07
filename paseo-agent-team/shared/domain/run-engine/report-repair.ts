@@ -61,7 +61,7 @@ export function replyAnchor(
   return sent.at(-1)?.messageId ?? assignment.messageId;
 }
 
-export type RepairIssue = { path: string; message: string };
+export type RepairIssue = { path: string; message: string; expected?: string };
 
 export type RepairRequest = {
   assignmentId: string;
@@ -99,6 +99,7 @@ export function trimIssues(issues: readonly RepairIssue[]): RepairIssue[] {
   return issues.slice(0, MAX_REPAIR_ISSUES).map((issue) => ({
     path: issue.path.slice(0, MAX_ISSUE_TEXT),
     message: issue.message.slice(0, MAX_ISSUE_TEXT),
+    ...(typeof issue.expected === "string" ? { expected: issue.expected.slice(0, 16) } : {}),
   }));
 }
 

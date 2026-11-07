@@ -255,8 +255,11 @@ describe("settleCoordinator", () => {
     });
     const after = await stored();
     expect(after.lifecycle).toBe("active");
-    // The earlier alert stays as history.
+    // The earlier alert stays as history, but it no longer asks for attention.
     expect(after.alerts).toHaveLength(1);
+    expect(after.alerts[0]).toMatchObject({ state: "resolved" });
+    expect(after.alerts[0]?.resolvedAt).not.toBeNull();
+    expect(after.events.filter((event) => event.kind === "alert-resolved")).toHaveLength(1);
   });
 
   test("an incomplete read is left for later and an unreadable host is reported, writing nothing", async () => {
@@ -373,6 +376,12 @@ describe("a plan the strict parser refuses is asked for again, once", () => {
       semanticArgs: { reason: "plan-rejected:schema-invalid", ordinal: 1, limit: 1 },
     });
     expect(JSON.stringify(wake?.semanticArgs.issues)).toContain("tasks.0.group");
+    // The re-send also learns what type the missing key should have.
+    expect(wake?.semanticArgs.issues).toContainEqual({
+      path: "tasks.0.group",
+      message: "invalid_type",
+      expected: "string",
+    });
     expect(sends).toEqual([RUN_ID]);
     expect(h.onAdmitted).not.toHaveBeenCalled();
   });
@@ -405,10 +414,13 @@ describe("a plan the strict parser refuses is asked for again, once", () => {
     ]);
     expect(readDagControl(after)?.acceptedAt).not.toBeNull();
     expect(after.outbox.some((intent) => intent.kind === "wake")).toBe(false);
-    expect(after.events.at(-1)).toMatchObject({
-      kind: "plan-request-settled",
+    expect(after.events.find((event) => event.kind === "plan-request-settled")).toMatchObject({
       payload: { intentIds: [PLAN_ID, wake.id] },
     });
+    // The refusal that started the repair no longer asks for attention.
+    expect(after.alerts).toHaveLength(1);
+    expect(after.alerts[0]).toMatchObject({ state: "resolved" });
+    expect(after.events.at(-1)).toMatchObject({ kind: "alert-resolved" });
     expect(h.onAdmitted).toHaveBeenCalledTimes(1);
   });
 

@@ -12,7 +12,8 @@ import {
 } from "../../shared/domain/run-engine/engine-prompts";
 import { latestSentWake, requestPlanRepair } from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
-import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
+import { DAG_ALERT_PREFIX } from "../../shared/domain/run-engine/replan";
+import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunTaskDagBlock } from "../../shared/schemas/run-engine/protocol";
 import { alertIdFor, sha256Hex } from "./digest";
@@ -290,7 +291,13 @@ export function createDagIntake(options: DagIntakeOptions) {
         return null;
       }
       holder.result = { status: "admitted", tasks: again.block.tasks.length };
-      return consumePlanRequests(reduced.next, agentId, now);
+      // The plan is in, so the "DAG was refused" alerts of earlier tries (a repair or a replan that
+      // finally worked) no longer describe the Run; they are resolved in the same commit.
+      return resolveAlerts(
+        consumePlanRequests(reduced.next, agentId, now),
+        (alert) => alert.summary.startsWith(DAG_ALERT_PREFIX),
+        now,
+      ).next;
     });
 
     // A refusal found only inside the commit is shown the same way as one found before it.
