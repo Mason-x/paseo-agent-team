@@ -23,7 +23,7 @@
 | T6c 关闭开关后的已有 Run | 已做 | c47d477 | 3046 | `runtime.test.ts` 新增 3 例：开关关闭后 hook、恢复、kick、列表、控制仍然工作 |
 | T6d 计划状态与收尾 | 未开始 | — | — | |
 | T7a 取消的内部能力 | 未开始 | — | — | |
-| T7b 暂停的内部能力 | 未开始 | — | — | |
+| T7b 暂停的内部能力 | 已做 | 22d98a2（代码）+ 计划第 43 点 | 3064 | `lifecycle.ts` 的 pause/resume，不注册 RPC |
 | 第 5 节 DEV 验证 | 未开始 | — | — | |
 
 ## 待批准
@@ -172,3 +172,4 @@
 - **T5d**：biome 仅 2 条既有警告；tsc 通过；vitest 3016（T5c 后 3005 加 11）；verify:package 通过。变异检查 7 项（`mut-t5d.mjs`）全部被抓到。
 - **T5e/T5f**：全量 vitest 182 个文件 3036 通过（3 todo，加 20）；biome 仅 2 条既有警告；tsc、verify:package 通过。变异检查 12 项加 1 项复查（`mut-t5ef.mjs`、`mut-t5ef2.mjs`）全部被抓到（`P05` 以未处理的拒绝使运行失败的方式被抓，脚本报 ERROR 但实际是失败）；中途 `P04` 存活，补测试后被抓。
 - **T6b/T6c**：biome 仅 2 条既有警告；tsc 通过；vitest 183 个文件 3046 通过（3 todo，T5e/f 后 3036 加 10）；verify:package 通过。T6c 变异检查 3 项（`mut-t6c.mjs`：开关关闭时忽略 hook、跳过恢复、移除控制）全部被抓到。T6b 只写文档，没有行为变化；`readme-facts.test.ts` 防止 README 里的名字和数字与代码脱节。
+- **T7b**：biome 仅 2 条既有警告；tsc 通过；vitest 184 个文件 3064 通过（3 todo，T6b/c 后 3046 加 18）；verify:package 通过。变异检查 8 项（`mut-t7b.mjs`）全部被抓到；中途一次后台运行被截断（输出少了最后一项，文件停在被破坏状态），我用备份还原并逐字节确认后，把最后一项单独重跑，被抓到。
