@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createRunQueries } from "../../server/run-engine/queries";
 import { createEngineRuntime, seatSourceOf } from "../../server/run-engine/runtime";
 import type { EngineStartInput } from "../../server/run-engine/start";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
@@ -493,5 +494,87 @@ describe("seatSourceOf", () => {
       order: record.roster.findIndex((entry) => entry.seatId === seat?.seatId),
     });
     expect(seatSourceOf(record, "no-such-seat")).toBeNull();
+  });
+});
+
+describe("the switch that starts Engine Runs is off, and a Run that was started goes on", () => {
+  /** The same ledger, a runtime built the way a daemon without the switch builds it. */
+  async function started(host: Host) {
+    const on = runtime();
+    const result = await on.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    if (!result.ok) throw new Error(`start failed: ${result.message} ${result.detail}`);
+    await on.recover();
+    on.dispose();
+    return result;
+  }
+
+  test("it cannot start a new Run, but a hook still admits the plan and dispatches", async () => {
+    const host = fakeHost();
+    const first = await started(host);
+    const off = runtime({ supported: false });
+    expect(off.launchHost.supported).toBe(false);
+
+    await coordinatorPlans(host, first.coordinatorId);
+    await off.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: first.coordinatorId,
+        turnId: host.turnOf(first.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.port,
+    );
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(host.sent).toHaveLength(2);
+    off.dispose();
+  });
+
+  test("a restart without the switch recovers a Run whose plan arrived unheard, and a kick still works", async () => {
+    const host = fakeHost();
+    const first = await started(host);
+    await coordinatorPlans(host, first.coordinatorId);
+
+    const off = runtime({ supported: false });
+    off.bind(host.port);
+    await off.recover();
+    expect(states(await stored())).toEqual({ t1: "assigned", t2: "pending" });
+
+    const kicked = await off.control.kick({ runContractVersion: 1, runId: RUN_ID });
+    expect(kicked.status).toBe("ok");
+    // Nothing was sent twice by recovering and kicking: every message is its own, and the task
+    // prompt went out once. (The scripted host reports every agent idle, so a reconcile may also
+    // ask a member that never answered for its report; that is a different message.)
+    expect(new Set(host.sent.map((entry) => entry.messageId)).size).toBe(host.sent.length);
+    expect(host.sent.filter((entry) => entry.text.includes("【执行事实 JSON】"))).toHaveLength(1);
+    off.dispose();
+  });
+
+  test("it can still be listed and read, and its controls still answer", async () => {
+    const host = fakeHost();
+    await started(host);
+    const queries = createRunQueries({ store, ensureReady: async () => undefined });
+    const list = await queries.list({ runContractVersion: 1 });
+    expect(list.runs.map((run) => run.runId)).toEqual([RUN_ID]);
+    const detail = await queries.get({ runContractVersion: 1, runId: RUN_ID });
+    expect(detail.status).toBe("ready");
+
+    const off = runtime({ supported: false });
+    const refused = await off.control.replan({
+      runContractVersion: 1,
+      runId: RUN_ID,
+      requestId: "req-1",
+      expectedRevision: 1,
+      reason: "x",
+    });
+    // The Run is not waiting for a plan, so the refusal is the Run's own, not "the Engine is off".
+    expect(refused.status).toBe("rejected");
+    expect(refused.issues.map((issue) => issue.code)).not.toContain("run-missing");
+    off.dispose();
   });
 });
