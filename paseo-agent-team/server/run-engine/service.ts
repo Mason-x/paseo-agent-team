@@ -43,6 +43,7 @@ import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
+import type { ReadFailure } from "./read-retry";
 import {
   deliveredFiles,
   dispatchWorkspace,
@@ -93,6 +94,11 @@ export type EngineServiceOptions = {
   /** The shared start Workspace of the Run (M2). `null` blocks dispatch. */
   resolveWorkspace(record: RunRecord): { workspaceId: string; directory: string } | null;
   compile(intent: DispatchIntent, record: RunRecord): string | null;
+  /**
+   * Told when the live state of a seat could not be read before a dispatch. The caller may write that
+   * down so the read is tried again later (`read-retry.ts`); the dispatch is not retried by this.
+   */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   ids?: { uuid(): string };
   clock?: { now(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -205,12 +211,21 @@ export function createEngineService(options: EngineServiceOptions) {
   const log = options.log ?? (() => undefined);
   const chains = new Map<string, Promise<unknown>>();
 
-  async function liveSnapshot(agentId: string): Promise<PortAgentSnapshot | "unreadable"> {
+  async function liveSnapshot(
+    runId: string,
+    agentId: string,
+  ): Promise<PortAgentSnapshot | "unreadable"> {
     try {
       const refreshed = await options.port.agents.ref(agentId).refresh();
       return refreshed?.agent ?? "unreadable";
     } catch (error) {
       log(`cannot read agent ${agentId}`, error);
+      // The read threw, so it may work a moment later: let the owner of the retries know.
+      try {
+        await options.onReadFailure?.(runId, { type: "seat", agentId });
+      } catch (reportError) {
+        log(`could not report the failed read of ${agentId}`, reportError);
+      }
       return "unreadable";
     }
   }
@@ -220,7 +235,8 @@ export function createEngineService(options: EngineServiceOptions) {
     for (const seat of record.roster) {
       const source = options.resolveSeat(record, seat.seatId);
       if (!source) continue;
-      const snapshot = seat.agentId === null ? "unreadable" : await liveSnapshot(seat.agentId);
+      const snapshot =
+        seat.agentId === null ? "unreadable" : await liveSnapshot(record.runId, seat.agentId);
       const readable = snapshot !== "unreadable";
       const channel = record.channels.find((entry) => entry.channelId === seat.channelId);
       const mine = record.assignments.filter((entry) => entry.seatId === seat.seatId);

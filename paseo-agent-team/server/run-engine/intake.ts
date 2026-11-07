@@ -22,6 +22,7 @@ import { sha256Hex } from "./digest";
 import { payloadHash } from "./effects";
 import type { ObserverHost, RunObserver } from "./observer";
 import { type UnverifiableReason, verifyReportOwnership } from "./protocol";
+import type { ReadFailure } from "./read-retry";
 import type { RunStore } from "./store";
 
 /**
@@ -68,6 +69,11 @@ export type IntakeOptions = {
    * (the intake itself sends nothing). Without it a bad report only leaves its reason on the task.
    */
   repair?: { send(runId: string): Promise<unknown> };
+  /**
+   * Told when the host could not be read for a reply. The caller may write that down so the read is
+   * tried again later (`read-retry.ts`); the intake itself does nothing more about it.
+   */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   /** Called after a report was committed, so the next unit of work can be dispatched. */
   onSettled?: (runId: string) => void;
   log?: (message: string, detail?: unknown) => void;
@@ -113,6 +119,32 @@ export function createIntake(options: IntakeOptions) {
       newId: () => uuid(),
       newDecisionNonceDigest: () => createHash("sha256").update(uuid(), "utf8").digest("hex"),
     };
+  }
+
+  /** Tells the owner of the retries which reply could not be read. Never throws. */
+  async function reportReadFailure(
+    runId: string,
+    assignmentId: string,
+    agentId: string,
+  ): Promise<void> {
+    if (!options.onReadFailure) return;
+    try {
+      const read = await options.store.get(runId);
+      if (read.status !== "ok") return;
+      const assignment = read.record.assignments.find(
+        (entry) => entry.assignmentId === assignmentId,
+      );
+      if (!assignment) return;
+      await options.onReadFailure(runId, {
+        type: "reply",
+        agentId,
+        taskId: assignment.taskId,
+        assignmentId,
+        anchorMessageId: replyAnchor(read.record, assignment),
+      });
+    } catch (error) {
+      log(`could not report the failed read of ${agentId}`, error);
+    }
   }
 
   type RepairWitness = {
@@ -275,6 +307,7 @@ export function createIntake(options: IntakeOptions) {
       );
     } catch (error) {
       log(`cannot read the reply of ${agentId}`, error);
+      await reportReadFailure(runId, assignmentId, agentId);
       return { status: "host-error" };
     }
 
@@ -336,6 +369,7 @@ export function createIntake(options: IntakeOptions) {
         witnesses = checked.witnesses;
       } catch (error) {
         log(`cannot verify repairs for ${assignmentId}`, error);
+        await reportReadFailure(runId, assignmentId, agentId);
         return { status: "host-error" };
       }
     }

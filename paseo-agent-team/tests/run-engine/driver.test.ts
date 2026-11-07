@@ -10,11 +10,13 @@ import { createEffects } from "../../server/run-engine/effects";
 import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
 import { createRunObserver } from "../../server/run-engine/observer";
+import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
+import { emptyReadRetries, readReadRetries } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -77,6 +79,8 @@ beforeEach(async () => {
   record.policy.evidenceRoot = evidenceRoot;
   // New Runs are v2; this file is also the v2 regression for everything that does not touch evidence.
   record.schemaVersion = expect.getState().currentTestName?.includes("[v1]") ? 1 : 2;
+  // A new Run carries the block that gives it read re-checks.
+  (record as Record<string, unknown>).readRetries = emptyReadRetries();
   await store.create(record);
 });
 
@@ -95,6 +99,8 @@ function fakeHost() {
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
   const lose = { next: false };
+  // Reads of the host that throw: the timeline (a reply) and the live agent state (a seat).
+  const unreadable = { timeline: false, agent: false };
   let seq = 0;
   const entries = (agentId: string) => {
     let list = timelines.get(agentId);
@@ -133,9 +139,17 @@ function fakeHost() {
           add(agentId, `turn-${agentId}-${sent.length}`, { type: "user_message", messageId });
         },
         archive: async () => undefined,
-        timeline: { refetch: async () => page(agentId) },
+        timeline: {
+          refetch: async () => {
+            if (unreadable.timeline) throw new Error("the timeline cannot be read");
+            return page(agentId);
+          },
+        },
         current: () => ({ status: "idle", activeTurn: null }),
-        refresh: async () => ({ agent: { status: "idle", activeTurn: null } }),
+        refresh: async () => {
+          if (unreadable.agent) throw new Error("the agent cannot be read");
+          return { agent: { status: "idle", activeTurn: null } };
+        },
       }),
     },
   };
@@ -145,6 +159,10 @@ function fakeHost() {
     /** The next send throws after the host "received" it, and leaves no echo in the timeline. */
     loseNextSend: () => {
       lose.next = true;
+    },
+    /** While set, reading the timeline or the live state of an agent throws. */
+    setUnreadable: (what: "timeline" | "agent", value: boolean) => {
+      unreadable[what] = value;
     },
     /** The coordinator was sent the plan request earlier: its message is already in the timeline. */
     planRequestSent: () =>
@@ -176,6 +194,8 @@ function build(
   repairSend?: (runId: string) => Promise<unknown>,
   /** What the service sends through. A stand-in that sends nothing leaves a committed request prepared. */
   serviceOutbox?: Pick<ReturnType<typeof createEffects>, "runOutbox">,
+  /** Told when a read of the host failed, as the production wiring tells the read re-checks. */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>,
 ) {
   const observerHost = createObserverHost(host.port);
   const observer = createRunObserver({ store });
@@ -212,11 +232,13 @@ function build(
     },
     resolveWorkspace,
     compile: compileDispatch,
+    onReadFailure,
   });
   const intake = createIntake({
     store,
     observer,
     host: observerHost,
+    onReadFailure,
     repair: { send: repairSend ?? ((runId) => effects.runOutbox(runId)) },
   });
   const dagIntake = createDagIntake({
@@ -1090,5 +1112,144 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     await driver.retryRun(RUN_ID);
     expect(host.sent).toHaveLength(sent);
     expect(states(await stored()).t1).toBe("assigned");
+  });
+});
+
+describe("a host that could not be read is read again, and a person is told what came of it", () => {
+  /** The wiring as production makes it: the intake and the service tell the re-checks, a pass sweeps. */
+  function wired(host: Host) {
+    const clock = { at: Date.now() };
+    const readHost = createObserverHost(host.port);
+    const retry = createReadRetry({
+      store,
+      clock: { now: () => new Date(clock.at).toISOString() },
+      schedule: () => () => undefined,
+      readReply: (agentId, messageId) => readHost.replyWindow(agentId, messageId),
+      readSeat: async (agentId) => {
+        const refreshed = await host.port.agents.ref(agentId).refresh();
+        if (!refreshed?.agent) throw new Error("no agent state");
+      },
+    });
+    const built = build(
+      host,
+      { onPassed: (runId) => retry.sweep(runId) },
+      undefined,
+      undefined,
+      (runId, failure) => retry.note(runId, failure),
+    );
+    return { ...built, retry, clock };
+  }
+
+  const items = async () => {
+    const block = readReadRetries(await stored());
+    if (block.kind !== "valid") throw new Error(`block is ${block.kind}`);
+    return block.items;
+  };
+
+  test("a reply that could not be read: the read works again later, a warning asks for a kick, and only the kick takes the report in", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+
+    host.setUnreadable("timeline", true);
+    await hook(host, driver, "agent-b1");
+    const failed = await stored();
+    expect(await items()).toEqual([
+      expect.objectContaining({
+        state: "waiting",
+        attemptsStarted: 0,
+        target: expect.objectContaining({ type: "reply", agentId: "agent-b1", taskId: "t1" }),
+      }),
+    ]);
+    expect(states(failed).t1).toBe("assigned");
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+
+    // The host answers again. The re-check finds that out and says so; it does not take the report in.
+    host.setUnreadable("timeline", false);
+    const sent = host.sent.length;
+    clock.at += 1500;
+    await retry.fire();
+    const told = await stored();
+    expect((await items())[0]).toMatchObject({ state: "resolved" });
+    expect(told.alerts.map((alert) => alert.state)).toEqual(["open"]);
+    expect(told.alerts[0]?.summary).toContain("读取恢复，报告未入账，请 kick");
+    expect(states(told).t1).toBe("assigned");
+    expect(told.assignments.find((entry) => entry.taskId === "t1")?.acceptedProof).toBeNull();
+    expect(host.sent).toHaveLength(sent);
+
+    // A person kicks: the report is read and taken in by the ordinary path, and the warning goes.
+    await driver.retryRun(RUN_ID);
+    const settled = await stored();
+    expect(states(settled).t1).toBe("review");
+    expect(settled.alerts.every((alert) => alert.state === "resolved")).toBe(true);
+  });
+
+  test("a reply that stays unreadable is tried three times and then left, with the alert saying so", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    host.setUnreadable("timeline", true);
+    await hook(host, driver, "agent-b1");
+    for (const wait of [1500, 2500, 4500, 100_000]) {
+      clock.at += wait;
+      await retry.fire();
+    }
+    expect((await items())[0]).toMatchObject({ state: "held", attemptsStarted: 3 });
+    const after = await stored();
+    expect(after.alerts.map((alert) => alert.summary.slice(0, 7))).toEqual(["读取重试已用尽"]);
+    expect(states(after).t1).toBe("assigned");
+    expect(host.sent).toHaveLength(1);
+    expect(retry.armed).toBe(false);
+  });
+
+  test("a seat that could not be read before a dispatch: nothing is sent, the read works again, and a kick dispatches and takes the alert down", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    host.setUnreadable("agent", true);
+    await hook(host, driver, COORDINATOR_AGENT);
+    expect(host.sent).toHaveLength(0);
+    // Every seat whose state could not be read is its own item: the producer's and the reviewer's.
+    expect((await items()).map((item) => [item.state, item.target])).toEqual([
+      ["waiting", { type: "seat", agentId: "agent-b1" }],
+      ["waiting", { type: "seat", agentId: "agent-b2" }],
+    ]);
+
+    host.setUnreadable("agent", false);
+    clock.at += 1500;
+    await retry.fire();
+    // The read works again; that alone dispatches nothing.
+    expect(host.sent).toHaveLength(0);
+    expect((await stored()).alerts.map((alert) => alert.state)).toEqual(["open", "open"]);
+
+    await driver.kick(RUN_ID);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    expect((await stored()).alerts.every((alert) => alert.state === "resolved")).toBe(true);
+  });
+
+  test("a v1 Run, or one made without the block, is read as before: nothing is written down", async () => {
+    await store.update(RUN_ID, (record) => {
+      delete (record as Record<string, unknown>).readRetries;
+      return record;
+    });
+    const host = fakeHost();
+    const { driver } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    host.setUnreadable("timeline", true);
+    await hook(host, driver, "agent-b1");
+    const after = await stored();
+    expect((after as Record<string, unknown>).readRetries).toBeUndefined();
+    expect(after.alerts).toHaveLength(0);
+    expect(after.events.some((event) => event.kind === "read-retry-changed")).toBe(false);
   });
 });

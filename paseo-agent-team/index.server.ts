@@ -379,6 +379,8 @@ export default function contribute(server: PluginServerContext) {
     for (const stop of stopRunHooks) stop();
     await initializing;
     await designer.dispose();
+    // No timer of the Engine may fire into a ledger that is being closed.
+    await engine.dispose();
     await runStoreInitializing;
     // Releases the ledger lock so a reloaded plugin can take over as the single writer.
     await runStore.close();

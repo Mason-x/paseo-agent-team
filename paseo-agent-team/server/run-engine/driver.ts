@@ -63,6 +63,11 @@ export type DriverOptions = {
    * never went out because the process stopped in between. Without it neither happens.
    */
   outbox?: { run(runId: string): Promise<unknown> };
+  /**
+   * Called when a pass of a Run is over, whatever it did. Used to take down the alerts of reads that
+   * were tried again and no longer matter. It must not move the Run; its failure is logged only.
+   */
+  onPassed?: (runId: string) => void | Promise<void>;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -155,6 +160,11 @@ export function createEngineDriver(options: DriverOptions) {
     await show(runId, last);
     await openMissingDecisions(runId);
     const finished = await finishIfDone(runId);
+    try {
+      await options.onPassed?.(runId);
+    } catch (error) {
+      log(`engine could not close out a pass of ${runId}`, error);
+    }
     return { dispatched, last, finished };
   }
 

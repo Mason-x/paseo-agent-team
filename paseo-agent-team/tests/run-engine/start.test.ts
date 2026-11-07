@@ -21,6 +21,7 @@ import {
   readDagControl,
 } from "../../shared/domain/run-engine/dag-admission";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
+import { readReadRetries } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { readSeatProfiles } from "../../shared/domain/run-engine/run-record";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
@@ -257,6 +258,8 @@ describe("startEngineRun", () => {
     if (!result.ok) return;
     const record = await stored();
     expect(record.schemaVersion).toBe(2);
+    // A new Run is given read re-checks; the block starts empty.
+    expect(readReadRetries(record)).toEqual({ kind: "valid", items: [] });
     expect(record.launch.state).toBe("running");
     expect(record.lifecycle).toBe("bootstrapping");
     expect(record.tasks).toEqual([]);

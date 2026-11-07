@@ -12,6 +12,7 @@ import type { LaunchPlan } from "../launch-plan";
 import { MODE_CONTRACT_VERSION } from "../mode-contract";
 import { identifyModelFamily } from "../model-family";
 import { COORDINATOR_DUTY, COORDINATOR_SEAT_ID } from "./dag-admission";
+import { emptyReadRetries } from "./read-retry";
 
 /**
  * Building the first record of an Engine Run, and the small controlled changes the start sequence
@@ -223,6 +224,8 @@ export function buildRunRecord(input: RunRecordInput): RunRecord {
 
   return {
     schemaVersion: RUN_SCHEMA_VERSION,
+    // A new Run is given read re-checks (`read-retry.ts`); a Run made without this block never is.
+    readRetries: emptyReadRetries(),
     runId: input.runId,
     revision: 1,
     previousDigest: "",

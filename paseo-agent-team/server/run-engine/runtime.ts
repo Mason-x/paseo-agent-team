@@ -14,6 +14,7 @@ import { createEffects } from "./effects";
 import { createObserverHost } from "./host";
 import { createIntake } from "./intake";
 import { createRunObserver, type ObserverHookEvent } from "./observer";
+import { createReadRetry } from "./read-retry";
 import { type CommitIdentity, commitIdentity } from "./repo";
 import { createEngineService, type SeatSource } from "./service";
 import { type EngineStartInput, type EngineStartResult, startEngineRun } from "./start";
@@ -100,6 +101,19 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
 
   const observer = createRunObserver({ store, log });
   const host = createObserverHost(port);
+  // Reads a host that failed to answer again a few times and says what came of it. It holds two
+  // functions that read and nothing that sends, settles or dispatches.
+  const readRetry = createReadRetry({
+    store,
+    readReply: (agentId, messageId) => host.replyWindow(agentId, messageId),
+    readSeat: async (agentId) => {
+      const refreshed = await port.agents.ref(agentId).refresh();
+      if (!refreshed?.agent) throw new Error("the host returned no agent state");
+    },
+    log,
+  });
+  const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
+    readRetry.note(runId, failure);
   // Reconcile has no hook behind it, so it must not call a turn that is still running finished.
   const reconcileHost = createObserverHost(port, { requireIdle: true });
   const resolveWorkspace = (record: RunRecord) => {
@@ -120,6 +134,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     resolveSeat: seatSourceOf,
     resolveWorkspace,
     compile: compileDispatch,
+    onReadFailure,
     log,
   });
   const intake = createIntake({
@@ -127,6 +142,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     observer,
     host,
     repair: { send: (runId) => effects.runOutbox(runId) },
+    onReadFailure,
     log,
   });
   const dagIntake = createDagIntake({
@@ -146,6 +162,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     dagIntake,
     service,
     outbox: { run: (runId) => effects.runOutbox(runId) },
+    onPassed: (runId) => readRetry.sweep(runId),
     log,
   });
   const control = createRunControl({
@@ -174,6 +191,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
       if (!store.ready) return;
       const { runs } = await driver.recover();
       if (runs > 0) log(`run engine recovered ${runs} live run(s)`);
+      // Works out from the ledger which reads are due again, so a restart does not lose them.
+      await readRetry.start();
     })()
       .catch((error: unknown) => log("run engine recovery failed", error))
       .finally(() => {
@@ -203,6 +222,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     control,
     bind,
     recover,
+    /** Stops the timer of the read re-checks. Call it before the ledger is closed. */
+    dispose: () => readRetry.dispose(),
 
     /**
      * One host hook, routed through the driver. Hooks that were held until the ledger or an owner
