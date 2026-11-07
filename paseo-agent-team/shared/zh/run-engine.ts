@@ -137,6 +137,15 @@ export const runEngineZh = {
     workspaceNoCommit: "Workspace 还没有任何提交，Run 引擎需要一个基准提交",
   },
 
+  /** The launch dialog while an Engine Run starts. */
+  launchJob: {
+    sendingPlanRequest:
+      "计划请求已提交，正在发送给协调者。协调者读完任务并给出任务图可能需要几分钟，在那之前不会派发任何任务，不要重复启动",
+    done: "Run 已启动，等待协调者给出任务图；进度见 Runs 页的 Engine 运行",
+    donePending:
+      "Run 已启动，计划请求已提交但还没确认送达；Engine 会自己核对，不会重复发送。进度见 Runs 页的 Engine 运行",
+  },
+
   lifecycle: LIFECYCLE_ZH,
 
   level: {

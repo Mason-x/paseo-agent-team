@@ -22,6 +22,7 @@ import { RoleGlyph } from "../shared/RoleGlyph";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { LaunchPreview } from "./LaunchPreview";
 import { launchPreviewRequest, launchStartRequest, launchStatusRequest } from "./launch-args";
+import { jobDoneText, jobProgressLabel } from "./launch-job-copy";
 import {
   launchGate,
   launchPreviewQueryKey,
@@ -34,13 +35,6 @@ import { useLaunchContext } from "./use-launch-context";
 const POLL_MS = 800;
 
 type TargetKind = LaunchTarget["kind"];
-
-function jobProgressLabel(job: LaunchJob): string {
-  if (job.step === "workspace") return zh.creatingWorkspace;
-  if (job.step === "coordinator") return zh.creatingCoordinator;
-  if (job.step === "member") return zh.creatingMember(job.memberIndex ?? 1, job.memberTotal);
-  return zh.sendingKickoff;
-}
 
 function jobErrorText(job: LaunchJob): string | null {
   const error = job.error;
@@ -219,7 +213,7 @@ export function LaunchDialog({
   useEffect(() => {
     if (job?.state !== "succeeded" || announcedRunId.current === job.runId) return;
     announcedRunId.current = job.runId;
-    toast.show(zh.launched, { variant: "success" });
+    toast.show(jobDoneText(job), { variant: "success" });
     onLaunched(job.runId, job.workspaceId);
   }, [job, onLaunched, toast]);
 
