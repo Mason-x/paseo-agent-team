@@ -27,6 +27,7 @@
 | 第 5 节 DEV 验证 | 未做（可选） | — | — | 见"没做或没做完" |
 | A1 事件压缩与容量保护（Sonnet 实施 Opus 裁决项） | 已做 | caf8a26（代码）+ 计划第 44 点 | 3095 | 压缩进现有 checkpoint，不升版本；容量门 `ledger-capacity`；历史页 `compactedThroughSeq`；变异 10 项全抓到 |
 | A2 取消后释放被冻结任务的占用 | 已做 | 786caba（代码）+ 计划第 45 点 | 3107 | 只改 `applyCancellation`；答复 `cancel` 才释放，绑定 `releaseDecisionId`；变异 4 项全抓到 |
+| A3 暂停与续办 RPC | 已做 | a456eb0（代码）+ 计划第 46 点 | 3140 | RPC 24 到 26；先重复、再修订号、再生命周期；变异 9 项全抓到；必须与 A5 同一版本发布 |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 
 ## 待批准
@@ -302,6 +303,8 @@
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
+
+- **A3**：biome 仅 2 条既有警告；tsc 通过；vitest 189 个文件 3140 通过（3 todo，A2 后 3107 加 33）；verify:package 通过。变异检查 9 项（`a3.json`）全部被抓到。
 
 - **A2**：biome 仅 2 条既有警告；tsc 通过；vitest 188 个文件 3107 通过（3 todo，A1 后 3095 加 12）；verify:package 通过。变异检查 4 项（`a2.json`）全部被抓到。
 
