@@ -1,3 +1,4 @@
+import { cancelPending } from "../../shared/domain/run-engine/cancel-request";
 import { answerableActions } from "../../shared/domain/run-engine/decision-answer";
 import { occupiesExecutionSlot } from "../../shared/domain/run-engine/invariants";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
@@ -32,16 +33,27 @@ export const OBSERVATION_CAPABILITIES = {
  * The controls this Run can use right now, from its own ledger. Only the controls that exist are ever
  * named: `kick` while the Run is live, `replan` while it waits for a plan a person must ask for again,
  * `decide` while a decision of a kind this build can answer is waiting, `pause` while the Run is
- * active and `resume` while it is paused.
+ * active and `resume` while it is paused, `cancel` until a cancellation is asked for. While one is
+ * pending only `kick` is left.
  */
-export function supportedControlsOf(record: Pick<RunRecord, "lifecycle" | "decisions">): string[] {
+export function supportedControlsOf(
+  record: Pick<RunRecord, "lifecycle" | "decisions"> & {
+    launch?: Pick<RunRecord["launch"], "state">;
+  },
+): string[] {
   const live = record.lifecycle !== "finished" && record.lifecycle !== "cancelled";
+  // A cancellation that was asked for (or that cannot be read) decides the rest: kick still looks.
+  const cancelling = cancelPending(record);
+  const starting = record.launch?.state === "preparing" || record.launch?.state === "creating";
   const usable: Record<(typeof RUN_ACTION_CONTROLS)[number], boolean> = {
-    replan: record.lifecycle === "awaiting-dag",
-    decide: record.decisions.some((decision) => answerableActions(record, decision).length > 0),
+    replan: record.lifecycle === "awaiting-dag" && !cancelling,
+    decide:
+      !cancelling &&
+      record.decisions.some((decision) => answerableActions(record, decision).length > 0),
     kick: live,
-    pause: record.lifecycle === "active",
-    resume: record.lifecycle === "paused",
+    pause: record.lifecycle === "active" && !cancelling,
+    resume: record.lifecycle === "paused" && !cancelling,
+    cancel: live && !cancelling && !starting,
   };
   return RUN_ACTION_CONTROLS.filter((name) => usable[name]);
 }

@@ -6,6 +6,8 @@ import {
   RunListOutputSchema,
 } from "../schemas/run-engine/rpc";
 import {
+  RunCancelInputSchema,
+  RunCancelOutputSchema,
   RunDecideInputSchema,
   RunDecideOutputSchema,
   RunKickInputSchema,
@@ -59,6 +61,12 @@ export const runResumeRpc = defineRpc({
   name: "agent-team.run.resume",
   input: RunLifecycleInputSchema,
   output: RunLifecycleOutputSchema,
+});
+
+export const runCancelRpc = defineRpc({
+  name: "agent-team.run.cancel",
+  input: RunCancelInputSchema,
+  output: RunCancelOutputSchema,
 });
 
 export const runKickRpc = defineRpc({

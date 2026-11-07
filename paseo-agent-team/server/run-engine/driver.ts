@@ -6,6 +6,7 @@ import {
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { CancelFinisher } from "./cancel";
 import type { Compactor } from "./compact";
 import type { DagIntake } from "./dag";
 import { sha256Hex } from "./digest";
@@ -71,6 +72,8 @@ export type DriverOptions = {
   onPassed?: (runId: string) => void | Promise<void>;
   /** Folds the old events of a Run into its checkpoint at the start of a pass (`compact.ts`). */
   compactor?: Pick<Compactor, "compactIfNeeded">;
+  /** Finishes a cancellation that was asked for, at the start of a pass (`cancel.ts`). */
+  cancelFinisher?: Pick<CancelFinisher, "finish">;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -159,6 +162,10 @@ export function createEngineDriver(options: DriverOptions) {
       if (read.status === "ok") {
         await options.compactor.compactIfNeeded(runId, { bytesHigh: read.needsCompaction });
       }
+    }
+    if (options.cancelFinisher) {
+      // Its own commit; it never throws, and a Run it cancels has nothing more to dispatch below.
+      await options.cancelFinisher.finish(runId);
     }
     let dispatched = 0;
     let last: DispatchNextResult = { status: "idle" };

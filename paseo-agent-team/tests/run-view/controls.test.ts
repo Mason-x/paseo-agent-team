@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  cancelRunNotice,
   controlsOf,
   decideNotice,
   issueText,
@@ -130,6 +131,13 @@ describe("controlsOf: only what the server named is offered", () => {
     expect(only.cancels[0]?.downstream).toEqual([]);
   });
 
+  test("cancelling the Run is offered only when the server names it, and counts as something to offer", () => {
+    const none = controlsOf(run({ supportedControls: ["kick"] }));
+    expect(none.cancelRun).toBe(false);
+    const named = controlsOf(run({ supportedControls: ["cancel"], decisions: [] }));
+    expect([named.cancelRun, named.any]).toEqual([true, true]);
+  });
+
   test("replan is offered only when the server names it", () => {
     expect(controlsOf(run({ supportedControls: ["kick"] })).replan).toBe(false);
     expect(controlsOf(run({ supportedControls: ["replan", "kick"] })).replan).toBe(true);
@@ -143,6 +151,7 @@ describe("controlsOf: only what the server named is offered", () => {
       kick: false,
       pause: false,
       resume: false,
+      cancelRun: false,
       retries: [],
       cancels: [],
       any: false,
@@ -201,6 +210,42 @@ describe("what a retry will do is said per kind of decision", () => {
       expect(offer?.explain).toBe(retryExplanation(category));
       expect(offer?.reason).toContain(category);
     }
+  });
+});
+
+describe("what is said about a cancellation", () => {
+  const base = {
+    runContractVersion: 1 as const,
+    revision: 5,
+    lifecycle: "paused",
+    issues: [],
+  };
+
+  test("done at once, still waiting, repeated and refused each have their own words", () => {
+    expect(cancelRunNotice({ ...base, status: "applied", waiting: null })).toEqual({
+      tone: "success",
+      text: zh.controls.cancelRun.done,
+      refresh: true,
+    });
+    const waiting = cancelRunNotice({
+      ...base,
+      status: "applied",
+      waiting: { turns: 2, deliveries: 1 },
+    });
+    expect(waiting).toMatchObject({ tone: "warning", refresh: true });
+    expect(waiting.text).toBe(zh.controls.cancelRun.waiting(2, 1));
+    expect(waiting.text).toContain("2");
+    expect(cancelRunNotice({ ...base, status: "replayed", waiting: null }).text).toBe(
+      zh.controls.result.replayed,
+    );
+    const refused = cancelRunNotice({
+      ...base,
+      status: "rejected",
+      waiting: null,
+      issues: [{ code: "cancel-pending", severity: "error", path: [], params: {}, action: "none" }],
+    });
+    expect(refused.tone).toBe("danger");
+    expect(refused.text).toContain("请求取消");
   });
 });
 

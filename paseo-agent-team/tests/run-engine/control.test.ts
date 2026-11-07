@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { createCancelFinisher } from "../../server/run-engine/cancel";
 import { createRunControl, type RunControl } from "../../server/run-engine/control";
 import { createDagIntake } from "../../server/run-engine/dag";
 import { createEngineDriver, type EngineDriver } from "../../server/run-engine/driver";
@@ -14,6 +15,11 @@ import { createRunObserver } from "../../server/run-engine/observer";
 import { projectDetail } from "../../server/run-engine/projection";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
+import {
+  CANCEL_COMPLETED_EVENT,
+  CANCEL_PENDING_ALERT,
+  CANCEL_REQUEST_EVENT,
+} from "../../shared/domain/run-engine/cancel-request";
 import { REPO_ALIAS, readDagControl } from "../../shared/domain/run-engine/dag-admission";
 import { answerDecision, openLimboDecision } from "../../shared/domain/run-engine/decision-answer";
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
@@ -132,6 +138,10 @@ function fakeHost() {
   const timelines = new Map<string, PortTimelineEntry[]>();
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
+  const archived: string[] = [];
+  const lose = { next: false };
+  // What the live state of an agent says, when the test wants it to say something else.
+  const live: { override: "running" | "throw" | null } = { override: null };
   let seq = 0;
   let reads = 0;
   const entries = (agentId: string) => {
@@ -163,9 +173,16 @@ function fakeHost() {
         send: async (text, options) => {
           const messageId = options?.messageId ?? "";
           sent.push({ agentId, text, messageId });
+          // The host took the call and the answer was lost: nothing reaches the timeline.
+          if (lose.next) {
+            lose.next = false;
+            throw new Error("the host did not answer");
+          }
           add(agentId, `turn-${agentId}-${sent.length}`, { type: "user_message", messageId });
         },
-        archive: async () => undefined,
+        archive: async () => {
+          archived.push(agentId);
+        },
         timeline: {
           refetch: async () => {
             reads += 1;
@@ -176,12 +193,13 @@ function fakeHost() {
         // An agent that was spoken to and has not answered is working: a reader that acts without a
         // hook (a retry, a recovery) must not take its half-written turn for a finished one.
         refresh: async () => {
+          if (live.override === "throw") throw new Error("the agent cannot be read");
           const last = entries(agentId).at(-1);
-          const busy = last?.item.type === "user_message";
+          const busy = live.override === "running" || last?.item.type === "user_message";
           return {
             agent: {
               status: busy ? "running" : "idle",
-              activeTurn: busy ? { turnId: last.turnId } : null,
+              activeTurn: busy ? { turnId: last?.turnId ?? "turn-live" } : null,
             },
           };
         },
@@ -191,6 +209,22 @@ function fakeHost() {
   return {
     port,
     sent,
+    archived,
+    /** The next send throws after the host "received" it, and leaves no echo in the timeline. */
+    loseNextSend: () => {
+      lose.next = true;
+    },
+    /** The echo of the newest message sent to the agent reaches its timeline: it was delivered after all. */
+    deliverLost: (agentId: string) => {
+      const last = [...sent].reverse().find((entry) => entry.agentId === agentId);
+      if (last) {
+        add(agentId, `turn-${agentId}-late`, { type: "user_message", messageId: last.messageId });
+      }
+    },
+    /** What the live state of agents says from now on; null for the ordinary behaviour. */
+    liveState: (value: "running" | "throw" | null) => {
+      live.override = value;
+    },
     /** How many timeline reads the Engine has made. */
     reads: () => reads,
     planRequestSent: () =>
@@ -272,6 +306,15 @@ function build(
     service,
     outbox: { run: (runId) => effects.runOutbox(runId) },
     reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    cancelFinisher: createCancelFinisher({
+      store: useStore,
+      readSeat: async (agentId) => {
+        const refreshed = await host.port.agents.ref(agentId).refresh();
+        return refreshed?.agent
+          ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+          : null;
+      },
+    }),
   });
   const control = createRunControl({
     store: useStore,
@@ -831,7 +874,7 @@ describe("decide", () => {
     const view = projectDetail(frozen);
     if (!view.ok) throw new Error("projection failed");
     expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry", "cancel"]]);
-    expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick", "pause"]);
+    expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick", "pause", "cancel"]);
 
     const out = await b.control.decide(answer(decision?.decisionId ?? "", frozen.revision));
     expect(out).toMatchObject({ status: "applied", taskId: "t1", issues: [] });
@@ -1571,6 +1614,377 @@ describe("decide", () => {
 });
 
 // === kick ======================================================================================
+
+describe("cancel the Run", () => {
+  const ask = (revision: number, over: Record<string, unknown> = {}) => ({
+    runContractVersion: 1 as const,
+    runId: RUN_ID,
+    requestId: "cancel-1",
+    expectedRevision: revision,
+    reason: "stop everything",
+    ...over,
+  });
+  const pending = (record: RunRecord) =>
+    (record as unknown as { cancelRequest?: unknown }).cancelRequest;
+  const alertOf = (record: RunRecord) =>
+    record.alerts.find((alert) => alert.summary === CANCEL_PENDING_ALERT);
+  const count = (record: RunRecord, kind: string) =>
+    record.events.filter((event) => event.kind === kind).length;
+
+  /** The plan is accepted and t1 is with its producer, whose turn is running. */
+  async function underway(host: Host, b: Built): Promise<RunRecord> {
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    const record = await stored();
+    expect(states(record).t1).toBe("assigned");
+    return record;
+  }
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] a running turn is waited for, its report is taken in, and then the whole Run is cancelled without a single message",
+    async (version) => {
+      const host = fakeHost();
+      const b = build(host);
+      const before = await underway(host, b);
+      const sentBefore = host.sent.length;
+
+      const out = await b.control.cancel(ask(before.revision));
+      expect(out).toMatchObject({
+        status: "applied",
+        lifecycle: "paused",
+        waiting: { turns: 1, deliveries: 0 },
+        issues: [],
+      });
+      await b.control.idle();
+      const mid = await stored();
+      expect(mid.lifecycle).toBe("paused");
+      expect(pending(mid)).toMatchObject({ requestId: "cancel-1", completedAt: null });
+      expect(alertOf(mid)?.state).toBe("open");
+      expect(count(mid, CANCEL_REQUEST_EVENT)).toBe(1);
+      expect(states(mid).t1).toBe("assigned");
+      expect(mid.resources.length).toBeGreaterThan(0);
+      // Looking again while the turn runs writes nothing.
+      await b.driver.kick(RUN_ID);
+      expect((await stored()).revision).toBe(mid.revision);
+
+      produce(host, "agent-b1");
+      await hook(host, b.driver, "agent-b1");
+      const after = await stored();
+      expect(after.schemaVersion).toBe(version === "v1" ? 1 : 2);
+      expect(after.lifecycle).toBe("cancelled");
+      expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+      expect(after.resources).toEqual([]);
+      // The report that arrived was taken in as usual, and no judge was asked.
+      expect(
+        after.assignments.filter((a) => a.taskId === "t1" && a.acceptedProof !== null),
+      ).toHaveLength(1);
+      expect(after.assignments.some((a) => a.purpose === "reviewer")).toBe(false);
+      expect(pending(after)).toMatchObject({ requestId: "cancel-1" });
+      expect((pending(after) as { completedAt: string | null }).completedAt).not.toBeNull();
+      expect(alertOf(after)?.state).toBe("resolved");
+      expect(count(after, CANCEL_COMPLETED_EVENT)).toBe(1);
+      expect(count(after, "run-cancelled")).toBe(1);
+      // The claim kept from the delivery that was sent was released on the request's behalf.
+      const release = after.decisions.find((d) => d.dedupeKey === "cancel:t1");
+      expect(release).toMatchObject({
+        state: "answered",
+        answer: { action: "cancel", requestId: "cancel-1", via: "run-cancel" },
+      });
+      expect(after.tasks.find((t) => t.spec.id === "t1")?.releaseDecisionId).toBe(
+        release?.decisionId,
+      );
+      // The key assertion: from the request to the end, nothing was sent, archived or interrupted.
+      expect(host.sent).toHaveLength(sentBefore);
+      expect(host.archived).toEqual([]);
+    },
+  );
+
+  test("a producer whose report is refused: the re-send held by the pause never goes out, and the attempt is closed", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    await store.update(RUN_ID, (current) => {
+      current.policy.perTask.protocolResends = 1;
+      return current;
+    });
+    const before = await underway(host, b);
+    await b.control.cancel(ask(before.revision));
+    const sentBefore = host.sent.length;
+    host.reply("agent-b1", "All done, trust me.");
+    await hook(host, b.driver, "agent-b1");
+    const after = await stored();
+    expect(after.lifecycle).toBe("cancelled");
+    expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+    expect(after.outbox.filter((i) => i.state === "prepared" || i.state === "sending")).toEqual([]);
+    const nonce = after.nonceRegistry.find((n) => n.taskId === "t1");
+    expect(nonce?.acceptedAt).toBeNull();
+    expect(nonce?.revokedAt).not.toBeNull();
+    expect(host.sent).toHaveLength(sentBefore);
+    expect(host.archived).toEqual([]);
+  });
+
+  test("a delivery whose result is not known keeps the cancellation waiting until its echo settles it", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    host.loseNextSend();
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    const lost = await stored();
+    expect(lost.outbox.some((i) => i.kind === "dispatch" && i.state === "outcome-unknown")).toBe(
+      true,
+    );
+    const out = await b.control.cancel(ask(lost.revision));
+    expect(out).toMatchObject({ status: "applied", waiting: { deliveries: 1 } });
+    await b.control.idle();
+    await b.driver.kick(RUN_ID);
+    expect((await stored()).lifecycle).toBe("paused");
+    const sentBefore = host.sent.length;
+
+    // The echo arrives: the message was delivered, and its turn is running.
+    host.deliverLost("agent-b1");
+    await b.driver.retryRun(RUN_ID);
+    expect((await stored()).lifecycle).toBe("paused");
+
+    produce(host, "agent-b1");
+    await hook(host, b.driver, "agent-b1");
+    const after = await stored();
+    expect(after.lifecycle).toBe("cancelled");
+    expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+    expect(host.sent).toHaveLength(sentBefore);
+    expect(host.archived).toEqual([]);
+  });
+
+  test("a turn the ledger says ended but the host says is running, or cannot be read, is waited for without a write", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await underway(host, b);
+    await b.control.cancel(ask(before.revision));
+    // A reply the Engine cannot use: the turn ended, but the attempt is still open.
+    host.reply("agent-b1", "All done, trust me.");
+    host.liveState("running");
+    await hook(host, b.driver, "agent-b1");
+    const waiting = await stored();
+    expect(waiting.lifecycle).toBe("paused");
+    host.liveState("throw");
+    await b.driver.kick(RUN_ID);
+    expect((await stored()).revision).toBe(waiting.revision);
+    expect((await stored()).lifecycle).toBe("paused");
+    host.liveState(null);
+    await b.driver.kick(RUN_ID);
+    expect((await stored()).lifecycle).toBe("cancelled");
+  });
+
+  test("a Run with no task yet is cancelled in the request's own commit, and a plan that comes later is not taken", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await stored();
+    expect(before.lifecycle).toBe("bootstrapping");
+    const out = await b.control.cancel(ask(before.revision));
+    expect(out).toMatchObject({ status: "applied", lifecycle: "cancelled", waiting: null });
+    await b.control.idle();
+    const done = await stored();
+    expect((pending(done) as { completedAt: string | null }).completedAt).not.toBeNull();
+    expect(alertOf(done)?.state).toBe("resolved");
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    const after = await stored();
+    expect(after.lifecycle).toBe("cancelled");
+    expect(after.tasks).toEqual([]);
+    expect(host.sent).toEqual([]);
+  });
+
+  test("the same request is the same request; another one is refused while it waits; stale, finished and starting Runs are refused", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const stale = await stored();
+    const conflict = await b.control.cancel(ask(stale.revision + 5));
+    expect(conflict).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "revision-conflict", params: { current: stale.revision } }],
+    });
+    await store.update(RUN_ID, (current) => {
+      current.launch.state = "creating";
+      return current;
+    });
+    const starting = await stored();
+    expect(await b.control.cancel(ask(starting.revision))).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "launch-in-progress" }],
+    });
+    await store.update(RUN_ID, (current) => {
+      current.launch.state = "running";
+      return current;
+    });
+
+    const before = await underway(host, b);
+    const first = await b.control.cancel(ask(before.revision));
+    expect(first.status).toBe("applied");
+    await b.control.idle();
+    const waiting = await stored();
+    // A repeat is found before anything else, even with a revision that is long gone.
+    expect(await b.control.cancel(ask(1))).toMatchObject({
+      status: "replayed",
+      lifecycle: "paused",
+    });
+    expect(await b.control.cancel(ask(1, { reason: "another reason" }))).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "request-id-reused" }],
+    });
+    expect(await b.control.cancel(ask(waiting.revision, { requestId: "cancel-2" }))).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "cancel-pending" }],
+    });
+    expect((await stored()).revision).toBe(waiting.revision);
+
+    // Once it is done, another request finds a Run that cannot be cancelled again.
+    produce(host, "agent-b1");
+    await hook(host, b.driver, "agent-b1");
+    const done = await stored();
+    expect(done.lifecycle).toBe("cancelled");
+    expect(await b.control.cancel(ask(done.revision, { requestId: "cancel-3" }))).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "lifecycle-not-allowed", params: { lifecycle: "cancelled" } }],
+    });
+  });
+
+  test("while it waits nobody resumes the Run or answers a decision, and the page is told only kick is left", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await underway(host, b);
+    await b.control.cancel(ask(before.revision));
+    await b.control.idle();
+    const waiting = await stored();
+    const view = projectDetail(waiting);
+    if (!view.ok) throw new Error("projection failed");
+    expect(view.view.capabilities.supportedControls).toEqual(["kick"]);
+    const body = { runContractVersion: 1 as const, runId: RUN_ID, requestId: "p-1", reason: "x" };
+    for (const act of [b.control.resume, b.control.pause]) {
+      expect(await act({ ...body, expectedRevision: waiting.revision })).toMatchObject({
+        status: "rejected",
+        issues: [{ code: "cancel-pending" }],
+      });
+    }
+    expect((await stored()).revision).toBe(waiting.revision);
+  });
+
+  test("a request that was written and not finished is finished by the recovery of a new process, once", async () => {
+    const host = fakeHost();
+    const first = build(host);
+    const before = await underway(host, first);
+    await first.control.cancel(ask(before.revision));
+    // A reply the Engine cannot use: the turn ended, but the attempt is still open.
+    host.reply("agent-b1", "All done, trust me.");
+    host.liveState("running");
+    await hook(host, first.driver, "agent-b1");
+    expect((await stored()).lifecycle).toBe("paused");
+    host.liveState(null);
+
+    // A new process: nothing of the first one is carried over.
+    const second = build(host);
+    await second.driver.recover();
+    const after = await stored();
+    expect(after.lifecycle).toBe("cancelled");
+    expect(count(after, "run-cancelled")).toBe(1);
+    expect(count(after, CANCEL_COMPLETED_EVENT)).toBe(1);
+    await second.driver.recover();
+    await first.driver.kick(RUN_ID);
+    expect(count(await stored(), "run-cancelled")).toBe(1);
+  });
+
+  test("two finishers at once commit one cancellation", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await underway(host, b);
+    await b.control.cancel(ask(before.revision));
+    // A reply the Engine cannot use: the turn ended, but the attempt is still open.
+    host.reply("agent-b1", "All done, trust me.");
+    host.liveState("running");
+    await hook(host, b.driver, "agent-b1");
+    host.liveState(null);
+    const readSeat = async (agentId: string) => {
+      const refreshed = await host.port.agents.ref(agentId).refresh();
+      return refreshed?.agent
+        ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+        : null;
+    };
+    const finishers = [1, 2, 3].map(() => createCancelFinisher({ store, readSeat }));
+    const reports = await Promise.all(finishers.map((finisher) => finisher.finish(RUN_ID)));
+    expect(reports.filter((report) => report.status === "finished")).toHaveLength(1);
+    const after = await stored();
+    expect(count(after, "run-cancelled")).toBe(1);
+    expect(count(after, CANCEL_COMPLETED_EVENT)).toBe(1);
+  });
+
+  test("a turn that started after the plan was made stops the commit: the plan is worked out again on the record that is committed", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await underway(host, b);
+    await b.control.cancel(ask(before.revision));
+    host.reply("agent-b1", "All done, trust me.");
+    host.liveState("running");
+    await hook(host, b.driver, "agent-b1");
+    host.liveState(null);
+    expect((await stored()).lifecycle).toBe("paused");
+
+    // Between the finisher reading the Run and committing, the agent starts a turn (a message of its own).
+    let injected = false;
+    const watched = new Proxy(store, {
+      get(target, prop) {
+        if (prop !== "update") return Reflect.get(target, prop);
+        return async (runId: string, change: Parameters<RunStore["update"]>[1]) => {
+          if (!injected) {
+            injected = true;
+            await target.update(runId, (current) => {
+              const seq = current.counters.observationSeq + 1;
+              current.counters.observationSeq = seq;
+              current.eventReceipts.push({
+                eventKey: "agent-b1|turn-new|turn_started",
+                kind: "turn_started",
+                agentId: "agent-b1",
+                turnId: "turn-new",
+                seq,
+                receivedAt: new Date().toISOString(),
+                dedupeKey: "agent-b1|turn-new|turn_started",
+                disposition: "observed",
+              });
+              return current;
+            });
+          }
+          return target.update(runId, change);
+        };
+      },
+    });
+    const finisher = createCancelFinisher({
+      store: watched,
+      readSeat: async () => ({ status: "idle", activeTurn: false }),
+    });
+    const report = await finisher.finish(RUN_ID);
+    expect(report.status).toBe("waiting");
+    expect((await stored()).lifecycle).toBe("paused");
+    expect(count(await stored(), "run-cancelled")).toBe(0);
+  });
+
+  test("what the request returns carries counts, ids and codes only", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const before = await underway(host, b);
+    const out = await b.control.cancel(ask(before.revision));
+    expect(Object.keys(out).sort()).toEqual([
+      "issues",
+      "lifecycle",
+      "revision",
+      "runContractVersion",
+      "status",
+      "waiting",
+    ]);
+    const text = JSON.stringify(out);
+    for (const secret of ["nonce", "prompt", "semanticArgs", "outbox"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
 
 describe("kick", () => {
   const kick = (b: Built) => b.control.kick({ runContractVersion: 1, runId: RUN_ID });

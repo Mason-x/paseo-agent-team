@@ -1,6 +1,7 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  runCancelRpc,
   runDecideRpc,
   runKickRpc,
   runPauseRpc,
@@ -19,11 +20,12 @@ export function useEngineControls(runId: string, refresh: () => Promise<void>) {
   const decide = useRpc(runDecideRpc);
   const kick = useRpc(runKickRpc);
   const pause = useRpc(runPauseRpc);
+  const cancel = useRpc(runCancelRpc);
   const resume = useRpc(runResumeRpc);
   const [state, setState] = useState<ControlState>({ pending: null, notice: null });
   // The RPC functions and `refresh` may be new on every render; the runner reads the latest ones.
-  const latest = useRef({ replan, decide, kick, pause, resume, refresh });
-  latest.current = { replan, decide, kick, pause, resume, refresh };
+  const latest = useRef({ replan, decide, kick, pause, resume, cancel, refresh });
+  latest.current = { replan, decide, kick, pause, resume, cancel, refresh };
 
   const runner = useMemo(
     () =>
@@ -34,6 +36,7 @@ export function useEngineControls(runId: string, refresh: () => Promise<void>) {
           decide: (input) => latest.current.decide(input),
           kick: (input) => latest.current.kick(input),
           pause: (input) => latest.current.pause(input),
+          cancel: (input) => latest.current.cancel(input),
           resume: (input) => latest.current.resume(input),
           refresh: () => latest.current.refresh(),
           newId: newRequestId,

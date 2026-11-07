@@ -7,6 +7,7 @@ import {
 import { controlsOf, type RetryOffer } from "../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../shared/schemas/run-engine/rpc";
 import type {
+  RunCancelOutput,
   RunDecideOutput,
   RunKickOutput,
   RunLifecycleOutput,
@@ -32,6 +33,15 @@ const lifecycle = (state: string): RunLifecycleOutput => ({
   status: "applied",
   revision: 6,
   lifecycle: state,
+  issues: [],
+});
+
+const cancelled = (waiting: RunCancelOutput["waiting"] = null): RunCancelOutput => ({
+  ...BASE,
+  status: "applied",
+  revision: 6,
+  lifecycle: "cancelled",
+  waiting,
   issues: [],
 });
 
@@ -72,6 +82,7 @@ function setup(overrides: Partial<ControlDeps> = {}) {
     ),
     pause: vi.fn(async () => lifecycle("paused")),
     resume: vi.fn(async () => lifecycle("active")),
+    cancel: vi.fn(async () => cancelled()),
     refresh: vi.fn(async () => undefined),
     newId: () => {
       counter += 1;
@@ -210,6 +221,39 @@ describe("kick", () => {
       runId: "run-ctl-a1",
     });
     expect(runner.state.notice?.text).toBe(zh.controls.result.kick.dispatched(1));
+  });
+});
+
+describe("cancelling the Run", () => {
+  test("a reason is needed; the written one is sent under the revision the page read", async () => {
+    const { runner, deps } = setup();
+    expect(await runner.cancelRun("   ", 9)).toBe(false);
+    expect(deps.cancel).not.toHaveBeenCalled();
+    expect(await runner.cancelRun("  the plan is wrong ", 9)).toBe(true);
+    expect(deps.cancel).toHaveBeenCalledWith({
+      runContractVersion: RUN_CONTRACT_VERSION,
+      runId: "run-ctl-a1",
+      requestId: "req-1",
+      expectedRevision: 9,
+      reason: "the plan is wrong",
+    });
+    expect(runner.state.notice?.text).toBe(zh.controls.cancelRun.done);
+    expect(deps.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("says what it waits for, and asks again under the same id after a request that got no answer", async () => {
+    const cancel = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(cancelled({ turns: 1, deliveries: 0 }));
+    const { runner } = setup({ cancel });
+    await runner.cancelRun("stop", 9);
+    expect(runner.state.notice?.text).toBe(zh.controls.result.transport);
+    await runner.cancelRun("stop", 9);
+    expect(runner.state.notice?.text).toBe(zh.controls.cancelRun.waiting(1, 0));
+    expect(cancel.mock.calls.map((call) => call[0].requestId)).toEqual(["req-1", "req-1"]);
+    await runner.cancelRun("another reason", 9);
+    expect(cancel.mock.calls.at(-1)?.[0].requestId).toBe("req-2");
   });
 });
 

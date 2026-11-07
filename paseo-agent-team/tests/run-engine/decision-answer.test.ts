@@ -233,18 +233,55 @@ describe("supportedControlsOf", () => {
   const live = (lifecycle: RunRecord["lifecycle"], decisions: Decision[] = []) =>
     supportedControlsOf({ lifecycle, decisions });
 
+  test("a cancellation that was asked for leaves only kick; a Run still starting cannot be cancelled", () => {
+    const decisions = [decision()];
+    const cancelling = (value: unknown) =>
+      supportedControlsOf({ lifecycle: "paused", decisions, cancelRequest: value } as never);
+    const request = {
+      version: 1,
+      requestId: "c",
+      reason: "r",
+      requestedAt: "2026-11-08T10:00:00.000Z",
+      completedAt: null,
+    };
+    expect(cancelling(request)).toEqual(["kick"]);
+    // One that cannot be read counts as wanted as well.
+    expect(cancelling({ nonsense: true })).toEqual(["kick"]);
+    // Nothing is offered to pause or cancel again once it is done, and the Run is over anyway.
+    expect(
+      supportedControlsOf({
+        lifecycle: "cancelled",
+        decisions,
+        cancelRequest: { ...request, completedAt: request.requestedAt },
+      } as never),
+    ).toEqual([]);
+    for (const state of ["preparing", "creating"] as const) {
+      expect(
+        supportedControlsOf({ lifecycle: "bootstrapping", decisions: [], launch: { state } }),
+      ).toEqual(["kick"]);
+    }
+    expect(
+      supportedControlsOf({
+        lifecycle: "active",
+        decisions: [decision()],
+        cancelRequest: request,
+      } as never),
+    ).toEqual(["kick"]);
+  });
+
   test("names only the controls this Run can use right now, in a fixed order", () => {
-    expect(live("bootstrapping")).toEqual(["kick"]);
-    expect(live("awaiting-dag")).toEqual(["replan", "kick"]);
-    expect(live("active")).toEqual(["kick", "pause"]);
-    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause"]);
+    expect(live("bootstrapping")).toEqual(["kick", "cancel"]);
+    expect(live("awaiting-dag")).toEqual(["replan", "kick", "cancel"]);
+    expect(live("active")).toEqual(["kick", "pause", "cancel"]);
+    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause", "cancel"]);
     // A paused Run answers nothing: the decision waits until it is resumed.
-    expect(live("paused", [decision()])).toEqual(["kick", "resume"]);
-    expect(live("paused")).toEqual(["kick", "resume"]);
-    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick", "pause"]);
+    expect(live("paused", [decision()])).toEqual(["kick", "resume", "cancel"]);
+    expect(live("paused")).toEqual(["kick", "resume", "cancel"]);
+    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick", "pause", "cancel"]);
     expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual([
       "kick",
       "pause",
+      "cancel",
     ]);
     expect(live("finished")).toEqual([]);
     expect(live("cancelled")).toEqual([]);

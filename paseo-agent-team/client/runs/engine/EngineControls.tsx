@@ -19,6 +19,7 @@ export type EngineControlsProps = {
   onReplan: (reason: string) => void;
   onRetry: (offer: RetryOffer) => void;
   onCancelTask: (offer: CancelOffer) => void;
+  onCancelRun: (reason: string) => void;
   onKick: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -81,6 +82,7 @@ export function EngineControls(props: EngineControlsProps) {
     onReplan,
     onRetry,
     onCancelTask,
+    onCancelRun,
     onKick,
     onPause,
     onResume,
@@ -90,6 +92,9 @@ export function EngineControls(props: EngineControlsProps) {
   const [needReason, setNeedReason] = useState(false);
   const [confirming, setConfirming] = useState<RetryOffer | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState<CancelOffer | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [needCancelReason, setNeedCancelReason] = useState(false);
+  const [confirmingRun, setConfirmingRun] = useState(false);
   const busy = state.pending !== null;
 
   return (
@@ -237,6 +242,53 @@ export function EngineControls(props: EngineControlsProps) {
         </View>
       ) : null}
 
+      {view.cancelRun ? (
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+            {zh.controls.cancelRun.title}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {zh.controls.cancelRun.help}
+          </Text>
+          <ImeTextInput
+            accessibilityLabel={zh.controls.cancelRun.reasonLabel}
+            placeholder={zh.controls.cancelRun.reasonPlaceholder}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            multiline
+            editable={!busy}
+            onChangeText={(text: string) => {
+              setCancelReason(text);
+              if (text.trim() !== "") setNeedCancelReason(false);
+            }}
+            style={{
+              minHeight: 56,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              borderRadius: 8,
+              padding: 8,
+              color: theme.colors.foreground,
+            }}
+          />
+          {needCancelReason ? (
+            <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+              {zh.controls.cancelRun.needReason}
+            </Text>
+          ) : null}
+          <ActionButton
+            theme={theme}
+            label={zh.controls.cancelRun.submit}
+            disabled={busy}
+            onPress={() => {
+              if (cancelReason.trim() === "") {
+                setNeedCancelReason(true);
+                return;
+              }
+              setConfirmingRun(true);
+            }}
+          />
+        </View>
+      ) : null}
+
       {busy ? (
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
           {zh.controls.pending}
@@ -270,6 +322,19 @@ export function EngineControls(props: EngineControlsProps) {
           const offer = confirming;
           setConfirming(null);
           if (offer !== null) onRetry(offer);
+        }}
+      />
+      <ConfirmDialog
+        theme={theme}
+        open={confirmingRun}
+        title={zh.controls.cancelRun.confirmTitle}
+        body={zh.controls.cancelRun.help}
+        confirmLabel={zh.controls.cancelRun.confirm}
+        cancelLabel={zh.controls.cancelRun.cancel}
+        onCancel={() => setConfirmingRun(false)}
+        onConfirm={() => {
+          setConfirmingRun(false);
+          onCancelRun(cancelReason);
         }}
       />
       <ConfirmDialog

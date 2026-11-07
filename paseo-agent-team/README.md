@@ -179,7 +179,7 @@ cancelled Run sends nothing new.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
 waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
-cancel a whole Run or approve from the Runs page yet, and it does not retry a transient failure after a
+approve from the Runs page yet, and it does not retry a transient failure after a
 message was dispatched by itself. A Run holds at most 8192 events: old history is folded into a
 summary (it cannot be expanded again), and when the ledger nears a limit it stops starting new work
 and says so, so a very long Run is finished and restarted rather than overfilled. Acceptance status per scenario is in
@@ -207,6 +207,13 @@ only when the Run offers them:
   usual.
 - **继续** (resume), while the Run is paused: reads the host, takes in what arrived meanwhile, sends
   what was held back once, and dispatches again.
+- **取消这个 Run** (cancel the Run), with a reason you write: nothing new is dispatched from then on
+  (the Run is paused and cannot be resumed), and once every turn that was running is proven ended on
+  the host's own record, every unfinished task is cancelled and every claim released. It sends no
+  message, archives nothing and interrupts nothing, so it costs no model call; it does not roll back
+  code. A long running turn is waited for, and a delivery whose result is not known keeps it waiting
+  (the page says what for; **立即检查并推进** looks again). A Run that is still being set up cannot be
+  cancelled yet; one that has no task yet is cancelled at once.
 
 A refusal is shown in words; if the Run changed since you looked, the page reads it again and asks
 you to try once more. A request is never applied twice.

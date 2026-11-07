@@ -476,6 +476,7 @@ describe("EngineView controls", () => {
     onReplan: vi.fn(),
     onRetry: vi.fn(),
     onCancelTask: vi.fn(),
+    onCancelRun: vi.fn(),
     onKick: vi.fn(),
     onPause: vi.fn(),
     onResume: vi.fn(),
@@ -630,6 +631,34 @@ describe("EngineView controls", () => {
     );
     expect(button(plain.root, `${zh.controls.cancelTask.button} Core`)).toBeUndefined();
     await renderer.act(async () => plain.unmount());
+  });
+
+  test("cancelling the Run needs a reason and a confirmation that says what it does", async () => {
+    const calls = handlers();
+    const view = await mount(withControls(["kick", "cancel"]), { controls: calls });
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.cancelRun.help);
+    // Without a reason it only says so.
+    await press(view.root, zh.controls.cancelRun.submit);
+    expect(calls.onCancelRun).not.toHaveBeenCalled();
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.cancelRun.needReason);
+    expect(view.root.findAll((node) => node.type === "Modal")).toHaveLength(0);
+    const input = view.root.findAll(
+      (node) => node.props?.accessibilityLabel === zh.controls.cancelRun.reasonLabel,
+    )[0];
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("wrong plan"),
+    );
+    await press(view.root, zh.controls.cancelRun.submit);
+    expect(calls.onCancelRun).not.toHaveBeenCalled();
+    const dialog = view.root.findAll((node) => node.type === "Modal")[0];
+    expect(dialog?.props.title).toBe(zh.controls.cancelRun.confirmTitle);
+    await press(view.root, zh.controls.cancelRun.confirm);
+    expect(calls.onCancelRun).toHaveBeenCalledExactlyOnceWith("wrong plan");
+    await renderer.act(async () => view.unmount());
+
+    const none = await mount(withControls(["kick"]), { controls: handlers() });
+    expect(button(none.root, zh.controls.cancelRun.submit)).toBeUndefined();
+    await renderer.act(async () => none.unmount());
   });
 
   test("cancelling the confirmation sends nothing", async () => {

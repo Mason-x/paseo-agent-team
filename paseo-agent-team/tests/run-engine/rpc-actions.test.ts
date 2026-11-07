@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+  runCancelRpc,
   runDecideRpc,
   runKickRpc,
   runPauseRpc,
@@ -11,6 +12,8 @@ import {
 import {
   RUN_ACTION_CODES,
   RUN_ACTION_CONTROLS,
+  RunCancelInputSchema,
+  RunCancelOutputSchema,
   RunDecideInputSchema,
   RunDecideOutputSchema,
   RunKickInputSchema,
@@ -138,6 +141,35 @@ describe("inputs", () => {
     expect(RunDecideOutputSchema.safeParse({ ...out, cancelledTaskIds: [""] }).success).toBe(false);
   });
 
+  test("cancel: the same strict request as the others, and an answer that may say what it waits for", () => {
+    expect(RunCancelInputSchema.safeParse(base).success).toBe(true);
+    for (const bad of [
+      { ...base, extra: 1 },
+      { ...base, force: true },
+      { ...base, reason: "" },
+      { ...base, reason: "x".repeat(601) },
+      { ...base, requestId: "" },
+      { ...base, expectedRevision: -1 },
+    ]) {
+      expect(RunCancelInputSchema.safeParse(bad).success).toBe(false);
+    }
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 4,
+      lifecycle: "paused",
+      issues: [],
+    };
+    expect(RunCancelOutputSchema.safeParse({ ...out, waiting: null }).success).toBe(true);
+    expect(
+      RunCancelOutputSchema.safeParse({ ...out, waiting: { turns: 1, deliveries: 0 } }).success,
+    ).toBe(true);
+    expect(
+      RunCancelOutputSchema.safeParse({ ...out, waiting: { turns: -1, deliveries: 0 } }).success,
+    ).toBe(false);
+    expect(RunCancelOutputSchema.safeParse(out).success).toBe(false);
+  });
+
   test("kick: a Run id and nothing else", () => {
     expect(RunKickInputSchema.safeParse({ runContractVersion: 1, runId: RUN }).success).toBe(true);
     for (const bad of [
@@ -220,13 +252,21 @@ describe("outputs", () => {
     ).toBe(false);
   });
 
-  test("the names the capabilities may carry are the five that exist", () => {
-    expect([...RUN_ACTION_CONTROLS]).toEqual(["replan", "decide", "kick", "pause", "resume"]);
+  test("the names the capabilities may carry are the six that exist", () => {
+    expect([...RUN_ACTION_CONTROLS]).toEqual([
+      "replan",
+      "decide",
+      "kick",
+      "pause",
+      "resume",
+      "cancel",
+    ]);
     expect(runReplanRpc.name).toBe("agent-team.run.replan");
     expect(runDecideRpc.name).toBe("agent-team.run.decide");
     expect(runKickRpc.name).toBe("agent-team.run.kick");
     expect(runPauseRpc.name).toBe("agent-team.run.pause");
     expect(runResumeRpc.name).toBe("agent-team.run.resume");
+    expect(runCancelRpc.name).toBe("agent-team.run.cancel");
   });
 });
 

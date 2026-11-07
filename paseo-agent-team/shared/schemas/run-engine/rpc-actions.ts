@@ -19,7 +19,14 @@ const ContractShape = { runContractVersion: z.literal(RUN_CONTRACT_VERSION) };
 const Text = (max: number) => z.string().min(1).max(max);
 
 /** The names `capabilities.supportedControls` may carry for the controls that exist. */
-export const RUN_ACTION_CONTROLS = ["replan", "decide", "kick", "pause", "resume"] as const;
+export const RUN_ACTION_CONTROLS = [
+  "replan",
+  "decide",
+  "kick",
+  "pause",
+  "resume",
+  "cancel",
+] as const;
 export type RunActionControl = (typeof RUN_ACTION_CONTROLS)[number];
 
 /**
@@ -46,8 +53,10 @@ export const RUN_ACTION_CODES = [
   "action-unsupported",
   "task-not-releasable",
   "run-not-active",
-  // pause and resume
+  // pause, resume and cancel
   "lifecycle-not-allowed",
+  "cancel-pending",
+  "launch-in-progress",
   // anything the ledger itself refuses
   "ledger-refused",
 ] as const;
@@ -128,6 +137,28 @@ export const RunLifecycleOutputSchema = z.object({
   issues: z.array(RunIssueViewSchema).max(100),
 });
 export type RunLifecycleOutput = z.infer<typeof RunLifecycleOutputSchema>;
+
+// --- run.cancel ------------------------------------------------------------------------------
+
+/** Same strict request as the others: a request id, the revision the caller read and a reason. */
+export const RunCancelInputSchema = z.strictObject(WriteShape);
+export type RunCancelInput = z.input<typeof RunCancelInputSchema>;
+
+export const RunCancelOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  revision: z.number().int().nonnegative(),
+  lifecycle: Text(32).nullable(),
+  /** What the cancellation still waits for when it was not completed at once. */
+  waiting: z
+    .object({
+      turns: z.number().int().nonnegative(),
+      deliveries: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunCancelOutput = z.infer<typeof RunCancelOutputSchema>;
 
 // --- run.kick -------------------------------------------------------------------------------
 

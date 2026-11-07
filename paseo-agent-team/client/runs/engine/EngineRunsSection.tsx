@@ -43,6 +43,10 @@ function RunDetailPane({
             const held = session.state;
             if (held?.kind === "ready") void runner.retry(offer, held.run.revision);
           },
+          onCancelRun: (reason) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.cancelRun(reason, held.run.revision);
+          },
           onCancelTask: (offer) => {
             const held = session.state;
             if (held?.kind === "ready") void runner.cancelTask(offer, held.run.revision);

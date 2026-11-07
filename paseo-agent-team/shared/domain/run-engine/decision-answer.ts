@@ -4,6 +4,7 @@ import type {
   RunStoredTaskReport,
 } from "../../schemas/run-engine/ledger";
 import { RunStoredTaskReportSchema } from "../../schemas/run-engine/ledger";
+import { cancelPending } from "./cancel-request";
 import { isDecisionPending } from "./decision-state";
 import { producerHead, resolveD } from "./delivery-binding";
 import { evidenceRepairOf } from "./evidence-repair";
@@ -114,7 +115,9 @@ export function answerableActions(
   record: Pick<RunRecord, "lifecycle">,
   decision: Decision,
 ): DecisionAction[] {
-  if (record.lifecycle !== "active" || !isDecisionPending(decision)) return [];
+  if (record.lifecycle !== "active" || cancelPending(record) || !isDecisionPending(decision)) {
+    return [];
+  }
   const kind = classifyDecision(decision);
   return kind === null ? [] : actionsOfKind(kind);
 }

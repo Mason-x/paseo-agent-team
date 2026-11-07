@@ -7,6 +7,7 @@ import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { type FilesPort, nodeFiles } from "../version/process";
 import { readServerId } from "../version/service";
+import { createCancelFinisher } from "./cancel";
 import { createCompactor } from "./compact";
 import { createRunControl } from "./control";
 import { createDagIntake } from "./dag";
@@ -165,6 +166,17 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     outbox: { run: (runId) => effects.runOutbox(runId) },
     onPassed: (runId) => readRetry.sweep(runId),
     compactor: createCompactor({ store, log }),
+    cancelFinisher: createCancelFinisher({
+      store,
+      readSeat: async (agentId) => {
+        const refreshed = await port.agents.ref(agentId).refresh();
+        return refreshed?.agent
+          ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+          : null;
+      },
+      onReadFailure,
+      log,
+    }),
     log,
   });
   const control = createRunControl({

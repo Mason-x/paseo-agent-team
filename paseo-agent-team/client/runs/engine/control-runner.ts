@@ -1,6 +1,7 @@
 import {
   type ActionNotice,
   type CancelOffer,
+  cancelRunNotice,
   decideNotice,
   kickNotice,
   pauseNotice,
@@ -11,6 +12,8 @@ import {
 } from "../../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../../shared/schemas/run-engine/rpc";
 import type {
+  RunCancelInput,
+  RunCancelOutput,
   RunDecideInput,
   RunDecideOutput,
   RunKickInput,
@@ -36,7 +39,7 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
  *    not refreshed on its account.
  */
 
-export type ControlKey = "replan" | "kick" | "pause" | "resume" | `decide:${string}`;
+export type ControlKey = "replan" | "kick" | "pause" | "resume" | "cancel" | `decide:${string}`;
 
 export type ControlState = {
   pending: ControlKey | null;
@@ -49,6 +52,7 @@ export type ControlDeps = {
   decide(input: RunDecideInput): Promise<RunDecideOutput>;
   kick(input: RunKickInput): Promise<RunKickOutput>;
   pause(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
+  cancel(input: RunCancelInput): Promise<RunCancelOutput>;
   resume(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
   /** Reads the Run again. A failure here is the page's own error, not the control's. */
   refresh(): Promise<void>;
@@ -164,6 +168,24 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
             requestId: requestIdFor(signature),
             expectedRevision,
             reason: zh.controls.pause.reason,
+          }),
+        ),
+      );
+    },
+
+    /** The whole Run, with a reason the person wrote. Finished later, once the running turns have ended. */
+    cancelRun(reason: string, expectedRevision: number): Promise<boolean> {
+      const text = reason.trim();
+      if (text === "") return Promise.resolve(false);
+      const signature = `cancel-run:${expectedRevision}:${text}`;
+      return run("cancel", signature, async () =>
+        cancelRunNotice(
+          await deps.cancel({
+            runContractVersion: RUN_CONTRACT_VERSION,
+            runId: deps.runId,
+            requestId: requestIdFor(signature),
+            expectedRevision,
+            reason: text.slice(0, 600),
           }),
         ),
       );

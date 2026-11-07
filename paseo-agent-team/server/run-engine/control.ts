@@ -1,14 +1,28 @@
 import { randomUUID } from "node:crypto";
+import {
+  CANCEL_COMPLETED_EVENT,
+  CANCEL_PENDING_ALERT,
+  CANCEL_REQUEST_EVENT,
+  CANCEL_TASK_REASON,
+  cancelPending,
+  planCancelFinish,
+  readCancelRequest,
+  withCancelRequest,
+} from "../../shared/domain/run-engine/cancel-request";
 import { answerDecision } from "../../shared/domain/run-engine/decision-answer";
 import {
   compilePlanRequest,
   PLAN_REPLAN_VERSION,
 } from "../../shared/domain/run-engine/engine-prompts";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
+import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { requestReplan } from "../../shared/domain/run-engine/replan";
+import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import { RUN_CONTRACT_VERSION, type RunIssueView } from "../../shared/schemas/run-engine/rpc";
 import type {
   RunActionCode,
+  RunCancelInput,
+  RunCancelOutput,
   RunDecideInput,
   RunDecideOutput,
   RunKickInput,
@@ -18,7 +32,7 @@ import type {
   RunReplanInput,
   RunReplanOutput,
 } from "../../shared/schemas/run-engine/rpc-actions";
-import { sha256Hex } from "./digest";
+import { alertIdFor, sha256Hex } from "./digest";
 import type { EngineDriver } from "./driver";
 import { payloadHash } from "./effects";
 import { planLifecycleMove } from "./lifecycle";
@@ -154,6 +168,11 @@ export function createRunControl(options: RunControlOptions) {
           outcome.refused = refused("revision-conflict", { current: current.revision }, "refresh");
           return null;
         }
+        // A cancellation that was asked for decides what happens to the Run: nobody resumes it.
+        if (cancelPending(current)) {
+          outcome.refused = refused("cancel-pending");
+          return null;
+        }
         const plan = planLifecycleMove(
           current,
           action === "pause" ? "run-paused" : "run-resumed",
@@ -212,6 +231,185 @@ export function createRunControl(options: RunControlOptions) {
     // A pause moves nothing on; a resume asks the driver to settle, send what was held and dispatch.
     if (action === "resume") push(input.runId);
     return { ...BASE, status: "applied", revision, lifecycle: outcome.lifecycle, issues: [] };
+  }
+
+  /**
+   * Cancels the whole Run, later: the request is written, new dispatches stop (the Run is paused), and
+   * the cancellation is finished by `cancel.ts` once every running turn is proven ended. A Run that has
+   * no task yet is cancelled in the same commit. Nothing is sent, archived or interrupted. The checks run
+   * in the usual order: a repeat of this request first, then the revision, then what the Run allows.
+   */
+  async function cancelRequest(input: RunCancelInput): Promise<RunCancelOutput> {
+    const loaded = await load(input.runId);
+    if (!loaded.ok) {
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        waiting: null,
+        issues: [loaded.issue],
+      };
+    }
+    const outcome: {
+      refused?: Refused;
+      replayed?: boolean;
+      applied?: boolean;
+      lifecycle: string | null;
+      waiting: RunCancelOutput["waiting"];
+    } = { lifecycle: null, waiting: null };
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        outcome.lifecycle = current.lifecycle;
+        const existing = readCancelRequest(current);
+        if (existing.kind === "valid" && existing.value.requestId === input.requestId) {
+          if (existing.value.reason === input.reason) outcome.replayed = true;
+          else outcome.refused = refused("request-id-reused");
+          return null;
+        }
+        if (
+          existing.kind === "invalid" ||
+          (existing.kind === "valid" && existing.value.completedAt === null)
+        ) {
+          outcome.refused = refused("cancel-pending");
+          return null;
+        }
+        if (current.revision !== input.expectedRevision) {
+          outcome.refused = refused("revision-conflict", { current: current.revision }, "refresh");
+          return null;
+        }
+        if (current.lifecycle === "finished" || current.lifecycle === "cancelled") {
+          outcome.refused = refused("lifecycle-not-allowed", { lifecycle: current.lifecycle });
+          return null;
+        }
+        if (current.launch.state === "preparing" || current.launch.state === "creating") {
+          outcome.refused = refused("launch-in-progress", {}, "retry");
+          return null;
+        }
+        const now = clock.now();
+        const request = {
+          version: 1 as const,
+          requestId: input.requestId,
+          reason: input.reason,
+          requestedAt: now,
+          completedAt: null as string | null,
+        };
+        let next = withCancelRequest(current, request);
+        const audit = (kind: string, payload: Record<string, unknown>) => {
+          const seq = next.counters.eventsThroughSeq + 1;
+          next.counters.eventsThroughSeq = seq;
+          next.events.push({ seq, kind, at: now, payload });
+          next.updatedAt = now;
+        };
+        audit(CANCEL_REQUEST_EVENT, {
+          requestId: input.requestId,
+          reason: input.reason.slice(0, 200),
+        });
+        // No new work starts from here on.
+        if (next.lifecycle === "active") {
+          const paused = planLifecycleMove(next, "run-paused", now);
+          if (!paused.ok) {
+            outcome.refused = refused("lifecycle-not-allowed", { lifecycle: next.lifecycle });
+            return null;
+          }
+          next = paused.next;
+        }
+        next = raiseAlert(
+          next,
+          {
+            alertId: alertIdFor(CANCEL_PENDING_ALERT),
+            severity: "warning",
+            summary: CANCEL_PENDING_ALERT,
+          },
+          now,
+        ).next;
+        let done = false;
+        if (next.lifecycle === "bootstrapping" || next.lifecycle === "awaiting-dag") {
+          // No task, no assignment, no claim: there is nothing to wait for.
+          const cancelled = reduceRun(
+            next,
+            {
+              kind: "run-cancelled",
+              reason: CANCEL_TASK_REASON,
+              controlNonceDigest: sha256Hex(uuid()),
+              cancelIntents: [],
+              preparedCancelIntents: [],
+            },
+            { now, newId: () => uuid() },
+          );
+          if (!cancelled.ok) {
+            outcome.refused = refused("ledger-refused", { invariant: "run-cancelled" }, "inspect");
+            return null;
+          }
+          next = withCancelRequest(cancelled.next, { ...request, completedAt: now });
+          next = resolveAlerts(next, (alert) => alert.summary === CANCEL_PENDING_ALERT, now).next;
+          audit(CANCEL_COMPLETED_EVENT, { requestId: input.requestId, tasks: 0 });
+          done = true;
+        }
+        const checked = checkLedgerInvariants(next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        if (!done) {
+          const plan = planCancelFinish(next, "assume-idle");
+          outcome.waiting =
+            plan.kind === "wait"
+              ? { turns: plan.turns, deliveries: plan.deliveries }
+              : { turns: 0, deliveries: 0 };
+        }
+        outcome.applied = true;
+        outcome.lifecycle = next.lifecycle;
+        return next;
+      });
+    } catch (error) {
+      log(`cancel of ${input.runId} could not be written`, error);
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        waiting: null,
+        issues: [issue("ledger-refused", {}, "retry")],
+      };
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action } = outcome.refused;
+      return {
+        ...BASE,
+        status: "rejected",
+        revision,
+        lifecycle: outcome.lifecycle,
+        waiting: null,
+        issues: [issue(code, params, action)],
+      };
+    }
+    if (outcome.replayed) {
+      return {
+        ...BASE,
+        status: "replayed",
+        revision,
+        lifecycle: outcome.lifecycle,
+        waiting: null,
+        issues: [],
+      };
+    }
+    // The cancellation is finished by the driver's pass: ask it to look now.
+    push(input.runId);
+    return {
+      ...BASE,
+      status: "applied",
+      revision,
+      lifecycle: outcome.lifecycle,
+      waiting: outcome.waiting,
+      issues: [],
+    };
   }
 
   return {
@@ -416,6 +614,11 @@ export function createRunControl(options: RunControlOptions) {
      */
     pause(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
       return lifecycleRequest("pause", input);
+    },
+
+    /** Cancels the whole Run once every running turn is proven ended; see `cancelRequest`. */
+    cancel(input: RunCancelInput): Promise<RunCancelOutput> {
+      return cancelRequest(input);
     },
 
     /** Lets a `paused` Run go on; the driver is asked to push it, so what was held goes out once. */

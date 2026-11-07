@@ -67,6 +67,20 @@ export const runEngineZh = {
       help: "立即核对宿主、补收漏掉的报告、发出还没发出的消息，并推进一次。不会替成员完成任何任务，也不会放开冻结的占用。",
       button: "立即检查并推进",
     },
+    cancelRun: {
+      title: "取消整个 Run",
+      help: "不再派发新任务；等进行中的回合结束后，取消全部未完成的任务并释放占用。不会给成员发消息，也不会回滚代码：已经提交的改动留在分支上，需要的话请自己 revert。进行中的回合很长时要等它结束。",
+      reasonLabel: "原因（必填）",
+      reasonPlaceholder: "说明为什么要取消，会记在台账里",
+      submit: "取消这个 Run",
+      needReason: "请先写明原因",
+      confirmTitle: "确认取消整个 Run？",
+      confirm: "确认取消",
+      cancel: "返回",
+      done: "Run 已取消",
+      waiting: (turns: number, deliveries: number) =>
+        `已请求取消，不再派发新任务；还在等 ${turns} 个回合结束、${deliveries} 条消息的送达确认。可以点“立即检查并推进”核对。`,
+    },
     cancelTask: {
       button: "取消任务",
       confirmTitle: "确认取消这个任务？",
@@ -134,6 +148,9 @@ export const runEngineZh = {
         `Run 现在不在运行中${typeof params.lifecycle === "string" ? `（${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}，不能执行这个操作`,
       "lifecycle-not-allowed": (params: Record<string, string | number | boolean>) =>
         `现在不能执行这个操作${typeof params.lifecycle === "string" ? `（Run 当前${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}：只有运行中的 Run 才能暂停，只有已暂停的 Run 才能继续`,
+      "cancel-pending": () =>
+        "这个 Run 已经请求取消，正在等进行中的回合结束；现在不能再暂停、继续或回应决策",
+      "launch-in-progress": () => "这个 Run 还在启动（创建成员或发送计划请求），启动完成后才能取消",
       "ledger-refused": () => "台账拒绝了这次修改，没有任何改动；请刷新后再试，持续出现请上报",
     },
     taskNotReleasable: TASK_NOT_RELEASABLE_ZH,
@@ -404,6 +421,8 @@ export const runEngineZh = {
       "run-paused": "Run 暂停",
       "run-resumed": "Run 恢复",
       "run-control-requested": "暂停或继续的请求",
+      "run-cancel-requested": "请求取消 Run",
+      "run-cancel-completed": "Run 取消完成",
       "run-finished": "Run 结束",
       "run-cancelled": "Run 取消",
       "observation-recorded": "观察记录",
@@ -419,7 +438,7 @@ export const runEngineZh = {
   list: {
     title: "Engine 运行",
     controlsHint:
-      "展开一个运行后可以重新规划、重试停下的任务、催办、取消任务、暂停或继续；取消整个 Run 和批准还不能在这里做",
+      "展开一个运行后可以重新规划、重试停下的任务、催办、取消任务、暂停或继续、取消整个 Run；批准还不能在这里做",
     observeOnly: "目前只读观察：不会派发或改动任务",
     open: "查看",
     close: "收起",

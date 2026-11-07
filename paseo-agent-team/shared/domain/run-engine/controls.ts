@@ -1,5 +1,6 @@
 import type { RunDetailView, RunIssueView } from "../../schemas/run-engine/rpc";
 import type {
+  RunCancelOutput,
   RunDecideOutput,
   RunKickOutput,
   RunLifecycleOutput,
@@ -53,6 +54,7 @@ export type ControlsView = {
   kick: boolean;
   pause: boolean;
   resume: boolean;
+  cancelRun: boolean;
   retries: RetryOffer[];
   cancels: CancelOffer[];
   /** False when there is nothing to offer at all (a finished Run, nothing waiting for a person). */
@@ -107,15 +109,17 @@ export function controlsOf(
   const kick = named.has("kick");
   const pause = named.has("pause");
   const resume = named.has("resume");
+  const cancelRun = named.has("cancel");
   return {
     revision: run.revision,
     replan,
     kick,
     pause,
     resume,
+    cancelRun,
     retries,
     cancels,
-    any: replan || kick || pause || resume || retries.length > 0 || cancels.length > 0,
+    any: replan || kick || pause || resume || cancelRun || retries.length > 0 || cancels.length > 0,
   };
 }
 
@@ -209,6 +213,22 @@ export function pauseNotice(output: RunLifecycleOutput): ActionNotice {
 
 export function resumeNotice(output: RunLifecycleOutput): ActionNotice {
   return settled(output, zh.controls.resume.applied);
+}
+
+/** A cancellation is either done at once or waits; what it waits for is said in words. */
+export function cancelRunNotice(output: RunCancelOutput): ActionNotice {
+  if (output.status === "rejected") return rejected(output.issues);
+  if (output.status === "replayed") {
+    return { tone: "neutral", text: zh.controls.result.replayed, refresh: true };
+  }
+  return {
+    tone: output.waiting === null ? "success" : "warning",
+    text:
+      output.waiting === null
+        ? zh.controls.cancelRun.done
+        : zh.controls.cancelRun.waiting(output.waiting.turns, output.waiting.deliveries),
+    refresh: true,
+  };
 }
 
 export function kickNotice(output: RunKickOutput): ActionNotice {

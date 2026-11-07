@@ -20,6 +20,7 @@ const runtime = vi.hoisted(() => ({
     decide: vi.fn<(input: unknown) => Promise<unknown>>(),
     kick: vi.fn<(input: unknown) => Promise<unknown>>(),
     pause: vi.fn<(input: unknown) => Promise<unknown>>(),
+    cancel: vi.fn<(input: unknown) => Promise<unknown>>(),
     resume: vi.fn<(input: unknown) => Promise<unknown>>(),
   },
   created: vi.fn(),
@@ -190,6 +191,7 @@ describe("the Paseo handle is bound where the host supplies one", () => {
     ["agent-team.run.decide", { runId: "run-x" }],
     ["agent-team.run.kick", { runId: "run-x" }],
     ["agent-team.run.pause", { runId: "run-x" }],
+    ["agent-team.run.cancel", { runId: "run-x" }],
     ["agent-team.run.resume", { runId: "run-x" }],
   ])("%s", async (name, input) => {
     const { server, handlers } = fakeServer();
@@ -216,6 +218,7 @@ describe("the Paseo handle is bound where the host supplies one", () => {
       ["agent-team.run.decide", "decide"],
       ["agent-team.run.kick", "kick"],
       ["agent-team.run.pause", "pause"],
+      ["agent-team.run.cancel", "cancel"],
       ["agent-team.run.resume", "resume"],
     ] as const) {
       const input = { runId: "run-x", marker: name };
