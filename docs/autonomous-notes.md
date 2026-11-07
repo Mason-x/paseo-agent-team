@@ -11,7 +11,7 @@
 | T1 计划第 35 点（S1 记录） | 已做 | a42f51c | — | 文档提交，diff 只改计划 P04 行一行 |
 | T2 暂停/结束的 Run 不发送 | 已做 | e815db1（代码）+ 计划第 36 点 | 2855 | `effects.ts` 的 `lifecycleMaySend`，快照与提交各检查一次 |
 | T3 来源仍是最新的复核 | 已做 | b2eb368（代码）+ 计划第 37 点 | 2862 | 入账提交内比较 anchor（`stale`）；补报 prepared→sending 提交内核对 assignment 仍在等报告 |
-| T4 `creating` 崩溃续办 | 未开始 | — | — | |
+| T4 `creating` 崩溃续办 | 未完成（需批准） | — | — | 判断：重建 `CreateMemberInput` 的信息没有冻结在记录里，见待批准 B13；没有写代码 |
 | T5a Runs 页控制 | 未开始 | — | — | |
 | T5b 为什么在等 / 因果时间线 | 未开始 | — | — | |
 | T5c Team 编辑器 runEngine | 未开始 | — | — | |
@@ -28,7 +28,16 @@
 
 ## 待批准
 
-（每条：编号｜标题｜为什么需要批准｜没批准时现状｜最小形状｜影响的验收项｜建议。第 3 节的 B1–B12 在这里展开。）
+（每条：编号｜标题｜为什么需要批准｜没批准时现状｜最小形状｜影响的验收项｜建议。第 3 节的 B1–B12 在这里展开；我在做的过程中新发现的从 B13 起编号。）
+
+### B13｜`creating` 阶段崩溃后的续办：要冻结启动规格
+
+- **为什么需要批准**：续办必须能原样重建每个成员的创建请求，而这些信息现在没有冻结在记录里。冻结就是在 `launch` 里新增透传字段，属于"台账字段（包括新增透传字段的约定）"。
+- **没批准时现状**：`startEngineRun` 用 `engine:<runId>:seat:<seatId>` 作幂等键创建，进程在创建过程中死掉后，重启的 `driver.recover` 看到 `launch.state === "creating"` 的 Run 什么也不做：`settleWaiting` 只会在 `launch` 不是 `failed`/`cancelled` 时跑 outbox，而 outbox 里还没有计划请求（它在 `kickoff-pending` 才写入）。Run 停在 `bootstrapping`，已创建的 Agent 留着，没有任何告警。
+- **核对结果（记录里有什么、缺什么）**：`createAgent` 的请求包含 `workspaceId`、`parentAgentId`、`title`、`labels`、`systemPrompt`、`profile`（含 `modeId`、`thinkingOptionId`、`featureValues`）、`mcpServers`、`idempotencyKey`。记录里已有：`launch.workspace`、`launch.seatProfiles`（只有 profileId/name/provider/model/family）、`launch.systemPrompts`（只有模板名、版本和哈希，没有文本）、`launch.modelPlan.task`、各角色 id。**缺**：成员 `title`、`labels`、角色全文（系统提示词的输入：角色说明、`operatingRules`）、`mcpServers`、Profile 的 `modeId`/`thinkingOptionId`/`featureValues`。从当前团队配置重建不可靠：配置可能在崩溃后被改，且 `title`/`labels` 是启动规划器生成的，不是配置里的固定值。
+- **最小形状**：`launch.agentSpecs`（透传字段，和 `launch.workspace` 一样带独立读取器）：`{ version: 1, seats: { [seatId]: { parentSeatId: string | null, title: string, labels: Record<string,string>, systemPromptSha256: string, systemPrompt: string, profile: { id, provider, model, modeId, thinkingOptionId, featureValues }, mcpServers: [...] } } }`，在 `store.create(record)` 同一次提交里写入（`startEngineRun` 的 "preparing" 步骤，创建任何 Agent 之前）。系统提示词存全文的话要给大小上限（成员提示词 + 角色全文，约几 KB 每席位）；不想存全文就存重建它所需的输入并在续办时用 `systemPromptSha256` 对账，对不上就记 `failed` 并按偏好归档。`resume` 放在 `server/run-engine/start.ts` 导出，`driver.recover` 在 `launch.state === "creating"` 时调用：给还没有 `agentId` 的启用席位用同一个幂等键再创建、绑定，然后走和 `startEngineRun` 相同的 kickoff 步骤（同一个 `kickoff` 子函数，需要从 `startEngineRun` 里拆出来）。
+- **影响的验收项**：AC14（续办），AC04/AC05（不重复创建）。
+- **建议**：中优先级。批准后实现约一天：拆 `startEngineRun` 的 kickoff、写 `agentSpecs` 读写器、在第 k 个成员创建前后崩溃的假适配器测试、变异检查。在这之前可以先做一件不需要批准的小事（我没做，因为它改变行为）：`recover` 看到 `creating` 且没有任何 Agent 在飞的 Run 时，写一条告警"启动在创建成员时中断"，让人知道要重新启动。
 
 ## 我自己做的判断
 
