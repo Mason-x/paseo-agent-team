@@ -10,7 +10,7 @@
 | T0 准备 | 已做 | — | 2844 | junction 接好；基线 biome 2 警告、tsc、2844 通过（3 todo）、verify:package 通过 |
 | T1 计划第 35 点（S1 记录） | 已做 | a42f51c | — | 文档提交，diff 只改计划 P04 行一行 |
 | T2 暂停/结束的 Run 不发送 | 已做 | e815db1（代码）+ 计划第 36 点 | 2855 | `effects.ts` 的 `lifecycleMaySend`，快照与提交各检查一次 |
-| T3 来源仍是最新的复核 | 未开始 | — | — | |
+| T3 来源仍是最新的复核 | 已做 | b2eb368（代码）+ 计划第 37 点 | 2862 | 入账提交内比较 anchor（`stale`）；补报 prepared→sending 提交内核对 assignment 仍在等报告 |
 | T4 `creating` 崩溃续办 | 未开始 | — | — | |
 | T5a Runs 页控制 | 未开始 | — | — | |
 | T5b 为什么在等 / 因果时间线 | 未开始 | — | — | |
@@ -41,3 +41,4 @@
 - **T0**：biome 2 条既有警告，tsc 通过，vitest 174 个文件 2844 通过（3 todo），verify:package 通过。
 - **T1**：只改文档，`git diff --check` 通过。
 - **T2**：biome 仅 2 条既有警告；tsc 通过；vitest 174 个文件 2855 通过（3 todo，基线 2844 + 11）；verify:package 通过。变异检查 8 项（`mut-t2.mjs`）：两道防线同时去掉被抓（6 例失败）；只去快照防线存活（有意冗余，提交里的检查覆盖）；只去提交防线被抓；paused/finished/cancelled 各漏一个、`bootstrapping` 也停发、对账也停都被抓；还原后逐字节一致。
+- **T3**：biome 仅 2 条既有警告；tsc 通过；vitest 174 个文件 2862 通过（3 todo，T2 后 2855 加 7）；verify:package 通过。变异检查 10 项（`mut-t3.mjs`）：R01、R02（普通报告去掉 anchor 复核、比较错的 anchor）、R03（补证链同时去掉两层）、R06 到 R10（effects 的复核与 continue 行为）都被抓；R04、R05 存活，原因是补证链里"补报集合与回执"的复核与 anchor 复核互为后备，只去 anchor 一层行为不变（R03 同时去掉两层就被抓），属有意冗余；还原后逐字节一致。
