@@ -1,7 +1,7 @@
 # 无人值守会话笔记
 
 计划：`docs/remaining-work-plan.md`。分支：`autonomous-p05-p08`。基线：`main` 的 `5533722`。
-这个文件由无人值守会话维护；用户回来后先看"待批准"。
+这个文件由无人值守会话维护；用户回来后先看"待批准"和其后的"裁决"（B1–B13 已由 Opus 5.5 代为裁决，实施清单在 `docs/approved-implementation-plan.md`）。
 
 ## 进度
 
@@ -25,6 +25,7 @@
 | T7a 取消的内部能力 | 未做（机动项） | — | — | 见"没做或没做完" |
 | T7b 暂停的内部能力 | 已做 | 22d98a2（代码）+ 计划第 43 点 | 3064 | `lifecycle.ts` 的 pause/resume，不注册 RPC |
 | 第 5 节 DEV 验证 | 未做（可选） | — | — | 见"没做或没做完" |
+| B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 
 ## 待批准
 
@@ -148,6 +149,130 @@
 5. **B10**（DTO 字段），**B5** 的测试部分。
 6. **B7**（需要先确认宿主信号）、**B8**。
 7. **B9** 最后。
+
+## 裁决
+
+2026-11-08，Opus 5.5。用户授权由我代为裁决 B1–B13，之后改为"只裁决、不实施"，实施交给另一个会话。本节写裁决、理由、依据、风险，以及对上面提案的更正。可以直接照着做的形状（文件、字段、事件、RPC 与 zod 形状、测试清单、变异检查点、顺序、验收、回滚）在 `docs/approved-implementation-plan.md`，下文用任务号 A1–A12 指它。本会话没有改任何源码。
+
+### 怎么核实的
+
+- 读过的代码：`shared/schemas/run-engine/{ledger,rpc,rpc-actions,proof-shapes}.ts`；`shared/domain/run-engine/{reducer,transitions,invariants,decision-answer,budget,read-retry,wake-summary,task-note,replan}.ts`；`server/run-engine/{driver,control,lifecycle,start,read-retry,observer,effects,service,runtime,projection,digest}.ts`；`shared/paseo/port.ts`；`shared/rpc/run-engine.ts`；`index.server.ts`；相关测试（`tests/run-core/{reducer,r01g-behavior,cancellation-review-regressions}.test.ts`、`tests/spec/run-core-reducer.spec.test.ts`）；计划第 7、8、11 节与第 29–43 点。
+- 只读探针：`%TEMP%\b-rulings\probe\cancel-probe.test.ts`（仓库外）用现有夹具重放 reducer，证实了下面 R1 的缺口。
+- A2 的改动在仓库外的临时副本里试过：`tests/run-core`、`tests/spec`、`tests/run-engine`、`tests/run-view` 与合同测试全部通过（598 + 925 例；两条读 `docs`/`README` 的测试因副本里没有这些文件而略过）。副本已删除，删除前先摘掉了 `node_modules` junction，主工作区的 `node_modules` 完好。
+
+### 总表
+
+| 编号 | 裁决 | 一句话 | 实施 |
+| --- | --- | --- | --- |
+| B1 | 修改后批准 | 不要 schema v3、不要新状态和 `sendIntent`：重查成功后自动走一次 `retryRun(afterWrite)`，每个来源最多 3 次 | A7 |
+| B2 | 修改后批准（低优先级，可选） | 协调者上限用已有的 `policy.run.strategicTurns`，不改配置合同；它证明不了 AC17 | A11 |
+| B3 | 修改后批准 | 不开 D4 决策，改为窄 RPC `agent-team.run.budget` | A6 |
+| B4 | 拆分 | 暂停/续办 RPC 批准；整个 Run 的取消改为"延迟取消"（不归档、不打断）后批准；在途任务的归档式取消推迟；`run.approve` 不批准；`run.reconcile`、`run.export` 推迟 | A3、A5 |
+| B5 | 批准（只补测试） | 永不代答权限是结构性的，补上证明与重启用例 | A9 |
+| B6 | 修改后批准 | 只做 `cancel` 答复，级联取消下游，补证冻结任务另开 `evidence-stuck:` 决策；`reject` 不批准；`assign-seat` 推迟 | A2、A4 |
+| B7 | 不批准（推迟） | 宿主没有"失败发生在任何工具执行之前"的信号，自动重跑会重复副作用 | — |
+| B8 | 推迟 | 先确认插件 SDK 有服务端推送通道 | — |
+| B9 | 只给建议 | 见本节末尾，留给用户 | — |
+| B10 | 修改后批准（缩小） | 只加决策的 `kind`（可选字符串）；历史页的 `compactedThroughSeq` 并入 A1 | A10 |
+| B11 | 修改后批准（第一优先） | 只压缩 `events` 前缀，用已有的 `checkpoint`，不升版本；压不下来时停止新派发 | A1 |
+| B12 | 修改后批准（并入 A7） | 三类读取失败映射到已有的 `reply`/`seat` 目标；不拆入账 | A7 |
+| B13 | 修改后批准 | 启动中断的 Run 关闭并告警（fail-closed）；完整续办推迟 | A8 |
+| R1（新） | 批准修复 | reducer：有已发交付留下占用、没有在途工作的任务，取消后永远释放不了；改为"经授权即可释放" | A2 |
+| R2（新） | 批准修复 | `answerableActions` 不看生命周期，暂停中的 Run 也画"重试" | A4 |
+| R3（新） | 推迟 | `policy.run.failedTasks` 没有任何代码执行 | — |
+
+### B11 事件压缩
+
+- **裁决**：修改后批准，第一优先（A1）。
+- **依据**：`RunRecordSchema` 早有可选的 `checkpoint`（`throughSeq`、`historyDigest`、`counters`、`acceptedNonceDigests`、`terminalAssignmentIds`）；不变式 I1 允许事件从 `checkpoint.throughSeq + 1` 开始连续，I6 只做下限检查；`transitions.cancellationAuditValid` 对压缩前缀里的戳直接信任；`projection.encodeHistoryCursor` 已把游标绑在 `checkpoint.throughSeq` 上；`r01g-behavior.test.ts` 的 `compact()` 清空全部事件后不变式仍通过。所以不需要升 schema 版本，旧程序能读压缩后的记录。
+- **更正 1**：`eventReceipts` 一条也不能压，不只是"仍被未了结 assignment 引用的"：`isNormalEnded`、`isComplete167`、`actorSettledBy` 对每个 assignment（包括已结束的，`run-finished` 要逐个核对）都要找到它的 `turn_ended` 回执。`nonceRegistry`、`assignments`、`outbox` 本轮也不压。
+- **更正 2**：读事件的生产代码只有三处：`transitions.hasTurnFacts`（能否本地撤回未发出的派发，按 `event.at >= assignment.createdAt` 过滤）、`replan.priorRequest`（`requestId` 去重）、历史页。边界因此是：最早一个未结束 assignment 的 `createdAt` 及之后的事件全部保留，另外至少保留最新 2048 条。被压掉的 replan `requestId` 再提交会得到 `revision-conflict`（`expectedRevision` 严格相等，不会二次生效），可以接受，要有用例。
+- **更正 3**：多半先撞上的是 8 MiB 字节上限而不是 8192 条：reducer 把整个事件对象（含完整报告块）放进 `payload`，同一份报告又存在 assignment 的 `acceptedProof` 里。触发条件要同时看条数和 store 的 `needsCompaction`。
+- **补充**：压不下来时停止新派发（`dispatch-blocked:ledger-capacity`），这是 AC15 的"不越限派发"；在途工作照常收尾。
+- **风险**：压掉的历史只剩摘要链；边界算错会让本地撤回误判。回滚到旧版本：能读，历史页更短。
+
+### R1 reducer 的取消缺口（新发现）
+
+- **发现**：生产者报告 `blocked` 或 `failed`、回合已正常结束、任务仍持有占用时，`cancel-requested` 只会把它冻结并开一个配对为空的 D1 `cancel:<任务>`；`releaseIfSettled` 遇到空配对直接返回，`cancellation-checked` 也要求配对，所以占用永远放不掉，再取消一次也不变（探针证实，blocked 与 failed 都如此，`failed` 的任务还会被改成 `blocked`）。DEV 上"冻结后占着仓库锁"的任务正是这一类。
+- **不能**简单改成"显式取消就立即释放"：`r01g-behavior.test.ts` 的 "local withdrawal of a retry preserves the claim from its historical sent producer" 把"已发出的交付留下的占用不得被隐式释放"定成了设计，临时副本里这样改那条用例就失败。
+- **裁决**：批准一个窄的修复（A2）：`applyCancellation` 的立即取消分支在"没有在途 assignment、没有未结效果"时，如果该任务的 D1 `cancel:<任务>` 已被答复为 `cancel`（`cancellationAuthorization`），就照常取消并释放，`releaseDecisionId` 指向那个 D1。未授权时行为不变；`dag-revised` 不会产生授权，不受影响。
+
+### B4 取消、暂停、续办
+
+- **裁决**：拆成三块。(a) `pause`/`resume` 窄 RPC：批准（A3）。(b) 整个 Run 的取消：改为"延迟取消"后批准（A5）。(c) 在途任务的归档式取消：推迟。`run.approve` 不批准（没有任何流程会产生审批，`approvals` 没有写入者）；`run.reconcile`、`run.export` 推迟（kick 已经包含对账，没有使用方）。
+- **依据**：`server/run-engine/lifecycle.ts` 已有暂停与续办的引擎入口。`rpc.ts` 里只定形状的 `RunControlAction` 有 `pause`、按任务的 `cancel` 和 `budget`，却没有"从暂停续办"（`resume-request` 属于对账，要 `diagnosisId`），所以照第 33 点新开窄 RPC。reducer 的静止证明 `isComplete167` 要求每个在途 assignment 有 `archive` 意图且回执已确认、刷新为 idle/closed/missing 且没有活动回合、最后一个回合有 `turn_ended`，并且 D1 已被人答复：**取消在途任务就是归档该成员的 Agent**。P00 能力矩阵：插件 API 没有"停止"，`archive` 不是停止证据，打断要发一条新消息（一次模型调用）；`policy.archiveResume.seatRevival` 是 `explicit-resume-seat`，而 resume-seat 没有实现，归档后该席位在这个 Run 里不能再用。`effects.ts` 只执行 `dispatch` 与 `wake`，没有 archive 执行器；`lifecycleMaySend` 在 `cancelled` 里不发送、`driver.recover` 跳过 `cancelled` 的 Run，所以 reducer 的 `run-cancelled` 一提交，它准备的 archive 意图永远不会被执行。
+- **更正**：提案"对每个在途 assignment 先取静止证据"在这个代码库里意味着归档成员，提案没有写这个代价。改为延迟取消：先暂停并记下取消请求（透传块 `cancelRequest`），等每个在途回合被回执和宿主刷新证明已经结束（报告照常入账，补报不发），再在一次提交里用 reducer 自己的 `run-cancelled` 取消全部未完成任务，有已发交付留下占用的任务用同一个请求答复它的 D1 后释放（依赖 R1 的修复）。全程不发送、不归档、不打断，零模型调用。
+- **风险**：在途回合长时取消要等；送达不明会一直等（安全方向，页面有说明）。A3 与 A5 必须同一版本发布，否则在两者之间的版本里能续办一个已请求取消的 Run。
+
+### B6 冻结任务的出路
+
+- **裁决**：修改后批准，只做 `cancel`（A4，依赖 A2）。
+- **依据**：台账的 `RUN_DECISION_ANSWER_ACTIONS` 早已含 `cancel`、`reject`、`assign-seat`、`increase-budget`，所以台账词汇不用改，只改 RPC 的答复联合；`answerDecision` 的放行条件可以复用；`abandonAttempt` 已能按宿主回执关闭"回合结束但报告不可用"的尝试。
+- **更正 1**：`reject` 不批准：台账没有区别于 `cancelled` 的终止状态，被拒的任务最后还得取消，Run 才能结束。
+- **更正 2**：`assign-seat` 推迟：reducer 把它当作取消授权（`cancellationAuthorization`），意思是"取消后改派"，需要任务级的"指定席位"字段和派发规则。
+- **更正 3**：取消一个任务必须级联取消依赖它的下游任务（它们只能是 `pending`），否则 `run-finished` 永远过不了；探针里取消 t2 后 `run-finished` 报 `tasks: 1`。
+- **更正 4**：补证 assignment 冻结的任务要开决策，但用单独的键前缀 `evidence-stuck:<assignmentId>`，只允许 `cancel`，保持第 34 点"补证冻结不落入普通 retry"的约束。判官"回合结束没有可用报告"仍推迟（第 33 点：重派冒烟者会撞 `unsettled-smoker`）。
+- **R2**：`answerableActions` 不看生命周期，暂停中的 Run 也画"重试"、按下得到 `run-not-active`；A4 一并改成只在 `active`（且没有取消请求）时给动作。
+- **风险**：取消不回滚代码，已提交的改动留在分支上；确认框必须写明。
+
+### B3 追加预算
+
+- **裁决**：修改后批准（A6）：窄 RPC `agent-team.run.budget`（`seatId`，`by` 1–64，累计上限 1024），不开 D4 决策。
+- **依据**：`budget.findSeatBudget` 先看 `budgets.entries` 再回落到冻结的 `policy.seatBudgets`，所以追加只写 `budgets.entries`，冻结的策略一个字节都不动。`wake-summary.ts` 的 D4 预算约定（`subjectId = budgetKey`）只在纯函数里，`classifyWake` 没有接线。
+- **更正**：D4 决策会挡住 `run-finished`（`isDecisionPending`）：预算不再需要时（任务被别的席位做了，或被取消）它仍然 open，而 schema 只允许 D1 取消决策进入 `superseded`，没有人去答就结束不了 Run。加预算也不是对某个任务问题的回答。耗尽时由派发结果带出 `seatId`，写一条告警，追加后撤下。
+- **风险**：上限防止失控消耗。
+
+### B2 统一模型预算
+
+- **裁决**：修改后批准，低优先级、可选（A11，排在 A6 之后）。
+- **更正 1**：`policy.run.strategicTurns`（0–256，Team 编辑器默认 12）与 `metrics.strategicTurns` 早就存在但没有任何代码执行。用它作协调者的上限，在 `budgets.entries` 里懒建 `coordinator` 条目；不往 `seatBudgets` 加条目，不改 Team 配置默认值。
+- **更正 2**：B2 证明不了 AC17。AC17 要的是"空闲与重复普通事件时零调用"的用例，已放进 A9。今天协调者的调用要么由人触发（replan），要么有上限（每个计划请求最多补报 1 次），所以 B2 主要是记账和可见性，不是止血。
+- **风险**：`strategicTurns` 为 0 的 Team 以后会被启动门阻断（预览会显示原因）。
+
+### B12 + B1 读取重查
+
+- **裁决**：两项都修改后批准，合并为 A7。
+- **依据**：`readRetries` 是带独立读取器的透传块，`TargetSchema` 是严格的 `seat`/`reply` 两种；`noteReadFailure` 在 `resolved` 之后会开新一代，`generation` 最大到 10,000；`driver.retryRun` 已经做"重读宿主、入账、outbox、派发"，且永不重发 `sending`/`outcome-unknown`（第 33 点）。
+- **更正 1（B1）**：不需要 schema v3、新状态或 `sendIntent`。重查成功的那次提交之后自动调一次 `driver.retryRun(runId, { afterWrite: true })`，就是人按 kick 做的事，从台账重新推算。必须按来源限次（第 1–3 代才自动继续），否则宿主时好时坏会一直循环并写满台账。
+- **更正 2（B12）**：新增目标类型会让旧的 S1 程序把整个块判为不可读、停掉该 Run 的全部重查。三类失败都映射到已有目标：不完整的回复窗口与对账读取抛错用 `reply`，补证发送前的宿主刷新抛错用 `seat`。"拆出无发送能力的入账"也不需要：自动继续走的就是正常入账。
+- **限制**：协调者的计划回复没有 assignment，不能登记；`too-large` 这类永久性不完整会用尽 3 次后告警。
+
+### B13 `creating` 崩溃续办
+
+- **裁决**：修改后批准为"关闭并告警"（A8）；完整续办推迟。
+- **依据**：`startEngineRun` 的创建请求用了 `agent.title`、`agent.labels`、按角色全文编译的 `systemPrompt`、`agent.profile`（含 `modeId` 等）、`agent.role.mcpServers`。记录里只有 `launch.systemPrompts`（模板名、版本和哈希）、`launch.seatProfiles`（profileId/name/provider/model/family），`modelPlan` 里的角色只有 id 和名称，重建不出同一个请求。`archiveOnLaunchFailure` 是启动时的偏好，没有冻结在记录里。
+- **更正**：先做 fail-closed：恢复时看到 `launch.state` 为 `preparing`/`creating`、且不是本进程正在启动的 Run，就在一次提交里把启动记为失败，写一条列出已登记 Agent 的告警；不调用宿主、不归档。DEV 上的启动失败都是创建报错，已由 `fail()` 处理；真正的崩溃窗口很小，完整续办的收益抵不过新增透传字段和每个席位几 KB 的提示词存储。
+- **风险**：已创建但还没登记的那个 Agent 只能靠告警提示人去找。
+
+### B5 权限等待
+
+- **裁决**：批准，只补测试（A9），同时补 AC17 的空闲零调用用例。
+- **依据**：`PortEngineAgentHandle` 只有 `send`、`archive`、`timeline`、`current`、`refresh`，没有答权限的方法；`server/run-engine` 里没有任何 `respondToPermission`；`service.ts` 对有 `pendingPermissions` 的席位拒绝派发。缺的是证明和重启用例。测试若暴露缺陷且修复不改合同，就在同一任务里修；要改合同就写进"待批准"。
+
+### B7 派发之后的临时失败自动重试
+
+- **裁决**：不批准，推迟到宿主能证明"失败发生在任何工具执行之前"。
+- **依据**：P00 矩阵里 `turn_ended.outcome` 只有 completed/failed/canceled，没有工具是否执行过的信号；没有这个证据，自动重跑可能重复改文件、重复提交。现状里"回合结束没有可用报告"已经有人工的 `retry`。
+
+### B8 服务端推送式失效
+
+- **裁决**：推迟。P00 矩阵没有服务端向客户端推送的能力；T5e 的可见性轮询加 `unchanged` 已经让空闲读取很小。先在 `@getpaseo/plugin` 的类型里确认有推送通道再议。
+
+### B10 界面要的新 DTO 字段
+
+- **裁决**：修改后批准，缩小为决策的 `kind`（A10）。
+- **依据与更正**：输出 DTO 都是非严格的 `z.object`，旧客户端会剥掉不认识的字段，所以加可选字段向后兼容；但值域如果用 `z.enum`，较新的服务端加一个值就会让旧客户端整份详情解析失败，所以 `kind` 用字符串。`nextAttemptAt` 和 `waitingCode` 推迟：除了读取重查没有别的定时器，`waitingCode` 与现有的原因码表重复。
+
+### R3 `policy.run.failedTasks` 没有执行（新发现）
+
+- `policy.run.failedTasks` 只出现在 schema、Team 编辑器和投影里，没有任何代码按它停止 Run。A4 之后被取消的任务算不算"失败"是产品问题。推迟，留给用户。
+
+### B9 的建议（不实施，留给用户）
+
+- **默认开启 `PASEO_AGENT_TEAM_RUN_ENGINE` 之前**：A1、A2、A4、A5、A6 完成；第 5 节 DEV 验收在两种 Provider 上跑过（至少：replan v4、取消有在途成员的 Run、追加预算、取消冻结任务后另一个 Run 拿到占用）；第 9 节完成条件由你逐条勾选。
+- **灰度**：先发一个版本，开关仍默认关闭，README 写明怎么开；下一个版本开关默认开，但 Team 的 `runEngine` 仍默认不建（只有在编辑器里点开关才写入），已有 Team 不受影响；之后再考虑在预设里放一个关闭状态的样例。
+- **版本与发布**：走 release-please（`release-please-config.json`），按新功能给 minor，`CHANGELOG` 由发布机制生成，不手改。发布说明写明回滚注意：回滚到不认识 v2 的版本会阻断所有 Run 的新资源授予（第 34 点）；回滚到 A3 与 A5 之间的版本会让已请求取消的 Run 被续办；压缩掉的历史不可恢复。
+- **要你决定的事**：B9 本身；要不要"取消在途任务"（会归档该成员的 Agent，这个 Run 里该席位不能再用，除非另做 resume-seat）；`assign-seat`；B7 何时重议；B8 值不值得做；`failedTasks` 的语义（R3）；DEV 验收用多少模型额度。
 
 ## 我自己做的判断
 
