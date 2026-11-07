@@ -146,6 +146,82 @@ If the coordinator asks for a permission, the Crew panel offers **Allow, don't a
 session** next to Allow / Deny. It retargets the provider's suggested rule to the running session,
 so nothing is written to disk.
 
+## Run Engine (opt-in)
+
+By default a launched Team runs on the coordinator chain described above: the coordinator decides
+who works on what. The Run Engine is a second way to run a Team that is off unless you turn it on.
+The coordinator only writes the task graph; the Engine itself (plain code, no model of its own)
+dispatches each task to a member seat, takes the member's report, checks the evidence, asks an
+independent reviewer (and a DEV smoke where the task declares one), sends back what failed, and
+stops at a decision for a person when it will not undo something by itself.
+
+**Turn it on.** Two things, both required:
+
+1. Start the daemon with `PASEO_AGENT_TEAM_RUN_ENGINE=1`. Without it a Team that has the Engine
+   enabled is refused at launch with a message; it never falls back to the coordinator chain
+   silently.
+2. In **Agent Teams → Teams**, edit the Team and open **Run 引擎**: switch it on, give each seat a
+   tier (S, A, B), its duties (implement, review, smoke) and its channel (normally its Profile's
+   provider, for example `claude`), and check the policy numbers. The launch preview shows what
+   would be refused or warned about before you start (a seat missing for a member, no independent
+   reviewer at the tier a task needs, a Codex Profile that is not full-access).
+
+The Workspace must be a git repository on a branch with a clean tree and a usable committer
+identity: members commit their work there, and the evidence is written outside the repository
+(`<PASEO_HOME>/agent-team-evidence/<runId>` when the evidence root is `auto`).
+
+**What it does.** One Run is one ledger file. Every message to a member goes through an outbox: the
+intent is written first, sent once, and a result that is not known is checked against the member's
+timeline and never sent twice. A report that is missing or malformed is asked for again a bounded
+number of times; evidence the gate refuses is asked for again on the same delivery; a host read
+that failed is read again 1, 2 and 4 seconds later and only a note is left. A paused, finished or
+cancelled Run sends nothing new.
+
+**What it does not do.** It never answers a permission request for an agent: a task whose agent
+waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
+cancel, pause or approve from the Runs page yet, it does not retry a transient failure after a
+message was dispatched by itself, and it does not compact the ledger (a Run holds at most 8192
+events, so a very long Run can fill it). Acceptance status per scenario is in
+`docs/run-engine-acceptance.md` in the repository.
+
+**Follow and steer a Run.** **Agent Teams → 运行 → Engine 运行** lists the Runs and opens one: the
+task graph, each task with why it waits, who clears it and what happens next, locks, budgets,
+decisions, channels and alerts, and a history with the cause of each event. Three controls appear
+only when the Run offers them:
+
+- **重新规划** (re-plan), while the Run waits for a task graph: asks the coordinator again, with a
+  reason you write.
+- **重试** (retry) on a decision the Engine opened for a stopped task (D1, D3, D4): after you
+  confirm, the task gets one more attempt from where it stopped. Nothing is released until every
+  turn of the task is proven ended.
+- **立即检查并推进** (kick): reads the host, takes in reports that were missed, sends what was
+  prepared and not yet sent, and moves the Run on. It completes no task for a member.
+
+A refusal is shown in words; if the Run changed since you looked, the page reads it again and asks
+you to try once more. A request is never applied twice.
+
+**Recover and roll back.**
+
+- After a restart the daemon recovers every live Run from its ledger and works out again which
+  reads and sends are due. Nothing needs to be restarted by hand.
+- New Runs are written as ledger schema v2; this version reads v1 and v2. A Run written as v1 is
+  not migrated and is not given evidence supplements. An older plugin version cannot read a v2
+  Run: it keeps the file untouched, and because it then cannot see which files that Run holds it
+  refuses to grant new write claims to any Run, in any repository. Do not roll back while an
+  Engine Run is live.
+- If a member answers an evidence request with "blocked" or "failed", the task stays frozen with
+  its claims and no decision is opened; there is no Retry for it, because a retry would throw the
+  delivery away. Look at the member's conversation and decide by hand; cancel and re-assign
+  controls are not in the page yet.
+- Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
+  Runs that already exist can still be listed and read, still take hooks, recovery and the three
+  controls, and run to the end.
+
+**Where the data is.** `<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json` is the ledger;
+damaged or unreadable ledgers are kept as they are and listed on the page, never repaired or
+overwritten. The design, the numbered implementation record and the open work are in
+`docs/run-engine-iteration-plan.md`.
+
 ## Limits
 
 - Requires Paseo `>=0.12.0` (checked on 0.12.0 and 0.13.0-beta.1). Only the public plugin SDK is used. The manifest schema accepts
