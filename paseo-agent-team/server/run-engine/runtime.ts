@@ -7,6 +7,7 @@ import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { type FilesPort, nodeFiles } from "../version/process";
 import { readServerId } from "../version/service";
+import { createRunControl } from "./control";
 import { createDagIntake } from "./dag";
 import { createEngineDriver, type EngineDriver } from "./driver";
 import { createEffects } from "./effects";
@@ -138,6 +139,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     intake,
     dagIntake,
     service,
+    outbox: { run: (runId) => effects.runOutbox(runId) },
+    log,
+  });
+  const control = createRunControl({
+    store,
+    ensureReady: options.ensureReady,
+    driver,
     log,
   });
 
@@ -185,6 +193,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     supported,
     driver,
     observer,
+    /** The writing RPCs: `replan`, `decide`, `kick`. They work on any Engine Run in the ledger. */
+    control,
     bind,
     recover,
 

@@ -7,6 +7,7 @@ import type {
   RunListOutputSchema,
 } from "../../shared/schemas/run-engine/rpc";
 import { RUN_CONTRACT_VERSION } from "../../shared/schemas/run-engine/rpc";
+import { RUN_ACTION_CONTROLS } from "../../shared/schemas/run-engine/rpc-actions";
 import {
   HISTORY_PAGE_SIZE,
   historyPage,
@@ -78,7 +79,12 @@ export function createRunQueries(deps: { store: RunStore; ensureReady: () => Pro
   return {
     async list(input: ListInput): Promise<ListOutput> {
       await deps.ensureReady();
-      const capabilities = { ...OBSERVATION_CAPABILITIES, supportedControls: [] };
+      // The list is not about one Run: it names the controls this build has. A Run's own detail says
+      // which of them it can use.
+      const capabilities = {
+        ...OBSERVATION_CAPABILITIES,
+        supportedControls: [...RUN_ACTION_CONTROLS],
+      };
       if (!store.ready) {
         return {
           runContractVersion: RUN_CONTRACT_VERSION,

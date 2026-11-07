@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
+import {
+  openStuckDecision,
+  stoppedTasksWithoutDecision,
+} from "../../shared/domain/run-engine/decision-answer";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
+import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { DagIntake } from "./dag";
+import { sha256Hex } from "./digest";
 import type { Intake } from "./intake";
 import type { IngestResult, ObserverHookEvent, ObserverHost, RunObserver } from "./observer";
 import type { DispatchNextResult, EngineService } from "./service";
@@ -26,6 +32,18 @@ export type KickReport = {
   finished: boolean;
 };
 
+/** What a person's retry did, in words that carry no prompt, nonce or outbox argument. */
+export type RetryReport = {
+  status: "ok" | "unavailable";
+  /** Messages sent to members by this retry. */
+  dispatched: number;
+  finished: boolean;
+  /** Why it stopped: `idle`, `waiting`, `blocked`, `dispatched` or `run-unavailable`. */
+  last: DispatchNextResult["status"];
+  /** A short code for a task that could not move, e.g. `dispatch-blocked:workspace-dirty`. */
+  reason: string | null;
+};
+
 export type DriverOptions = {
   store: Pick<RunStore, "get" | "update" | "list" | "runsForAgent">;
   observer: Pick<RunObserver, "ingest" | "flush" | "reconcile">;
@@ -39,6 +57,12 @@ export type DriverOptions = {
   intake: Pick<Intake, "settleAgent">;
   dagIntake: Pick<DagIntake, "settleCoordinator">;
   service: Pick<EngineService, "dispatchNext">;
+  /**
+   * The outbox executor. With it, a recovery or a retry also settles the messages whose delivery was
+   * unknown (by the host's echo, never by sending again) and sends the ones that were prepared and
+   * never went out because the process stopped in between. Without it neither happens.
+   */
+  outbox?: { run(runId: string): Promise<unknown> };
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -96,6 +120,30 @@ export function createEngineDriver(options: DriverOptions) {
     return finished;
   }
 
+  /**
+   * A task that a member or a judge stopped (`blocked` or `failed`) waits on a person, and a person
+   * answers a decision. This gives every such task one, once: nothing is written when it has one.
+   */
+  async function openMissingDecisions(runId: string): Promise<void> {
+    await options.store.update(runId, (current) => {
+      let next = current;
+      let changed = false;
+      for (const stopped of stoppedTasksWithoutDecision(current)) {
+        const opened = openStuckDecision(next, {
+          ...stopped,
+          decisionId: uuid(),
+          controlNonceDigest: sha256Hex(uuid()),
+          now: clock.now(),
+        });
+        if (opened.changed) {
+          next = opened.next;
+          changed = true;
+        }
+      }
+      return changed ? next : null;
+    });
+  }
+
   async function pass(runId: string): Promise<KickReport> {
     let dispatched = 0;
     let last: DispatchNextResult = { status: "idle" };
@@ -105,6 +153,7 @@ export function createEngineDriver(options: DriverOptions) {
       dispatched += 1;
     }
     await show(runId, last);
+    await openMissingDecisions(runId);
     const finished = await finishIfDone(runId);
     return { dispatched, last, finished };
   }
@@ -147,6 +196,104 @@ export function createEngineDriver(options: DriverOptions) {
     }
   }
 
+  /** Settles what a live Run waits on: the agents of its open assignments and the coordinator's plan. */
+  async function settleWaiting(runId: string, record: RunRecord): Promise<void> {
+    const waiting = new Set<string>();
+    for (const assignment of record.assignments) {
+      if (assignment.state === "assigned" || assignment.state === "in_progress") {
+        waiting.add(assignment.agentId);
+      }
+    }
+    const coordinator = record.roster.find((seat) => seat.seatId === "coordinator");
+    if (coordinator?.agentId) waiting.add(coordinator.agentId);
+    for (const agentId of waiting) {
+      try {
+        await options.intake.settleAgent(agentId);
+        await options.dagIntake.settleCoordinator(agentId);
+      } catch (error) {
+        log(`engine could not settle ${agentId} on recovery`, error);
+      }
+    }
+    // A launch that failed (its agents archived by preference) or was cancelled leaves a request that
+    // was prepared and will never be sent: nothing may be sent for it now.
+    const launch = record.launch.state;
+    if (options.outbox !== undefined && launch !== "failed" && launch !== "cancelled") {
+      try {
+        await options.outbox.run(runId);
+      } catch (error) {
+        log(`engine could not run the outbox of ${runId}`, error);
+      }
+    }
+  }
+
+  const retrying = new Map<string, Promise<RetryReport>>();
+
+  async function retryNow(runId: string): Promise<RetryReport> {
+    const read = await options.store.get(runId);
+    if (read.status !== "ok") {
+      return {
+        status: "unavailable",
+        dispatched: 0,
+        finished: false,
+        last: "run-unavailable",
+        reason: null,
+      };
+    }
+    const lifecycle = read.record.lifecycle;
+    if (lifecycle === "finished" || lifecycle === "cancelled") {
+      return {
+        status: "ok",
+        dispatched: 0,
+        finished: lifecycle === "finished",
+        last: "idle",
+        reason: null,
+      };
+    }
+    await options.observer.reconcile(options.reconcileHost ?? options.host, { runId });
+    const fresh = await options.store.get(runId);
+    await settleWaiting(runId, fresh.status === "ok" ? fresh.record : read.record);
+    const report = await kick(runId);
+    return {
+      status: "ok",
+      dispatched: report.dispatched,
+      finished: report.finished,
+      last: report.last.status,
+      reason: reasonOf(report.last),
+    };
+  }
+
+  /** Runs a write was committed for while a retry of them was running (that retry may be past it). */
+  const retryAfterWrite = new Set<string>();
+
+  /**
+   * A person's retry joins the one that is running. A retry asked for by a write (`afterWrite`: a
+   * re-plan or an answer was just committed) is different: the running one began before the write
+   * and may be past the step that would have seen it (the outbox, the dispatch), so one more starts
+   * when it is done. A burst of such writes costs one more pass, not one each.
+   */
+  function retryRun(runId: string, options: { afterWrite?: boolean } = {}): Promise<RetryReport> {
+    const running = retrying.get(runId);
+    if (running) {
+      if (options.afterWrite) retryAfterWrite.add(runId);
+      return running;
+    }
+    const run = (async () => {
+      try {
+        let report: RetryReport;
+        do {
+          retryAfterWrite.delete(runId);
+          report = await retryNow(runId);
+        } while (retryAfterWrite.has(runId));
+        return report;
+      } finally {
+        retrying.delete(runId);
+        retryAfterWrite.delete(runId);
+      }
+    })();
+    retrying.set(runId, run);
+    return run;
+  }
+
   return {
     kick,
 
@@ -183,22 +330,7 @@ export function createEngineDriver(options: DriverOptions) {
         const read = await options.store.get(entry.runId);
         if (read.status !== "ok") continue;
         runs += 1;
-        const waiting = new Set<string>();
-        for (const assignment of read.record.assignments) {
-          if (assignment.state === "assigned" || assignment.state === "in_progress") {
-            waiting.add(assignment.agentId);
-          }
-        }
-        const coordinator = read.record.roster.find((seat) => seat.seatId === "coordinator");
-        if (coordinator?.agentId) waiting.add(coordinator.agentId);
-        for (const agentId of waiting) {
-          try {
-            await options.intake.settleAgent(agentId);
-            await options.dagIntake.settleCoordinator(agentId);
-          } catch (error) {
-            log(`engine could not settle ${agentId} on recovery`, error);
-          }
-        }
+        await settleWaiting(entry.runId, read.record);
         try {
           await kick(entry.runId);
         } catch (error) {
@@ -207,6 +339,18 @@ export function createEngineDriver(options: DriverOptions) {
       }
       return { runs };
     },
+
+    /**
+     * A person's "try again" for one Run: what recovery does, for this Run only. It reads the host for
+     * a turn whose hook was lost, settles what the Run is waiting on, settles the messages whose
+     * delivery was unknown by their echo and sends the ones that were prepared and never left, then
+     * pushes the Run forward. Nothing it does can send a message twice (the outbox's own rule), and
+     * nothing it does needs a hook: a dirty tree that was cleaned, a seat that came back.
+     *
+     * Calls for one Run join the one that is running, so pressing it again costs nothing. It does not
+     * release a frozen task, answer a decision or cancel anything.
+     */
+    retryRun,
   };
 }
 

@@ -75,6 +75,17 @@ export function resolveProducerProof(
   return parsed.success && parsed.data.status === "done" ? parsed.data : undefined;
 }
 
+/**
+ * A reviewer or smoker whose accepted proof is a blocked task report: it said it could not do its job
+ * (plan 8, point 24) and so judged nothing. It neither passes nor fails the delivery it was bound to,
+ * which is what lets a person have the delivery judged again.
+ */
+export function judgedNothing(assignment: RunAssignment): boolean {
+  if (assignment.purpose !== "reviewer" && assignment.purpose !== "smoker") return false;
+  const parsed = RunStoredTaskReportSchema.safeParse(assignment.acceptedProof);
+  return parsed.success && parsed.data.status === "blocked";
+}
+
 /** Identity-only D resolution: evidence gates decide whether this candidate is a valid D. */
 export function resolveD(record: RunRecord, taskId: string): DeliveryResolution {
   const head = producerHead(record, taskId);

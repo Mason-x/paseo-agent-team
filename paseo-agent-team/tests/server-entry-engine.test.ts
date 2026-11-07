@@ -15,6 +15,11 @@ const runtime = vi.hoisted(() => ({
   onHook: vi.fn<(event: unknown, paseo: unknown) => Promise<void>>(),
   bind: vi.fn<(paseo: unknown) => void>(),
   launchHost: { supported: false, identity: vi.fn(), start: vi.fn() },
+  control: {
+    replan: vi.fn<(input: unknown) => Promise<unknown>>(),
+    decide: vi.fn<(input: unknown) => Promise<unknown>>(),
+    kick: vi.fn<(input: unknown) => Promise<unknown>>(),
+  },
   created: vi.fn(),
 }));
 
@@ -42,6 +47,10 @@ beforeEach(() => {
   runtime.onHook.mockResolvedValue(undefined);
   runtime.bind.mockReset();
   runtime.created.mockReset();
+  for (const control of Object.values(runtime.control)) {
+    control.mockReset();
+    control.mockResolvedValue({ answered: true });
+  }
 });
 
 function fakeServer() {
@@ -175,6 +184,9 @@ describe("the Paseo handle is bound where the host supplies one", () => {
     ],
     ["agent-team.run.list", {}],
     ["agent-team.run.get", { runId: "run-x" }],
+    ["agent-team.run.replan", { runId: "run-x" }],
+    ["agent-team.run.decide", { runId: "run-x" }],
+    ["agent-team.run.kick", { runId: "run-x" }],
   ])("%s", async (name, input) => {
     const { server, handlers } = fakeServer();
     contribute(server);
@@ -189,6 +201,25 @@ describe("the Paseo handle is bound where the host supplies one", () => {
     };
     await Promise.resolve(handlers.get(name)?.(input, { paseo })).catch(() => undefined);
     expect(runtime.bind).toHaveBeenCalledWith(paseo);
+  });
+
+  test("each writing control reaches its own method of the Engine, with the input as the host sent it", async () => {
+    const { server, handlers } = fakeServer();
+    contribute(server);
+    const paseo = { marker: "host-handle" };
+    for (const [name, method] of [
+      ["agent-team.run.replan", "replan"],
+      ["agent-team.run.decide", "decide"],
+      ["agent-team.run.kick", "kick"],
+    ] as const) {
+      const input = { runId: "run-x", marker: name };
+      await expect(handlers.get(name)?.(input, { paseo })).resolves.toEqual({ answered: true });
+      expect(runtime.control[method]).toHaveBeenCalledExactlyOnceWith(input);
+      for (const other of Object.keys(runtime.control) as (keyof typeof runtime.control)[]) {
+        if (other !== method) expect(runtime.control[other]).not.toHaveBeenCalled();
+      }
+      for (const control of Object.values(runtime.control)) control.mockClear();
+    }
   });
 
   test("the launch service is given the Engine's launch host", () => {

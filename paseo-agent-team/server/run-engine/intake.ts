@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { openLimboDecision } from "../../shared/domain/run-engine/decision-answer";
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
 import {
   compileRepairRequest,
@@ -13,6 +14,7 @@ import {
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunAssignment, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunProtocolBlock } from "../../shared/schemas/run-engine/protocol";
+import { sha256Hex } from "./digest";
 import { payloadHash } from "./effects";
 import type { ObserverHost, RunObserver } from "./observer";
 import { type UnverifiableReason, verifyReportOwnership } from "./protocol";
@@ -113,12 +115,18 @@ export function createIntake(options: IntakeOptions) {
    * Writes "why this task is not moving". With repair on, a report that is missing or refused by
    * the parser also gets a repair request, once per message that was read and within the budget; the
    * request is committed with the reason, and sent after the commit.
+   *
+   * When nothing more can be asked for (the repair budget is spent, repair is off, the turn did not end
+   * well, or the problem is not one a repeat could fix) and the turn that was read is known to have
+   * ended, the producer's attempt has nobody to wait for: the same commit opens the decision a person
+   * answers (`openLimboDecision`). The task keeps its state; nothing is released.
    */
   async function recordProblem(
     runId: string,
     assignmentId: string,
     reason: string,
     repairable?: { anchor: string; turnId: string; issues: readonly RepairIssue[] },
+    readTurnId?: string,
   ): Promise<IntakeResult> {
     let requested = false;
     let open = false;
@@ -126,6 +134,9 @@ export function createIntake(options: IntakeOptions) {
       const assignment = current.assignments.find((entry) => entry.assignmentId === assignmentId);
       if (!assignment || !awaitingReport(current, assignment)) return null;
       const now = clock.now();
+      // Nothing left to ask for. A problem a repeat could fix stays open until the budget says no.
+      // Part of the same opt-in as the repair itself: without `options.repair` nothing here is new.
+      let terminal = options.repair !== undefined && repairable === undefined;
       if (repairable !== undefined && options.repair !== undefined) {
         // Only a turn that ended on its own can be asked again; a turn that failed or was
         // interrupted is a host problem, and a repair would not fix it.
@@ -162,14 +173,32 @@ export function createIntake(options: IntakeOptions) {
               requested = true;
               return draft.next;
             }
+          } else {
+            terminal = draft.code === "limit-reached";
           }
+        } else {
+          terminal = true;
         }
       }
       const noted = noteTask(current, assignment.taskId, reason, {
         now,
         detail: { assignmentId },
       });
-      return noted.ok && noted.changed ? noted.next : null;
+      let next = noted.ok && noted.changed ? noted.next : current;
+      const turnId = repairable?.turnId ?? readTurnId;
+      if (terminal && turnId !== undefined) {
+        const opened = openLimboDecision(next, {
+          taskId: assignment.taskId,
+          assignmentId,
+          reason,
+          turnId,
+          decisionId: uuid(),
+          controlNonceDigest: sha256Hex(uuid()),
+          now,
+        });
+        if (opened.changed) next = opened.next;
+      }
+      return next === current ? null : next;
     });
     if (open) return { status: "turn-not-ended" };
     if (requested) {
@@ -220,12 +249,24 @@ export function createIntake(options: IntakeOptions) {
     }
     if (!inspected.ownership.ok) {
       if (inspected.ownership.code === "duplicate") return { status: "duplicate", assignmentId };
-      return recordProblem(runId, assignmentId, `report-ownership:${inspected.ownership.code}`);
+      return recordProblem(
+        runId,
+        assignmentId,
+        `report-ownership:${inspected.ownership.code}`,
+        undefined,
+        inspected.turnId,
+      );
     }
 
     const { kind, block, turnId } = inspected;
     if (kind !== "task-report" && kind !== "review-report" && kind !== "smoke-report") {
-      return recordProblem(runId, assignmentId, `report-rejected:unexpected-kind`);
+      return recordProblem(
+        runId,
+        assignmentId,
+        `report-rejected:unexpected-kind`,
+        undefined,
+        turnId,
+      );
     }
     const holder: { result: IntakeResult } = { result: { status: "no-assignment" } };
 

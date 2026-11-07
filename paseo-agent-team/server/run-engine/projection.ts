@@ -1,3 +1,4 @@
+import { answerableActions } from "../../shared/domain/run-engine/decision-answer";
 import { occupiesExecutionSlot } from "../../shared/domain/run-engine/invariants";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
 import {
@@ -11,6 +12,7 @@ import {
   type RunTaskView,
   runHistoryCursorExpiredIssue,
 } from "../../shared/schemas/run-engine/rpc";
+import { RUN_ACTION_CONTROLS } from "../../shared/schemas/run-engine/rpc-actions";
 
 /**
  * Ledger record -> redacted view DTOs. Pure and read-only.
@@ -25,6 +27,21 @@ export const OBSERVATION_CAPABILITIES = {
   enabled: false,
   supportedControls: [] as string[],
 } as const;
+
+/**
+ * The controls this Run can use right now, from its own ledger. Only the controls that exist are ever
+ * named: `kick` while the Run is live, `replan` while it waits for a plan a person must ask for again,
+ * `decide` while a decision of a kind this build can answer is waiting.
+ */
+export function supportedControlsOf(record: Pick<RunRecord, "lifecycle" | "decisions">): string[] {
+  const live = record.lifecycle !== "finished" && record.lifecycle !== "cancelled";
+  const usable: Record<(typeof RUN_ACTION_CONTROLS)[number], boolean> = {
+    replan: record.lifecycle === "awaiting-dag",
+    decide: record.decisions.some((decision) => answerableActions(decision).length > 0),
+    kick: live,
+  };
+  return RUN_ACTION_CONTROLS.filter((name) => usable[name]);
+}
 
 export const HISTORY_PAGE_SIZE = 50;
 
@@ -213,6 +230,7 @@ export function projectDetail(record: RunRecord): ProjectedDetail {
       summary: decision.summary,
       createdAt: decision.createdAt,
       answeredAction: decision.answer?.action ?? null,
+      actions: answerableActions(decision),
     })),
     channels: record.channels.map((channel) => ({
       channelId: channel.channelId,
@@ -238,7 +256,7 @@ export function projectDetail(record: RunRecord): ProjectedDetail {
       firstReviewAccepted: record.metrics.firstReviewAccepted,
       coverage: record.metrics.coverage,
     },
-    capabilities: { ...OBSERVATION_CAPABILITIES, supportedControls: [] },
+    capabilities: { ...OBSERVATION_CAPABILITIES, supportedControls: supportedControlsOf(record) },
     issues: [] as RunIssueView[],
   };
   const parsed = RunDetailViewSchema.safeParse(candidate);

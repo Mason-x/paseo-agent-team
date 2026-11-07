@@ -200,6 +200,11 @@ export const RunDecisionViewSchema = z.object({
   createdAt: z.string().datetime(),
   /** The accepted action when answered; null while open. */
   answeredAction: RunDecisionAnswerActionSchema.nullable(),
+  /**
+   * What a person can answer with right now (`run.decide`): empty, or absent from an older server,
+   * when this build cannot answer it. Derived from the ledger by the server; the client only shows it.
+   */
+  actions: z.array(RunDecisionAnswerActionSchema).max(8).optional(),
 });
 
 export const RunChannelViewSchema = z.object({

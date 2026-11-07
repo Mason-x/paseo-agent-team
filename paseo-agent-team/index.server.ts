@@ -38,7 +38,13 @@ import {
   launchStatusRpc,
   teamPlanRpc,
 } from "./shared/rpc";
-import { runGetRpc, runListRpc } from "./shared/rpc/run-engine";
+import {
+  runDecideRpc,
+  runGetRpc,
+  runKickRpc,
+  runListRpc,
+  runReplanRpc,
+} from "./shared/rpc/run-engine";
 import { preferencesSettings, rolesSettings, teamsSettings } from "./shared/settings";
 import {
   versionCheckRpc,
@@ -291,6 +297,20 @@ export default function contribute(server: PluginServerContext) {
   server.handle(runGetRpc, (input, { paseo }) => {
     engine.bind(paseo);
     return runQueries.get(input);
+  });
+  // The writing controls. They act on a Run already in the ledger, whatever the switch for starting
+  // new Engine Runs says: a Run that exists must be possible to move on or to stop waiting.
+  server.handle(runReplanRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.replan(input);
+  });
+  server.handle(runDecideRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.decide(input);
+  });
+  server.handle(runKickRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.kick(input);
   });
 
   const stopRunHooks = [

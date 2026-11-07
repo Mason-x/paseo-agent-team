@@ -254,14 +254,14 @@ describe("run.list", () => {
     expect(RunListOutputSchema.safeParse(first).success).toBe(true);
   });
 
-  test("declares observation only with no controls", async () => {
+  test("names the writing controls the build has, and nothing the page could mistake for more", async () => {
     const { queries } = await setup();
     const out = await queries.list({ runContractVersion: 1 });
     expect(out.capabilities).toEqual({
       runEngine: 1,
       observationOnly: true,
       enabled: false,
-      supportedControls: [],
+      supportedControls: ["replan", "decide", "kick"],
     });
     expect(out.runs).toEqual([]);
   });

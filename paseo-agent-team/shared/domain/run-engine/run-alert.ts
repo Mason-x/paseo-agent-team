@@ -43,3 +43,34 @@ export function raiseAlert(
   next.updatedAt = now;
   return { changed: true, next };
 }
+
+/**
+ * Marks the alerts `matches` picks as resolved, with one audit event naming them. Only an alert that
+ * is still open (or merely acknowledged) is touched; a resolved one is left alone, so asking twice
+ * writes nothing the second time. The record is copied; the caller's value is never mutated.
+ */
+export function resolveAlerts(
+  record: RunRecord,
+  matches: (alert: RunRecord["alerts"][number]) => boolean,
+  now: string,
+): RaisedAlert {
+  const open = record.alerts.filter((alert) => alert.state !== "resolved" && matches(alert));
+  if (open.length === 0) return { changed: false, next: record };
+  const next = structuredClone(record);
+  const ids = new Set(open.map((alert) => alert.alertId));
+  for (const alert of next.alerts) {
+    if (!ids.has(alert.alertId)) continue;
+    alert.state = "resolved";
+    alert.resolvedAt = now;
+  }
+  const seq = next.counters.eventsThroughSeq + 1;
+  next.counters.eventsThroughSeq = seq;
+  next.events.push({
+    seq,
+    kind: "alert-resolved",
+    at: now,
+    payload: { alertIds: [...ids] },
+  });
+  next.updatedAt = now;
+  return { changed: true, next };
+}

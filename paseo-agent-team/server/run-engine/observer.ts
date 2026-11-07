@@ -1,3 +1,4 @@
+import { latestSentWake } from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { REPORT_KINDS_BY_PURPOSE, replyAnchor } from "../../shared/domain/run-engine/report-repair";
 import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -251,7 +252,7 @@ export function createRunObserver(options: ObserverOptions) {
      * Fills in what hooks missed by reading the host. Records only turn_ended receipts that the
      * timeline proves; an unreadable or partial timeline is counted, never treated as "no turn".
      */
-    async reconcile(host: ObserverHost): Promise<ReconcileSummary> {
+    async reconcile(host: ObserverHost, only?: { runId: string }): Promise<ReconcileSummary> {
       const summary: ReconcileSummary = {
         runsScanned: 0,
         brokenRuns: 0,
@@ -264,6 +265,7 @@ export function createRunObserver(options: ObserverOptions) {
       const listed = await store.list();
       summary.brokenRuns = listed.broken.length;
       for (const entry of listed.entries) {
+        if (only !== undefined && entry.runId !== only.runId) continue;
         if (entry.lifecycle === "finished" || entry.lifecycle === "cancelled") continue;
         const read = await store.get(entry.runId);
         if (read.status !== "ok") {
@@ -284,12 +286,9 @@ export function createRunObserver(options: ObserverOptions) {
         const lifecycle = read.record.lifecycle;
         if (lifecycle === "bootstrapping" || lifecycle === "awaiting-dag") {
           const coordinator = read.record.roster.find((seat) => seat.seatId === "coordinator");
-          const plan = read.record.outbox.findLast(
-            (intent) =>
-              intent.kind === "wake" &&
-              intent.recipient === coordinator?.agentId &&
-              ["sending", "confirmed", "outcome-unknown"].includes(intent.state),
-          );
+          const plan = coordinator?.agentId
+            ? latestSentWake(read.record, coordinator.agentId)
+            : undefined;
           if (coordinator?.agentId && plan) {
             waiting.push({ agentId: coordinator.agentId, messageId: plan.messageId });
           }

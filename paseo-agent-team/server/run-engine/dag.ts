@@ -121,10 +121,16 @@ export function createDagIntake(options: DagIntakeOptions) {
     agentId: string,
     reasons: string,
     repairable?: Repairable,
+    readUnder?: string,
   ): Promise<DagIntakeResult> {
     let send = false;
     await options.store.update(runId, (current) => {
       if (!pending(current, agentId)) return null;
+      // The reply being refused was read while `readUnder` was the control nonce in force. If a
+      // re-plan has replaced it since, the refusal describes a plan that no longer counts: it is not
+      // recorded against the new request, which has its own reply to wait for.
+      if (readUnder !== undefined && readDagControl(current)?.nonceDigest !== readUnder)
+        return null;
       const now = clock.now();
       const raised = raiseAlert(
         current,
@@ -181,6 +187,11 @@ export function createDagIntake(options: DagIntakeOptions) {
     // The newest message that asks for the plan and went out: the request, or its re-send.
     const request = latestSentWake(record, agentId);
     if (!request) return { status: "no-pending-plan" };
+    // A refusal found below is recorded only while this is still the control nonce in force: a
+    // re-plan can commit while the reply is being read, and the old reply's refusal is then stale.
+    const readUnder = readDagControl(record)?.nonceDigest;
+    const refuseRead = (reasons: string, repairable?: Repairable) =>
+      refuse(runId, agentId, reasons, repairable, readUnder);
 
     let window: Awaited<ReturnType<ObserverHost["replyWindow"]>>;
     try {
@@ -206,29 +217,24 @@ export function createDagIntake(options: DagIntakeOptions) {
       return { status: "turn-not-ended" };
     }
     if (extracted.status === "none") {
-      return refuse(runId, agentId, "DAG 缺失：协调者的回复里没有 task-dag 块");
+      return refuseRead("DAG 缺失：协调者的回复里没有 task-dag 块");
     }
     if (extracted.status === "rejected") {
       const issues = (extracted.issues ?? []).map((issue) => issue.path).join(",");
-      return refuse(
-        runId,
-        agentId,
-        `DAG 块被拒：${extracted.reason}${issues ? `（${issues}）` : ""}`,
-        {
-          anchor: request.messageId,
-          reason: `plan-rejected:${extracted.reason}`,
-          issues: extracted.issues ?? [],
-        },
-      );
+      return refuseRead(`DAG 块被拒：${extracted.reason}${issues ? `（${issues}）` : ""}`, {
+        anchor: request.messageId,
+        reason: `plan-rejected:${extracted.reason}`,
+        issues: extracted.issues ?? [],
+      });
     }
-    if (extracted.kind !== "task-dag") return refuse(runId, agentId, "DAG 块被拒：unexpected-kind");
+    if (extracted.kind !== "task-dag") return refuseRead("DAG 块被拒：unexpected-kind");
     const block = extracted.block as RunTaskDagBlock;
 
     // The real repository is what the plan's repository id and paths are judged against.
     const location = options.resolveWorkspace(record);
-    if (!location) return refuse(runId, agentId, "DAG 被拒：找不到启动 Workspace 的目录");
+    if (!location) return refuseRead("DAG 被拒：找不到启动 Workspace 的目录");
     const inspected = await inspectRepo(location.directory);
-    if (!inspected.ok) return refuse(runId, agentId, `DAG 被拒：仓库不可读（${inspected.reason}）`);
+    if (!inspected.ok) return refuseRead(`DAG 被拒：仓库不可读（${inspected.reason}）`);
     const repo = inspected.repo;
 
     const families = new Map<string, string | null>(
@@ -241,16 +247,14 @@ export function createDagIntake(options: DagIntakeOptions) {
       seatFamilies: families,
     };
     const checked = checkDag(record, block, checkInput);
-    if (!checked.ok) return refuse(runId, agentId, describeIssues(checked.issues));
+    if (!checked.ok) return refuseRead(describeIssues(checked.issues));
 
     const verified = await verifyScopes(
       repo,
       checked.block.tasks.flatMap((task) => task.scopes),
     );
     if (!verified.ok) {
-      return refuse(
-        runId,
-        agentId,
+      return refuseRead(
         describeIssues(
           verified.rejected.map((entry) => ({
             code: "scope-rejected",
@@ -290,7 +294,7 @@ export function createDagIntake(options: DagIntakeOptions) {
     });
 
     // A refusal found only inside the commit is shown the same way as one found before it.
-    if (holder.result.status === "refused") return refuse(runId, agentId, holder.result.reasons);
+    if (holder.result.status === "refused") return refuseRead(holder.result.reasons);
     if (holder.result.status === "admitted") options.onAdmitted?.(runId);
     return holder.result;
   }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveD } from "../../shared/domain/run-engine/delivery-binding";
+import { judgedNothing, resolveD } from "../../shared/domain/run-engine/delivery-binding";
 import {
   applyDispatch,
   buildDispatch,
@@ -136,9 +136,14 @@ function nextWork(record: RunRecord): Work | null {
     const resolved = resolveD(record, task.spec.id);
     if (resolved.kind !== "ok") continue;
     const producerId = resolved.d.producer.assignmentId;
+    // A judge that ended by saying it could not judge (a person has since retried) left the delivery
+    // unjudged: it does not count, so the next one is sent. One that is still working, or has judged, does.
     const bound = (purpose: "reviewer" | "smoker") =>
       record.assignments.some(
-        (entry) => entry.purpose === purpose && entry.delivery?.producerAssignmentId === producerId,
+        (entry) =>
+          entry.purpose === purpose &&
+          entry.delivery?.producerAssignmentId === producerId &&
+          !(entry.state === "ended" && judgedNothing(entry)),
       );
     if (!bound("reviewer")) return { kind: "reviewer", task };
     if (task.spec.devSmoke && !bound("smoker") && checkReviewGate(record, task).ok) {

@@ -39,20 +39,62 @@ export function isPlanRepairWake(intent: RunEffectIntent): intent is Wake {
   return intent.kind === "wake" && intent.semanticArgs.purpose === PLAN_REPAIR_PURPOSE;
 }
 
+/** The newest plan request to this agent: the one whose nonce is in force (a re-plan adds a later one). */
+export function currentPlanRequest(
+  record: Pick<RunRecord, "outbox">,
+  agentId: string,
+): Wake | undefined {
+  return record.outbox.findLast(
+    (intent): intent is Wake => isPlanRequest(intent) && intent.recipient === agentId,
+  );
+}
+
 /**
- * The newest plan request or re-send that went out to this agent, whose reply is the plan to read.
- * A re-send that is only prepared has no reply yet, so it is not it.
+ * The newest message of the CURRENT plan request that went out to this agent, whose reply is the plan
+ * to read: that request or its re-send. A re-send that is only prepared has no reply yet, so it is
+ * not it. Messages of an earlier plan request (before a re-plan) are never it, and neither is the
+ * current request while it is only prepared: the reply to an old message holds a plan made under a
+ * control nonce that no longer counts, and reading it again would only raise the same refusal.
  */
 export function latestSentWake(
   record: Pick<RunRecord, "outbox">,
   agentId: string,
 ): Wake | undefined {
+  const plan = currentPlanRequest(record, agentId);
+  if (plan === undefined) return undefined;
   return record.outbox.findLast(
     (intent): intent is Wake =>
-      (isPlanRequest(intent) || isPlanRepairWake(intent)) &&
+      intent.kind === "wake" &&
       intent.recipient === agentId &&
-      SENT_STATES.includes(intent.state),
+      SENT_STATES.includes(intent.state) &&
+      (intent.id === plan.id ||
+        (isPlanRepairWake(intent) && intent.semanticArgs.planIntentId === plan.id)),
   );
+}
+
+/**
+ * What a re-plan pins in its plan request (`semanticArgs.replan`) so the text can be rebuilt from the
+ * record alone. The operator's note and the program's last refusal are data for the coordinator, never
+ * instructions; the request id is what makes asking twice the same request.
+ */
+export type ReplanFacts = {
+  /** Which plan request this is: 2 is the first re-plan. */
+  epoch: number;
+  requestId: string;
+  /** The Run alert that said why the last plan was refused (program text), if one was open. */
+  previousRefusal: string | null;
+  note: string;
+};
+
+export function readReplanFacts(raw: unknown): ReplanFacts | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { epoch, requestId, previousRefusal, note } = raw as Record<string, unknown>;
+  if (!Number.isInteger(epoch) || (epoch as number) < 2) return null;
+  if (typeof requestId !== "string" || requestId === "" || requestId.length > 128) return null;
+  if (previousRefusal !== null && typeof previousRefusal !== "string") return null;
+  if (typeof previousRefusal === "string" && previousRefusal.length > 1000) return null;
+  if (typeof note !== "string" || note === "" || note.length > 600) return null;
+  return { epoch: epoch as number, requestId, previousRefusal, note };
 }
 
 /** The re-sends of one plan request, oldest first. */
@@ -108,8 +150,8 @@ export function requestPlanRepair(record: RunRecord, input: PlanRepairRequest): 
   ) {
     return { ok: false, code: "not-waiting" };
   }
-  const plan = record.outbox.findLast(isPlanRequest);
-  if (!plan || plan.recipient !== input.agentId) return { ok: false, code: "no-plan-request" };
+  const plan = currentPlanRequest(record, input.agentId);
+  if (!plan) return { ok: false, code: "no-plan-request" };
 
   const repairs = planRepairWakes(record, plan.id);
   if (repairs.some((intent) => intent.state === "prepared")) {

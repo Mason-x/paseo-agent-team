@@ -13,6 +13,7 @@ import {
 import {
   artifactRefEqual,
   type DeliveryCandidate,
+  judgedNothing,
   resolveD,
   resolveProducerProof,
 } from "./delivery-binding";
@@ -472,11 +473,14 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
   if (failedDeliveryIds(record, task).includes(d.producer.assignmentId)) {
     return fail("review", ["tasks", task.spec.id, "quality"], "failed-delivery");
   }
+  // A judge that said it could not judge (and was settled) neither passes nor fails the delivery: it
+  // is how a person has a delivery judged again after the environment was put right (P06).
   const reviewers = record.assignments.filter(
     (entry) =>
       entry.taskId === task.spec.id &&
       entry.purpose === "reviewer" &&
-      entry.delivery?.producerAssignmentId === d.producer.assignmentId,
+      entry.delivery?.producerAssignmentId === d.producer.assignmentId &&
+      !judgedNothing(entry),
   );
   if (reviewers.length === 0)
     return fail("review", ["tasks", task.spec.id, "reviews"], "no-reviewer");
@@ -499,7 +503,8 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
       (entry) =>
         entry.taskId === task.spec.id &&
         entry.purpose === "smoker" &&
-        entry.delivery?.producerAssignmentId === d.producer.assignmentId,
+        entry.delivery?.producerAssignmentId === d.producer.assignmentId &&
+        !judgedNothing(entry),
     );
     if (smokers.length === 0) return fail("smoke", ["tasks", task.spec.id, "smoke"], "no-smoker");
     for (const smoker of smokers) {
