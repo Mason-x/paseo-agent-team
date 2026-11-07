@@ -349,12 +349,20 @@ function applyCancellation(
       : reject("RUN_INVALID_TRANSITION", ["tasks", taskId, "state"], "cancel-terminal");
   }
   const outstanding = outstandingAssignments(next, taskId);
+  // A claim kept from a delivery that was sent is never released just because cancel was asked
+  // (a retry withdrawn locally keeps it). It is released when a person has answered the task's
+  // cancel decision with `cancel` and nothing of the task is still running or unsettled.
+  const authorization = decisionAuthorization(next, taskId);
   if (
     outstanding.length === 0 &&
     !unsettledIntents(next, taskId) &&
-    !next.resources.some((claim) => claim.taskId === taskId)
+    (!next.resources.some((claim) => claim.taskId === taskId) || authorization !== undefined)
   ) {
     markCancelled(next, taskId, reason, facts);
+    if (authorization !== undefined) {
+      const cancelled = taskOf(next, taskId);
+      if (cancelled) cancelled.releaseDecisionId = authorization.decisionId;
+    }
     const source = next.events.at(-1);
     if (source && isCancellationKind(source.kind)) {
       for (const decision of next.decisions) {
