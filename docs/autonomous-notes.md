@@ -21,10 +21,10 @@
 | T6a 验收表 | 已做 | 1a20b45 | 3069 | `docs/run-engine-acceptance.md`：22 项如实写状态，只有 AC03/04/05/08 记为已覆盖；`acceptance-doc.test.ts` 核对 136 条引用 |
 | T6b 使用说明 | 已做 | a97c2c7 | 3046 | README 新增"Run Engine (opt-in)"一节；`readme-facts.test.ts` 对照代码核对其中的名字和数字 |
 | T6c 关闭开关后的已有 Run | 已做 | c47d477 | 3046 | `runtime.test.ts` 新增 3 例：开关关闭后 hook、恢复、kick、列表、控制仍然工作 |
-| T6d 计划状态与收尾 | 已做 | 下一个文档提交 | 3069 | 第 8 节 P05–P08 行改为实施中并指向相应的点；第 9 节没动；仓库里没有临时产物 |
-| T7a 取消的内部能力 | 未开始 | — | — | |
+| T6d 计划状态与收尾 | 已做 | 1881354 | 3069 | 第 8 节 P05–P08 行改为实施中并指向相应的点；第 9 节没动；仓库里没有临时产物 |
+| T7a 取消的内部能力 | 未做（机动项） | — | — | 见"没做或没做完" |
 | T7b 暂停的内部能力 | 已做 | 22d98a2（代码）+ 计划第 43 点 | 3064 | `lifecycle.ts` 的 pause/resume，不注册 RPC |
-| 第 5 节 DEV 验证 | 未开始 | — | — | |
+| 第 5 节 DEV 验证 | 未做（可选） | — | — | 见"没做或没做完" |
 
 ## 待批准
 
@@ -158,7 +158,21 @@
 
 ## 遇到的问题与绕法
 
+- **后台工具调用丢失**：有几次 Write 或 Bash 被转到后台后没有落盘（一次是计划第 37 点的文本文件，一次是 `poller.test.ts` 与 `layout-guard.test.ts` 的 heredoc 拼接失败，一次是验收表）。每次都靠`git status`与`ls`发现，然后用 Write 重写。以后看到"已转到后台"就先核对文件是否存在。
+- **变异检查被截断**：T7b 的一次后台变异运行少输出了最后一项和"ALL RESTORED"，文件停在被破坏的状态。我用 `%TEMP%/aw-mutation-backup` 里的备份还原并 `cmp`，再单独重跑那一项。变异脚本 `mutate.mjs` 的备份就是为这种情况留的。
+- **Windows 上的 heredoc**：带 `$`、反引号、`
+` 的内容用 shell 拼不可靠，改用 Write 写 `.mjs` 脚本再用 node 执行。
+- **`biome` 的 `noUnsafeOptionalChaining`**：测试里 `x?.props.fn as T)()` 会被拒，改成先取节点、缺失就抛错的 `byLabel` 帮助函数（反而让缺控件变成测试失败而不是静默）。
+- **测试里发现的我自己的缺陷**：T5c 第一版把刚启用的默认块（渠道还空着）当作"无法读取"，隐藏了席位编辑；改成"有待补全"后才能填渠道。T5b 的穷举测试第一次运行就抓出我漏掉的 4 个证据门原因。
+
 ## 没做或没做完
+
+- **T4 `creating` 阶段崩溃后的续办**：重建 `CreateMemberInput` 需要的信息（成员 title、labels、角色全文、mcpServers、Profile 的 modeId 等）没有冻结在记录里，不能硬凑。写进待批准 B13，代码没写。
+- **T7a 取消的引擎内部能力**：没做。取消要构造 `cancel-requested` 事件和 outbox 的 `archive` 意图（`Binding`、`ArchiveIntent`、`CancellationObservation` 三个内部形状）、给 `effects` 增加`archive`意图的执行路径、对每个在途 assignment 取静止证据（`refresh` 加匹配的 `turn_ended` 回执）并驱动 `cancellation-checked` 与释放，还要并发和重启的测试和变异检查。这是机动项，我判断剩下的额度不足以把它做到与其余各项同样的质量，也不想留一个只写了一半、可能放错占用的取消。批准 B4 后和 RPC 一起做更合适（先做内部能力、再注册）。
+- **第 5 节 DEV 真实验证**：没做。需要 DEV daemon、Profile、探针仓库、真实模型额度，规则要求"时间和额度还够才做"，我没有把握，不勉强。可验证项（补证模板是否被遵守、`replan` 的 v4 提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查）都在验收表的"DEV 记录"栏里记为没有。
+- **新界面没有真实浏览器检查**：只有源码层的保护和渲染测试（`react-test-renderer`），窄屏、折行、断线重连都没有真实看过。
+- **`LaunchDialog` 本身没有渲染测试**：它调用 `launch-job-copy.ts` 的接线只靠类型检查。
+- **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
 
