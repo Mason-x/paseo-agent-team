@@ -180,6 +180,9 @@ export const runEngineZh = {
     other: "等待处理",
   },
 
+  /** The three lines under a task, a decision and a history event. */
+  explain: { why: "为什么在等", who: "谁来解除", next: "下一步" },
+
   sections: {
     dag: "任务依赖",
     tasks: "任务",

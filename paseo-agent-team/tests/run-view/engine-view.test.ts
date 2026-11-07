@@ -605,3 +605,68 @@ describe("EngineView controls", () => {
     await renderer.act(async () => view.unmount());
   });
 });
+
+describe("EngineView says why, who and what next", () => {
+  test("an expanded task shows the three lines for its waiting reason", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          tasks: [
+            task("T1", {
+              state: "in_progress",
+              waitingReason: "dispatch-blocked:workspace-dirty",
+            }),
+          ],
+        }),
+      ),
+    );
+    await renderer.act(async () =>
+      (button(view.root, "展开 T1")?.props.onPress as (() => void) | undefined)?.(),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(`${zh.explain.why}：`);
+    expect(text).toContain("工作树不干净");
+    expect(text).toContain(`${zh.explain.who}：`);
+    expect(text).toContain(`${zh.explain.next}：`);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("a decision says who answers it, and whether this page can", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          decisions: [
+            {
+              decisionId: "6f1c2a44-3b7e-4f0a-9a11-000000000001",
+              category: "D3",
+              state: "open",
+              subjectId: "T1",
+              summary: "x",
+              createdAt: AT,
+              answeredAction: null,
+              actions: ["retry"],
+            },
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(`${zh.explain.who}：你`);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("every history event carries its cause, and a kind nobody has words for is not hidden", async () => {
+    const history = {
+      events: [
+        { seq: 1, kind: "task-dispatched", at: AT, taskId: "T1", summary: "task-dispatched" },
+        { seq: 2, kind: "from-the-future", at: AT, taskId: null, summary: "from-the-future" },
+      ],
+      nextCursor: null,
+    };
+    const view = await mount(ready(runView(), history));
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("有合格席位和锁");
+    expect(text).toContain("没有这类事件的说明");
+    await renderer.act(async () => view.unmount());
+  });
+});

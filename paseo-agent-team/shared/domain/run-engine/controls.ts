@@ -6,7 +6,7 @@ import type {
 } from "../../schemas/run-engine/rpc-actions";
 import { runEngineZh as zh } from "../../zh/run-engine";
 import { isDecisionPending } from "./decision-state";
-import { displayText } from "./view";
+import { displayText } from "./display-text";
 
 /**
  * What a person can do to one Run from the Runs page, and what to say about the answer.

@@ -181,6 +181,22 @@ function DagPanel({ theme, model }: { theme: PluginTheme; model: EngineModel }) 
   );
 }
 
+function Explain({
+  theme,
+  explain,
+}: {
+  theme: PluginTheme;
+  explain: { why: string; who: string; next: string };
+}) {
+  return (
+    <View style={{ gap: 1 }}>
+      <Muted theme={theme}>{`${zh.explain.why}：${explain.why}`}</Muted>
+      <Muted theme={theme}>{`${zh.explain.who}：${explain.who}`}</Muted>
+      <Muted theme={theme}>{`${zh.explain.next}：${explain.next}`}</Muted>
+    </View>
+  );
+}
+
 function TaskRow({ theme, row }: { theme: PluginTheme; row: EngineModel["tasks"][number] }) {
   const [open, setOpen] = useState(false);
   return (
@@ -216,6 +232,7 @@ function TaskRow({ theme, row }: { theme: PluginTheme; row: EngineModel["tasks"]
           {row.lastEvent ? (
             <Muted theme={theme}>{zh.taskRow.lastEvent(row.lastEvent)}</Muted>
           ) : null}
+          <Explain theme={theme} explain={row.explain} />
         </View>
       ) : null}
     </View>
@@ -309,6 +326,7 @@ function DecisionPanel({ theme, model }: { theme: PluginTheme; model: EngineMode
               ) : null}
               <Muted theme={theme}>{row.summary}</Muted>
               {row.answered ? <Muted theme={theme}>{row.answered}</Muted> : null}
+              <Explain theme={theme} explain={row.explain} />
             </View>
           ))}
     </Section>
@@ -383,6 +401,7 @@ function HistoryList({
               <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
                 {row.detail ? `${row.label} · ${row.detail}` : row.label}
               </Text>
+              <Muted theme={theme}>{row.cause}</Muted>
               <Muted theme={theme}>{`#${row.seq} · ${row.at}`}</Muted>
             </View>
           ))}
