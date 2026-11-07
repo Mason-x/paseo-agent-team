@@ -142,6 +142,8 @@
 - tests/spec/run-core-reducer.spec.test.ts :: an in-flight task stays frozen when a later turn starts after the end
 - tests/run-core/r01g-behavior.test.ts :: an in-flight producer starting after cancellation cannot unfreeze the task
 - tests/run-core/locks.test.ts :: a frozen claim conflicts even for its own task; a review handoff does not
+- tests/run-core/cancel-release.test.ts :: after the decision is answered `cancel`, cancelling releases the claim and binds the decision
+- tests/run-core/cancel-release.test.ts :: another answer is not an authorization: the task stays frozen with its claim
 - tests/run-core/cancellation-review-regressions.test.ts :: %s keeps the frozen claims — 模板
 
 缺口："Agent 失联"没有用例（夹具 `closed-while-assigned` 没有测试使用）；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，只有锁函数层。
