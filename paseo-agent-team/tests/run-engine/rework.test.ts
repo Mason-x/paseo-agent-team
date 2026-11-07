@@ -298,9 +298,9 @@ describe("rework template versions are frozen", () => {
   // registered version; a failure here means "add a version", not "update the hash".
   const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
-  test("version 1 and version 2 render exactly these bytes for a fixed ledger", () => {
+  test("versions 1 to 3 render exactly these bytes for a fixed ledger", () => {
     const { record, intent } = reworked();
-    expect(REWORK_TEMPLATE_VERSION).toBe(2);
+    expect(REWORK_TEMPLATE_VERSION).toBe(3);
     expect(intent.templateVersion).toBe(REWORK_TEMPLATE_VERSION);
     expect(sha256(compileDispatch({ ...intent, templateVersion: 1 }, record) ?? "")).toBe(
       "aec21296378028226cfec17abb84dd398af7214f39178e723c17b8619b15db36",
@@ -308,7 +308,10 @@ describe("rework template versions are frozen", () => {
     expect(sha256(compileDispatch({ ...intent, templateVersion: 2 }, record) ?? "")).toBe(
       "62db9d9eb6ff001e8ef5e53f5443ec1a6cbe145cf77d528052840079e4d27532",
     );
-    expect(compileDispatch({ ...intent, templateVersion: 3 }, record)).toBeNull();
+    const v3 = compileDispatch({ ...intent, templateVersion: 3 }, record) ?? "";
+    expect(v3).toContain("命令本身写错不等于任务失败");
+    expect(sha256(v3)).toBe("65eaaa5925d465828121463a39afd1b53ad73d1596c69b2703ecbde1ec21c1e1");
+    expect(compileDispatch({ ...intent, templateVersion: 4 }, record)).toBeNull();
   });
 });
 

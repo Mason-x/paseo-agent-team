@@ -105,11 +105,23 @@ describe("producer template versions are frozen", () => {
   });
 
   test("version 2 renders exactly these bytes for the same ledger", () => {
-    expect(PRODUCER_TEMPLATE_VERSION).toBe(2);
     const { record, intent } = dispatched(undefined, 2);
     expect(sha256(compileDispatch(intent, record) ?? "")).toBe(
       "d8754f6b5d89b349a3528fd07b7c73544b7ca07c14b67ebbe23bf0d81670ec91",
     );
+  });
+
+  test("version 3 renders exactly these bytes for the same ledger, and says a wrong command is not a failed task", () => {
+    expect(PRODUCER_TEMPLATE_VERSION).toBe(3);
+    const { record, intent } = dispatched(undefined, 3);
+    const text = compileDispatch(intent, record) ?? "";
+    expect(text).toContain("命令本身写错不等于任务失败");
+    expect(text).toContain("[System.IO.File]::WriteAllText");
+    expect(text).not.toMatch(/^ {0,3}`{3}/mu);
+    expect(sha256(text)).toBe("c1c0eec383148024aece28979cf3fb1950419862d8eba5b2d330de6a999f6aad");
+    // Version 2 never said it.
+    const older = dispatched(undefined, 2);
+    expect(compileDispatch(older.intent, older.record)).not.toContain("命令本身写错");
   });
 });
 

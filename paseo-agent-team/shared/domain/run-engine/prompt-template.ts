@@ -37,8 +37,8 @@ import { devEndpoint } from "./gates";
  * read as if `ref` were optional, and the strict schema refuses the whole report with no repair yet.
  * Version 1 of each template stays registered and byte-identical for intents already in an outbox.
  */
-export const PRODUCER_TEMPLATE_VERSION = 2;
-export const REWORK_TEMPLATE_VERSION = 2;
+export const PRODUCER_TEMPLATE_VERSION = 3;
+export const REWORK_TEMPLATE_VERSION = 3;
 /** Version 2 adds the cumulative base for a delivery that follows a rework; version 3 the report text. */
 export const REVIEWER_TEMPLATE_VERSION = 4;
 export const SMOKER_TEMPLATE_VERSION = 3;
@@ -441,6 +441,22 @@ const SMOKER_BODY_V2: string[] = [
   "只要有任何一项无法如实完成，就只用简短的普通文字说明原因，不输出协议块。",
 ];
 
+/**
+ * Producer v3 and rework v3: a command that was written wrong is not a failed task. DEV, 2026-11-06:
+ * a Codex producer wrote a multi-line file with `Set-Content` and several quoted segments, got a
+ * PowerShell parse error, and reported `failed` after one tool call; in other runs the same model hit
+ * the same error and recovered by itself with `WriteAllText`. A prompt is not isolation: this only
+ * makes the recovery the expected behaviour.
+ */
+const COMMAND_ERRORS_NOTE: string[] = [
+  "",
+  "命令本身写错不等于任务失败：命令因引号、转义、路径写法或语法错误而报错时（例如 PowerShell 的解析错误），",
+  "先改正命令再试，同一步骤至少再用另一种写法尝试一次；确认确实做不到之后，才报告 blocked 或 failed。",
+  "在 Windows PowerShell 下写含引号的多行文件，不要用 Set-Content 拼接多段引号：用单引号 here-string",
+  "（@' 单独一行开头，'@ 单独一行结尾）配合 [System.IO.File]::WriteAllText，或使用编辑工具；",
+  "写完后用 Get-Content 或 git diff 核对内容再提交。",
+];
+
 const REWORK_BODY: string[] = [
   "",
   "【返工说明】",
@@ -491,10 +507,16 @@ const RENDERERS: Readonly<Record<TemplateName, ReadonlyMap<number, Render>>> = {
   producer: new Map([
     [1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V1].join("\n")}\n`],
     [2, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V2].join("\n")}\n`],
+    [3, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V2, ...COMMAND_ERRORS_NOTE].join("\n")}\n`],
   ]),
   rework: new Map([
     [1, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V1, ...REWORK_BODY].join("\n")}\n`],
     [2, (ctx) => `${[...COMMON(ctx), ...PRODUCER_BODY_V2, ...REWORK_BODY].join("\n")}\n`],
+    [
+      3,
+      (ctx) =>
+        `${[...COMMON(ctx), ...PRODUCER_BODY_V2, ...COMMAND_ERRORS_NOTE, ...REWORK_BODY].join("\n")}\n`,
+    ],
   ]),
   reviewer: new Map([
     [1, (ctx) => `${[...COMMON(ctx), ...REVIEWER_BODY_V1].join("\n")}\n`],
