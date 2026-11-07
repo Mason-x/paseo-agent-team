@@ -86,6 +86,17 @@ function isSendable(intent: RunEffectIntent): intent is SendableIntent {
   return intent.kind === "dispatch" || intent.kind === "wake";
 }
 
+/**
+ * A Run that is paused, finished or cancelled sends nothing new. The plan request goes out while the
+ * Run is still `bootstrapping` or `awaiting-dag`, so those lifecycles send as usual. What is already
+ * on the host (`sending`, `outcome-unknown`) is still read and settled by echo in every lifecycle:
+ * that only reads. A `prepared` intent is left as it is; when the Run is `active` again it goes out
+ * once, because the ledger still says `prepared`.
+ */
+function lifecycleMaySend(lifecycle: RunRecord["lifecycle"]): boolean {
+  return lifecycle !== "paused" && lifecycle !== "finished" && lifecycle !== "cancelled";
+}
+
 function errorCode(error: unknown): string {
   if (error !== null && typeof error === "object") {
     const code = (error as { code?: unknown }).code;
@@ -201,6 +212,9 @@ export function createEffects(options: EffectsOptions) {
       );
       const repair = assignment && evidenceRepairOf(current, assignment);
       const now = clock.now();
+      // The claim to send is taken in the commit that moves the intent, so a pause or an end that
+      // landed after the snapshot of the caller still wins: nothing moves, nothing is sent.
+      if (to === "sending" && !lifecycleMaySend(current.lifecycle)) return null;
       if (to === "sending" && repair && assignment && intent) {
         const task = current.tasks.find((entry) => entry.spec.id === assignment.taskId);
         const head = producerHead(current, assignment.taskId);
@@ -308,6 +322,7 @@ export function createEffects(options: EffectsOptions) {
     for (let sentCount = 0; sentCount < maxPerCall; ) {
       const record = await snapshot(runId);
       if (!record) return;
+      if (!lifecycleMaySend(record.lifecycle)) return;
       const dispatches = record.outbox.filter(isSendable);
       // An agent whose last delivery is unresolved gets nothing more until that is settled.
       const blocked = new Set(
