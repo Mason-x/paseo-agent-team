@@ -44,6 +44,14 @@ function RunDetailPane({
             if (held?.kind === "ready") void runner.retry(offer, held.run.revision);
           },
           onKick: () => void runner.kick(),
+          onPause: () => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.pause(held.run.revision);
+          },
+          onResume: () => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.resume(held.run.revision);
+          },
           onDismiss: () => runner.dismiss(),
         }}
         onRefresh={() => void refresh()}
@@ -131,7 +139,7 @@ function HealthRow({ theme, entry }: { theme: PluginTheme; entry: Health }) {
 /**
  * Engine runs on this host. Renders nothing while there is nothing to show, so a host without any
  * Engine run looks exactly like before. The list and detail read with `run.list` and `run.get`; the
- * controls in a detail (replan, retry, kick) are the only writes, and only what the server names.
+ * controls in a detail (replan, retry, kick, pause, resume) are the only writes, and only what the server names.
  */
 export function EngineRunsSection({
   theme,

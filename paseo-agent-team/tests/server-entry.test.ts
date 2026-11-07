@@ -122,7 +122,9 @@ describe("server entry", () => {
       "agent-team.run.get",
       "agent-team.run.kick",
       "agent-team.run.list",
+      "agent-team.run.pause",
       "agent-team.run.replan",
+      "agent-team.run.resume",
       "agent-team.team.plan",
       "agent-team.templates.defaults.preview",
       "agent-team.templates.examples",
@@ -132,9 +134,9 @@ describe("server entry", () => {
       "agent-team.version.update.start",
       "agent-team.version.update.status",
     ]);
-    expect([...handlers.keys()]).toHaveLength(24);
-    expect(handle).toHaveBeenCalledTimes(24);
-    expect(new Set(handle.mock.calls.map(([contract]) => contract.name)).size).toBe(24);
+    expect([...handlers.keys()]).toHaveLength(26);
+    expect(handle).toHaveBeenCalledTimes(26);
+    expect(new Set(handle.mock.calls.map(([contract]) => contract.name)).size).toBe(26);
     // Observation hooks for the run ledger, plus the designer's own turn_ended handler.
     expect([...hooks.keys()].sort()).toEqual([
       "agent.archived",

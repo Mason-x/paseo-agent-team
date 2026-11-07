@@ -476,6 +476,8 @@ describe("EngineView controls", () => {
     onReplan: vi.fn(),
     onRetry: vi.fn(),
     onKick: vi.fn(),
+    onPause: vi.fn(),
+    onResume: vi.fn(),
     onDismiss: vi.fn(),
   });
   const press = (root: Node, label: string) =>
@@ -489,6 +491,29 @@ describe("EngineView controls", () => {
     expect(button(view.root, zh.controls.replan.submit)).toBeUndefined();
     expect(textNodes(view.root).join("\n")).not.toContain(zh.noControls);
     await renderer.act(async () => view.unmount());
+  });
+
+  test("pause and resume appear only when named, each calls its own handler without a confirmation, and pause says what it does", async () => {
+    const calls = handlers();
+    const running = await mount(withControls(["kick", "pause"]), { controls: calls });
+    expect(button(running.root, zh.controls.resume.button)).toBeUndefined();
+    expect(textNodes(running.root).join("\n")).toContain(zh.controls.pause.help);
+    await press(running.root, zh.controls.pause.button);
+    expect(calls.onPause).toHaveBeenCalledTimes(1);
+    expect(calls.onResume).not.toHaveBeenCalled();
+    await renderer.act(async () => running.unmount());
+
+    const paused = await mount(withControls(["kick", "resume"]), { controls: calls });
+    expect(button(paused.root, zh.controls.pause.button)).toBeUndefined();
+    await press(paused.root, zh.controls.resume.button);
+    expect(calls.onResume).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => paused.unmount());
+
+    const busy = await mount(withControls(["pause"]), {
+      controls: { ...calls, state: { pending: "pause", notice: null } },
+    });
+    expect(disabled(busy.root, zh.controls.pause.button)).toBe(true);
+    await renderer.act(async () => busy.unmount());
   });
 
   test("nothing named: no button, and the view says there is nothing to do", async () => {

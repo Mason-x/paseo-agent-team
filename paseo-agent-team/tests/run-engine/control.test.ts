@@ -829,7 +829,7 @@ describe("decide", () => {
     const view = projectDetail(frozen);
     if (!view.ok) throw new Error("projection failed");
     expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry"]]);
-    expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick"]);
+    expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick", "pause"]);
 
     const out = await b.control.decide(answer(decision?.decisionId ?? "", frozen.revision));
     expect(out).toMatchObject({ status: "applied", taskId: "t1", issues: [] });

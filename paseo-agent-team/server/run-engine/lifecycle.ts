@@ -4,9 +4,9 @@ import type { EngineDriver } from "./driver";
 import type { RunStore } from "./store";
 
 /**
- * Pause and resume of one Run, as engine code. Nothing registers this as an RPC (that is a separate
- * decision, B4 in the notes): it is the function a later control would call, and the tests exercise
- * it directly.
+ * Pause and resume of one Run, as engine code. The RPCs (`run.pause`, `run.resume`) are in
+ * `control.ts`, which adds the request id, the revision check and the audit event around
+ * `planLifecycleMove`; this function is the bare version the tests and other engine code call.
  *
  * Both are the reducer's own events (`run-paused`, `run-resumed`), committed in one store update, so
  * the ledger decides what is allowed: only an `active` Run pauses, only a `paused` Run resumes. Asking
@@ -19,6 +19,33 @@ import type { RunStore } from "./store";
  * resume does is ask the driver to push the Run on, which re-reads the host first, settles what
  * arrived meanwhile, sends what was held back once, and dispatches.
  */
+
+export type LifecycleEvent = "run-paused" | "run-resumed";
+
+export type LifecyclePlan =
+  | { ok: true; next: RunRecord }
+  | { ok: false; lifecycle: RunRecord["lifecycle"]; reason: string };
+
+/**
+ * What one reducer event does to a Run, without writing anything: the record after it, or why the
+ * ledger refuses. The only place the two events are reduced; the RPCs of `control.ts` and the engine
+ * function below both go through it, so they cannot disagree about what is allowed.
+ */
+export function planLifecycleMove(
+  current: RunRecord,
+  event: LifecycleEvent,
+  now: string,
+): LifecyclePlan {
+  const reduced = reduceRun(current, { kind: event }, { now, newId: () => "unused" });
+  if (!reduced.ok) {
+    return {
+      ok: false,
+      lifecycle: current.lifecycle,
+      reason: String(reduced.params.reason ?? reduced.code),
+    };
+  }
+  return { ok: true, next: reduced.next };
+}
 
 export type LifecycleOutcome =
   | { status: "applied"; lifecycle: RunRecord["lifecycle"]; revision: number }
@@ -40,10 +67,7 @@ export function createLifecycleControl(options: LifecycleOptions) {
   const clock = options.clock ?? { now: () => new Date().toISOString() };
   const log = options.log ?? (() => undefined);
 
-  async function move(
-    runId: string,
-    event: "run-paused" | "run-resumed",
-  ): Promise<LifecycleOutcome> {
+  async function move(runId: string, event: LifecycleEvent): Promise<LifecycleOutcome> {
     const target: RunRecord["lifecycle"] = event === "run-paused" ? "paused" : "active";
     const holder: { outcome: LifecycleOutcome } = { outcome: { status: "run-unavailable" } };
     let written: Awaited<ReturnType<RunStore["update"]>>;
@@ -53,21 +77,13 @@ export function createLifecycleControl(options: LifecycleOptions) {
           holder.outcome = { status: "unchanged", lifecycle: current.lifecycle };
           return null;
         }
-        const reduced = reduceRun(
-          current,
-          { kind: event },
-          { now: clock.now(), newId: () => "unused" },
-        );
-        if (!reduced.ok) {
-          holder.outcome = {
-            status: "refused",
-            lifecycle: current.lifecycle,
-            reason: String(reduced.params.reason ?? reduced.code),
-          };
+        const plan = planLifecycleMove(current, event, clock.now());
+        if (!plan.ok) {
+          holder.outcome = { status: "refused", lifecycle: plan.lifecycle, reason: plan.reason };
           return null;
         }
         holder.outcome = { status: "applied", lifecycle: target, revision: 0 };
-        return reduced.next;
+        return plan.next;
       });
     } catch (error) {
       log(`could not ${event === "run-paused" ? "pause" : "resume"} ${runId}`, error);

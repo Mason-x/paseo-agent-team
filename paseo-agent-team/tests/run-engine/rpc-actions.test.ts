@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import { runDecideRpc, runKickRpc, runReplanRpc } from "../../shared/rpc/run-engine";
+import {
+  runDecideRpc,
+  runKickRpc,
+  runPauseRpc,
+  runReplanRpc,
+  runResumeRpc,
+} from "../../shared/rpc/run-engine";
 import {
   RUN_ACTION_CODES,
   RUN_ACTION_CONTROLS,
@@ -9,6 +15,8 @@ import {
   RunDecideOutputSchema,
   RunKickInputSchema,
   RunKickOutputSchema,
+  RunLifecycleInputSchema,
+  RunLifecycleOutputSchema,
   RunReplanInputSchema,
   RunReplanOutputSchema,
 } from "../../shared/schemas/run-engine/rpc-actions";
@@ -67,6 +75,44 @@ describe("inputs", () => {
     ]) {
       expect(RunDecideInputSchema.safeParse(bad).success).toBe(false);
     }
+  });
+
+  test("pause and resume: the same strict shape as replan, a request id, a revision and a reason", () => {
+    expect(RunLifecycleInputSchema.safeParse(base).success).toBe(true);
+    const { reason: _reason, ...noReason } = base;
+    const { expectedRevision: _revision, ...noRevision } = base;
+    for (const bad of [
+      { ...base, extra: 1 },
+      { ...base, nonce: "x" },
+      { ...base, lifecycle: "paused" },
+      { ...base, requestId: "" },
+      { ...base, reason: "" },
+      { ...base, reason: "x".repeat(601) },
+      { ...base, expectedRevision: -1 },
+      { ...base, runContractVersion: 2 },
+      noReason,
+      noRevision,
+    ]) {
+      expect(RunLifecycleInputSchema.safeParse(bad).success).toBe(false);
+    }
+    expect(
+      RunLifecycleOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "applied",
+        revision: 4,
+        lifecycle: "paused",
+        issues: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      RunLifecycleOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        issues: [],
+      }).success,
+    ).toBe(true);
   });
 
   test("kick: a Run id and nothing else", () => {
@@ -151,11 +197,13 @@ describe("outputs", () => {
     ).toBe(false);
   });
 
-  test("the names the capabilities may carry are the three that exist", () => {
-    expect([...RUN_ACTION_CONTROLS]).toEqual(["replan", "decide", "kick"]);
+  test("the names the capabilities may carry are the five that exist", () => {
+    expect([...RUN_ACTION_CONTROLS]).toEqual(["replan", "decide", "kick", "pause", "resume"]);
     expect(runReplanRpc.name).toBe("agent-team.run.replan");
     expect(runDecideRpc.name).toBe("agent-team.run.decide");
     expect(runKickRpc.name).toBe("agent-team.run.kick");
+    expect(runPauseRpc.name).toBe("agent-team.run.pause");
+    expect(runResumeRpc.name).toBe("agent-team.run.resume");
   });
 });
 

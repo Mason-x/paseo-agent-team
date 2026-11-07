@@ -31,7 +31,8 @@ export const OBSERVATION_CAPABILITIES = {
 /**
  * The controls this Run can use right now, from its own ledger. Only the controls that exist are ever
  * named: `kick` while the Run is live, `replan` while it waits for a plan a person must ask for again,
- * `decide` while a decision of a kind this build can answer is waiting.
+ * `decide` while a decision of a kind this build can answer is waiting, `pause` while the Run is
+ * active and `resume` while it is paused.
  */
 export function supportedControlsOf(record: Pick<RunRecord, "lifecycle" | "decisions">): string[] {
   const live = record.lifecycle !== "finished" && record.lifecycle !== "cancelled";
@@ -39,6 +40,8 @@ export function supportedControlsOf(record: Pick<RunRecord, "lifecycle" | "decis
     replan: record.lifecycle === "awaiting-dag",
     decide: record.decisions.some((decision) => answerableActions(decision).length > 0),
     kick: live,
+    pause: record.lifecycle === "active",
+    resume: record.lifecycle === "paused",
   };
   return RUN_ACTION_CONTROLS.filter((name) => usable[name]);
 }

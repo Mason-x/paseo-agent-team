@@ -395,6 +395,10 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
   },
   "run-paused": { label: "Run 暂停", cause: "有人暂停了 Run；暂停期间不会再向成员发新消息" },
   "run-resumed": { label: "Run 恢复", cause: "Run 恢复运行，暂停时没发出的消息会发一次" },
+  "run-control-requested": {
+    label: "暂停或继续的请求",
+    cause: "有人从 Runs 页要求暂停或继续这个 Run；请求编号记在台账里，同一个请求不会执行两次",
+  },
   "run-finished": { label: "Run 结束", cause: "所有任务都完成或取消，且没有未了结的消息" },
   "run-cancelled": { label: "Run 取消", cause: "Run 被取消，占用已释放" },
   "observation-recorded": {

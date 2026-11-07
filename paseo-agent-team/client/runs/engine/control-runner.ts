@@ -2,8 +2,10 @@ import {
   type ActionNotice,
   decideNotice,
   kickNotice,
+  pauseNotice,
   type RetryOffer,
   replanNotice,
+  resumeNotice,
   transportNotice,
 } from "../../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../../shared/schemas/run-engine/rpc";
@@ -12,9 +14,12 @@ import type {
   RunDecideOutput,
   RunKickInput,
   RunKickOutput,
+  RunLifecycleInput,
+  RunLifecycleOutput,
   RunReplanInput,
   RunReplanOutput,
 } from "../../../shared/schemas/run-engine/rpc-actions";
+import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 
 /**
  * The state machine behind the Runs page controls, apart from React so it can be tested.
@@ -30,7 +35,7 @@ import type {
  *    not refreshed on its account.
  */
 
-export type ControlKey = "replan" | "kick" | `decide:${string}`;
+export type ControlKey = "replan" | "kick" | "pause" | "resume" | `decide:${string}`;
 
 export type ControlState = {
   pending: ControlKey | null;
@@ -42,6 +47,8 @@ export type ControlDeps = {
   replan(input: RunReplanInput): Promise<RunReplanOutput>;
   decide(input: RunDecideInput): Promise<RunDecideOutput>;
   kick(input: RunKickInput): Promise<RunKickOutput>;
+  pause(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
+  resume(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
   /** Reads the Run again. A failure here is the page's own error, not the control's. */
   refresh(): Promise<void>;
   newId(): string;
@@ -123,6 +130,37 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
             reason: offer.reason,
             decisionId: offer.decisionId,
             answer: { action: "retry" },
+          }),
+        ),
+      );
+    },
+
+    /** The reason is written here, not typed: pausing is one press, with no text box. */
+    pause(expectedRevision: number): Promise<boolean> {
+      const signature = `pause:${expectedRevision}`;
+      return run("pause", signature, async () =>
+        pauseNotice(
+          await deps.pause({
+            runContractVersion: RUN_CONTRACT_VERSION,
+            runId: deps.runId,
+            requestId: requestIdFor(signature),
+            expectedRevision,
+            reason: zh.controls.pause.reason,
+          }),
+        ),
+      );
+    },
+
+    resume(expectedRevision: number): Promise<boolean> {
+      const signature = `resume:${expectedRevision}`;
+      return run("resume", signature, async () =>
+        resumeNotice(
+          await deps.resume({
+            runContractVersion: RUN_CONTRACT_VERSION,
+            runId: deps.runId,
+            requestId: requestIdFor(signature),
+            expectedRevision,
+            reason: zh.controls.resume.reason,
           }),
         ),
       );

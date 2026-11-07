@@ -2,6 +2,7 @@ import type { RunDetailView, RunIssueView } from "../../schemas/run-engine/rpc";
 import type {
   RunDecideOutput,
   RunKickOutput,
+  RunLifecycleOutput,
   RunReplanOutput,
 } from "../../schemas/run-engine/rpc-actions";
 import { runEngineZh as zh } from "../../zh/run-engine";
@@ -36,6 +37,8 @@ export type ControlsView = {
   revision: number;
   replan: boolean;
   kick: boolean;
+  pause: boolean;
+  resume: boolean;
   retries: RetryOffer[];
   /** False when there is nothing to offer at all (a finished Run, nothing waiting for a person). */
   any: boolean;
@@ -65,12 +68,16 @@ export function controlsOf(
     : [];
   const replan = named.has("replan");
   const kick = named.has("kick");
+  const pause = named.has("pause");
+  const resume = named.has("resume");
   return {
     revision: run.revision,
     replan,
     kick,
+    pause,
+    resume,
     retries,
-    any: replan || kick || retries.length > 0,
+    any: replan || kick || pause || resume || retries.length > 0,
   };
 }
 
@@ -135,6 +142,14 @@ export function replanNotice(output: RunReplanOutput): ActionNotice {
 
 export function decideNotice(output: RunDecideOutput): ActionNotice {
   return settled(output, zh.controls.result.applied);
+}
+
+export function pauseNotice(output: RunLifecycleOutput): ActionNotice {
+  return settled(output, zh.controls.pause.applied);
+}
+
+export function resumeNotice(output: RunLifecycleOutput): ActionNotice {
+  return settled(output, zh.controls.resume.applied);
 }
 
 export function kickNotice(output: RunKickOutput): ActionNotice {

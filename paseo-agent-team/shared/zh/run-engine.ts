@@ -64,6 +64,21 @@ export const runEngineZh = {
       help: "立即核对宿主、补收漏掉的报告、发出还没发出的消息，并推进一次。不会替成员完成任何任务，也不会放开冻结的占用。",
       button: "立即检查并推进",
     },
+    pause: {
+      title: "暂停派发",
+      help: "暂停后不再派发新任务，也不再向成员发新消息；进行中的回合会继续到结束，到达的报告照常入账。随时可以继续。",
+      button: "暂停派发",
+      /** Written by the page: the person pressed the button, there is no text box. */
+      reason: "从 Runs 页暂停派发",
+      applied: "已暂停：不再派发新任务",
+    },
+    resume: {
+      title: "继续",
+      help: "让暂停的 Run 继续：先核对宿主、收下期间到达的报告，再把暂停时没发出的消息发出（只发一次）并继续派发。",
+      button: "继续",
+      reason: "从 Runs 页继续",
+      applied: "已继续：正在核对并推进",
+    },
     result: {
       applied: "已提交",
       replayed: "这个请求已经提交过，没有重复执行",
@@ -103,6 +118,8 @@ export const runEngineZh = {
         `任务还没有被证明已经停下，不能重试${typeof params.reason === "string" ? `（${own(TASK_NOT_RELEASABLE_ZH, params.reason)}）` : ""}`,
       "run-not-active": (params: Record<string, string | number | boolean>) =>
         `Run 现在不在运行中${typeof params.lifecycle === "string" ? `（${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}，不能执行这个操作`,
+      "lifecycle-not-allowed": (params: Record<string, string | number | boolean>) =>
+        `现在不能执行这个操作${typeof params.lifecycle === "string" ? `（Run 当前${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}：只有运行中的 Run 才能暂停，只有已暂停的 Run 才能继续`,
       "ledger-refused": () => "台账拒绝了这次修改，没有任何改动；请刷新后再试，持续出现请上报",
     },
     taskNotReleasable: TASK_NOT_RELEASABLE_ZH,
@@ -372,6 +389,7 @@ export const runEngineZh = {
       "cancellation-checked": "取消静止检查",
       "run-paused": "Run 暂停",
       "run-resumed": "Run 恢复",
+      "run-control-requested": "暂停或继续的请求",
       "run-finished": "Run 结束",
       "run-cancelled": "Run 取消",
       "observation-recorded": "观察记录",
@@ -387,7 +405,7 @@ export const runEngineZh = {
   list: {
     title: "Engine 运行",
     controlsHint:
-      "展开一个运行后可以重新规划、重试停下的任务或催办；取消、暂停和批准还不能在这里做",
+      "展开一个运行后可以重新规划、重试停下的任务、催办、暂停或继续；取消和批准还不能在这里做",
     observeOnly: "目前只读观察：不会派发或改动任务",
     open: "查看",
     close: "收起",

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createRunControl } from "../../server/run-engine/control";
 import { createDagIntake } from "../../server/run-engine/dag";
 import { createEngineDriver, type DriverOptions } from "../../server/run-engine/driver";
 import { createEffects } from "../../server/run-engine/effects";
@@ -580,6 +581,48 @@ describe("why a Run does not move", () => {
     expect(toMember()).toHaveLength(1);
     // Pressing resume again, or kicking, sends nothing more.
     expect((await lifecycle.resume(RUN_ID)).status).toBe("unchanged");
+    await driver.kick(RUN_ID);
+    expect(toMember()).toHaveLength(1);
+  });
+
+  test("pause and resume as RPCs: nothing goes out while paused, the held work goes out once after the resume answer", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    const control = createRunControl({
+      store,
+      ensureReady: async () => undefined,
+      driver,
+    });
+    const ask = async (requestId: string) => ({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId,
+      expectedRevision: (await stored()).revision,
+      reason: "from the test",
+    });
+    await writeFile(path.join(repoDir, "stray.txt"), "x");
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    expect(states(await stored()).t1).toBe("ready");
+
+    expect((await control.pause(await ask("pause-1"))).status).toBe("applied");
+    await rm(path.join(repoDir, "stray.txt"));
+    await driver.kick(RUN_ID);
+    await driver.retryRun(RUN_ID);
+    await driver.recover();
+    const toMember = () => host.sent.filter((entry) => entry.agentId === "agent-b1");
+    expect(toMember()).toHaveLength(0);
+    expect(states(await stored()).t1).toBe("ready");
+
+    expect((await control.resume(await ask("resume-1"))).status).toBe("applied");
+    await control.idle();
+    expect(states(await stored()).t1).toBe("assigned");
+    expect(toMember()).toHaveLength(1);
+    // The same answer again, or a kick, sends nothing more.
+    const again = await control.resume({ ...(await ask("resume-1")), expectedRevision: 1 });
+    await control.idle();
+    expect(again.status).toBe("replayed");
     await driver.kick(RUN_ID);
     expect(toMember()).toHaveLength(1);
   });

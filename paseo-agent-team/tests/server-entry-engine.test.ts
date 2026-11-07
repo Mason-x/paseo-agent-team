@@ -19,6 +19,8 @@ const runtime = vi.hoisted(() => ({
     replan: vi.fn<(input: unknown) => Promise<unknown>>(),
     decide: vi.fn<(input: unknown) => Promise<unknown>>(),
     kick: vi.fn<(input: unknown) => Promise<unknown>>(),
+    pause: vi.fn<(input: unknown) => Promise<unknown>>(),
+    resume: vi.fn<(input: unknown) => Promise<unknown>>(),
   },
   created: vi.fn(),
 }));
@@ -187,6 +189,8 @@ describe("the Paseo handle is bound where the host supplies one", () => {
     ["agent-team.run.replan", { runId: "run-x" }],
     ["agent-team.run.decide", { runId: "run-x" }],
     ["agent-team.run.kick", { runId: "run-x" }],
+    ["agent-team.run.pause", { runId: "run-x" }],
+    ["agent-team.run.resume", { runId: "run-x" }],
   ])("%s", async (name, input) => {
     const { server, handlers } = fakeServer();
     contribute(server);
@@ -211,6 +215,8 @@ describe("the Paseo handle is bound where the host supplies one", () => {
       ["agent-team.run.replan", "replan"],
       ["agent-team.run.decide", "decide"],
       ["agent-team.run.kick", "kick"],
+      ["agent-team.run.pause", "pause"],
+      ["agent-team.run.resume", "resume"],
     ] as const) {
       const input = { runId: "run-x", marker: name };
       await expect(handlers.get(name)?.(input, { paseo })).resolves.toEqual({ answered: true });

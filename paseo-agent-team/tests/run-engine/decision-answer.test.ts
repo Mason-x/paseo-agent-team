@@ -213,11 +213,15 @@ describe("supportedControlsOf", () => {
   test("names only the controls this Run can use right now, in a fixed order", () => {
     expect(live("bootstrapping")).toEqual(["kick"]);
     expect(live("awaiting-dag")).toEqual(["replan", "kick"]);
-    expect(live("active")).toEqual(["kick"]);
-    expect(live("active", [decision()])).toEqual(["decide", "kick"]);
-    expect(live("paused", [decision()])).toEqual(["decide", "kick"]);
-    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick"]);
-    expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual(["kick"]);
+    expect(live("active")).toEqual(["kick", "pause"]);
+    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause"]);
+    expect(live("paused", [decision()])).toEqual(["decide", "kick", "resume"]);
+    expect(live("paused")).toEqual(["kick", "resume"]);
+    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick", "pause"]);
+    expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual([
+      "kick",
+      "pause",
+    ]);
     expect(live("finished")).toEqual([]);
     expect(live("cancelled")).toEqual([]);
   });

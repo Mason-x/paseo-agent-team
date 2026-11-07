@@ -58,11 +58,19 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("v1 and v2");
   });
 
-  test("the three controls it names are the ones the server ships, under the page's own labels", () => {
-    expect([...RUN_ACTION_CONTROLS].sort()).toEqual(["decide", "kick", "replan"]);
+  test("the controls it names are the ones the server ships, under the page's own labels", () => {
+    expect([...RUN_ACTION_CONTROLS].sort()).toEqual([
+      "decide",
+      "kick",
+      "pause",
+      "replan",
+      "resume",
+    ]);
     expect(section).toContain("重新规划");
     expect(section).toContain("重试");
     expect(section).toContain(runEngineZh.controls.kick.button);
+    expect(section).toContain(runEngineZh.controls.pause.button);
+    expect(section).toContain(runEngineZh.controls.resume.button);
   });
 
   test("the page labels it points to exist", () => {

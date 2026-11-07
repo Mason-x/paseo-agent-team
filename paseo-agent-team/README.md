@@ -179,14 +179,15 @@ cancelled Run sends nothing new.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
 waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
-cancel, pause or approve from the Runs page yet, it does not retry a transient failure after a
-message was dispatched by itself, and it does not compact the ledger (a Run holds at most 8192
-events, so a very long Run can fill it). Acceptance status per scenario is in
+cancel or approve from the Runs page yet, and it does not retry a transient failure after a
+message was dispatched by itself. A Run holds at most 8192 events: old history is folded into a
+summary (it cannot be expanded again), and when the ledger nears a limit it stops starting new work
+and says so, so a very long Run is finished and restarted rather than overfilled. Acceptance status per scenario is in
 `docs/run-engine-acceptance.md` in the repository.
 
 **Follow and steer a Run.** **Agent Teams → 运行 → Engine 运行** lists the Runs and opens one: the
 task graph, each task with why it waits, who clears it and what happens next, locks, budgets,
-decisions, channels and alerts, and a history with the cause of each event. Three controls appear
+decisions, channels and alerts, and a history with the cause of each event. Five controls appear
 only when the Run offers them:
 
 - **重新规划** (re-plan), while the Run waits for a task graph: asks the coordinator again, with a
@@ -196,6 +197,11 @@ only when the Run offers them:
   turn of the task is proven ended.
 - **立即检查并推进** (kick): reads the host, takes in reports that were missed, sends what was
   prepared and not yet sent, and moves the Run on. It completes no task for a member.
+- **暂停派发** (pause), while the Run is running: nothing new is dispatched and no new message goes
+  to a member. Turns already running go on to their end and a report that arrives is taken in as
+  usual.
+- **继续** (resume), while the Run is paused: reads the host, takes in what arrived meanwhile, sends
+  what was held back once, and dispatches again.
 
 A refusal is shown in words; if the Run changed since you looked, the page reads it again and asks
 you to try once more. A request is never applied twice.
@@ -214,7 +220,7 @@ you to try once more. A request is never applied twice.
   delivery away. Look at the member's conversation and decide by hand; cancel and re-assign
   controls are not in the page yet.
 - Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
-  Runs that already exist can still be listed and read, still take hooks, recovery and the three
+  Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.
 
 **Where the data is.** `<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json` is the ledger;

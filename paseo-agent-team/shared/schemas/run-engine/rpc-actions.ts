@@ -19,7 +19,7 @@ const ContractShape = { runContractVersion: z.literal(RUN_CONTRACT_VERSION) };
 const Text = (max: number) => z.string().min(1).max(max);
 
 /** The names `capabilities.supportedControls` may carry for the controls that exist. */
-export const RUN_ACTION_CONTROLS = ["replan", "decide", "kick"] as const;
+export const RUN_ACTION_CONTROLS = ["replan", "decide", "kick", "pause", "resume"] as const;
 export type RunActionControl = (typeof RUN_ACTION_CONTROLS)[number];
 
 /**
@@ -46,6 +46,8 @@ export const RUN_ACTION_CODES = [
   "action-unsupported",
   "task-not-releasable",
   "run-not-active",
+  // pause and resume
+  "lifecycle-not-allowed",
   // anything the ledger itself refuses
   "ledger-refused",
 ] as const;
@@ -106,6 +108,23 @@ export const RunDecideOutputSchema = z.object({
   issues: z.array(RunIssueViewSchema).max(100),
 });
 export type RunDecideOutput = z.infer<typeof RunDecideOutputSchema>;
+
+// --- run.pause / run.resume ------------------------------------------------------------------
+
+/** Both take the same request: pause and resume differ only in the RPC they are sent to. */
+export const RunLifecycleInputSchema = z.strictObject(WriteShape);
+export type RunLifecycleInput = z.input<typeof RunLifecycleInputSchema>;
+
+export const RunLifecycleOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  /** The Run's revision after the call (the current one when rejected). */
+  revision: z.number().int().nonnegative(),
+  /** The lifecycle after the call; null when the Run cannot be read. */
+  lifecycle: Text(32).nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunLifecycleOutput = z.infer<typeof RunLifecycleOutputSchema>;
 
 // --- run.kick -------------------------------------------------------------------------------
 

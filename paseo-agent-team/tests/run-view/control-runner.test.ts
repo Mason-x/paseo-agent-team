@@ -9,6 +9,7 @@ import { RUN_CONTRACT_VERSION } from "../../shared/schemas/run-engine/rpc";
 import type {
   RunDecideOutput,
   RunKickOutput,
+  RunLifecycleOutput,
   RunReplanOutput,
 } from "../../shared/schemas/run-engine/rpc-actions";
 import { runEngineZh as zh } from "../../shared/zh/run-engine";
@@ -25,6 +26,14 @@ const offer: RetryOffer = {
   explain: "y",
   reason: zh.controls.retry.reason("D3"),
 };
+
+const lifecycle = (state: string): RunLifecycleOutput => ({
+  ...BASE,
+  status: "applied",
+  revision: 6,
+  lifecycle: state,
+  issues: [],
+});
 
 const applied = (): RunReplanOutput => ({
   ...BASE,
@@ -61,6 +70,8 @@ function setup(overrides: Partial<ControlDeps> = {}) {
         issues: [],
       }),
     ),
+    pause: vi.fn(async () => lifecycle("paused")),
+    resume: vi.fn(async () => lifecycle("active")),
     refresh: vi.fn(async () => undefined),
     newId: () => {
       counter += 1;
@@ -199,6 +210,65 @@ describe("kick", () => {
       runId: "run-ctl-a1",
     });
     expect(runner.state.notice?.text).toBe(zh.controls.result.kick.dispatched(1));
+  });
+});
+
+describe("pause and resume", () => {
+  test.each(["pause", "resume"] as const)(
+    "%s sends the revision the page read and a reason the page wrote",
+    async (name) => {
+      const { runner, deps, states } = setup();
+      expect(await runner[name](9)).toBe(true);
+      expect(deps[name]).toHaveBeenCalledWith({
+        runContractVersion: RUN_CONTRACT_VERSION,
+        runId: "run-ctl-a1",
+        requestId: "req-1",
+        expectedRevision: 9,
+        reason: zh.controls[name].reason,
+      });
+      expect(runner.state.notice).toEqual({
+        tone: "success",
+        text: zh.controls[name].applied,
+        refresh: true,
+      });
+      expect(deps.refresh).toHaveBeenCalledTimes(1);
+      expect(states.some((entry) => entry.pending === name)).toBe(true);
+    },
+  );
+
+  test("a request that got no answer is asked again under the same id; a new revision is a new request", async () => {
+    const pause = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(lifecycle("paused"));
+    const { runner } = setup({ pause });
+    await runner.pause(9);
+    expect(runner.state.notice?.text).toBe(zh.controls.result.transport);
+    await runner.pause(9);
+    await runner.pause(10);
+    expect(pause.mock.calls.map((call) => call[0].requestId)).toEqual(["req-1", "req-1", "req-2"]);
+  });
+
+  test("a refusal is said in words and the Run is read again", async () => {
+    const { runner, deps } = setup({
+      pause: vi.fn(async () => ({
+        ...lifecycle("paused"),
+        status: "rejected" as const,
+        issues: [
+          {
+            code: "lifecycle-not-allowed",
+            severity: "error" as const,
+            path: [],
+            params: { lifecycle: "paused" },
+            action: "none" as const,
+          },
+        ],
+      })),
+    });
+    await runner.pause(9);
+    expect(runner.state.notice?.tone).toBe("danger");
+    expect(runner.state.notice?.text).toContain(zh.lifecycle.paused as string);
+    expect(deps.refresh).toHaveBeenCalledTimes(1);
   });
 });
 

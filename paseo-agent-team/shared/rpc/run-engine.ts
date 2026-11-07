@@ -10,6 +10,8 @@ import {
   RunDecideOutputSchema,
   RunKickInputSchema,
   RunKickOutputSchema,
+  RunLifecycleInputSchema,
+  RunLifecycleOutputSchema,
   RunReplanInputSchema,
   RunReplanOutputSchema,
 } from "../schemas/run-engine/rpc-actions";
@@ -45,6 +47,18 @@ export const runDecideRpc = defineRpc({
   name: "agent-team.run.decide",
   input: RunDecideInputSchema,
   output: RunDecideOutputSchema,
+});
+
+export const runPauseRpc = defineRpc({
+  name: "agent-team.run.pause",
+  input: RunLifecycleInputSchema,
+  output: RunLifecycleOutputSchema,
+});
+
+export const runResumeRpc = defineRpc({
+  name: "agent-team.run.resume",
+  input: RunLifecycleInputSchema,
+  output: RunLifecycleOutputSchema,
 });
 
 export const runKickRpc = defineRpc({

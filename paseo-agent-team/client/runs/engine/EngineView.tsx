@@ -30,10 +30,13 @@ export type EngineViewProps = {
   /** Render without its own scroller, for a page that already scrolls. */
   embedded?: boolean;
   /**
-   * The controls of this Run (replan, retry, kick). Left out, the view only observes: no button is
+   * The controls of this Run (replan, retry, kick, pause, resume). Left out, the view only observes: no button is
    * drawn, and nothing is said about controls either.
    */
-  controls?: Pick<EngineControlsProps, "state" | "onReplan" | "onRetry" | "onKick" | "onDismiss">;
+  controls?: Pick<
+    EngineControlsProps,
+    "state" | "onReplan" | "onRetry" | "onKick" | "onPause" | "onResume" | "onDismiss"
+  >;
   onRefresh: () => void;
   onLoadOlder: (cursor: string) => void;
 };

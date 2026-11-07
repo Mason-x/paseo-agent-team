@@ -84,6 +84,15 @@ describe("controlsOf: only what the server named is offered", () => {
     });
   });
 
+  test("pause and resume are offered only when the server names them, and count as something to offer", () => {
+    const none = controlsOf(run({ supportedControls: ["kick"] }));
+    expect([none.pause, none.resume]).toEqual([false, false]);
+    const active = controlsOf(run({ supportedControls: ["pause"] }));
+    expect([active.pause, active.resume, active.any]).toEqual([true, false, true]);
+    const paused = controlsOf(run({ supportedControls: ["resume"] }));
+    expect([paused.pause, paused.resume, paused.any]).toEqual([false, true, true]);
+  });
+
   test("replan is offered only when the server names it", () => {
     expect(controlsOf(run({ supportedControls: ["kick"] })).replan).toBe(false);
     expect(controlsOf(run({ supportedControls: ["replan", "kick"] })).replan).toBe(true);
@@ -91,7 +100,15 @@ describe("controlsOf: only what the server named is offered", () => {
 
   test("nothing is offered for a Run that names no control, and the view says so", () => {
     const view = controlsOf(run({ supportedControls: [] }));
-    expect(view).toEqual({ revision: 7, replan: false, kick: false, retries: [], any: false });
+    expect(view).toEqual({
+      revision: 7,
+      replan: false,
+      kick: false,
+      pause: false,
+      resume: false,
+      retries: [],
+      any: false,
+    });
   });
 
   test("a retry needs both `decide` in the Run's controls and `retry` in the decision's own actions", () => {
@@ -149,7 +166,7 @@ describe("what a retry will do is said per kind of decision", () => {
   });
 });
 
-describe("every refusal code of the three controls has words", () => {
+describe("every refusal code of the controls has words", () => {
   test.each(RUN_ACTION_CODES)("%s", (code) => {
     const text = issueText({ code, params: {} });
     expect(text.length).toBeGreaterThan(4);
@@ -162,6 +179,9 @@ describe("every refusal code of the three controls has words", () => {
     expect(issueText({ code: "run-not-active", params: { lifecycle: "paused" } })).toContain(
       zh.lifecycle.paused as string,
     );
+    expect(
+      issueText({ code: "lifecycle-not-allowed", params: { lifecycle: "finished" } }),
+    ).toContain(zh.lifecycle.finished as string);
     expect(issueText({ code: "replan-not-allowed", params: { lifecycle: "active" } })).toContain(
       zh.lifecycle.active as string,
     );

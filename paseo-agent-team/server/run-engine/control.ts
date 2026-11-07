@@ -13,16 +13,22 @@ import type {
   RunDecideOutput,
   RunKickInput,
   RunKickOutput,
+  RunLifecycleInput,
+  RunLifecycleOutput,
   RunReplanInput,
   RunReplanOutput,
 } from "../../shared/schemas/run-engine/rpc-actions";
 import { sha256Hex } from "./digest";
 import type { EngineDriver } from "./driver";
 import { payloadHash } from "./effects";
+import { planLifecycleMove } from "./lifecycle";
 import type { RunStore } from "./store";
 
+/** The audit event of a pause or resume; its `requestId` is how a repeat is recognised. */
+export const LIFECYCLE_REQUEST_EVENT = "run-control-requested";
+
 /**
- * The Run Engine's writing RPCs (P06): `replan`, `decide` and `kick`. A person asks; the ledger
+ * The Run Engine's writing RPCs (P06): `replan`, `decide` and `kick`, and `pause` and `resume` (A3). A person asks; the ledger
  * decides. Each write is ONE store update that reads the Run, asks a pure function whether the request
  * is allowed and what it changes, checks the ledger invariants on the result, and commits or changes
  * nothing. The handler sends no message itself: after a commit it asks the driver to push the Run on
@@ -105,6 +111,108 @@ export function createRunControl(options: RunControlOptions) {
 
   const revisionOf = (written: Awaited<ReturnType<RunStore["update"]>>): number =>
     written.status === "committed" ? written.record.revision : written.revision;
+
+  /**
+   * One pause or resume. The checks run in a fixed order, as in every write here: find a request with
+   * this id first (the same request is answered `replayed`, a different one under the same id is
+   * `request-id-reused`), then the revision the caller saw, then the lifecycle. The lifecycle change is
+   * the reducer's own event (`planLifecycleMove`); the audit event written with it carries the request
+   * id so a repeat is recognised, and nothing else (no nonce, no text of a message).
+   */
+  async function lifecycleRequest(
+    action: "pause" | "resume",
+    input: RunLifecycleInput,
+  ): Promise<RunLifecycleOutput> {
+    const loaded = await load(input.runId);
+    if (!loaded.ok) {
+      return { ...BASE, status: "rejected", revision: 0, lifecycle: null, issues: [loaded.issue] };
+    }
+    const reason = input.reason.slice(0, 200);
+    const outcome: {
+      refused?: Refused;
+      replayed?: boolean;
+      applied?: boolean;
+      lifecycle: string | null;
+    } = { lifecycle: null };
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        outcome.lifecycle = current.lifecycle;
+        const prior = current.events.find(
+          (event) =>
+            event.kind === LIFECYCLE_REQUEST_EVENT && event.payload.requestId === input.requestId,
+        );
+        if (prior !== undefined) {
+          if (prior.payload.action === action && prior.payload.reason === reason) {
+            outcome.replayed = true;
+          } else {
+            outcome.refused = refused("request-id-reused");
+          }
+          return null;
+        }
+        if (current.revision !== input.expectedRevision) {
+          outcome.refused = refused("revision-conflict", { current: current.revision }, "refresh");
+          return null;
+        }
+        const plan = planLifecycleMove(
+          current,
+          action === "pause" ? "run-paused" : "run-resumed",
+          clock.now(),
+        );
+        if (!plan.ok) {
+          outcome.refused = refused("lifecycle-not-allowed", { lifecycle: current.lifecycle });
+          return null;
+        }
+        const next = plan.next;
+        const seq = next.counters.eventsThroughSeq + 1;
+        next.counters.eventsThroughSeq = seq;
+        next.events.push({
+          seq,
+          kind: LIFECYCLE_REQUEST_EVENT,
+          at: clock.now(),
+          payload: { requestId: input.requestId, action, reason },
+        });
+        const checked = checkLedgerInvariants(next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        outcome.applied = true;
+        outcome.lifecycle = next.lifecycle;
+        return next;
+      });
+    } catch (error) {
+      log(`${action} of ${input.runId} could not be written`, error);
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        issues: [issue("ledger-refused", {}, "retry")],
+      };
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action: next } = outcome.refused;
+      return {
+        ...BASE,
+        status: "rejected",
+        revision,
+        lifecycle: outcome.lifecycle,
+        issues: [issue(code, params, next)],
+      };
+    }
+    if (outcome.replayed) {
+      return { ...BASE, status: "replayed", revision, lifecycle: outcome.lifecycle, issues: [] };
+    }
+    // A pause moves nothing on; a resume asks the driver to settle, send what was held and dispatch.
+    if (action === "resume") push(input.runId);
+    return { ...BASE, status: "applied", revision, lifecycle: outcome.lifecycle, issues: [] };
+  }
 
   return {
     /**
@@ -291,6 +399,19 @@ export function createRunControl(options: RunControlOptions) {
         taskId: outcome.applied ?? null,
         issues: [],
       };
+    },
+
+    /**
+     * Stops new work from starting. Only an `active` Run pauses; what is already running goes on to the
+     * end of its turn and a report that arrives is taken in as usual. See `lifecycleRequest`.
+     */
+    pause(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
+      return lifecycleRequest("pause", input);
+    },
+
+    /** Lets a `paused` Run go on; the driver is asked to push it, so what was held goes out once. */
+    resume(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
+      return lifecycleRequest("resume", input);
     },
 
     /**

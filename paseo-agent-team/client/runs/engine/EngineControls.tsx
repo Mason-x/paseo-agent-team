@@ -18,6 +18,8 @@ export type EngineControlsProps = {
   onReplan: (reason: string) => void;
   onRetry: (offer: RetryOffer) => void;
   onKick: () => void;
+  onPause: () => void;
+  onResume: () => void;
   onDismiss: () => void;
 };
 
@@ -70,7 +72,7 @@ function ActionButton({
  * flight every button is disabled; the answer is said in words under the buttons.
  */
 export function EngineControls(props: EngineControlsProps) {
-  const { theme, view, state, onReplan, onRetry, onKick, onDismiss } = props;
+  const { theme, view, state, onReplan, onRetry, onKick, onPause, onResume, onDismiss } = props;
   const [reason, setReason] = useState("");
   const [needReason, setNeedReason] = useState(false);
   const [confirming, setConfirming] = useState<RetryOffer | null>(null);
@@ -169,6 +171,40 @@ export function EngineControls(props: EngineControlsProps) {
             label={zh.controls.kick.button}
             disabled={busy}
             onPress={onKick}
+          />
+        </View>
+      ) : null}
+
+      {view.pause ? (
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+            {zh.controls.pause.title}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {zh.controls.pause.help}
+          </Text>
+          <ActionButton
+            theme={theme}
+            label={zh.controls.pause.button}
+            disabled={busy}
+            onPress={onPause}
+          />
+        </View>
+      ) : null}
+
+      {view.resume ? (
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+            {zh.controls.resume.title}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {zh.controls.resume.help}
+          </Text>
+          <ActionButton
+            theme={theme}
+            label={zh.controls.resume.button}
+            disabled={busy}
+            onPress={onResume}
           />
         </View>
       ) : null}
