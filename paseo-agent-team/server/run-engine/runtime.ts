@@ -127,6 +127,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     host,
     seatFamily: (record, seatId) => readSeatProfiles(record).get(seatId)?.family ?? null,
     resolveWorkspace,
+    repair: { send: (runId) => effects.runOutbox(runId) },
     log,
   });
   const driver: EngineDriver = createEngineDriver({

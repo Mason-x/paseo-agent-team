@@ -6,13 +6,19 @@ import {
   readDagControl,
   withDagControl,
 } from "../../shared/domain/run-engine/dag-admission";
+import {
+  compilePlanRepair,
+  PLAN_REPAIR_VERSION,
+} from "../../shared/domain/run-engine/engine-prompts";
+import { latestSentWake, requestPlanRepair } from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunTaskDagBlock } from "../../shared/schemas/run-engine/protocol";
 import { alertIdFor, sha256Hex } from "./digest";
+import { payloadHash } from "./effects";
 import type { ObserverHost } from "./observer";
-import { extractProtocolBlock, type UnverifiableReason } from "./protocol";
+import { extractProtocolBlock, type ProtocolIssue, type UnverifiableReason } from "./protocol";
 import { inspectRepo, verifyScopes } from "./repo";
 import type { RunStore } from "./store";
 
@@ -22,8 +28,12 @@ import type { RunStore } from "./store";
  * `dag-accepted` and the use-up of the control nonce in one commit, so a DAG can be accepted once.
  *
  * A refusal changes nothing about tasks (there are none yet): it raises an alert naming the reasons
- * and leaves the Run waiting for a DAG. The coordinator is not asked to try again from here; a person
- * asks for a re-plan (plan 11.5, decision 5).
+ * and leaves the Run waiting for a DAG. The coordinator is not asked to rewrite a plan the checks
+ * refuse for what it says; a person asks for a re-plan (plan 11.5, decision 5). The one exception is
+ * a `task-dag` block the strict parser could not read (a missing key, broken JSON): that is a fault of
+ * form, and with `options.repair` on the coordinator is asked once to send it again
+ * (`plan-repair.ts`). A reply with no block at all is not asked again: the plan request allows the
+ * coordinator to say in plain words that it cannot plan.
  */
 
 export type DagIntakeResult =
@@ -46,19 +56,16 @@ export type DagIntakeOptions = {
   ids?: { uuid(): string };
   /** Called after a DAG was admitted, so the first task can be dispatched. */
   onAdmitted?: (runId: string) => void;
+  /**
+   * Turns on the plan re-send. `send` runs the outbox of the Run after a re-send was committed (this
+   * module sends nothing itself). Without it a refused plan only leaves its reason on the Run.
+   */
+  repair?: { send(runId: string): Promise<unknown> };
   log?: (message: string, detail?: unknown) => void;
 };
 
-const SENT_STATES = ["sending", "confirmed", "outcome-unknown"];
-
-/** The newest plan request that went out to this agent: a `wake` intent. */
-function latestPlanRequest(record: RunRecord, agentId: string) {
-  const sent = record.outbox.filter(
-    (intent) =>
-      intent.kind === "wake" && intent.recipient === agentId && SENT_STATES.includes(intent.state),
-  );
-  return sent.at(-1);
-}
+/** The block the strict parser refused, and the message whose reply held it. */
+type Repairable = { anchor: string; reason: string; issues: readonly ProtocolIssue[] };
 
 /**
  * The DAG is the plan request's completion. The ledger counts a message that belongs to no
@@ -103,8 +110,19 @@ export function createDagIntake(options: DagIntakeOptions) {
     return control !== null && control.acceptedAt === null;
   }
 
-  /** Says why no DAG was admitted, once per distinct reason; the Run waits for a DAG. */
-  async function refuse(runId: string, agentId: string, reasons: string): Promise<DagIntakeResult> {
+  /**
+   * Says why no DAG was admitted, once per distinct reason; the Run waits for a DAG. With
+   * `repairable` (and `options.repair`) the coordinator is also asked once to send the plan again:
+   * the request is committed with the reason and sent after the commit. A re-send that is prepared
+   * but was never sent (the process stopped in between) is sent here too.
+   */
+  async function refuse(
+    runId: string,
+    agentId: string,
+    reasons: string,
+    repairable?: Repairable,
+  ): Promise<DagIntakeResult> {
+    let send = false;
     await options.store.update(runId, (current) => {
       if (!pending(current, agentId)) return null;
       const now = clock.now();
@@ -113,12 +131,45 @@ export function createDagIntake(options: DagIntakeOptions) {
         { alertId: alertIdFor(reasons), severity: "warning", summary: reasons },
         now,
       );
-      const waiting =
+      let next =
         current.lifecycle === "bootstrapping"
           ? { ...raised.next, lifecycle: "awaiting-dag" as const }
           : raised.next;
-      return raised.changed || waiting.lifecycle !== current.lifecycle ? waiting : null;
+      let changed = raised.changed || next.lifecycle !== current.lifecycle;
+      if (repairable !== undefined && options.repair !== undefined) {
+        const draft = requestPlanRepair(next, {
+          agentId,
+          anchor: repairable.anchor,
+          reason: repairable.reason,
+          issues: repairable.issues,
+          intentId: `intent-plan-repair-${uuid().replace(/-/gu, "").slice(0, 8)}`,
+          messageId: uuid(),
+          payloadHash: "0".repeat(64),
+          templateVersion: PLAN_REPAIR_VERSION,
+          now,
+        });
+        if (draft.ok) {
+          const intent = draft.next.outbox.at(-1);
+          const text = intent?.kind === "wake" ? compilePlanRepair(intent, draft.next) : null;
+          if (intent !== undefined && text !== null) {
+            intent.payloadHash = payloadHash(text);
+            next = draft.next;
+            changed = true;
+            send = true;
+          }
+        } else if (draft.code === "repair-pending") {
+          send = true;
+        }
+      }
+      return changed ? next : null;
     });
+    if (send) {
+      try {
+        await options.repair?.send(runId);
+      } catch (error) {
+        log(`plan re-send for ${runId} could not be sent`, error);
+      }
+    }
     return { status: "refused", reasons };
   }
 
@@ -127,7 +178,8 @@ export function createDagIntake(options: DagIntakeOptions) {
     if (read.status !== "ok" || !pending(read.record, agentId))
       return { status: "no-pending-plan" };
     const record = read.record;
-    const request = latestPlanRequest(record, agentId);
+    // The newest message that asks for the plan and went out: the request, or its re-send.
+    const request = latestSentWake(record, agentId);
     if (!request) return { status: "no-pending-plan" };
 
     let window: Awaited<ReturnType<ObserverHost["replyWindow"]>>;
@@ -162,6 +214,11 @@ export function createDagIntake(options: DagIntakeOptions) {
         runId,
         agentId,
         `DAG 块被拒：${extracted.reason}${issues ? `（${issues}）` : ""}`,
+        {
+          anchor: request.messageId,
+          reason: `plan-rejected:${extracted.reason}`,
+          issues: extracted.issues ?? [],
+        },
       );
     }
     if (extracted.kind !== "task-dag") return refuse(runId, agentId, "DAG 块被拒：unexpected-kind");

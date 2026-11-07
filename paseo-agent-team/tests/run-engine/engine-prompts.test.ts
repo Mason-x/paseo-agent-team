@@ -1,20 +1,17 @@
-import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import { extractProtocolBlock } from "../../server/run-engine/protocol";
 import { checkDag } from "../../shared/domain/run-engine/dag-admission";
 import {
-  buildPlanSeats,
   compileCoordinatorSystem,
   compileEngineIntent,
   compileMemberSystem,
   compilePlanRequest,
   PLAN_REQUEST_VERSION,
-  planRequestFacts,
 } from "../../shared/domain/run-engine/engine-prompts";
-import { addPlanRequest } from "../../shared/domain/run-engine/run-record";
-import type { RunEffectIntent, RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { REPO_ID } from "../fixtures/run-engine/base";
-import { bootstrapRun, COORDINATOR_AGENT, dagBlock, planTasks } from "./support/bootstrap-run";
+import { COORDINATOR_AGENT, dagBlock, planTasks } from "./support/bootstrap-run";
+import { NONCE, prepared, ROLE, section, sha256, type Wake } from "./support/plan-fixtures";
 
 /**
  * Failure modes this file guards:
@@ -26,86 +23,6 @@ import { bootstrapRun, COORDINATOR_AGENT, dagBlock, planTasks } from "./support/
  *  - the old chain's delegation instructions leaking into the Engine's system prompts through a Role;
  *  - a template changing its bytes without a version bump.
  */
-
-type Wake = Extract<RunEffectIntent, { kind: "wake" }>;
-
-const NOW = "2026-11-05T12:00:00.000Z";
-const NONCE = "6f1c2a44-3b7e-4f0a-9a11-0000000000f1";
-const ROLE = {
-  name: "Developer",
-  mission: "Implement the assigned files.",
-  responsibilities: ["Write code", "Run the checks"],
-  restrictions: ["Do not touch unrelated modules"],
-};
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-/** A Run that has agents on every seat and whose plan request has just been prepared. */
-function prepared(
-  options: {
-    task?: string;
-    role?: typeof ROLE;
-    sameAgent?: boolean;
-    templateVersion?: number;
-  } = {},
-): {
-  record: RunRecord;
-  intent: Wake;
-} {
-  const task = options.task ?? "Add a login page.";
-  const base = bootstrapRun({ runId: "run-plan01-a1" });
-  base.outbox = [];
-  delete (base.launch as Record<string, unknown>).dagControl;
-  base.launch.modelPlan.task = task;
-  (base.launch as Record<string, unknown>).seatProfiles = {
-    "seat-b1": {
-      profileId: "p1",
-      name: "Haiku",
-      provider: "claude",
-      model: "claude-haiku-5-5",
-      family: "haiku",
-    },
-    "seat-b2": {
-      profileId: "p2",
-      name: "Luna",
-      provider: "codex",
-      model: "gpt-6-luna",
-      family: "luna",
-    },
-  };
-  if (options.sameAgent) {
-    const reviewer = base.roster.find((seat) => seat.seatId === "seat-b2");
-    if (reviewer) reviewer.agentId = "agent-b1";
-  }
-  const role = options.role ?? ROLE;
-  const members = new Map([
-    ["seat-b1", { memberName: "Backend dev", role }],
-    ["seat-b2", { memberName: "Reviewer", role: { ...role, name: "Reviewer" } }],
-  ]);
-  const record = addPlanRequest(base, {
-    intentId: "intent-plan-1",
-    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-    payloadHash: "0".repeat(64),
-    templateVersion: options.templateVersion ?? PLAN_REQUEST_VERSION,
-    task,
-    controlNonce: NONCE,
-    controlNonceDigest: sha256(NONCE),
-    facts: planRequestFacts({ seats: buildPlanSeats(base, members), devTargetUsable: true }),
-    now: NOW,
-  });
-  const intent = record.outbox.find((entry) => entry.kind === "wake");
-  if (intent?.kind !== "wake") throw new Error("intent missing");
-  return { record, intent };
-}
-
-function section(text: string, label: string): unknown {
-  const lines = text.split("\n");
-  const index = lines.indexOf(label);
-  if (index < 0) throw new Error(`no section ${label}`);
-  return JSON.parse(lines[index + 1] ?? "");
-}
 
 describe("compilePlanRequest", () => {
   test("is rebuilt byte for byte, also from a reloaded record, whatever the stored hash says", () => {
@@ -187,7 +104,7 @@ describe("compilePlanRequest", () => {
 
   test("returns null rather than guess when it cannot be rebuilt faithfully", () => {
     const { record, intent } = prepared();
-    expect(compilePlanRequest({ ...intent, templateVersion: 3 }, record)).toBeNull();
+    expect(compilePlanRequest({ ...intent, templateVersion: 4 }, record)).toBeNull();
     expect(compilePlanRequest({ ...intent, recipient: "agent-b1" }, record)).toBeNull();
     expect(compilePlanRequest({ ...intent, semanticArgs: {} }, record)).toBeNull();
     for (const patch of [
@@ -290,9 +207,9 @@ describe("system prompts", () => {
 
 describe("plan request versions", () => {
   test("version 2 says dispatchDuties is an object of duty names from the roster, version 1 does not", () => {
-    const v2 = prepared();
+    const v2 = prepared({ templateVersion: 2 });
     const v1 = prepared({ templateVersion: 1 });
-    expect(PLAN_REQUEST_VERSION).toBe(2);
+    expect(PLAN_REQUEST_VERSION).toBe(3);
     const text2 = compilePlanRequest(v2.intent, v2.record) ?? "";
     const text1 = compilePlanRequest(v1.intent, v1.record) ?? "";
     expect(text2).toContain("必须是对象");
@@ -332,18 +249,20 @@ describe("plan request versions", () => {
   });
 
   test("an unregistered version is not rendered", () => {
-    for (const templateVersion of [0, 3]) {
+    for (const templateVersion of [0, 4]) {
       const { record, intent } = prepared({ templateVersion });
       expect(compilePlanRequest(intent, record)).toBeNull();
     }
   });
 });
 
-describe("version 1 is frozen", () => {
+describe("registered versions are frozen", () => {
   // A failure here means "add the next version", not "update the hash".
-  test("the three texts render exactly these bytes for a fixed input", () => {
-    const { record, intent } = prepared();
-    const plan = compilePlanRequest(intent, record) ?? "";
+  test("the texts render exactly these bytes for a fixed input", () => {
+    const planOf = (templateVersion: number) => {
+      const { record, intent } = prepared({ templateVersion });
+      return compilePlanRequest(intent, record) ?? "";
+    };
     const coordinator = compileCoordinatorSystem({
       teamName: "Coding Team",
       operatingRules: "Review everything.",
@@ -359,11 +278,15 @@ describe("version 1 is frozen", () => {
       memberName: "Backend dev",
       role: ROLE,
     });
-    expect(sha256(plan)).toBe("50c58bde7e19cb746a2e7713dfc160c145d4da7b20b84081e6442ec5520d93a6");
-    // Version 1 is still rendered for plan requests prepared before version 2 existed.
-    const v1 = prepared({ templateVersion: 1 });
-    expect(sha256(compilePlanRequest(v1.intent, v1.record) ?? "")).toBe(
+    // Every plan request version is still rendered for requests prepared before the next one existed.
+    expect(sha256(planOf(1))).toBe(
       "2ff5162b75263a9fbb23e52ebe375dde5eefcf9b98c8eec0efb2e00ac532eda1",
+    );
+    expect(sha256(planOf(2))).toBe(
+      "50c58bde7e19cb746a2e7713dfc160c145d4da7b20b84081e6442ec5520d93a6",
+    );
+    expect(sha256(planOf(3))).toBe(
+      "d507a9ff8fa0cbf36c27581f1054b92b086c23f9000089ecb0d8432bfb4617b4",
     );
     expect(sha256(coordinator)).toBe(
       "5938d9f2d3e6d88c6b3b81b0f35b61507551f39bed67c61dca789ea964b84d48",

@@ -88,7 +88,8 @@ export function bootstrapRun(options: BootstrapOptions = {}): RunRecord {
       localCancellation: null,
       taskId: "plan",
       assignmentId: null,
-      semanticArgs: { purpose: "plan" },
+      // The control nonce is what a plan re-send is rebuilt from (`compilePlanRepair`).
+      semanticArgs: { purpose: "plan", controlNonce: DAG_NONCE },
     } as RunRecord["outbox"][number]);
   }
   return withDagControl(record, {

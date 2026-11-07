@@ -375,6 +375,52 @@ describe("a Run started through the launch host", () => {
     );
   });
 
+  test("a plan the parser refuses is sent back to the coordinator once, and the corrected plan is admitted", async () => {
+    const host = fakeHost();
+    const wired = runtime();
+    const started = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    if (!started.ok) throw new Error(`start failed: ${started.message} ${started.detail}`);
+    await wired.recover();
+    const endTurn = () =>
+      wired.onHook(
+        {
+          name: "agent.turn_ended",
+          agentId: started.coordinatorId,
+          turnId: host.turnOf(started.coordinatorId),
+          outcome: { kind: "completed" },
+        },
+        host.port,
+      );
+
+    // The coordinator leaves `group` out of every task, as DEV's haiku did.
+    const request = (await stored()).outbox.find((intent) => intent.kind === "wake");
+    const nonce = String(request?.semanticArgs.controlNonce);
+    const tasks = planTasks(REPO_ALIAS).map(({ group: _group, ...rest }) => rest);
+    const block = dagBlock(RUN_ID, tasks as never, { nonce });
+    host.reply(started.coordinatorId, `Plan.\n\`\`\`task-dag\n${JSON.stringify(block)}\n\`\`\`\n`);
+    await endTurn();
+
+    const waiting = await stored();
+    expect(waiting.lifecycle).toBe("awaiting-dag");
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([
+      started.coordinatorId,
+      started.coordinatorId,
+    ]);
+    expect(host.sent[1]?.text).toContain("tasks.0.group");
+
+    await coordinatorPlans(host, started.coordinatorId);
+    await endTurn();
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(host.sent).toHaveLength(3);
+    expect(after.outbox.some((intent) => intent.kind === "wake")).toBe(false);
+  });
+
   test("a coordinator reply whose hook was lost is picked up on the first sight of a Paseo handle", async () => {
     const host = fakeHost();
     const before = runtime();

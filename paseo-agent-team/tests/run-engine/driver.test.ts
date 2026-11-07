@@ -22,6 +22,7 @@ import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
 import {
   bootstrapRun,
   COORDINATOR_AGENT,
+  DAG_NONCE,
   dagBlock,
   PLAN_MESSAGE_ID,
   planTasks,
@@ -199,6 +200,7 @@ function build(host: Host, overrides: Partial<DriverOptions> = {}) {
     host: observerHost,
     seatFamily: () => null,
     resolveWorkspace,
+    repair: { send: (runId) => effects.runOutbox(runId) },
   });
   const driver = createEngineDriver({
     store,
@@ -699,5 +701,89 @@ describe("a report that cannot be used is asked for again", () => {
     });
     expect(host.sent).toHaveLength(before);
     expect(t1(await stored())?.protocolFailures).toBe(0);
+  });
+});
+
+describe("a plan the parser refuses is asked for again", () => {
+  /** The plan as DEV's haiku wrote it: no task has a `group`. */
+  const brokenPlan = () =>
+    fence(
+      "task-dag",
+      dagBlock(RUN_ID, planTasks(REPO_ALIAS).map(({ group: _group, ...rest }) => rest) as never),
+    );
+
+  const wakes = (record: RunRecord) => record.outbox.filter((intent) => intent.kind === "wake");
+
+  test("the coordinator is sent the plan's fault once, its corrected plan starts the Run, and t1 goes out", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, brokenPlan());
+    await hook(host, driver, COORDINATOR_AGENT);
+
+    // The Run waits for a DAG; the only message that went out is the re-send, to the coordinator.
+    const waiting = await stored();
+    expect(waiting.lifecycle).toBe("awaiting-dag");
+    expect(waiting.tasks).toEqual([]);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([COORDINATOR_AGENT]);
+    const request = host.lastSent(COORDINATOR_AGENT)?.text ?? "";
+    expect(request).toContain("【控制身份 JSON】");
+    expect(request).toContain(DAG_NONCE);
+    expect(request).toContain("tasks.0.group");
+    expect(request).not.toContain("agent-b1");
+    expect(wakes(waiting).map((intent) => intent.state)).toEqual(["confirmed", "confirmed"]);
+
+    // The coordinator answers the re-send with the plan, in its next turn.
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(wakes(after)).toEqual([]);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([COORDINATOR_AGENT, "agent-b1"]);
+  });
+
+  test("a hook delivered again while the re-send is out asks for nothing more", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, brokenPlan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const sent = host.sent.length;
+    const before = await stored();
+    // The first turn's hook arrives again; the reply being read is the re-send's, still being written.
+    await driver.onHook({
+      name: "agent.turn_ended",
+      agentId: COORDINATOR_AGENT,
+      turnId: "turn-plan",
+    });
+    expect(host.sent).toHaveLength(sent);
+    expect((await stored()).revision).toBe(before.revision);
+  });
+
+  test("a re-send that is refused again is the end of it: the Run waits for a person, and nothing else is sent", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, brokenPlan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    host.reply(COORDINATOR_AGENT, brokenPlan());
+    await hook(host, driver, COORDINATOR_AGENT);
+
+    const after = await stored();
+    expect(after.lifecycle).toBe("awaiting-dag");
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([COORDINATOR_AGENT]);
+    expect(after.alerts.length).toBeGreaterThan(0);
+    expect(wakes(after)).toHaveLength(2);
+  });
+
+  test("a plan refused for what it says is not asked about: the coordinator gets no second message", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, fence("task-dag", dagBlock(RUN_ID, planTasks("repo-elsewhere"))));
+    await hook(host, driver, COORDINATOR_AGENT);
+    expect(host.sent).toHaveLength(0);
+    expect((await stored()).lifecycle).toBe("awaiting-dag");
   });
 });

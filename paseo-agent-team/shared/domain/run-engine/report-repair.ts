@@ -94,7 +94,8 @@ export type RepairResult =
 
 type RecordWithRepair = RunRecord;
 
-function trimmed(issues: readonly RepairIssue[]): RepairIssue[] {
+/** At most `MAX_REPAIR_ISSUES` diagnostics, each field cut to a bounded length (shared with the plan re-send). */
+export function trimIssues(issues: readonly RepairIssue[]): RepairIssue[] {
   return issues.slice(0, MAX_REPAIR_ISSUES).map((issue) => ({
     path: issue.path.slice(0, MAX_ISSUE_TEXT),
     message: issue.message.slice(0, MAX_ISSUE_TEXT),
@@ -150,7 +151,7 @@ export function requestReportRepair(record: RunRecord, input: RepairRequest): Re
       ordinal,
       limit,
       reason: input.reason.slice(0, 200),
-      issues: trimmed(input.issues),
+      issues: trimIssues(input.issues),
       kinds: [...kinds],
     },
   });
