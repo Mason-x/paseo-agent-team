@@ -24,11 +24,11 @@
 | AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 没有断言协议失败不改变 `qualityFailures`、`reworkCount`；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
-| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | "Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例 | B4、B6 | 无 |
+| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用现在有页面出路（取消任务，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | A5 | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查；派发之后的临时失败没有自动重试；预算耗尽不开决策 | B2、B3、B7 | 无 |
-| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停与续办有 RPC 和页面按钮（含重复、过期修订、生命周期拒绝、续办只推进一次）；取消只有 reducer，没有引擎代码和 RPC；`creating` 崩溃后无人续办；没有 DEV | A4、A5、A8 | 无 |
+| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停与续办有 RPC 和页面按钮；单个任务的取消有决策答复（`cancel`，证明停下才释放，级联下游）；整个 Run 的取消还没有；`creating` 崩溃后无人续办；没有 DEV | A5、A8 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | B2 | 无 |
@@ -145,8 +145,11 @@
 - tests/run-core/cancel-release.test.ts :: after the decision is answered `cancel`, cancelling releases the claim and binds the decision
 - tests/run-core/cancel-release.test.ts :: another answer is not an authorization: the task stays frozen with its claim
 - tests/run-core/cancellation-review-regressions.test.ts :: %s keeps the frozen claims — 模板
+- tests/run-engine/control.test.ts :: [%s] a D4: the task and everything that depends on it are cancelled, the claims go, the Run finishes, and nothing is sent
+- tests/run-engine/control.test.ts :: work that is not proven stopped, or a dependent that already started, is not cancelled
+- tests/run-engine/driver.test.ts :: the decision of a frozen supplement can only be answered with cancel: a retry is refused, a cancel releases the claim and the dependents
 
-缺口："Agent 失联"没有用例（夹具 `closed-while-assigned` 没有测试使用）；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，只有锁函数层。
+缺口："Agent 失联"没有用例（夹具 `closed-while-assigned` 没有测试使用）；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，只有锁函数层；没有"取消后另一个 Run 拿到占用"的跨 Run 用例。
 
 ### AC11 收到报告后 hook 才到，或 hook 早于初始化/关键记录
 - tests/run-engine/observer.test.ts :: a turn end the hooks missed is recovered from the host, and a late hook is then a duplicate
@@ -184,6 +187,7 @@
 - tests/run-engine/lifecycle.test.ts :: an active Run is paused by the reducer's own event, once
 - tests/run-engine/lifecycle.test.ts :: a paused Run becomes active and the driver is asked to push it, as after a write
 - tests/run-engine/control-lifecycle.test.ts :: the same request again is the same request: replayed, nothing written
+- tests/run-engine/control.test.ts :: a paused Run answers nothing: the decision offers no action and the answer is refused
 - tests/run-engine/control-lifecycle.test.ts :: a repeat is found before the revision is checked, so a Run that moved on still answers replayed
 - tests/run-engine/control-lifecycle.test.ts :: a paused Run becomes active and the driver is asked to push it on, as after a write
 - tests/run-engine/driver.test.ts :: pause and resume as RPCs: nothing goes out while paused, the held work goes out once after the resume answer
