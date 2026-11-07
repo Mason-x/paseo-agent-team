@@ -46,14 +46,15 @@ export {
  *   requires a `schemaVersion` bump (and the v1 reader must keep leaving v2 bytes untouched).
  * - `schemaVersion` is the record version; the directory `v1` is the layout version. A record with
  *   a different `schemaVersion` never reaches these schemas: the store classifies it before
- *   parsing. These schemas only describe version 1.
+ *   parsing. Versions 1 and 2 share this shape; evidenceRepair is v2-only.
  * - No secrets: no API keys, env, MCP headers, full prompts or logs. Evidence stores bounded
  *   summaries plus paths; `artifactPath` root checks belong to the evidence gate (R05), not here.
  *
  * Nothing in this module performs I/O, scheduling, or recovery.
  */
 
-export const RUN_SCHEMA_VERSION = 1;
+export const RUN_SCHEMA_VERSION = 2;
+export const RUN_SUPPORTED_SCHEMA_VERSIONS = [1, 2] as const;
 
 /** AC-RE1.12 hard capacity. A Run never truncates history or silently splits; it stops instead. */
 export const RUN_MAX_TASKS = 64;
@@ -440,6 +441,17 @@ export const RunReopenGrantSchema = z
   });
 export type RunReopenGrant = z.infer<typeof RunReopenGrantSchema>;
 
+/** Storage remains tolerant, but known evidence-repair fields are versioned and bounded. */
+export const RunEvidenceRepairSchema = z
+  .object({
+    version: z.literal(1),
+    predecessorAssignmentId: RunIdRefSchema,
+    rootAssignmentId: RunIdRefSchema,
+    ordinal: z.number().int().min(1).max(10),
+  })
+  .passthrough();
+export type RunEvidenceRepair = z.infer<typeof RunEvidenceRepairSchema>;
+
 export const RunAssignmentSchema = z
   .object({
     assignmentId: RunIdRefSchema,
@@ -471,6 +483,9 @@ export const RunAssignmentSchema = z
     reopenGrantId: RunIdRefSchema.nullable().optional(),
     reopenOfAssignmentId: RunIdRefSchema.nullable().optional(),
     supersededByAssignmentId: RunIdRefSchema.nullable().optional(),
+    // v1 stored arbitrary unknown fields. Validate this field only when the enclosing record is v2;
+    // a v1 record may contain an unrelated value with this name and must retain its original bytes.
+    evidenceRepair: z.unknown().optional(),
   })
   .passthrough()
   .superRefine((assignment, ctx) => {
@@ -1320,7 +1335,7 @@ export type RunPolicySnapshot = z.infer<typeof RunPolicySnapshotSchema>;
  */
 export const RunRecordSchema = z
   .object({
-    schemaVersion: z.literal(RUN_SCHEMA_VERSION),
+    schemaVersion: z.union([z.literal(1), z.literal(RUN_SCHEMA_VERSION)]),
     runId: RunIdSchema,
     // The persisted root is the codec header: validateHeader (atomic-json.ts) requires revision >= 1.
     // Only this field is tightened; RunRevisionSchema stays non-negative for the other structures.
@@ -1383,6 +1398,21 @@ export const RunRecordSchema = z
   })
   .passthrough()
   .superRefine((record, ctx) => {
+    if (record.schemaVersion === 2) {
+      for (const [index, assignment] of record.assignments.entries()) {
+        if (assignment.evidenceRepair === undefined) continue;
+        const repair = RunEvidenceRepairSchema.safeParse(assignment.evidenceRepair);
+        if (!repair.success) {
+          for (const issue of repair.error.issues) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["assignments", index, "evidenceRepair", ...issue.path],
+              message: issue.message,
+            });
+          }
+        }
+      }
+    }
     if (record.revision === 1 && record.previousDigest !== "") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

@@ -6,6 +6,7 @@ import type {
 import { RunStoredTaskReportSchema } from "../../schemas/run-engine/ledger";
 import { isDecisionPending } from "./decision-state";
 import { producerHead, resolveD } from "./delivery-binding";
+import { evidenceRepairOf } from "./evidence-repair";
 import { reduceRun } from "./reducer";
 import { settleRepairs } from "./report-repair";
 import { hasUnsettledEffects, isNormalEnded } from "./transitions";
@@ -151,6 +152,7 @@ export function openStuckDecision(
   if (task === undefined || assignment === undefined || assignment.taskId !== input.taskId) {
     return { changed: false };
   }
+  if (evidenceRepairOf(record, assignment)) return { changed: false };
   if (task.state !== "blocked" && task.state !== "failed") return { changed: false };
   if (!isBlockedOrFailedReport(assignment.acceptedProof)) return { changed: false };
   const dedupeKey = `${STUCK_KEY_PREFIX}${input.assignmentId}`;
@@ -214,6 +216,7 @@ export function openLimboDecision(
   if (task === undefined || assignment === undefined || assignment.taskId !== input.taskId) {
     return { changed: false };
   }
+  if (evidenceRepairOf(record, assignment)) return { changed: false };
   if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return { changed: false };
   if (assignment.acceptedProof !== null || !OPEN_ASSIGNMENT.includes(assignment.state)) {
     return { changed: false };
@@ -289,7 +292,13 @@ export function stoppedTasksWithoutDecision(
     const assignment = record.assignments.find(
       (entry) => entry.assignmentId === task.currentAssignmentId,
     );
-    if (assignment === undefined || !isBlockedOrFailedReport(assignment.acceptedProof)) continue;
+    if (
+      assignment === undefined ||
+      evidenceRepairOf(record, assignment) ||
+      !isBlockedOrFailedReport(assignment.acceptedProof)
+    ) {
+      continue;
+    }
     found.push({ taskId: task.spec.id, assignmentId: assignment.assignmentId });
   }
   return found;
@@ -374,6 +383,7 @@ function planResume(
     return { ok: false, reason: "decision-stale" };
   }
 
+  if (evidenceRepairOf(record, assignment)) return { ok: false, reason: "decision-stale" };
   if (assignment.acceptedProof === null) {
     // A producer whose turn ended with nothing usable (`openLimboDecision`): still `assigned`.
     const evidence = limboEvidence(decision);

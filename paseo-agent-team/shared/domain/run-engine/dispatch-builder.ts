@@ -9,6 +9,7 @@ import type {
 import { type BudgetPredebit, predebit } from "./budget";
 import { resolveD } from "./delivery-binding";
 import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
+import { evidenceRepairOf, validEvidenceReissue } from "./evidence-repair";
 import { devEndpoint, producerEpoch } from "./gates";
 import { findLockConflicts, type LockConflict, type VerifiedScope } from "./locks";
 import { type ReduceFacts, type ReduceResult, reduceRun } from "./reducer";
@@ -78,6 +79,16 @@ export type DispatchBuildInput = {
     templateVersion: number;
     semanticArgs?: Record<string, unknown>;
   };
+};
+
+export type EvidenceReissueInput = {
+  taskId: string;
+  predecessorAssignmentId: string;
+  scopes: readonly VerifiedScope[];
+  otherResources: DispatchBuildInput["otherResources"];
+  ids: Omit<DispatchBuildInput["ids"], "claimId">;
+  now: string;
+  payload: DispatchBuildInput["payload"];
 };
 
 export type DispatchRefusal =
@@ -290,6 +301,200 @@ export function buildDispatch(record: RunRecord, input: DispatchBuildInput): Dis
       intent,
       claims,
       reissueOfAssignmentId: null,
+    },
+  };
+}
+
+/** Recheck retained M2 claims against the same authoritative cross-Run view used for new work. */
+export function evidenceResourcesAvailable(
+  record: RunRecord,
+  task: RunRecord["tasks"][number],
+  otherResources: EvidenceReissueInput["otherResources"],
+  options: { allowFrozen?: boolean } = {},
+): { ok: true } | Extract<DispatchBuild, { ok: false }> {
+  if (!otherResources.trusted) return { ok: false, reason: "other-runs-untrusted" };
+  const owned = record.resources.filter((claim) => claim.taskId === task.spec.id);
+  const repoIds = [...new Set(task.spec.scopes.map((scope) => scope.repoId))];
+  if (
+    (!options.allowFrozen && owned.some((claim) => claim.frozen)) ||
+    task.spec.scopes.some(
+      (scope) =>
+        !owned.some(
+          (claim) =>
+            claim.repoId === scope.repoId &&
+            claim.kind === scope.kind &&
+            claim.path === scope.path &&
+            claim.access === scope.access,
+        ),
+    ) ||
+    repoIds.some(
+      (repoId) =>
+        !owned.some(
+          (claim) =>
+            claim.repoId === repoId &&
+            claim.kind === "hot" &&
+            claim.path === REPO_EXCLUSIVE_RESOURCE &&
+            claim.access === "write",
+        ),
+    )
+  ) {
+    return { ok: false, reason: "lock-conflict" };
+  }
+  const foreign = findLockConflicts(foreignResources(otherResources.claims), {
+    taskId: task.spec.id,
+    phase: "implementation",
+    scopes: [
+      ...task.spec.scopes.map((scope): VerifiedScope => ({ ...scope, verified: true })),
+      ...repoIds.map(
+        (repoId): VerifiedScope => ({
+          repoId,
+          kind: "hot",
+          path: REPO_EXCLUSIVE_RESOURCE,
+          access: "write",
+          verified: true,
+        }),
+      ),
+    ],
+  });
+  if (!foreign.ok) return { ok: false, reason: "scope-unverified" };
+  return foreign.conflicts.length > 0
+    ? { ok: false, reason: "lock-conflict", conflicts: foreign.conflicts }
+    : { ok: true };
+}
+
+/** Build a same-attempt supplement without taking a new claim or changing the original delivery. */
+export function buildEvidenceReissue(
+  record: RunRecord,
+  input: EvidenceReissueInput,
+): DispatchBuild {
+  const task = record.tasks.find((entry) => entry.spec.id === input.taskId);
+  const previous = record.assignments.find(
+    (entry) => entry.assignmentId === input.predecessorAssignmentId,
+  );
+  if (!task) return { ok: false, reason: "task-missing" };
+  if (
+    !previous ||
+    previous.workspace === null ||
+    !["member", "coordinator"].includes(previous.purpose)
+  ) {
+    return { ok: false, reason: "delivery-missing" };
+  }
+  for (const declared of task.spec.scopes) {
+    if (!input.scopes.some((verified) => sameScope(declared, verified))) {
+      return { ok: false, reason: "scope-unverified" };
+    }
+  }
+  const resources = evidenceResourcesAvailable(record, task, input.otherResources);
+  if (!resources.ok) return resources;
+  const { ids } = input;
+  const idempotencyKey = `dispatch:${record.runId}:${ids.assignmentId}`;
+  if (
+    record.outbox.some(
+      (intent) => intent.messageId === ids.messageId || intent.idempotencyKey === idempotencyKey,
+    ) ||
+    record.assignments.some((entry) => entry.assignmentId === ids.assignmentId) ||
+    record.nonceRegistry.some((entry) => entry.nonce === ids.nonce)
+  ) {
+    return { ok: false, reason: "duplicate-dispatch" };
+  }
+  const seat = record.roster.find((entry) => entry.seatId === previous.seatId);
+  if (!seat?.enabled || seat.agentId !== previous.agentId) {
+    return { ok: false, reason: "seat-unavailable" };
+  }
+  const assignment: RunAssignment = {
+    assignmentId: ids.assignmentId,
+    taskId: task.spec.id,
+    seatId: previous.seatId,
+    agentId: previous.agentId,
+    profileId: previous.profileId,
+    profileName: previous.profileName,
+    provider: previous.provider,
+    model: previous.model,
+    family: previous.family,
+    channelId: previous.channelId,
+    tier: previous.tier,
+    reason: "Supplement evidence for the existing delivery",
+    purpose: previous.purpose,
+    workspace: structuredClone(previous.workspace),
+    attempt: previous.attempt,
+    nonce: ids.nonce,
+    messageId: ids.messageId,
+    delivery: null,
+    acceptedProof: null,
+    endedEventKey: null,
+    turnId: null,
+    state: "assigned",
+    createdAt: input.now,
+    startedAt: null,
+    endedAt: null,
+    evidenceRepair: {
+      version: 1,
+      predecessorAssignmentId: previous.assignmentId,
+      rootAssignmentId:
+        evidenceRepairOf(record, previous)?.rootAssignmentId ?? previous.assignmentId,
+      ordinal: task.evidenceReturns,
+    },
+  };
+  if (!validEvidenceReissue(record, assignment, previous.assignmentId)) {
+    return { ok: false, reason: "task-not-dispatchable" };
+  }
+  const budget = predebit(record, {
+    seatId: previous.seatId,
+    intentKey: idempotencyKey,
+    messageId: ids.messageId,
+    amount: 1,
+    revision: record.revision,
+  });
+  if (budget.status === "already-counted") return { ok: false, reason: "duplicate-dispatch" };
+  if (budget.status === "exhausted") {
+    return {
+      ok: false,
+      reason: budget.reason === "missing" ? "budget-missing" : "budget-exhausted",
+    };
+  }
+  const nonce: RunNonceEntry = {
+    nonce: ids.nonce,
+    runId: record.runId,
+    taskId: task.spec.id,
+    assignmentId: ids.assignmentId,
+    attempt: previous.attempt,
+    phase: "implementation",
+    agentId: previous.agentId,
+    seatId: previous.seatId,
+    issuedAt: input.now,
+    acceptedAt: null,
+    acceptedEventKey: null,
+    revokedAt: null,
+    revokeReason: null,
+  };
+  const intent: RunEffectIntent = {
+    id: ids.intentId,
+    kind: "dispatch",
+    recipient: previous.agentId,
+    messageId: ids.messageId,
+    idempotencyKey,
+    payloadHash: input.payload.hash,
+    templateVersion: input.payload.templateVersion,
+    state: "prepared",
+    recoverySendCount: 0,
+    createdAt: input.now,
+    confirmedAt: null,
+    localCancellation: null,
+    taskId: task.spec.id,
+    assignmentId: ids.assignmentId,
+    semanticArgs: input.payload.semanticArgs ?? {},
+  };
+  return {
+    ok: true,
+    budget,
+    event: {
+      kind: "task-dispatched",
+      taskId: task.spec.id,
+      assignment,
+      nonce,
+      intent,
+      claims: [],
+      reissueOfAssignmentId: previous.assignmentId,
     },
   };
 }

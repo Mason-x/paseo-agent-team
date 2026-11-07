@@ -345,7 +345,7 @@ describe("ledger records are tolerant, versioned, and bounded", () => {
   });
 
   test("schemaVersion, ids, digests, revisions, and the two header shapes are exact", () => {
-    expect(RunRecordSchema.safeParse(runRecord({ schemaVersion: 2 })).success).toBe(false);
+    expect(RunRecordSchema.safeParse(runRecord({ schemaVersion: 3 })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-abc" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ runId: "run-AbC-xyz" })).success).toBe(false);
     expect(RunRecordSchema.safeParse(runRecord({ revision: -1 })).success).toBe(false);

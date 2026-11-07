@@ -98,7 +98,7 @@ describe("run.get", () => {
     await writeFile(recordFile(home, "run-qry004-a1"), "{ broken");
     await writeFile(
       recordFile(home, "run-qry004-b1"),
-      `${JSON.stringify({ schemaVersion: 2, runId: "run-qry004-b1" })}\n`,
+      `${JSON.stringify({ schemaVersion: 3, runId: "run-qry004-b1" })}\n`,
     );
     const again = createRunStore({ home, lock: { acquireTimeoutMs: 300 } });
     stores.push(again);
@@ -119,7 +119,7 @@ describe("run.get", () => {
       issues: [{ code: "run-missing" }],
     });
     expect(await readFile(recordFile(home, "run-qry004-b1"), "utf8")).toContain(
-      '"schemaVersion":2',
+      '"schemaVersion":3',
     );
   });
 

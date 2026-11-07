@@ -1,8 +1,27 @@
 import { createHash } from "node:crypto";
+import {
+  producerHead,
+  resolveProducerProof,
+} from "../../shared/domain/run-engine/delivery-binding";
+import { evidenceResourcesAvailable } from "../../shared/domain/run-engine/dispatch-builder";
 import { type IntentTarget, transitionIntent } from "../../shared/domain/run-engine/effect-state";
+import {
+  evidenceRepairOf,
+  validStoredEvidenceRepair,
+} from "../../shared/domain/run-engine/evidence-repair";
+import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
+import { noteTask } from "../../shared/domain/run-engine/task-note";
+import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortActiveTurnBehavior } from "../../shared/paseo/port";
 import type { RunEffectIntent, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { findDispatchEcho } from "./host";
+import {
+  deliveredFiles,
+  dispatchWorkspace,
+  inspectRepo,
+  prepareEvidenceDir,
+  verifyScopes,
+} from "./repo";
 import type { RunStore } from "./store";
 
 /**
@@ -32,6 +51,8 @@ export type EffectsOptions = {
    */
   compile(intent: SendableIntent, record: RunRecord): string | null;
   clock?: { now(): string };
+  /** The Run's shared Workspace, to recheck a supplement just before it is sent. Defaults to `launch.workspace`. */
+  resolveWorkspace?(record: RunRecord): { workspaceId: string; directory: string } | null;
   /**
    * What the host does with a message that lands mid-turn. Constant for the life of a Run on
    * purpose: the host deduplicates a repeated `messageId` only when the options are identical.
@@ -81,6 +102,85 @@ export function createEffects(options: EffectsOptions) {
   const maxPerCall = options.maxPerCall ?? DEFAULT_MAX_PER_CALL;
   const activeTurnBehavior = options.activeTurnBehavior ?? "steer";
   const chains = new Map<string, Promise<unknown>>();
+  // Same source as the service: a supplement is only sent while the Run's shared Workspace is intact.
+  const resolveWorkspace =
+    options.resolveWorkspace ??
+    ((record: RunRecord) => {
+      const workspace = readLaunchWorkspace(record);
+      return workspace ? { workspaceId: workspace.id, directory: workspace.directory } : null;
+    });
+
+  /** A supplement can be left prepared across a restart; recheck live facts immediately before send. */
+  async function evidencePreflight(record: RunRecord, intent: SendableIntent): Promise<boolean> {
+    const assignment = record.assignments.find(
+      (entry) => entry.assignmentId === intent.assignmentId,
+    );
+    const repair = assignment && evidenceRepairOf(record, assignment);
+    if (!assignment || !repair) return true;
+    if (!validStoredEvidenceRepair(record, assignment)) return false;
+    const task = record.tasks.find((entry) => entry.spec.id === assignment.taskId);
+    const root = record.assignments.find((entry) => entry.assignmentId === repair.rootAssignmentId);
+    const proof = resolveProducerProof(record, repair.rootAssignmentId);
+    const location = resolveWorkspace(record);
+    const dispatch = record.outbox.find(
+      (entry) => entry.kind === "dispatch" && entry.assignmentId === assignment.assignmentId,
+    );
+    if (
+      !task ||
+      !root?.workspace ||
+      !proof ||
+      proof.ref.kind !== "git-commit" ||
+      !location ||
+      location.workspaceId !== root.workspace.id ||
+      !dispatch ||
+      typeof dispatch.semanticArgs.evidenceDir !== "string" ||
+      typeof dispatch.semanticArgs.repoRoot !== "string"
+    ) {
+      return false;
+    }
+    try {
+      const snapshot = (await options.port.agents.ref(assignment.agentId).refresh())?.agent;
+      const pending = Array.isArray(snapshot?.pendingPermissions)
+        ? snapshot.pendingPermissions.length > 0
+        : Boolean(snapshot?.pendingPermissions);
+      if (snapshot?.status !== "idle" || snapshot.activeTurn || pending || snapshot.lastError) {
+        return false;
+      }
+      const inspected = await inspectRepo(location.directory);
+      if (!inspected.ok) return false;
+      const repo = inspected.repo;
+      const delivered = proof.ref.value.toLowerCase();
+      if (repo.branch !== root.workspace.branch || repo.headSha?.toLowerCase() !== delivered)
+        return false;
+      if (!dispatchWorkspace(repo, location.workspaceId).ok) return false;
+      const normalize = (value: string) => {
+        const normalized = value.replaceAll("\\", "/");
+        return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+      };
+      if (normalize(repo.root) !== normalize(dispatch.semanticArgs.repoRoot)) return false;
+      const verified = await verifyScopes(repo, task.spec.scopes);
+      if (!verified.ok) return false;
+      const actual = await deliveredFiles(repo, root.workspace.baseRef, delivered);
+      if (!actual.ok) return false;
+      const sorted = (files: readonly string[]) =>
+        [...new Set(files.map((file) => file.replaceAll("\\", "/")))].sort();
+      const left = sorted(proof.changedFiles);
+      const right = sorted(actual.files);
+      if (left.length !== right.length || left.some((file, index) => file !== right[index]))
+        return false;
+      const evidence = await prepareEvidenceDir(
+        repo,
+        record.policy.evidenceRoot,
+        assignment.assignmentId,
+      );
+      return (
+        evidence.ok && normalize(evidence.dir) === normalize(dispatch.semanticArgs.evidenceDir)
+      );
+    } catch (error) {
+      log(`cannot recheck evidence intent ${intent.id}`, error);
+      return false;
+    }
+  }
 
   /**
    * One commit: move an intent to `to`. `ok` means the ledger now holds that state; `changed`
@@ -94,11 +194,69 @@ export function createEffects(options: EffectsOptions) {
     reason?: string,
   ): Promise<{ ok: boolean; changed: boolean }> {
     const holder = { ok: false, changed: false };
-    await options.store.update(runId, (current) => {
-      const result = transitionIntent(current, intentId, to, { now: clock.now(), reason });
+    await options.store.update(runId, (current, context) => {
+      const intent = current.outbox.find((entry) => entry.id === intentId);
+      const assignment = current.assignments.find(
+        (entry) => entry.assignmentId === intent?.assignmentId,
+      );
+      const repair = assignment && evidenceRepairOf(current, assignment);
+      const now = clock.now();
+      if (to === "sending" && repair && assignment && intent) {
+        const task = current.tasks.find((entry) => entry.spec.id === assignment.taskId);
+        const head = producerHead(current, assignment.taskId);
+        const seat = current.roster.find((entry) => entry.seatId === assignment.seatId);
+        const channel = current.channels.find((entry) => entry.channelId === assignment.channelId);
+        const remaining = {
+          ...current,
+          outbox: current.outbox.filter((entry) => entry.id !== intentId),
+        };
+        if (
+          current.lifecycle !== "active" ||
+          current.launch.state === "failed" ||
+          current.launch.state === "cancelled" ||
+          !task ||
+          (task.state !== "assigned" && task.state !== "in_progress") ||
+          task.frozenClaimId !== null ||
+          !seat?.enabled ||
+          seat.agentId !== assignment.agentId ||
+          channel?.state !== "available" ||
+          current.policy.disabledChannels.includes(assignment.channelId) ||
+          current.policy.disabledProfileIds.includes(assignment.profileId) ||
+          head.kind !== "ok" ||
+          head.assignment.assignmentId !== assignment.assignmentId ||
+          !validStoredEvidenceRepair(current, assignment) ||
+          !evidenceResourcesAvailable(current, task, context.otherResources, {
+            allowFrozen: intent.kind === "wake",
+          }).ok ||
+          current.decisions.some(
+            (entry) =>
+              entry.subjectId === task.spec.id &&
+              (entry.state === "open" || entry.state === "waiting-human"),
+          ) ||
+          current.outbox.some(
+            (entry) =>
+              entry.id !== intentId &&
+              entry.recipient === intent.recipient &&
+              (entry.state === "sending" || entry.state === "outcome-unknown"),
+          ) ||
+          (intent.kind === "dispatch" && hasUnsettledEffects(remaining, task.spec.id))
+        ) {
+          return null;
+        }
+      }
+      const result = transitionIntent(current, intentId, to, { now, reason });
       holder.ok = result.ok;
       holder.changed = result.ok && result.changed;
-      return result.ok && result.changed ? result.next : null;
+      if (!result.ok || !result.changed) return null;
+      let next = result.next;
+      if (to === "outcome-unknown" && repair && assignment) {
+        for (const claim of next.resources) {
+          if (claim.taskId === assignment.taskId) claim.frozen = true;
+        }
+        const noted = noteTask(next, assignment.taskId, "evidence-send-outcome-unknown", { now });
+        if (noted.ok && noted.changed) next = noted.next;
+      }
+      return next;
     });
     return holder;
   }
@@ -173,6 +331,20 @@ export function createEffects(options: EffectsOptions) {
         );
         report.failed.push(intent.id);
         continue;
+      }
+
+      if (!(await evidencePreflight(record, intent))) {
+        await options.store.update(runId, (current) => {
+          const stillPrepared = current.outbox.find(
+            (entry) => entry.id === intent.id && entry.state === "prepared",
+          );
+          if (typeof stillPrepared?.taskId !== "string" || stillPrepared.taskId === "") return null;
+          const noted = noteTask(current, stillPrepared.taskId, "evidence-send-waiting", {
+            now: clock.now(),
+          });
+          return noted.ok && noted.changed ? noted.next : null;
+        });
+        return;
       }
 
       // Commit the intent to `sending` first. If this throws, nothing was sent. Only the runner

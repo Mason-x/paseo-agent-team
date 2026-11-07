@@ -18,6 +18,7 @@ import {
   resolveProducerProof,
 } from "./delivery-binding";
 import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
+import { matchesEvidenceRoot } from "./evidence-repair";
 import { executionTier, reviewRequirement } from "./tier";
 import {
   assignmentPhase,
@@ -157,6 +158,13 @@ export function checkEvidenceForProducer(
     executionTier(producerEpoch(task, producer)) !== producer.tier
   ) {
     return fail("evidence", ["assignments", producer.assignmentId], "invalid-producer");
+  }
+  if (!matchesEvidenceRoot(record, producer, proof)) {
+    return fail(
+      "evidence",
+      ["assignments", producer.assignmentId],
+      "evidence-repair-delivery-changed",
+    );
   }
   return evidenceChecks(record, task, producer, proof);
 }

@@ -26,6 +26,12 @@ import { isDecisionPending } from "./decision-state";
 import { canonicalKnown, producerHead, proofEqual, resolveD } from "./delivery-binding";
 import { dispatchRequirement, structuralSeats } from "./dispatch-requirement";
 import {
+  EVIDENCE_TEMPLATE,
+  EVIDENCE_TEMPLATE_VERSION,
+  evidenceIssueCanBeRepaired,
+  validEvidenceReissue,
+} from "./evidence-repair";
+import {
   checkEvidenceGate,
   doneGate,
   failedDeliveryIds,
@@ -793,6 +799,9 @@ function applyEvent(
       const producer = ["member", "coordinator", "reopen"].includes(assignment.purpose);
       const reviewer = assignment.purpose === "reviewer";
       const smoker = assignment.purpose === "smoker";
+      if (next.schemaVersion === 2 && assignment.evidenceRepair !== undefined && !producer) {
+        return reject("RUN_EVENT_INVALID", ["assignment", "reissueOfAssignmentId"], "reissue");
+      }
       const requirement = dispatchRequirement(
         task,
         producer ? "produce" : reviewer ? "review" : "smoke",
@@ -847,10 +856,28 @@ function applyEvent(
       if (producer) {
         const awaiting = task.state === "review" && task.phase === "awaiting-rework";
         const reissue = event.reissueOfAssignmentId;
+        if (
+          next.schemaVersion === 2 &&
+          ((reissue === null && assignment.evidenceRepair !== undefined) ||
+            (reissue !== null &&
+              (!validEvidenceReissue(next, assignment, reissue) ||
+                event.intent.kind !== "dispatch" ||
+                event.intent.semanticArgs.template !== EVIDENCE_TEMPLATE ||
+                event.intent.templateVersion !== EVIDENCE_TEMPLATE_VERSION)))
+        ) {
+          return reject("RUN_EVENT_INVALID", ["assignment", "reissueOfAssignmentId"], "reissue");
+        }
         if (reissue === null && !["ready", "rework"].includes(task.state) && !awaiting) {
           return invalidTransition(event.taskId, task.state, "assigned");
         }
         if (reissue !== null) {
+          const evidence = checkEvidenceGate(next, task);
+          if (
+            next.schemaVersion === 2 &&
+            (evidence.ok || !evidenceIssueCanBeRepaired(evidence.issues[0]?.params.reason))
+          ) {
+            return reject("RUN_EVENT_INVALID", ["assignment", "reissueOfAssignmentId"], "reissue");
+          }
           const old = assignmentOf(next, reissue);
           const head = producerHead(next, task.spec.id);
           if (

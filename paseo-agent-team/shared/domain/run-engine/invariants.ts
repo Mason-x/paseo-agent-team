@@ -1,5 +1,6 @@
 import { type RunRecord, RunRecordSchema } from "../../schemas/run-engine/ledger";
 import { artifactRefEqual, producerHead, resolveD } from "./delivery-binding";
+import { validStoredEvidenceRepair } from "./evidence-repair";
 import {
   checkEvidenceForProducer,
   doneGate,
@@ -479,6 +480,17 @@ function checkI6(record: RunRecord): RunInvariantViolation[] {
 function checkI7(record: RunRecord): RunInvariantViolation[] {
   const issues: RunInvariantViolation[] = [];
   for (const task of record.tasks) {
+    for (const assignment of record.assignments.filter((entry) => entry.taskId === task.spec.id)) {
+      if (!validStoredEvidenceRepair(record, assignment)) {
+        issues.push(
+          violation(
+            "I7",
+            ["assignments", record.assignments.indexOf(assignment), "evidenceRepair"],
+            "invalid-evidence-repair-chain",
+          ),
+        );
+      }
+    }
     const head = producerHead(record, task.spec.id);
     if (head.kind === "invalid") {
       issues.push(violation("I7", ["tasks", task.spec.id, "producer"], head.reason));

@@ -102,11 +102,17 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
   const host = createObserverHost(port);
   // Reconcile has no hook behind it, so it must not call a turn that is still running finished.
   const reconcileHost = createObserverHost(port, { requireIdle: true });
-  const effects = createEffects({ store, port, compile: compileEngineIntent, log });
   const resolveWorkspace = (record: RunRecord) => {
     const workspace = readLaunchWorkspace(record);
     return workspace ? { workspaceId: workspace.id, directory: workspace.directory } : null;
   };
+  const effects = createEffects({
+    store,
+    port,
+    compile: compileEngineIntent,
+    resolveWorkspace,
+    log,
+  });
   const service = createEngineService({
     store,
     port,

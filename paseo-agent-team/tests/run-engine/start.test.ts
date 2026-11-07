@@ -256,6 +256,7 @@ describe("startEngineRun", () => {
     expect(result).toMatchObject({ ok: true, runId: RUN_ID, launchState: "running" });
     if (!result.ok) return;
     const record = await stored();
+    expect(record.schemaVersion).toBe(2);
     expect(record.launch.state).toBe("running");
     expect(record.lifecycle).toBe("bootstrapping");
     expect(record.tasks).toEqual([]);

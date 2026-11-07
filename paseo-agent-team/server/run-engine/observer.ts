@@ -65,6 +65,7 @@ export type ReportInspection =
       kind: RunProtocolBlockName;
       block: RunProtocolBlock;
       turnId: string;
+      anchor: string;
       ownership: OwnershipResult;
     };
 
@@ -375,6 +376,7 @@ export function createRunObserver(options: ObserverOptions) {
         kind: extracted.kind,
         block: extracted.block,
         turnId: window.turnId,
+        anchor,
         ownership,
       };
     },

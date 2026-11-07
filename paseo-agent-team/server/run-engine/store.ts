@@ -5,6 +5,7 @@ import {
   RUN_HARD_BYTES,
   RUN_SCHEMA_VERSION,
   RUN_SOFT_BYTES,
+  RUN_SUPPORTED_SCHEMA_VERSIONS,
   type RunRecord,
   RunRecordSchema,
   type RunResourceClaimSchema,
@@ -121,6 +122,7 @@ function invariantStrings(record: RunRecord): string[] {
 
 export const runRecordCodec: AtomicJsonCodec<RunRecord> = {
   schemaVersion: RUN_SCHEMA_VERSION,
+  supportedSchemaVersions: RUN_SUPPORTED_SCHEMA_VERSIONS,
   parse(value) {
     return RunRecordSchema.parse(value);
   },

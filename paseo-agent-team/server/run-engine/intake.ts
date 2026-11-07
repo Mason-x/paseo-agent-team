@@ -5,13 +5,17 @@ import {
   compileRepairRequest,
   REPAIR_REQUEST_VERSION,
 } from "../../shared/domain/run-engine/engine-prompts";
+import { evidenceRepairOf } from "../../shared/domain/run-engine/evidence-repair";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
 import {
   type RepairIssue,
+  repairWakes,
+  replyAnchor,
   requestReportRepair,
   settleRepairs,
 } from "../../shared/domain/run-engine/report-repair";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
+import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions";
 import type { RunAssignment, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunProtocolBlock } from "../../shared/schemas/run-engine/protocol";
 import { sha256Hex } from "./digest";
@@ -111,6 +115,51 @@ export function createIntake(options: IntakeOptions) {
     };
   }
 
+  type RepairWitness = {
+    id: string;
+    state: string;
+    messageId: string;
+    turnId: string | null;
+    endedEventKey: string | null;
+  };
+
+  /** Read each sent repair's own window and receipt; an older assignment's end is not its end. */
+  async function evidenceRepairWitnesses(
+    record: RunRecord,
+    assignment: RunAssignment,
+  ): Promise<{ ok: true; witnesses: RepairWitness[] } | { ok: false; reason: UnverifiableReason }> {
+    const witnesses: RepairWitness[] = [];
+    for (const wake of repairWakes(record, assignment.assignmentId)) {
+      if (wake.state === "prepared" || wake.state === "failed") {
+        witnesses.push({
+          id: wake.id,
+          state: wake.state,
+          messageId: wake.messageId,
+          turnId: null,
+          endedEventKey: null,
+        });
+        continue;
+      }
+      const window = await options.host.replyWindow(assignment.agentId, wake.messageId);
+      if (!window.complete) return { ok: false, reason: window.reason };
+      const ended = record.eventReceipts.find(
+        (entry) =>
+          entry.kind === "turn_ended" &&
+          entry.agentId === assignment.agentId &&
+          entry.turnId === window.turnId,
+      );
+      if (!ended) return { ok: false, reason: "turn-open" };
+      witnesses.push({
+        id: wake.id,
+        state: wake.state,
+        messageId: wake.messageId,
+        turnId: window.turnId,
+        endedEventKey: ended.eventKey,
+      });
+    }
+    return { ok: true, witnesses };
+  }
+
   /**
    * Writes "why this task is not moving". With repair on, a report that is missing or refused by
    * the parser also gets a repair request, once per message that was read and within the budget; the
@@ -130,6 +179,7 @@ export function createIntake(options: IntakeOptions) {
   ): Promise<IntakeResult> {
     let requested = false;
     let open = false;
+    let resultReason = reason;
     await options.store.update(runId, (current) => {
       const assignment = current.assignments.find((entry) => entry.assignmentId === assignmentId);
       if (!assignment || !awaitingReport(current, assignment)) return null;
@@ -174,13 +224,14 @@ export function createIntake(options: IntakeOptions) {
               return draft.next;
             }
           } else {
-            terminal = draft.code === "limit-reached";
+            terminal = draft.code === "limit-reached" || draft.code === "budget-exhausted";
+            if (draft.code === "budget-exhausted") resultReason = "report-repair-budget-exhausted";
           }
         } else {
           terminal = true;
         }
       }
-      const noted = noteTask(current, assignment.taskId, reason, {
+      const noted = noteTask(current, assignment.taskId, resultReason, {
         now,
         detail: { assignmentId },
       });
@@ -190,7 +241,7 @@ export function createIntake(options: IntakeOptions) {
         const opened = openLimboDecision(next, {
           taskId: assignment.taskId,
           assignmentId,
-          reason,
+          reason: resultReason,
           turnId,
           decisionId: uuid(),
           controlNonceDigest: sha256Hex(uuid()),
@@ -208,7 +259,7 @@ export function createIntake(options: IntakeOptions) {
         log(`repair request for ${assignmentId} could not be sent`, error);
       }
     }
-    return { status: "problem", assignmentId, reason };
+    return { status: "problem", assignmentId, reason: resultReason };
   }
 
   async function settleAssignment(
@@ -258,7 +309,7 @@ export function createIntake(options: IntakeOptions) {
       );
     }
 
-    const { kind, block, turnId } = inspected;
+    const { kind, block, turnId, anchor } = inspected;
     if (kind !== "task-report" && kind !== "review-report" && kind !== "smoke-report") {
       return recordProblem(
         runId,
@@ -268,6 +319,26 @@ export function createIntake(options: IntakeOptions) {
         turnId,
       );
     }
+    const sampled = await options.store.get(runId);
+    if (sampled.status !== "ok") return { status: "run-unavailable" };
+    const sampledAssignment = sampled.record.assignments.find(
+      (entry) => entry.assignmentId === assignmentId,
+    );
+    if (!sampledAssignment) return { status: "no-assignment" };
+    let witnesses: RepairWitness[] | null = null;
+    if (evidenceRepairOf(sampled.record, sampledAssignment)) {
+      if (replyAnchor(sampled.record, sampledAssignment) !== anchor) {
+        return { status: "no-assignment" };
+      }
+      try {
+        const checked = await evidenceRepairWitnesses(sampled.record, sampledAssignment);
+        if (!checked.ok) return { status: "unverifiable", reason: checked.reason };
+        witnesses = checked.witnesses;
+      } catch (error) {
+        log(`cannot verify repairs for ${assignmentId}`, error);
+        return { status: "host-error" };
+      }
+    }
     const holder: { result: IntakeResult } = { result: { status: "no-assignment" } };
 
     await options.store.update(runId, (current) => {
@@ -276,6 +347,34 @@ export function createIntake(options: IntakeOptions) {
       if (!assignment || !awaitingReport(current, assignment)) {
         holder.result = { status: "duplicate", assignmentId };
         return null;
+      }
+      if (witnesses !== null) {
+        const currentWakes = repairWakes(current, assignmentId);
+        if (
+          !evidenceRepairOf(current, assignment) ||
+          replyAnchor(current, assignment) !== anchor ||
+          currentWakes.length !== witnesses.length ||
+          currentWakes.some(
+            (wake, index) =>
+              wake.id !== witnesses?.[index]?.id ||
+              wake.state !== witnesses[index]?.state ||
+              wake.messageId !== witnesses[index]?.messageId,
+          ) ||
+          witnesses.some(
+            (witness) =>
+              witness.endedEventKey !== null &&
+              !current.eventReceipts.some(
+                (receipt) =>
+                  receipt.eventKey === witness.endedEventKey &&
+                  receipt.kind === "turn_ended" &&
+                  receipt.agentId === agentId &&
+                  receipt.turnId === witness.turnId,
+              ),
+          )
+        ) {
+          holder.result = { status: "no-assignment" };
+          return null;
+        }
       }
       // The snapshot the report was read against may be stale: judge ownership on what is stored.
       const owned = verifyReportOwnership(current, kind, block as never, {
@@ -320,6 +419,26 @@ export function createIntake(options: IntakeOptions) {
         return null;
       }
 
+      if (witnesses !== null) {
+        // The physical message/turn of each sent repair was checked above. A prepared repair can
+        // still be retired here because the same update races atomically with its sending claim.
+        for (const witness of witnesses) {
+          const target =
+            witness.state === "prepared"
+              ? "failed"
+              : witness.state === "sending" || witness.state === "outcome-unknown"
+                ? "confirmed"
+                : null;
+          if (target === null) continue;
+          const transitioned = transitionIntent(working, witness.id, target, {
+            now,
+            reason: target === "failed" ? "superseded-by-report" : "echo",
+          });
+          if (!transitioned.ok) return null;
+          working = transitioned.next;
+        }
+        working = settleRepairs(working, assignmentId, now);
+      }
       const steps: unknown[] = [];
       if (assignment.state === "assigned") {
         steps.push({ kind: "turn-started", assignmentId, agentId, turnId });
@@ -343,6 +462,24 @@ export function createIntake(options: IntakeOptions) {
       // The repair requests of this assignment are answered now; they leave the outbox like the
       // plan request does, so a confirmed message cannot keep the Run from finishing.
       working = settleRepairs(working, assignmentId, now);
+      const settledTask = working.tasks.find((entry) => entry.spec.id === assignment.taskId);
+      if (
+        witnesses !== null &&
+        settledTask?.state === "review" &&
+        settledTask.frozenClaimId === null &&
+        !hasUnsettledEffects(working, assignment.taskId) &&
+        !working.decisions.some(
+          (decision) =>
+            decision.subjectId === assignment.taskId &&
+            (decision.state === "open" || decision.state === "waiting-human"),
+        )
+      ) {
+        // A supplement's unknown send freezes its existing claims. Once its own report and all
+        // effects are proved settled, the original claim stays held but may proceed to review.
+        for (const claim of working.resources) {
+          if (claim.taskId === assignment.taskId) claim.frozen = false;
+        }
+      }
       holder.result = {
         status: "settled",
         assignmentId,

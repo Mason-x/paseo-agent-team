@@ -522,7 +522,7 @@ export const BLOCKED_LEDGER: LedgerFixture = withLedger({
 /** RE1.3 / Y15: a newer writer's record. Must stay byte-identical, read-only, and undeleted. */
 export const UNKNOWN_SCHEMA_VERSION_RECORD: unknown = {
   ...NORMAL_RUN_LEDGER,
-  schemaVersion: 2,
+  schemaVersion: 3,
   futureTopLevel: { engineEpoch: 7, note: "written by a newer daemon" },
   tasks: [
     { ...NORMAL_RUN_LEDGER.tasks[0], futureTaskField: { leaseMode: "async" } },

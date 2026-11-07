@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -75,6 +75,8 @@ beforeEach(async () => {
   await store.initialize();
   const record = bootstrapRun({ runId: RUN_ID, planRequest: true });
   record.policy.evidenceRoot = evidenceRoot;
+  // New Runs are v2; this file is also the v2 regression for everything that does not touch evidence.
+  record.schemaVersion = expect.getState().currentTestName?.includes("[v1]") ? 1 : 2;
   await store.create(record);
 });
 
@@ -92,6 +94,7 @@ function fakeHost() {
   const timelines = new Map<string, PortTimelineEntry[]>();
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
+  const lose = { next: false };
   let seq = 0;
   const entries = (agentId: string) => {
     let list = timelines.get(agentId);
@@ -122,6 +125,11 @@ function fakeHost() {
         send: async (text, options) => {
           const messageId = options?.messageId ?? "";
           sent.push({ agentId, text, messageId });
+          // The host took the call and the answer was lost: nothing reaches the timeline.
+          if (lose.next) {
+            lose.next = false;
+            throw new Error("the host did not answer");
+          }
           add(agentId, `turn-${agentId}-${sent.length}`, { type: "user_message", messageId });
         },
         archive: async () => undefined,
@@ -134,6 +142,10 @@ function fakeHost() {
   return {
     port,
     sent,
+    /** The next send throws after the host "received" it, and leaves no echo in the timeline. */
+    loseNextSend: () => {
+      lose.next = true;
+    },
     /** The coordinator was sent the plan request earlier: its message is already in the timeline. */
     planRequestSent: () =>
       add(COORDINATOR_AGENT, "turn-plan", { type: "user_message", messageId: PLAN_MESSAGE_ID }),
@@ -162,10 +174,17 @@ function build(
   overrides: Partial<DriverOptions> = {},
   /** What sends a repair once it is committed; a process that dies before sending passes one that throws. */
   repairSend?: (runId: string) => Promise<unknown>,
+  /** What the service sends through. A stand-in that sends nothing leaves a committed request prepared. */
+  serviceOutbox?: Pick<ReturnType<typeof createEffects>, "runOutbox">,
 ) {
   const observerHost = createObserverHost(host.port);
   const observer = createRunObserver({ store });
-  const effects = createEffects({ store, port: host.port, compile: compileEngineIntent });
+  const effects = createEffects({
+    store,
+    port: host.port,
+    compile: compileEngineIntent,
+    resolveWorkspace: () => ({ workspaceId: "ws-start", directory: repoDir }),
+  });
   const profile = (family: string, id: string) => ({
     id,
     name: id,
@@ -177,7 +196,7 @@ function build(
   const service = createEngineService({
     store,
     port: host.port,
-    effects,
+    effects: serviceOutbox ?? effects,
     resolveSeat: (_record, seatId) => {
       if (seatId === "seat-b1") {
         return {
@@ -255,7 +274,11 @@ function fence(kind: string, body: unknown): string {
 }
 
 /** The member does the work for real: edits a file, commits it, and reports from its prompt. */
-function produce(host: Host, agentId: string): void {
+function produce(
+  host: Host,
+  agentId: string,
+  options: { evidenceId?: string; exitCode?: number } = {},
+): void {
   const prompt = host.lastSent(agentId)?.text ?? "";
   const identity = section<Identity>(prompt, "【身份资料 JSON】");
   const facts = section<Facts>(prompt, "【执行事实 JSON】");
@@ -277,10 +300,43 @@ function produce(host: Host, agentId: string): void {
       ref,
       workspace: facts.workspace,
       evidence: task.evidence.map((requirement) => ({
+        // A wrong id leaves the required evidence missing: the gate refuses it, the report is real.
+        id: options.evidenceId ?? requirement.id,
+        command: requirement.command,
+        exitCode: options.exitCode ?? 0,
+        summary: "passed",
+        artifactPath: `${facts.evidenceDir}/${requirement.id}.log`,
+        ref,
+        isolation: { homePath: path.join(home, "isolated-home"), outsideRealHome: true },
+      })),
+    }),
+  );
+}
+
+type EvidenceFacts = Facts & {
+  evidenceRepair: { delivery: { ref: unknown; workspace: unknown; changedFiles: string[] } };
+};
+
+/** The member answers an evidence request from its own prompt: same delivery, the missing evidence added. */
+function supplement(host: Host, agentId: string): void {
+  const prompt = host.lastSent(agentId)?.text ?? "";
+  const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+  const facts = section<EvidenceFacts>(prompt, "【执行事实 JSON】");
+  const task = section<TaskData>(prompt, "【任务资料 JSON】");
+  const { ref, workspace, changedFiles } = facts.evidenceRepair.delivery;
+  host.reply(
+    agentId,
+    fence("task-report", {
+      ...identity,
+      status: "done",
+      changedFiles,
+      ref,
+      workspace,
+      evidence: task.evidence.map((requirement) => ({
         id: requirement.id,
         command: requirement.command,
         exitCode: 0,
-        summary: "passed",
+        summary: "collected",
         artifactPath: `${facts.evidenceDir}/${requirement.id}.log`,
         ref,
         isolation: { homePath: path.join(home, "isolated-home"), outsideRealHome: true },
@@ -820,5 +876,219 @@ describe("a plan the parser refuses is asked for again", () => {
     await hook(host, driver, COORDINATOR_AGENT);
     expect(host.sent).toHaveLength(0);
     expect((await stored()).lifecycle).toBe("awaiting-dag");
+  });
+});
+
+describe("evidence the gate refused is asked for again, on the same delivery", () => {
+  /** t1 handed to its producer; the producer commits and reports evidence the gate refuses. */
+  async function refused(options: { evidenceId?: string; exitCode?: number } = {}) {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const dispatched = await stored();
+    produce(host, "agent-b1", { evidenceId: "not-required", ...options });
+    const firstTurn = host.turnOf("agent-b1");
+    await hook(host, driver, "agent-b1");
+    return { host, driver, dispatched, firstTurn };
+  }
+
+  const t1 = (record: RunRecord) => record.tasks.find((task) => task.spec.id === "t1");
+  const b1Budget = (record: RunRecord) =>
+    record.budgets.entries.find((entry) => entry.scope === "seat" && entry.subjectId === "seat-b1")
+      ?.reserved ?? 0;
+
+  test("the producer is asked to add the missing evidence, then the delivery is judged as before", async () => {
+    const { host, driver, dispatched } = await refused();
+
+    // One more message to the same member, from the evidence template, and nothing else moved.
+    const asked = await stored();
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b1"]);
+    expect(host.lastSent("agent-b1")?.text).toContain("补齐已有交付的证据");
+    expect(host.lastSent("agent-b1")?.text).not.toContain("agent-b1");
+    expect(t1(asked)).toMatchObject({
+      state: "assigned",
+      attempts: 1,
+      reworkCount: 0,
+      qualityFailures: 0,
+      evidenceReturns: 1,
+    });
+    // The original report stays as it was, the supplement is a second assignment of the same attempt.
+    const [first, second] = asked.assignments.filter((entry) => entry.taskId === "t1");
+    expect(first?.supersededByAssignmentId).toBe(second?.assignmentId);
+    expect(second).toMatchObject({
+      attempt: 1,
+      agentId: first?.agentId,
+      evidenceRepair: { version: 1, rootAssignmentId: first?.assignmentId, ordinal: 1 },
+    });
+    expect(second?.nonce).not.toBe(first?.nonce);
+    // The claim that held the repository is the same one; one more model turn is reserved, once.
+    expect(asked.resources).toEqual(dispatched.resources);
+    expect(b1Budget(asked)).toBe(b1Budget(dispatched) + 1);
+
+    supplement(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    expect(states(await stored())).toEqual({ t1: "review", t2: "pending" });
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b1", "agent-b2"]);
+
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    const done = await stored();
+    expect(states(done)).toEqual({ t1: "done", t2: "assigned" });
+    // The supplement changed no file and made no commit.
+    expect(git(repoDir, "log", "--format=%s")).toBe("deliver t1\nbase");
+    expect(t1(done)).toMatchObject({ attempts: 1, reworkCount: 0, evidenceReturns: 1 });
+  });
+
+  // The scripted host reports every agent idle, so a reconcile may find the supplement's turn "ended"
+  // with no reply and ask for the report again (a format repair, a different message). What these
+  // two tests guard is the evidence request itself: it is asked once, however often the Run is moved.
+  const supplements = (record: RunRecord) =>
+    record.assignments.filter((entry) => entry.evidenceRepair !== undefined);
+  const evidenceRequests = (host: Host) =>
+    host.sent.filter((entry) => entry.text.includes("补齐已有交付的证据"));
+
+  test("the same hook again, or a kick, does not ask twice", async () => {
+    const { host, driver, firstTurn } = await refused();
+    await driver.onHook({ name: "agent.turn_ended", agentId: "agent-b1", turnId: firstTurn });
+    await driver.kick(RUN_ID);
+    await driver.retryRun(RUN_ID);
+    const again = await stored();
+    expect(evidenceRequests(host)).toHaveLength(1);
+    expect(supplements(again)).toHaveLength(1);
+    expect(t1(again)).toMatchObject({ attempts: 1, evidenceReturns: 1 });
+  });
+
+  test("a restart finds the request already out and sends no second one", async () => {
+    const { host } = await refused();
+    const second = build(host, { outbox: { run: (runId) => second.effects.runOutbox(runId) } });
+    await second.driver.recover();
+    await second.driver.recover();
+    const after = await stored();
+    expect(evidenceRequests(host)).toHaveLength(1);
+    expect(supplements(after)).toHaveLength(1);
+    expect(t1(after)).toMatchObject({ attempts: 1, evidenceReturns: 1 });
+  });
+
+  test("with no returns allowed nothing is asked: the task waits with the reason and keeps its claim", async () => {
+    await store.update(RUN_ID, (record) => {
+      record.policy.perTask.evidenceReturns = 0;
+      return record;
+    });
+    const { host } = await refused();
+    const waiting = await stored();
+    expect(host.sent).toHaveLength(1);
+    expect(t1(waiting)).toMatchObject({ state: "in_progress", evidenceReturns: 1 });
+    expect(waiting.assignments.filter((entry) => entry.taskId === "t1")).toHaveLength(1);
+    expect(waiting.resources.length).toBeGreaterThan(0);
+  });
+
+  test("[v1] a Run written before this contract is never asked to supplement: it keeps the old behaviour", async () => {
+    const { host } = await refused();
+    const waiting = await stored();
+    expect(waiting.schemaVersion).toBe(1);
+    expect(evidenceRequests(host)).toHaveLength(0);
+    expect(host.sent).toHaveLength(1);
+    expect(supplements(waiting)).toHaveLength(0);
+    expect(t1(waiting)).toMatchObject({ state: "in_progress", evidenceReturns: 1 });
+  });
+
+  test("a check that really failed is not asked for again", async () => {
+    const { host } = await refused({ evidenceId: undefined, exitCode: 1 });
+    expect(host.sent).toHaveLength(1);
+    const waiting = await stored();
+    expect(t1(waiting)).toMatchObject({ state: "in_progress", evidenceReturns: 1 });
+    expect(waiting.assignments.filter((entry) => entry.taskId === "t1")).toHaveLength(1);
+  });
+
+  test("a request is rechecked just before it leaves: a dirty tree holds it back, a clean one sends it once", async () => {
+    const host = fakeHost();
+    // Once armed, the service commits what it prepares but sends nothing, as when a process dies
+    // right after the commit.
+    let armed = false;
+    const switchable = {
+      runOutbox: async (runId: string) =>
+        armed
+          ? { status: "ok" as const, sent: [], reconciled: [], unknown: [], failed: [] }
+          : built.effects.runOutbox(runId),
+    };
+    const built = build(host, {}, undefined, switchable);
+    const { driver, effects } = built;
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    armed = true;
+    await hook(host, driver, "agent-b1");
+    const prepared = (await stored()).outbox.filter(
+      (entry) => entry.state === "prepared" && entry.assignmentId !== null,
+    );
+    expect(prepared).toHaveLength(1);
+    expect(evidenceRequests(host)).toHaveLength(0);
+
+    // Someone leaves a file in the working tree: the delivery is no longer what it was.
+    const stray = path.join(repoDir, "stray.txt");
+    writeFileSync(stray, "left behind\n");
+    await effects.runOutbox(RUN_ID);
+    expect(evidenceRequests(host)).toHaveLength(0);
+    expect((await stored()).outbox.find((entry) => entry.id === prepared[0]?.id)?.state).toBe(
+      "prepared",
+    );
+
+    rmSync(stray);
+    await effects.runOutbox(RUN_ID);
+    await effects.runOutbox(RUN_ID);
+    expect(evidenceRequests(host)).toHaveLength(1);
+    expect((await stored()).outbox.find((entry) => entry.id === prepared[0]?.id)?.state).toBe(
+      "confirmed",
+    );
+  });
+
+  test("a supplement that says it cannot be done freezes the task and offers no retry that redoes the work", async () => {
+    const { host, driver } = await refused();
+    const prompt = host.lastSent("agent-b1")?.text ?? "";
+    const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+    host.reply(
+      "agent-b1",
+      fence("task-report", {
+        ...identity,
+        status: "blocked",
+        reasonCode: "EVIDENCE_UNAVAILABLE",
+        summary: "the logs are gone",
+        evidence: [],
+      }),
+    );
+    await hook(host, driver, "agent-b1");
+    await driver.kick(RUN_ID);
+    const stopped = await stored();
+    expect(t1(stopped)).toMatchObject({ state: "blocked", waitingReason: "EVIDENCE_UNAVAILABLE" });
+    expect(stopped.resources.every((claim) => claim.frozen)).toBe(true);
+    // No decision is opened for it: a retry would discard the delivery and implement the task again.
+    expect(stopped.decisions).toHaveLength(0);
+  });
+
+  test("a request whose delivery is unknown stays sent once: claims freeze and nothing is re-sent", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    host.loseNextSend();
+    await hook(host, driver, "agent-b1");
+
+    const lost = await stored();
+    const request = lost.outbox.find(
+      (entry) =>
+        entry.kind === "dispatch" && entry.assignmentId !== null && entry.state !== "confirmed",
+    );
+    expect(request?.state).toBe("outcome-unknown");
+    expect(lost.resources.every((claim) => claim.frozen)).toBe(true);
+    const sent = host.sent.length;
+    await driver.kick(RUN_ID);
+    await driver.retryRun(RUN_ID);
+    expect(host.sent).toHaveLength(sent);
+    expect(states(await stored()).t1).toBe("assigned");
   });
 });

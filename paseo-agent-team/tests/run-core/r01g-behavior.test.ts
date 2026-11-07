@@ -1,8 +1,14 @@
 // biome-ignore-all lint/style/noNonNullAssertion: complete records and prior events are asserted.
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import { producerHead } from "../../shared/domain/run-engine/delivery-binding";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
+import {
+  compileDispatch,
+  producerSemanticArgs,
+} from "../../shared/domain/run-engine/prompt-template";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
+import { requestReportRepair } from "../../shared/domain/run-engine/report-repair";
 import {
   type ArchiveIntent,
   isLocalNeverSent,
@@ -337,6 +343,47 @@ function reissueEvent(record: RunRecord): Extract<RunReducerEvent, { kind: "task
     }),
     reissueOfAssignmentId: "p1",
   };
+}
+
+function rejectedEvidenceV2(commit?: string) {
+  const initial = ready();
+  initial.schemaVersion = 2;
+  initial.policy.perTask.evidenceReturns = 1;
+  let record = start(dispatch(initial, "p1", "member", 1), "p1");
+  const original = actor(record, "p1");
+  const template = RunStoredTaskReportSchema.parse(
+    NORMAL_RUN_LEDGER.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1")!
+      .acceptedProof,
+  );
+  if (template.status !== "done") throw new Error("expected done report");
+  if (commit) {
+    template.ref = { kind: "git-commit", value: commit };
+    template.evidence[0]!.ref = template.ref;
+  }
+  template.evidence[0]!.id = "unrelated-evidence";
+  const block = RunTaskReportBlockSchema.parse({
+    ...template,
+    runId: record.runId,
+    assignmentId: "p1",
+    attempt: original.attempt,
+    nonce: original.nonce,
+    messageId: original.messageId,
+    workspace: original.workspace,
+  });
+  record = apply(record, { kind: "task-report", block });
+  return end(record, "p1");
+}
+
+function evidenceReissueEvent(record: RunRecord) {
+  const event = reissueEvent(record);
+  event.assignment.evidenceRepair = {
+    version: 1,
+    predecessorAssignmentId: "p1",
+    rootAssignmentId: "p1",
+    ordinal: task(record).evidenceReturns,
+  };
+  event.intent.semanticArgs = { template: "evidence" };
+  return event;
 }
 
 function nextAttemptEvent(record: RunRecord) {
@@ -1660,6 +1707,180 @@ describe("R01g real reducer positive chains", () => {
     expect(actor(next, "p1").supersededByAssignmentId).toBe("p2");
     expect(task(next)).toMatchObject({ attempts: 1, reworkCount: 0, ref: null, changedFiles: [] });
     expect(next.resources[0]!.originAssignmentId).toBe("p1");
+  });
+
+  test("v2 evidence reissue preserves the original delivery and accepts only added evidence", () => {
+    let record = rejectedEvidenceV2();
+    const original = structuredClone(actor(record, "p1").acceptedProof);
+    const claims = structuredClone(record.resources);
+    record = apply(record, evidenceReissueEvent(record));
+    expect(actor(record, "p1").acceptedProof).toEqual(original);
+    expect(record.resources).toEqual(claims);
+    expect(task(record)).toMatchObject({ attempts: 1, reworkCount: 0, evidenceReturns: 1 });
+    record = report(start(record, "p2"), false, "p2");
+    expect(task(record)).toMatchObject({ state: "review", attempts: 1, evidenceReturns: 1 });
+  });
+
+  test("v2 reissue rejects a wrong chain, exhausted limit and unfinished effects", () => {
+    const record = rejectedEvidenceV2();
+    const invalid = evidenceReissueEvent(record);
+    invalid.assignment.evidenceRepair = {
+      version: 1,
+      predecessorAssignmentId: "p1",
+      rootAssignmentId: "other",
+      ordinal: 1,
+    };
+    expect(reduceRun(record, invalid, facts)).toMatchObject({ ok: false });
+    const exhausted = structuredClone(record);
+    exhausted.policy.perTask.evidenceReturns = 0;
+    expect(reduceRun(exhausted, evidenceReissueEvent(exhausted), facts)).toMatchObject({
+      ok: false,
+    });
+    const unknown = structuredClone(record);
+    unknown.outbox.push({
+      ...dispatchIntent({
+        id: "wake-unknown",
+        taskId: "t1",
+        assignmentId: "p1",
+        recipient: actor(record, "p1").agentId,
+        messageId: uuid(200),
+        idempotencyKey: "wake-unknown",
+        state: "outcome-unknown",
+      }),
+      kind: "wake",
+      taskId: "t1",
+      assignmentId: "p1",
+      semanticArgs: { purpose: "repair" },
+    });
+    expect(reduceRun(unknown, evidenceReissueEvent(unknown), facts)).toMatchObject({ ok: false });
+  });
+
+  test("v2 evidence template is pinned and never falls back to an implementation prompt", () => {
+    const record = rejectedEvidenceV2("a".repeat(40));
+    const event = evidenceReissueEvent(record);
+    event.intent.semanticArgs = {
+      ...producerSemanticArgs(task(record).spec, {
+        repoRoot: "C:/repo",
+        evidenceDir: "C:/evidence/p2",
+      }),
+      template: "evidence",
+      evidenceDiagnostic: { reason: "missing", path: "tasks.t1.evidence.five-gates" },
+    };
+    const next = apply(record, event);
+    const intent = next.outbox.find((entry) => entry.id === "dispatch-p2");
+    if (intent?.kind !== "dispatch") throw new Error("missing evidence dispatch");
+    const text = compileDispatch(intent, next);
+    expect(text).not.toBeNull();
+    expect(text).toContain("不要修改项目文件、提交");
+    expect(text).toContain('"reason":"missing"');
+    expect(text).not.toContain("agent-b1");
+    expect(text).not.toMatch(/^ {0,3}`{3}/mu);
+    expect(
+      createHash("sha256")
+        .update(text ?? "")
+        .digest("hex"),
+    ).toBe("51de0fdf08ee55c604053750badad2c891136b6f4a91f46fbd8db4ed0e3d16f9");
+    expect(
+      compileDispatch(
+        { ...intent, semanticArgs: { ...intent.semanticArgs, template: "producer" } },
+        next,
+      ),
+    ).toBeNull();
+    expect(compileDispatch({ ...intent, templateVersion: 2 }, next)).toBeNull();
+  });
+
+  test("v2 supplement cannot replace the original commit", () => {
+    let record = rejectedEvidenceV2();
+    record = apply(record, evidenceReissueEvent(record));
+    record = start(record, "p2");
+    const assignment = actor(record, "p2");
+    const template = RunStoredTaskReportSchema.parse(
+      NORMAL_RUN_LEDGER.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1")!
+        .acceptedProof,
+    );
+    if (template.status !== "done") throw new Error("expected done report");
+    template.ref = { kind: "git-commit", value: "abcdef1" };
+    template.evidence[0]!.ref = template.ref;
+    const block = RunTaskReportBlockSchema.parse({
+      ...template,
+      runId: record.runId,
+      assignmentId: assignment.assignmentId,
+      attempt: assignment.attempt,
+      nonce: assignment.nonce,
+      messageId: assignment.messageId,
+      workspace: assignment.workspace,
+    });
+    record = apply(record, { kind: "task-report", block });
+    expect(task(record)).toMatchObject({
+      state: "in_progress",
+      attempts: 1,
+      evidenceReturns: 2,
+      waitingReason: "evidence-repair-delivery-changed",
+    });
+    expect(record.resources).toHaveLength(1);
+  });
+
+  test("a stored supplement chain that was edited is refused by the ledger invariants", () => {
+    let record = rejectedEvidenceV2();
+    record = apply(record, evidenceReissueEvent(record));
+    expect(checkLedgerInvariants(record)).toEqual({ ok: true });
+    // The delivery is untouched, so only the chain itself can tell this record was edited.
+    for (const patch of [{ ordinal: 2 }, { ordinal: 1, rootAssignmentId: "p2" }]) {
+      const edited = structuredClone(record);
+      Object.assign(actor(edited, "p2").evidenceRepair!, patch);
+      const report = checkLedgerInvariants(edited);
+      expect(report.ok, JSON.stringify(patch)).toBe(false);
+      if (report.ok) continue;
+      expect(report.violations.map((entry) => entry.params.reason)).toContain(
+        "invalid-evidence-repair-chain",
+      );
+    }
+  });
+
+  test("a supplement's own format repair is another model turn: reserved once, refused when the budget is spent", () => {
+    let record = rejectedEvidenceV2();
+    record = start(apply(record, evidenceReissueEvent(record)), "p2");
+    const seat = (value: RunRecord) =>
+      value.budgets.entries.find(
+        (entry) => entry.scope === "seat" && entry.subjectId === actor(value, "p2").seatId,
+      );
+    const ask = (value: RunRecord) =>
+      requestReportRepair(value, {
+        assignmentId: "p2",
+        anchor: actor(value, "p2").messageId,
+        reason: "report-missing",
+        issues: [],
+        intentId: "intent-repair-p2",
+        messageId: uuid(300),
+        payloadHash: "0".repeat(64),
+        templateVersion: 1,
+        now: NOW,
+      });
+    const before = seat(record)?.reserved ?? 0;
+    const asked = ask(record);
+    if (!asked.ok) throw new Error(asked.code);
+    expect(seat(asked.next)?.reserved).toBe(before + 1);
+
+    const spent = structuredClone(record);
+    const entry = seat(spent) ?? {
+      scope: "seat" as const,
+      subjectId: actor(spent, "p2").seatId,
+      limit: 1,
+      reserved: 1,
+      confirmed: 0,
+      observedTurns: 0,
+    };
+    entry.limit = entry.reserved;
+    if (!spent.budgets.entries.includes(entry)) spent.budgets.entries.push(entry);
+    expect(ask(spent)).toEqual({ ok: false, code: "budget-exhausted" });
+  });
+
+  test("v2 reissue refuses an actual failed check", () => {
+    const initial = ready();
+    initial.schemaVersion = 2;
+    initial.policy.perTask.evidenceReturns = 1;
+    const record = end(report(start(dispatch(initial, "p1", "member", 1), "p1"), true), "p1");
+    expect(reduceRun(record, evidenceReissueEvent(record), facts)).toMatchObject({ ok: false });
   });
 
   test("a valid D cannot use evidence reissue as an attempt bypass", () => {

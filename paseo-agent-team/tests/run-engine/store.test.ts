@@ -278,12 +278,12 @@ describe("damaged and foreign records", () => {
     const first = await open(home);
     await first.create(firstRevision("run-aaa111-c2"));
     await first.close();
-    const bytes = `${JSON.stringify({ schemaVersion: 2, runId: "run-aaa111-c2", future: true })}\n`;
+    const bytes = `${JSON.stringify({ schemaVersion: 3, runId: "run-aaa111-c2", future: true })}\n`;
     await writeFile(recordPath(home, "run-aaa111-c2"), bytes);
     const second = await open(home);
     expect(await second.get("run-aaa111-c2")).toMatchObject({
       status: "unknown-version",
-      schemaVersion: 2,
+      schemaVersion: 3,
     });
     await expect(second.update("run-aaa111-c2", (r) => r)).rejects.toMatchObject({
       code: "unrecoverable-run",

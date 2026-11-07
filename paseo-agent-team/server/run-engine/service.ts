@@ -1,12 +1,28 @@
 import { randomUUID } from "node:crypto";
-import { judgedNothing, resolveD } from "../../shared/domain/run-engine/delivery-binding";
+import {
+  judgedNothing,
+  producerHead,
+  resolveD,
+  resolveProducerProof,
+} from "../../shared/domain/run-engine/delivery-binding";
 import {
   applyDispatch,
   buildDispatch,
+  buildEvidenceReissue,
   buildReviewDispatch,
   type DispatchBuild,
 } from "../../shared/domain/run-engine/dispatch-builder";
-import { checkReviewGate, devEndpoint, producerEpoch } from "../../shared/domain/run-engine/gates";
+import {
+  EVIDENCE_TEMPLATE_VERSION,
+  evidenceIssueCanBeRepaired,
+  evidenceRepairOf,
+} from "../../shared/domain/run-engine/evidence-repair";
+import {
+  checkEvidenceGate,
+  checkReviewGate,
+  devEndpoint,
+  producerEpoch,
+} from "../../shared/domain/run-engine/gates";
 import {
   producerSemanticArgs,
   reviewerSemanticArgs,
@@ -23,6 +39,7 @@ import {
   type SeatRuntime,
 } from "../../shared/domain/run-engine/scheduler";
 import { reviewRequirement } from "../../shared/domain/run-engine/tier";
+import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
@@ -119,7 +136,7 @@ function hasPending(value: unknown): boolean {
 }
 
 type Work =
-  | { kind: "produce"; task: RunTaskRecord }
+  | { kind: "produce" | "evidence"; task: RunTaskRecord }
   | { kind: "reviewer" | "smoker"; task: RunTaskRecord };
 
 /**
@@ -128,6 +145,27 @@ type Work =
  * that was dispatched but has not reported keeps the task waiting; it is never dispatched twice.
  */
 function nextWork(record: RunRecord): Work | null {
+  // A supplement keeps the repository claim already held by its task. Consider it before new
+  // tasks, which otherwise can be blocked by that claim and prevent the holder from progressing.
+  if (record.schemaVersion === 2) {
+    for (const task of record.tasks) {
+      if (
+        (task.state !== "assigned" && task.state !== "in_progress") ||
+        task.evidenceReturns === 0
+      ) {
+        continue;
+      }
+      const head = producerHead(record, task.spec.id);
+      if (
+        head.kind === "ok" &&
+        isNormalEnded(record, head.assignment) &&
+        resolveProducerProof(record, head.assignment.assignmentId) &&
+        !checkEvidenceGate(record, task).ok
+      ) {
+        return { kind: "evidence", task };
+      }
+    }
+  }
   for (const task of record.tasks) {
     if (task.state === "ready" || task.state === "rework") return { kind: "produce", task };
     if (task.state !== "review") continue;
@@ -406,6 +444,128 @@ export function createEngineService(options: EngineServiceOptions) {
     );
   }
 
+  async function dispatchEvidence(
+    runId: string,
+    record: RunRecord,
+    task: RunTaskRecord,
+  ): Promise<DispatchNextResult> {
+    const taskId = task.spec.id;
+    if (record.launch.state === "failed" || record.launch.state === "cancelled") {
+      return { status: "blocked", taskId, reason: "launch-unavailable" };
+    }
+    const head = producerHead(record, taskId);
+    if (head.kind !== "ok") return { status: "blocked", taskId, reason: "delivery-missing" };
+    const previous = head.assignment;
+    const rootId = evidenceRepairOf(record, previous)?.rootAssignmentId ?? previous.assignmentId;
+    const root = record.assignments.find((entry) => entry.assignmentId === rootId);
+    const proof = resolveProducerProof(record, rootId);
+    if (!root || root.workspace === null || !proof || proof.ref.kind !== "git-commit") {
+      return { status: "blocked", taskId, reason: "delivery-ref-unsupported" };
+    }
+    const gate = checkEvidenceGate(record, task);
+    if (gate.ok) return { status: "idle" };
+    const issue = gate.issues[0];
+    const reason = issue?.params.reason;
+    if (!evidenceIssueCanBeRepaired(reason)) {
+      return { status: "blocked", taskId, reason: "evidence-not-repairable" };
+    }
+    if (task.evidenceReturns > record.policy.perTask.evidenceReturns) {
+      return { status: "blocked", taskId, reason: "evidence-return-limit" };
+    }
+    const seat = (await seatFacts(record)).find((entry) => entry.seatId === previous.seatId);
+    if (
+      !seat ||
+      seat.agentId !== previous.agentId ||
+      !seat.enabled ||
+      !seat.available ||
+      !seat.idle ||
+      seat.permissionPending ||
+      seat.degraded ||
+      seat.channelState !== "available" ||
+      record.policy.disabledChannels.includes(previous.channelId) ||
+      record.policy.disabledProfileIds.includes(previous.profileId)
+    ) {
+      return { status: "blocked", taskId, reason: "evidence-seat-unavailable" };
+    }
+    const location = options.resolveWorkspace(record);
+    if (!location || location.workspaceId !== root.workspace.id) {
+      return { status: "blocked", taskId, reason: "workspace-unresolved" };
+    }
+    const inspected = await inspectRepo(location.directory);
+    if (!inspected.ok) {
+      return {
+        status: "blocked",
+        taskId,
+        reason: `repo-${inspected.reason}`,
+        detail: inspected.detail,
+      };
+    }
+    const repo = inspected.repo;
+    const delivered = proof.ref.value.toLowerCase();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(delivered)) {
+      return { status: "blocked", taskId, reason: "delivery-ref-unsupported" };
+    }
+    if (repo.branch !== root.workspace.branch) {
+      return { status: "blocked", taskId, reason: "delivery-branch-changed" };
+    }
+    if (repo.headSha?.toLowerCase() !== delivered) {
+      return { status: "blocked", taskId, reason: "delivery-not-at-head" };
+    }
+    const workspace = dispatchWorkspace(repo, location.workspaceId);
+    if (!workspace.ok)
+      return { status: "blocked", taskId, reason: `workspace-${workspace.reason}` };
+    const verified = await verifyScopes(repo, task.spec.scopes);
+    if (!verified.ok) {
+      return { status: "blocked", taskId, reason: "scope-rejected", detail: verified.rejected };
+    }
+    const actual = await deliveredFiles(repo, root.workspace.baseRef, delivered);
+    if (!actual.ok) return { status: "blocked", taskId, reason: `delivery-${actual.reason}` };
+    if (!sameFiles(proof.changedFiles, actual.files)) {
+      return { status: "blocked", taskId, reason: "delivery-diff-mismatch" };
+    }
+    const named = ids(taskId, "e", task.evidenceReturns);
+    const evidence = await prepareEvidenceDir(repo, record.policy.evidenceRoot, named.assignmentId);
+    if (!evidence.ok)
+      return { status: "blocked", taskId, reason: `evidence-root-${evidence.reason}` };
+    const semanticArgs = {
+      ...producerSemanticArgs(task.spec, { repoRoot: repo.root, evidenceDir: evidence.dir }),
+      template: "evidence",
+      evidenceDiagnostic: {
+        reason: String(reason).slice(0, 100),
+        path: (issue?.path.map(String).join(".") ?? "").slice(0, 200),
+      },
+    };
+    return commit(
+      runId,
+      {
+        taskId,
+        purpose: "member",
+        seatId: previous.seatId,
+        assignmentId: named.assignmentId,
+        intentId: named.intentId,
+      },
+      (current, otherResources) =>
+        buildEvidenceReissue(current, {
+          taskId,
+          predecessorAssignmentId: previous.assignmentId,
+          scopes: verified.scopes,
+          otherResources,
+          ids: {
+            assignmentId: named.assignmentId,
+            nonce: uuid(),
+            messageId: uuid(),
+            intentId: named.intentId,
+          },
+          now: clock.now(),
+          payload: {
+            hash: "0".repeat(64),
+            templateVersion: EVIDENCE_TEMPLATE_VERSION,
+            semanticArgs,
+          },
+        }),
+    );
+  }
+
   async function dispatchJudge(
     runId: string,
     record: RunRecord,
@@ -549,9 +709,9 @@ export function createEngineService(options: EngineServiceOptions) {
     if (read.record.lifecycle !== "active") return { status: "idle" };
     const work = nextWork(read.record);
     if (!work) return { status: "idle" };
-    return work.kind === "produce"
-      ? dispatchProducer(runId, read.record, work.task)
-      : dispatchJudge(runId, read.record, work.task, work.kind);
+    if (work.kind === "produce") return dispatchProducer(runId, read.record, work.task);
+    if (work.kind === "evidence") return dispatchEvidence(runId, read.record, work.task);
+    return dispatchJudge(runId, read.record, work.task, work.kind);
   }
 
   return {

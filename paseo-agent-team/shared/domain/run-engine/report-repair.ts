@@ -1,4 +1,6 @@
 import type { RunAssignment, RunEffectIntent, RunRecord } from "../../schemas/run-engine/ledger";
+import { predebit } from "./budget";
+import { evidenceRepairOf } from "./evidence-repair";
 
 /**
  * Asking a member to send its report again (plan 11.4, item 3, gap 1).
@@ -89,7 +91,8 @@ export type RepairResult =
         | "stale-anchor"
         /** A repair is prepared and not yet sent: wait for it. */
         | "repair-pending"
-        | "limit-reached";
+        | "limit-reached"
+        | "budget-exhausted";
     };
 
 type RecordWithRepair = RunRecord;
@@ -127,7 +130,30 @@ export function requestReportRepair(record: RunRecord, input: RepairRequest): Re
   if (task.protocolFailures >= limit) return { ok: false, code: "limit-reached" };
 
   const ordinal = task.protocolFailures + 1;
+  const idempotencyKey = `repair:${record.runId}:${assignment.assignmentId}:${ordinal}`;
+  // A supplement's format repair is another model turn. Reserve it in the same ledger commit;
+  // ordinary v1/other repair paths retain their existing accounting semantics.
+  const reservation = evidenceRepairOf(record, assignment)
+    ? predebit(record, {
+        seatId: assignment.seatId,
+        intentKey: idempotencyKey,
+        messageId: input.messageId,
+        amount: 1,
+        revision: record.revision,
+      })
+    : null;
+  if (reservation !== null && reservation.status !== "reserved") {
+    return { ok: false, code: "budget-exhausted" };
+  }
   const next = structuredClone(record);
+  if (reservation?.status === "reserved") {
+    const index = next.budgets.entries.findIndex(
+      (entry) =>
+        entry.scope === reservation.entry.scope && entry.subjectId === reservation.entry.subjectId,
+    );
+    if (index === -1) next.budgets.entries.push(reservation.entry);
+    else next.budgets.entries[index] = reservation.entry;
+  }
   const nextTask = next.tasks[index];
   if (nextTask === undefined) return { ok: false, code: "assignment-missing" };
   nextTask.protocolFailures = ordinal;
@@ -137,7 +163,7 @@ export function requestReportRepair(record: RunRecord, input: RepairRequest): Re
     kind: "wake",
     recipient: assignment.agentId,
     messageId: input.messageId,
-    idempotencyKey: `repair:${record.runId}:${assignment.assignmentId}:${ordinal}`,
+    idempotencyKey,
     payloadHash: input.payloadHash,
     templateVersion: input.templateVersion,
     state: "prepared",

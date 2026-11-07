@@ -45,6 +45,8 @@ export type LedgerHeader = {
 
 export type AtomicJsonCodec<T> = {
   schemaVersion: number;
+  /** Additional versions this codec preserves; ordinary commits never migrate an existing file. */
+  supportedSchemaVersions?: readonly number[];
   parse(value: unknown): T;
   readHeader(record: T): LedgerHeader;
   withHeader(record: T, header: LedgerHeader): T;
@@ -273,9 +275,17 @@ type Parsed<T> =
   | { status: "unknown-version"; schemaVersion: number }
   | { status: "corrupt"; reason: "json" | "schema" | "invariant"; detail: string };
 
-function validateHeader(header: unknown, schemaVersion: number): string | null {
+function validateHeader(
+  header: unknown,
+  schemaVersion: number,
+  supportedSchemaVersions: readonly number[] = [],
+): string | null {
   if (typeof header !== "object" || header === null) return "header is not an object";
-  if (!("schemaVersion" in header) || header.schemaVersion !== schemaVersion) {
+  if (
+    !("schemaVersion" in header) ||
+    (header.schemaVersion !== schemaVersion &&
+      !supportedSchemaVersions.includes(header.schemaVersion as number))
+  ) {
     return "header schemaVersion mismatch";
   }
   const revision = "revision" in header ? header.revision : undefined;
@@ -309,7 +319,9 @@ function parseBytes<T>(bytes: Uint8Array, codec: AtomicJsonCodec<T>): Parsed<T> 
   if (typeof version !== "number" || !Number.isInteger(version)) {
     return { status: "corrupt", reason: "schema", detail: "schemaVersion is not an integer" };
   }
-  if (version !== codec.schemaVersion) return { status: "unknown-version", schemaVersion: version };
+  if (version !== codec.schemaVersion && !codec.supportedSchemaVersions?.includes(version)) {
+    return { status: "unknown-version", schemaVersion: version };
+  }
   let record: T;
   try {
     record = codec.parse(value);
@@ -322,7 +334,8 @@ function parseBytes<T>(bytes: Uint8Array, codec: AtomicJsonCodec<T>): Parsed<T> 
   } catch (error) {
     return { status: "corrupt", reason: "schema", detail: messageOf(error) };
   }
-  const headerProblem = validateHeader(header, codec.schemaVersion);
+  // The parsed header must match the bytes, not silently normalize a legacy version.
+  const headerProblem = validateHeader(header, version);
   if (headerProblem !== null) return { status: "corrupt", reason: "schema", detail: headerProblem };
   const violations = codec.invariant?.(record) ?? [];
   if (violations.length > 0) {
@@ -517,6 +530,7 @@ export function createAtomicJson<T>(options: {
   ): Promise<AtomicCommitResult> {
     await assertContained(files, root, file);
     let currentDigest = "";
+    let currentVersion: number | undefined;
     const raw = await readRaw();
     if (raw.status === "missing") {
       if (cas.revision !== 0 || cas.digest !== "") {
@@ -534,6 +548,7 @@ export function createAtomicJson<T>(options: {
         throw new AtomicJsonError("corrupt", parsed.detail);
       }
       currentDigest = sha256(raw.bytes);
+      currentVersion = parsed.header.schemaVersion;
       if (currentDigest !== cas.digest) {
         throw new AtomicJsonError("cas-mismatch", "file digest changed");
       }
@@ -548,8 +563,15 @@ export function createAtomicJson<T>(options: {
     } catch (error) {
       throw new AtomicJsonError("header-invalid", messageOf(error));
     }
-    const headerProblem = validateHeader(header, options.codec.schemaVersion);
+    const headerProblem = validateHeader(
+      header,
+      options.codec.schemaVersion,
+      options.codec.supportedSchemaVersions,
+    );
     if (headerProblem !== null) throw new AtomicJsonError("header-invalid", headerProblem);
+    if (currentVersion !== undefined && header.schemaVersion !== currentVersion) {
+      throw new AtomicJsonError("header-invalid", "ordinary commits cannot change schemaVersion");
+    }
     if (header.revision !== cas.revision + 1) {
       throw new AtomicJsonError("header-invalid", "next revision must be previous + 1");
     }

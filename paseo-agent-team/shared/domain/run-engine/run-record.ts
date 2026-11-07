@@ -1,10 +1,11 @@
 import type { PaseoProfile } from "../../paseo/adapter";
 import type { Role } from "../../schemas/role";
 import type { RunTeamEngineConfig } from "../../schemas/run-engine/config";
-import type {
-  RunEffectIntent,
-  RunModelPlanBasis,
-  RunRecord,
+import {
+  RUN_SCHEMA_VERSION,
+  type RunEffectIntent,
+  type RunModelPlanBasis,
+  type RunRecord,
 } from "../../schemas/run-engine/ledger";
 import { LAUNCH_PLANNER_VERSION } from "../launch-hash";
 import type { LaunchPlan } from "../launch-plan";
@@ -221,7 +222,7 @@ export function buildRunRecord(input: RunRecordInput): RunRecord {
   for (const [seatId, profile] of input.seatProfiles) seatProfiles[seatId] = profile;
 
   return {
-    schemaVersion: 1,
+    schemaVersion: RUN_SCHEMA_VERSION,
     runId: input.runId,
     revision: 1,
     previousDigest: "",
