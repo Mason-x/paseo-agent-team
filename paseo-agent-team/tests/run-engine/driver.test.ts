@@ -9,6 +9,7 @@ import { createEngineDriver, type DriverOptions } from "../../server/run-engine/
 import { createEffects } from "../../server/run-engine/effects";
 import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
+import { createLifecycleControl } from "../../server/run-engine/lifecycle";
 import { createRunObserver } from "../../server/run-engine/observer";
 import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
@@ -552,6 +553,35 @@ describe("why a Run does not move", () => {
       return resumed.ok ? resumed.next : null;
     });
     expect((await driver.kick(RUN_ID)).dispatched).toBe(1);
+  });
+
+  test("pause and resume through the lifecycle control: nothing goes out while paused, the held work goes out once on resume", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    const lifecycle = createLifecycleControl({ store, driver });
+    await writeFile(path.join(repoDir, "stray.txt"), "x");
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    expect(states(await stored()).t1).toBe("ready");
+
+    expect((await lifecycle.pause(RUN_ID)).status).toBe("applied");
+    await rm(path.join(repoDir, "stray.txt"));
+    // Everything that could push the Run on is asked, and nothing is sent.
+    await driver.kick(RUN_ID);
+    await driver.retryRun(RUN_ID);
+    await driver.recover();
+    expect(host.sent.filter((entry) => entry.agentId !== COORDINATOR_AGENT)).toHaveLength(0);
+    expect(states(await stored()).t1).toBe("ready");
+
+    expect((await lifecycle.resume(RUN_ID)).status).toBe("applied");
+    expect(states(await stored()).t1).toBe("assigned");
+    const toMember = () => host.sent.filter((entry) => entry.agentId === "agent-b1");
+    expect(toMember()).toHaveLength(1);
+    // Pressing resume again, or kicking, sends nothing more.
+    expect((await lifecycle.resume(RUN_ID)).status).toBe("unchanged");
+    await driver.kick(RUN_ID);
+    expect(toMember()).toHaveLength(1);
   });
 
   test("a Run still waiting for its DAG has nothing to dispatch", async () => {
