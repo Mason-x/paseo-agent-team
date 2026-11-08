@@ -19,8 +19,10 @@ import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
 import { VERSION_PROCESS_TIMEOUT_MS } from "./setup/load-timeouts";
 
-const HOME = path.join("C:\\", "paseo-dev");
-const PLUGIN = path.join("C:\\", "repo", "paseo-agent-team");
+const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const HOME = path.join(ROOT, "paseo-dev");
+const REPOSITORY = path.join(ROOT, "repo");
+const PLUGIN = path.join(REPOSITORY, "paseo-agent-team");
 const OLD = "a".repeat(40);
 const TARGET = "b".repeat(40);
 const roots: string[] = [];
@@ -63,7 +65,7 @@ function directoryGit(extra: Record<string, ExecResult> = {}) {
       for (const [needle, value] of Object.entries(extra)) {
         if (joined.includes(needle)) return value;
       }
-      if (joined.includes("show-toplevel")) return ok("C:\\repo");
+      if (joined.includes("show-toplevel")) return ok(REPOSITORY);
       if (joined === "rev-parse HEAD") return ok(OLD);
       if (joined.includes("@{upstream}")) return ok("origin/trunk");
       if (joined.includes("--abbrev-ref HEAD")) return ok("trunk");
@@ -112,7 +114,7 @@ function serviceDeps(files: ReturnType<typeof filesFrom>, git = directoryGit()) 
       text: async () => JSON.stringify({ name: "@mason-x/paseo-agent-team", version: "0.3.0" }),
     }),
     bootId: "77777777-7777-4777-8777-777777777777",
-    platform: "win32" as const,
+    platform: process.platform,
     pathExists: () => true,
     cliExists: async (candidate: string) => files.data.has(candidate),
     runnerSource: path.join(PLUGIN, "server", "version", "runner.mjs"),
@@ -172,14 +174,18 @@ describe("version flow", () => {
     expect(checked.job.result.canUpdate).toBe(true);
   });
 
-  test("a Windows path origin is checked instead of reported as a network error", async () => {
-    const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
-    const versions = createVersionService(serviceDeps(seededFiles(), git));
-    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
-    expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
-    expect(checked.job.result.canUpdate).toBe(true);
-  });
+  // A drive-letter origin is only a path on Windows; elsewhere it is not a local directory at all.
+  test.skipIf(process.platform !== "win32")(
+    "a Windows path origin is checked instead of reported as a network error",
+    async () => {
+      const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
+      const versions = createVersionService(serviceDeps(seededFiles(), git));
+      const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+      if (!checked.ok || !checked.job.result) throw new Error("check failed");
+      expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
+      expect(checked.job.result.canUpdate).toBe(true);
+    },
+  );
 
   test("an option-like origin is an unsupported remote, not a network failure", async () => {
     const git = directoryGit({ "get-url": ok("--upload-pack=calc") });

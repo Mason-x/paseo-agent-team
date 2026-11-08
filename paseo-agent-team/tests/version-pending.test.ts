@@ -12,9 +12,10 @@ import { createVersionService } from "../server/version/service";
 import { storeRoot } from "../server/version/store";
 import type { RemoteTarget, VersionInfo } from "../shared/version";
 
-const HOME = path.join("C:\\", "paseo-dev");
-const PLUGIN = path.join("C:\\", "repo", "paseo-agent-team");
-const REPOSITORY = path.join("C:\\", "repo");
+const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const HOME = path.join(ROOT, "paseo-dev");
+const PLUGIN = path.join(ROOT, "repo", "paseo-agent-team");
+const REPOSITORY = path.join(ROOT, "repo");
 const REMOTE = "https://github.com/Mason-x/paseo-agent-team.git";
 const OLD = "a".repeat(40);
 const TARGET = "b".repeat(40);
@@ -192,7 +193,7 @@ function serviceDeps(files: MemoryFiles, git: GitHarness, options: ServiceOption
       text: async () => JSON.stringify({ name: "@mason-x/paseo-agent-team", version: "0.3.0" }),
     }),
     bootId: "77777777-7777-4777-8777-777777777777",
-    platform: "win32" as const,
+    platform: process.platform,
     pathExists: () => true,
     cliExists: async (candidate: string) => files.data.has(candidate),
     now: options.now,

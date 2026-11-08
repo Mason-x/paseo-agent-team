@@ -6,8 +6,10 @@ import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
 import type { Job, VersionInfo } from "../shared/version";
 
-const HOME = "C:\\paseo-dev";
-const PLUGIN = "C:\\repo\\paseo-agent-team";
+const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const HOME = path.join(ROOT, "paseo-dev");
+const REPOSITORY = path.join(ROOT, "repo");
+const PLUGIN = path.join(REPOSITORY, "paseo-agent-team");
 const OLD = "a".repeat(40);
 const TARGET = "b".repeat(40);
 const REQUEST = "11111111-1111-4111-8111-111111111111";
@@ -51,7 +53,7 @@ function info(canUpdate: boolean): VersionInfo {
       branch: "main",
       dirty: false,
       pluginPath: PLUGIN,
-      repositoryPath: "C:\\repo",
+      repositoryPath: REPOSITORY,
       observedAt: "2026-10-25T00:00:00.000Z",
     },
     installSource: { kind: "directory", path: PLUGIN, isGit: true },
@@ -102,7 +104,7 @@ function baseDeps(files: ReturnType<typeof memoryFiles>) {
       git: {
         async run(request: { args: readonly string[] }) {
           const joined = request.args.join(" ");
-          if (joined.includes("show-toplevel")) return result("C:\\repo");
+          if (joined.includes("show-toplevel")) return result(REPOSITORY);
           if (joined === "rev-parse HEAD") return result(OLD);
           if (joined.includes("porcelain")) return result("");
           if (joined.includes("MERGE_HEAD")) return result("", 1);
@@ -121,10 +123,10 @@ function baseDeps(files: ReturnType<typeof memoryFiles>) {
       ids: { uuid: () => "66666666-6666-4666-8666-666666666666" },
       fetch: async () => ({ status: 404, headers: { get: () => null }, text: async () => "" }),
       bootId: "77777777-7777-4777-8777-777777777777",
-      platform: "win32" as const,
+      platform: process.platform,
       pathExists: () => true,
       cliExists: async (candidate: string) => files.data.has(candidate),
-      runnerSource: "C:\\repo\\paseo-agent-team\\server\\version\\runner.mjs",
+      runnerSource: path.join(PLUGIN, "server", "version", "runner.mjs"),
       spawnRunner: async (file: string) => {
         spawned.push(file);
       },
