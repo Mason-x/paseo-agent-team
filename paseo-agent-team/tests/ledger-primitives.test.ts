@@ -616,6 +616,98 @@ async function lockFixture(options?: {
 }
 
 describe("process-lock", () => {
+  test.each(["lock", "reclaim guard"] as const)(
+    "a %s being written is re-read without stealing it or reporting corruption",
+    async (targetKind) => {
+      const disk = new FakeDisk();
+      disk.addDir(HOME);
+      const lockPath = path.join(HOME, ".lock");
+      const encode = (ownerToken: string, pid: number) =>
+        JSON.stringify({ version: 1, ownerToken, pid, startedAt: NOW, processStartedAt: NOW });
+      const guardPath = `${lockPath}.reclaim`;
+      disk.files.set(
+        lockPath,
+        targetKind === "lock" ? encode("live", 777) : encode("dead", 999_999),
+      );
+      if (targetKind === "reclaim guard") disk.files.set(guardPath, encode("guard", 777));
+      const original = disk.asLockFs();
+      const partialPath = targetKind === "lock" ? lockPath : guardPath;
+      let partialReads = 0;
+      const files: LockFs = {
+        ...original,
+        async readFile(target) {
+          if (target === partialPath && partialReads++ < 3) return "";
+          return original.readFile(target);
+        },
+      };
+      const clock = new FakeClock();
+      await expect(
+        acquireProcessLock({
+          file: lockPath,
+          files,
+          clock,
+          ids: ids(),
+          sleeper: {
+            async sleep(ms) {
+              clock.advance(ms);
+            },
+          },
+          processes: liveness({ alive: (pid) => pid === 777 }),
+          pid: 111,
+          ownerToken: "mine",
+          acquireTimeoutMs: 100,
+          retryDelayMs: 10,
+          bootTime: () => Date.parse(NOW),
+        }),
+      ).rejects.toMatchObject({ code: "lock-contended" });
+      expect(partialReads).toBeGreaterThan(1);
+      expect(disk.readText(lockPath)).toBe(
+        targetKind === "lock" ? encode("live", 777) : encode("dead", 999_999),
+      );
+      if (targetKind === "reclaim guard")
+        expect(disk.readText(guardPath)).toBe(encode("guard", 777));
+    },
+  );
+
+  test("a permanently malformed lock is still refused after bounded re-reads", async () => {
+    const disk = new FakeDisk();
+    disk.addDir(HOME);
+    const lockPath = path.join(HOME, ".lock");
+    disk.files.set(lockPath, "broken");
+    const original = disk.asLockFs();
+    let reads = 0;
+    const files: LockFs = {
+      ...original,
+      async readFile(target) {
+        reads += 1;
+        return original.readFile(target);
+      },
+    };
+    const clock = new FakeClock();
+    await expect(
+      acquireProcessLock({
+        file: lockPath,
+        files,
+        clock,
+        ids: ids(),
+        sleeper: {
+          async sleep(ms) {
+            clock.advance(ms);
+          },
+        },
+        processes: liveness({ alive: false }),
+        pid: 111,
+        ownerToken: "mine",
+        acquireTimeoutMs: 1000,
+        retryDelayMs: 10,
+        bootTime: () => Date.parse(NOW),
+      }),
+    ).rejects.toMatchObject({ code: "lock-corrupt" });
+    expect(reads).toBeGreaterThan(1);
+    expect(reads).toBeLessThanOrEqual(6);
+    expect(disk.readText(lockPath)).toBe("broken");
+  });
+
   test("acquires with a readback token and releases idempotently", async () => {
     const { disk, lock, lockPath } = await lockFixture();
     expect(lock.ownerToken).toBe("mine");

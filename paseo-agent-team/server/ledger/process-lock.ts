@@ -7,6 +7,9 @@ const GUARD_SUFFIX = ".reclaim";
 const GUARD_STALE_MS = 30_000;
 const BOOT_TIME_TOLERANCE_MS = 60 * 60 * 1000;
 const RETRY_DELAY_MAX_MS = 200;
+/** Exclusive creation makes the path visible before the JSON content has been written. */
+const PARTIAL_READ_RETRIES = 5;
+const PARTIAL_READ_DELAY_MS = 20;
 
 export type LockRecord = {
   version: 1;
@@ -215,6 +218,20 @@ async function readLock(files: LockFs, target: string): Promise<LockRecord | nul
   return parseLock(raw) ?? "corrupt";
 }
 
+/** A contender may observe an exclusive-created file before its creator has finished writing it. */
+async function readContendedLock(
+  files: LockFs,
+  target: string,
+  sleeper: LockSleeper,
+): Promise<LockRecord | null | "corrupt"> {
+  let observed = await readLock(files, target);
+  for (let attempt = 1; observed === "corrupt" && attempt <= PARTIAL_READ_RETRIES; attempt += 1) {
+    await sleeper.sleep(PARTIAL_READ_DELAY_MS * attempt);
+    observed = await readLock(files, target);
+  }
+  return observed;
+}
+
 function holderOf(lock: LockRecord): LockHolder {
   return { pid: lock.pid, startedAt: lock.startedAt, processStartedAt: lock.processStartedAt };
 }
@@ -277,6 +294,7 @@ async function tryReclaim(
     processes: ProcessLiveness;
     clock: LockClock;
     ids: LockIds;
+    sleeper: LockSleeper;
     staleGuardMs: number;
     bootTimeMs: number;
   },
@@ -300,7 +318,7 @@ async function tryReclaim(
       if (errorCode(error) !== "EEXIST") {
         throw new ProcessLockError("lock-unavailable", messageOf(error));
       }
-      const existing = await readLock(files, guardPath);
+      const existing = await readContendedLock(files, guardPath, options.sleeper);
       if (existing === null) return false;
       if (existing === "corrupt") {
         throw new ProcessLockError(
@@ -466,7 +484,7 @@ export async function acquireProcessLock(options: ProcessLockOptions): Promise<P
       }
     }
 
-    const observed = await readLock(files, file);
+    const observed = await readContendedLock(files, file, sleeper);
     if (observed === "corrupt") {
       throw new ProcessLockError(
         "lock-corrupt",
@@ -485,6 +503,7 @@ export async function acquireProcessLock(options: ProcessLockOptions): Promise<P
         processes,
         clock,
         ids,
+        sleeper,
         staleGuardMs,
         bootTimeMs: bootTime(),
       });
