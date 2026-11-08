@@ -101,7 +101,11 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     },
   };
 
-  const observer = createRunObserver({ store, log });
+  // Reads a host that failed to answer again a few times. It is defined before what reads, because
+  // they report to it; the timer behind it is created below.
+  const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
+    readRetry.note(runId, failure);
+  const observer = createRunObserver({ store, log, onReadFailure });
   const host = createObserverHost(port);
   // Reads a host that failed to answer again a few times and says what came of it. It holds two
   // functions that read and nothing that sends, settles or dispatches.
@@ -112,10 +116,15 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
       const refreshed = await port.agents.ref(agentId).refresh();
       if (!refreshed?.agent) throw new Error("the host returned no agent state");
     },
+    // A read that works again moves the Run on, as a person's kick would.
+    // Not waited for: the timer must not stand still while the Run is pushed on.
+    onRecovered: (runId) => {
+      driver
+        .retryRun(runId, { afterWrite: true })
+        .catch((error: unknown) => log(`could not push ${runId} on after a read recovered`, error));
+    },
     log,
   });
-  const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
-    readRetry.note(runId, failure);
   // Reconcile has no hook behind it, so it must not call a turn that is still running finished.
   const reconcileHost = createObserverHost(port, { requireIdle: true });
   const resolveWorkspace = (record: RunRecord) => {
@@ -127,6 +136,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     port,
     compile: compileEngineIntent,
     resolveWorkspace,
+    onReadFailure,
     log,
   });
   const service = createEngineService({

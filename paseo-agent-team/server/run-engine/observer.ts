@@ -14,6 +14,7 @@ import {
   type UnverifiableReason,
   verifyReportOwnership,
 } from "./protocol";
+import type { ReadFailure } from "./read-retry";
 import type { RunStore } from "./store";
 
 /**
@@ -88,6 +89,8 @@ export type ObserverOptions = {
   bufferLimit?: number;
   /** A buffered hook older than this is dropped and the observer is marked as needing a reconcile. */
   bufferTtlMs?: number;
+  /** Told when reconcile could not read the reply an open assignment waits for, so it is read again. */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
 };
 
 const RECEIPT_KIND = {
@@ -276,12 +279,17 @@ export function createRunObserver(options: ObserverOptions) {
         summary.runsScanned += 1;
         // What the Run is waiting on: each open assignment's dispatch, and, until its DAG is in,
         // the coordinator's reply to the newest plan request.
-        const waiting: { agentId: string; messageId: string }[] = [];
+        const waiting: {
+          agentId: string;
+          messageId: string;
+          assignment?: { taskId: string; assignmentId: string };
+        }[] = [];
         for (const assignment of read.record.assignments) {
           if (assignment.state !== "assigned" && assignment.state !== "in_progress") continue;
           waiting.push({
             agentId: assignment.agentId,
             messageId: replyAnchor(read.record, assignment),
+            assignment: { taskId: assignment.taskId, assignmentId: assignment.assignmentId },
           });
         }
         const lifecycle = read.record.lifecycle;
@@ -302,6 +310,20 @@ export function createRunObserver(options: ObserverOptions) {
           } catch (error) {
             summary.hostErrors += 1;
             log(`reconcile could not read ${item.agentId}`, error);
+            // The coordinator's plan reply has no assignment, so it is not retried here.
+            if (item.assignment !== undefined) {
+              try {
+                await options.onReadFailure?.(entry.runId, {
+                  type: "reply",
+                  agentId: item.agentId,
+                  taskId: item.assignment.taskId,
+                  assignmentId: item.assignment.assignmentId,
+                  anchorMessageId: item.messageId,
+                });
+              } catch (failure) {
+                log(`could not note the failed read of ${item.agentId}`, failure);
+              }
+            }
             continue;
           }
           if (!window.complete) {

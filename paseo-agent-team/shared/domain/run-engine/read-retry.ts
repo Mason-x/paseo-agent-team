@@ -29,6 +29,11 @@ export const READ_RETRY_MAX_ATTEMPTS = 3;
 /** The wait before try 1, 2 and 3. A failed try that was not the last waits for the next entry. */
 export const READ_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 export const READ_RETRY_EVENT = "read-retry-changed";
+/**
+ * A read that works again moves the Run on by itself, but only for the first few times a source
+ * recovers: a host that flaps for ever is not chased for ever, it is left with the warning.
+ */
+export const READ_RETRY_AUTO_CONTINUE_GENERATIONS = 3;
 
 const Time = RunTimeSchema;
 
@@ -402,6 +407,32 @@ export function finishTries(
   });
   if (events.length === 0) return { changed: false, next: record };
   return { changed: true, next: commit(next, items, events, now) };
+}
+
+/**
+ * The items a commit moved to `resolved` with a result (the read works again and the thing it was for
+ * is still waited on), for the first `READ_RETRY_AUTO_CONTINUE_GENERATIONS` generations of their source.
+ * Compares the record before and after, so it needs nothing from `finishTries` itself.
+ */
+export function recoveredItems(
+  before: RunRecord,
+  after: RunRecord,
+): { key: string; generation: number }[] {
+  const was = readReadRetries(before);
+  const now = readReadRetries(after);
+  if (now.kind !== "valid") return [];
+  const found: { key: string; generation: number }[] = [];
+  for (const item of now.items) {
+    if (item.state !== "resolved" || item.result === undefined) continue;
+    if (item.generation > READ_RETRY_AUTO_CONTINUE_GENERATIONS) continue;
+    const prior =
+      was.kind === "valid"
+        ? was.items.find((entry) => entry.key === item.key && entry.generation === item.generation)
+        : undefined;
+    if (prior?.state === "resolved") continue;
+    found.push({ key: item.key, generation: item.generation });
+  }
+  return found;
 }
 
 /**

@@ -16,6 +16,7 @@ import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions"
 import type { PaseoEnginePort, PortActiveTurnBehavior } from "../../shared/paseo/port";
 import type { RunEffectIntent, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { findDispatchEcho } from "./host";
+import type { ReadFailure } from "./read-retry";
 import {
   deliveredFiles,
   dispatchWorkspace,
@@ -52,6 +53,8 @@ export type EffectsOptions = {
    */
   compile(intent: SendableIntent, record: RunRecord): string | null;
   clock?: { now(): string };
+  /** Told when the live state of a seat could not be read before a supplement, so it is read again. */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   /** The Run's shared Workspace, to recheck a supplement just before it is sent. Defaults to `launch.workspace`. */
   resolveWorkspace?(record: RunRecord): { workspaceId: string; directory: string } | null;
   /**
@@ -151,7 +154,22 @@ export function createEffects(options: EffectsOptions) {
       return false;
     }
     try {
-      const snapshot = (await options.port.agents.ref(assignment.agentId).refresh())?.agent;
+      let refreshed: Awaited<ReturnType<ReturnType<typeof options.port.agents.ref>["refresh"]>>;
+      try {
+        refreshed = await options.port.agents.ref(assignment.agentId).refresh();
+      } catch (error) {
+        // Only this read is handed to the re-checks; a repository that cannot be inspected is not.
+        try {
+          await options.onReadFailure?.(record.runId, {
+            type: "seat",
+            agentId: assignment.agentId,
+          });
+        } catch (failure) {
+          log(`could not note the failed read of ${assignment.agentId}`, failure);
+        }
+        throw error;
+      }
+      const snapshot = refreshed?.agent;
       const pending = Array.isArray(snapshot?.pendingPermissions)
         ? snapshot.pendingPermissions.length > 0
         : Boolean(snapshot?.pendingPermissions);

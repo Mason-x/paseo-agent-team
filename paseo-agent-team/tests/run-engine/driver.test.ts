@@ -104,6 +104,7 @@ function fakeHost() {
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
   const lose = { next: false };
+  const flags = { newer: false };
   // Reads of the host that throw: the timeline (a reply) and the live agent state (a seat).
   const unreadable = { timeline: false, agent: false };
   let seq = 0;
@@ -125,7 +126,7 @@ function fakeHost() {
     epoch: "e1",
     startCursor: null,
     hasOlder: false,
-    hasNewer: false,
+    hasNewer: flags.newer,
     gap: false,
     staleCursor: false,
     reset: false,
@@ -161,6 +162,14 @@ function fakeHost() {
   return {
     port,
     sent,
+    /** Pages say there is more after them: a turn that no later turn proves over is still open. */
+    hasNewerPages: (value: boolean) => {
+      flags.newer = value;
+    },
+    /** The host lost the history of an agent. */
+    dropTimeline: (agentId: string) => {
+      timelines.set(agentId, []);
+    },
     /** The next send throws after the host "received" it, and leaves no echo in the timeline. */
     loseNextSend: () => {
       lose.next = true;
@@ -203,12 +212,13 @@ function build(
   onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>,
 ) {
   const observerHost = createObserverHost(host.port);
-  const observer = createRunObserver({ store });
+  const observer = createRunObserver({ store, onReadFailure });
   const effects = createEffects({
     store,
     port: host.port,
     compile: compileEngineIntent,
     resolveWorkspace: () => ({ workspaceId: "ws-start", directory: repoDir }),
+    onReadFailure,
   });
   const profile = (family: string, id: string) => ({
     id,
@@ -1326,8 +1336,10 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
 
 describe("a host that could not be read is read again, and a person is told what came of it", () => {
   /** The wiring as production makes it: the intake and the service tell the re-checks, a pass sweeps. */
-  function wired(host: Host) {
+  function wired(host: Host, wiring: { auto?: boolean } = {}) {
     const clock = { at: Date.now() };
+    // What a read that works again does in production: pushes the Run on, like a kick.
+    let continuing: (runId: string) => Promise<unknown> = async () => undefined;
     const readHost = createObserverHost(host.port);
     const retry = createReadRetry({
       store,
@@ -1338,6 +1350,7 @@ describe("a host that could not be read is read again, and a person is told what
         const refreshed = await host.port.agents.ref(agentId).refresh();
         if (!refreshed?.agent) throw new Error("no agent state");
       },
+      onRecovered: wiring.auto ? (runId) => continuing(runId).then(() => undefined) : undefined,
     });
     const built = build(
       host,
@@ -1346,6 +1359,7 @@ describe("a host that could not be read is read again, and a person is told what
       undefined,
       (runId, failure) => retry.note(runId, failure),
     );
+    continuing = (runId) => built.driver.retryRun(runId, { afterWrite: true });
     return { ...built, retry, clock };
   }
 
@@ -1441,6 +1455,171 @@ describe("a host that could not be read is read again, and a person is told what
     await driver.kick(RUN_ID);
     expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
     expect((await stored()).alerts.every((alert) => alert.state === "resolved")).toBe(true);
+  });
+
+  test("a reply that could not be read and then can: with the automatic continue the report is taken in without a person's kick, once", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host, { auto: true });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    host.setUnreadable("timeline", true);
+    await hook(host, driver, "agent-b1");
+    expect(states(await stored()).t1).toBe("assigned");
+
+    host.setUnreadable("timeline", false);
+    const sent = host.sent.length;
+    clock.at += 1500;
+    await retry.fire();
+    const settled = await stored();
+    expect(states(settled).t1).toBe("review");
+    expect(
+      settled.assignments.find((a) => a.taskId === "t1" && a.purpose === "member")?.acceptedProof,
+    ).not.toBeNull();
+    expect(settled.alerts.every((alert) => alert.state === "resolved")).toBe(true);
+    // The judge was asked, once, by the ordinary path; the producer was not asked again.
+    expect(host.sent.slice(sent).map((entry) => entry.agentId)).toEqual(["agent-b2"]);
+    expect(retry.armed).toBe(false);
+  });
+
+  test("a seat that could not be read and then can: with the automatic continue the dispatch happens without a kick", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host, { auto: true });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    host.setUnreadable("agent", true);
+    await hook(host, driver, COORDINATOR_AGENT);
+    expect(host.sent).toHaveLength(0);
+    host.setUnreadable("agent", false);
+    clock.at += 1500;
+    await retry.fire();
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    expect((await stored()).alerts.every((alert) => alert.state === "resolved")).toBe(true);
+    // Nothing is due any more: more time passing sends nothing.
+    clock.at += 100_000;
+    await retry.fire();
+    expect(host.sent).toHaveLength(1);
+  });
+
+  test("the seat read just before a supplement is sent: when it fails the request waits and the seat is registered, and once it reads again the request goes out exactly once", async () => {
+    const host = fakeHost();
+    const asked = (target: Host) =>
+      target.sent.filter((entry) => entry.text.includes("补齐已有交付的证据"));
+    const clock = { at: Date.now() };
+    const readHost = createObserverHost(host.port);
+    let armed = false;
+    // The service commits the supplement and does not send it; the outbox of the driver is the one that does.
+    const switchable = {
+      runOutbox: async (runId: string) =>
+        armed
+          ? { status: "ok" as const, sent: [], reconciled: [], unknown: [], failed: [] }
+          : built.effects.runOutbox(runId),
+    };
+    const retry = createReadRetry({
+      store,
+      clock: { now: () => new Date(clock.at).toISOString() },
+      schedule: () => () => undefined,
+      readReply: (agentId, messageId) => readHost.replyWindow(agentId, messageId),
+      readSeat: async (agentId) => {
+        const refreshed = await host.port.agents.ref(agentId).refresh();
+        if (!refreshed?.agent) throw new Error("no agent state");
+      },
+      onRecovered: (runId) =>
+        built.driver.retryRun(runId, { afterWrite: true }).then(() => undefined),
+    });
+    const built = build(
+      host,
+      {
+        onPassed: (runId) => retry.sweep(runId),
+        // As in production, a pass of the driver also sends what is prepared.
+        outbox: { run: (runId) => built.effects.runOutbox(runId) },
+      },
+      undefined,
+      switchable,
+      (runId, failure) => retry.note(runId, failure),
+    );
+    const { driver } = built;
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    armed = true;
+    await hook(host, driver, "agent-b1");
+    armed = false;
+    const prepared = await stored();
+    expect(prepared.outbox.some((i) => i.kind === "dispatch" && i.state === "prepared")).toBe(true);
+    expect(asked(host)).toHaveLength(0);
+
+    // Sending is tried; the seat cannot be read just before. Nothing is sent, and the seat is registered.
+    host.setUnreadable("agent", true);
+    await built.effects.runOutbox(RUN_ID);
+    expect(asked(host)).toHaveLength(0);
+    expect(
+      (await items()).some(
+        (item) => item.target.type === "seat" && item.target.agentId === "agent-b1",
+      ),
+    ).toBe(true);
+
+    host.setUnreadable("agent", false);
+    clock.at += 1500;
+    await retry.fire();
+    expect(asked(host)).toHaveLength(1);
+    await driver.kick(RUN_ID);
+    await driver.retryRun(RUN_ID);
+    expect(asked(host)).toHaveLength(1);
+  });
+
+  test("a reply window the host gave incomplete is read again, three times, and then the alert says so; a turn that is only still open is not", async () => {
+    const host = fakeHost();
+    const { driver, retry, clock } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+
+    // Still open: no later turn proves it over and the pages say there is more. Not a failed read.
+    host.hasNewerPages(true);
+    await hook(host, driver, "agent-b1");
+    expect(await items()).toEqual([]);
+    host.hasNewerPages(false);
+
+    // The host lost the history: the dispatch cannot be found. That is a read that did not work.
+    host.dropTimeline("agent-b1");
+    await hook(host, driver, "agent-b1");
+    expect(await items()).toEqual([
+      expect.objectContaining({
+        state: "waiting",
+        target: expect.objectContaining({ type: "reply", agentId: "agent-b1", taskId: "t1" }),
+      }),
+    ]);
+    for (const wait of [1500, 2500, 4500]) {
+      clock.at += wait;
+      await retry.fire();
+    }
+    expect((await items())[0]).toMatchObject({ state: "held", attemptsStarted: 3 });
+    expect((await stored()).alerts.map((alert) => alert.summary.slice(0, 7))).toEqual([
+      "读取重试已用尽",
+    ]);
+  });
+
+  test("a reply that cannot be read when the Run is reconciled is registered for the re-checks", async () => {
+    const host = fakeHost();
+    const { driver } = wired(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    host.setUnreadable("timeline", true);
+    await driver.recover();
+    const registered = await items();
+    expect(registered.filter((item) => item.target.type === "reply")).toEqual([
+      expect.objectContaining({
+        state: "waiting",
+        target: expect.objectContaining({ type: "reply", agentId: "agent-b1", taskId: "t1" }),
+      }),
+    ]);
+    // The coordinator's plan reply has no assignment, and is not given one.
+    expect(registered.every((item) => item.target.agentId !== COORDINATOR_AGENT)).toBe(true);
   });
 
   test("a v1 Run, or one made without the block, is read as before: nothing is written down", async () => {
