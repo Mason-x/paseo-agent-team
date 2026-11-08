@@ -10,7 +10,7 @@ import { runEngineZh as zh } from "../../zh/run-engine";
 import { isDecisionPending } from "./decision-state";
 import { displayText } from "./display-text";
 import { eventCause } from "./timeline";
-import { explainDecision, explainTask, type TaskExplanation } from "./waiting";
+import { explainAlert, explainDecision, explainTask, type TaskExplanation } from "./waiting";
 
 export { displayText };
 
@@ -456,6 +456,7 @@ export type AlertRowView = {
   stateLabel: string;
   open: boolean;
   summary: string;
+  explain: TaskExplanation;
   createdAt: string;
 };
 
@@ -470,6 +471,7 @@ export function alertRows(alerts: RunDetailView["alerts"]): AlertRowView[] {
       stateLabel: zh.alerts.state[alert.state] ?? textOf(alert.state, 16),
       open: alert.state === "open",
       summary: displayText(alert.summary, 300, "—"),
+      explain: explainAlert(alert),
       createdAt: shortTime(alert.createdAt),
       rank: SEVERITY_RANK[alert.severity] ?? 3,
     }))

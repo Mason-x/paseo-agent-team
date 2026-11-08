@@ -380,7 +380,9 @@ function ChannelAlertPanel({ theme, model }: { theme: PluginTheme; model: Engine
                 >
                   {`${row.severity} · ${row.stateLabel}`}
                 </Text>
-                <Muted theme={theme}>{row.summary}</Muted>
+                <Muted theme={theme}>{row.explain.why}</Muted>
+                <Muted theme={theme}>{`${zh.explain.who}：${row.explain.who}`}</Muted>
+                <Muted theme={theme}>{`${zh.explain.next}：${row.explain.next}`}</Muted>
               </View>
             )),
           ]}

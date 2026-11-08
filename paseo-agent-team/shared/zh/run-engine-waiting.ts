@@ -101,6 +101,16 @@ export const DISPATCH_BLOCKED_ZH: Record<string, WaitingText> = {
     who: YOU,
     next: `检查是否有 Run 的台账损坏或版本不一致；${KICK}`,
   },
+  "budget-missing": {
+    why: "负责这个步骤的席位没有回合预算记录，无法派发",
+    who: YOU,
+    next: "检查席位的预算记录；当前 Run 无法给没有预算记录的席位追加预算",
+  },
+  "budget-exhausted": {
+    why: "负责这个步骤的席位的回合预算已用完，无法派发",
+    who: YOU,
+    next: "在 Runs 页为该席位追加预算；如果没有入口，请检查 Run 的状态",
+  },
   "duplicate-dispatch": {
     why: "这次派发已经做过了",
     who: ENGINE,
@@ -368,7 +378,7 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
   },
   "replan-requested": {
     label: "重新规划",
-    cause: "有人要求重新规划，Engine 向协调者发了新的计划请求",
+    cause: "有人要求重新规划，新的计划请求已写入待发送队列",
   },
   "dag-accepted": { label: "任务图已接受", cause: "协调者的任务图通过校验，Run 开始派发任务" },
   "dag-revised": { label: "任务图已修订", cause: "协调者提交了修订后的任务图并被接纳" },
@@ -423,7 +433,10 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
     cause: "进行中的回合都已确认结束，全部未完成的任务已取消，占用已释放",
   },
   "run-finished": { label: "Run 结束", cause: "所有任务都完成或取消，且没有未了结的消息" },
-  "run-cancelled": { label: "Run 取消", cause: "Run 被取消，占用已释放" },
+  "run-cancelled": {
+    label: "Run 取消",
+    cause: "Run 进入取消状态；在途工作或未解除的占用仍可能需要确认",
+  },
   "observation-recorded": {
     label: "观察记录",
     cause: "Engine 记下了一条来自宿主的事实（例如回合结束的回执）",

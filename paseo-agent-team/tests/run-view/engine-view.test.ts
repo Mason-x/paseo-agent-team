@@ -181,6 +181,29 @@ function button(root: Node, label: string): Node | undefined {
 }
 
 describe("EngineView mounted rendering", () => {
+  test("shows an alert's summary and states when the responsible party is unknown", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          alerts: [
+            {
+              alertId: "alert-a1",
+              state: "open",
+              severity: "warning",
+              summary: "宿主读取失败",
+              createdAt: AT,
+            },
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("宿主读取失败");
+    expect(text).toContain(`${zh.explain.who}：需根据告警内容判断`);
+    expect(text).toContain(`${zh.explain.next}：查看并按告警内容处理`);
+    await renderer.act(async () => view.unmount());
+  });
+
   test("renders server text literally, uses DTO capabilities, and exposes only read/refresh controls", async () => {
     const canary = runView({
       team: { id: "t", name: "Team‮ **x**", rawMode: "m", modeContract: 2, plannerVersion: 2 },

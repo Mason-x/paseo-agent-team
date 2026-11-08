@@ -100,6 +100,17 @@ export function explainWaiting(reason: string): WaitingExplanation {
 
 export type TaskExplanation = { why: string; who: string; next: string };
 
+/** Alert DTOs carry a summary, not a type or owner; never infer the responsible party from its text. */
+export function explainAlert(
+  alert: Pick<RunDetailView["alerts"][number], "state" | "summary">,
+): TaskExplanation {
+  return {
+    why: displayText(alert.summary, 300, "—"),
+    who: alert.state === "resolved" ? "—" : "需根据告警内容判断",
+    next: alert.state === "resolved" ? "告警已解除" : "查看并按告警内容处理；之后重新查看状态",
+  };
+}
+
 type DecisionView = RunDetailView["decisions"][number];
 
 /** A decision: what stopped, who answers, and whether this page can. */

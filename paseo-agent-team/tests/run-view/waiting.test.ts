@@ -9,6 +9,7 @@ import {
 } from "../../shared/domain/run-engine/transitions";
 import { historyRows } from "../../shared/domain/run-engine/view";
 import {
+  explainAlert,
   explainDecision,
   explainTask,
   explainWaiting,
@@ -42,6 +43,26 @@ describe("every reason the server writes has words", () => {
     ].filter((code) => code !== "no-seat");
     const missing = [...new Set(codes)].filter((code) => unknownOf(`dispatch-blocked:${code}`));
     expect(missing).toEqual([]);
+  });
+
+  test("dispatch-blocked: every builder refusal has words, including dynamically chosen budget codes", () => {
+    const text = read("shared/domain/run-engine/dispatch-builder.ts");
+    const union = /export type DispatchRefusal =([\s\S]*?);/u.exec(text);
+    expect(union).not.toBeNull();
+    const codes = [...(union?.[1] ?? "").matchAll(/"([a-z][a-z-]+)"/gu)].map(
+      (match) => match[1] as string,
+    );
+    expect(codes).toEqual(expect.arrayContaining(["budget-missing", "budget-exhausted"]));
+    expect(codes.length).toBeGreaterThanOrEqual(15);
+    expect(codes.filter((code) => unknownOf(`dispatch-blocked:${code}`))).toEqual([]);
+  });
+
+  test("budget exhaustion offers an increase but a missing record cannot be increased", () => {
+    const exhausted = explainWaiting("dispatch-blocked:budget-exhausted");
+    const missing = explainWaiting("dispatch-blocked:budget-missing");
+    expect(exhausted.next).toContain("追加预算");
+    expect(missing.why).toContain("没有回合预算记录");
+    expect(missing.next).toContain("无法");
   });
 
   test("dispatch-blocked: the families whose detail is a git or filesystem code", () => {
@@ -349,6 +370,25 @@ describe("explainDecision", () => {
   });
 });
 
+describe("alert explanations", () => {
+  test.each(["open", "acknowledged"] as const)(
+    "%s alerts retain the summary without guessing who can resolve them",
+    (state) => {
+      const said = explainAlert({ state, summary: "宿主‮读取失败" });
+      expect(said.why).toBe("宿主读取失败");
+      expect(said.who).toContain("判断");
+      expect(said.next).toContain("告警内容");
+    },
+  );
+
+  test("a resolved alert does not suggest that it still needs a response", () => {
+    const said = explainAlert({ state: "resolved", summary: "问题已解除" });
+    expect(said.why).toBe("问题已解除");
+    expect(said.who).toBe("—");
+    expect(said.next).toContain("已解除");
+  });
+});
+
 describe("the causal timeline", () => {
   const intentStates = ["sending", "confirmed", "outcome-unknown", "failed"];
 
@@ -386,6 +426,15 @@ describe("the causal timeline", () => {
     }
     expect(kinds.size).toBeGreaterThanOrEqual(10);
     expect([...kinds].filter((kind) => !eventCause(kind).known)).toEqual([]);
+  });
+
+  test("replan and cancellation events do not claim unproved sends or released claims", () => {
+    const replan = eventCause("replan-requested").cause;
+    const cancelled = eventCause("run-cancelled").cause;
+    expect(replan).toContain("待发送");
+    expect(replan).not.toContain("发了");
+    expect(cancelled).toContain("可能");
+    expect(cancelled).not.toContain("占用已释放");
   });
 
   test("a kind with no words falls back to the general sentence and keeps its own name", () => {
