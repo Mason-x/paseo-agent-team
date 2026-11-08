@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createCancelFinisher } from "../../server/run-engine/cancel";
 import { createRunControl } from "../../server/run-engine/control";
 import { createDagIntake } from "../../server/run-engine/dag";
 import { createEngineDriver, type DriverOptions } from "../../server/run-engine/driver";
@@ -25,7 +26,7 @@ import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { replyAnchor, requestReportRepair } from "../../shared/domain/run-engine/report-repair";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
+import { PROFILE_HAIKU, spec } from "../fixtures/run-engine/base";
 import {
   bootstrapRun,
   COORDINATOR_AGENT,
@@ -34,7 +35,7 @@ import {
   PLAN_MESSAGE_ID,
   planTasks,
 } from "./support/bootstrap-run";
-import { JUDGE_SEAT_REVIEW } from "./support/review-run";
+import { JUDGE_SEAT_REVIEW, JUDGE_SEAT_SMOKE } from "./support/review-run";
 
 /**
  * The whole Engine loop without a launch: a coordinator's plan, producers that really commit in a
@@ -103,6 +104,8 @@ function fakeHost() {
   const timelines = new Map<string, PortTimelineEntry[]>();
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
+  // Every call that reaches the host besides a send: reads of a timeline or a live state, and archives.
+  const calls = { reads: 0, archives: 0 };
   const lose = { next: false };
   const flags = { newer: false };
   // Reads of the host that throw: the timeline (a reply) and the live agent state (a seat).
@@ -146,9 +149,12 @@ function fakeHost() {
           }
           add(agentId, `turn-${agentId}-${sent.length}`, { type: "user_message", messageId });
         },
-        archive: async () => undefined,
+        archive: async () => {
+          calls.archives += 1;
+        },
         timeline: {
           refetch: async () => {
+            calls.reads += 1;
             if (unreadable.timeline) throw new Error("the timeline cannot be read");
             return page(agentId);
           },
@@ -159,6 +165,7 @@ function fakeHost() {
           pendingPermissions: permissionAgents.has(agentId) ? [{ id: "permission-1" }] : [],
         }),
         refresh: async () => {
+          calls.reads += 1;
           if (unreadable.agent) throw new Error("the agent cannot be read");
           return {
             agent: {
@@ -174,6 +181,7 @@ function fakeHost() {
   return {
     port,
     sent,
+    calls,
     runningAgents,
     permissionAgents,
     /** Pages say there is more after them: a turn that no later turn proves over is still open. */
@@ -193,8 +201,11 @@ function fakeHost() {
       unreadable[what] = value;
     },
     /** The coordinator was sent the plan request earlier: its message is already in the timeline. */
-    planRequestSent: () =>
-      add(COORDINATOR_AGENT, "turn-plan", { type: "user_message", messageId: PLAN_MESSAGE_ID }),
+    planRequestSent: (agentId: string = COORDINATOR_AGENT, messageId: string = PLAN_MESSAGE_ID) =>
+      add(agentId, "turn-plan", { type: "user_message", messageId }),
+    /** A message the person typed into the agent's chat: it starts the turn `turnId`. */
+    addUserMessage: (agentId: string, turnId: string, messageId: string) =>
+      add(agentId, turnId, { type: "user_message", messageId }),
     reply: (agentId: string, text: string) =>
       add(agentId, turns.get(agentId) ?? "turn-plan", { type: "assistant_message", text }),
     turnOf: (agentId: string) => turns.get(agentId) ?? "turn-plan",
@@ -254,7 +265,7 @@ function build(
           order: 0,
         };
       }
-      if (seatId === JUDGE_SEAT_REVIEW) {
+      if (seatId === JUDGE_SEAT_REVIEW || seatId === JUDGE_SEAT_SMOKE) {
         return { profile: profile("luna", "profile-dev-luna"), available: true, order: 1 };
       }
       return null;
@@ -556,6 +567,386 @@ describe("the loop, from plan to finished Run", () => {
   });
 });
 
+describe("a task that declares a smoke holds back the task that depends on it", () => {
+  type SmokeFacts = Facts & {
+    devTarget: { devHost: string; devServerId: string; devHome: string };
+  };
+
+  /** t1 declares a DEV smoke (one check, "health") on the registered target; t2 comes after it. */
+  const smokePlan = () => {
+    const scope = (file: string) => [
+      { repoId: REPO_ALIAS, kind: "file", path: file, access: "write" },
+    ];
+    return fence(
+      "task-dag",
+      dagBlock(RUN_ID, [
+        spec("t1", "Core API surface", {
+          scopes: scope("src/t1.ts"),
+          devSmoke: true,
+          smokeChecklist: ["health"],
+        }) as never,
+        spec("t2", "Core implementation", { deps: ["t1"], scopes: scope("src/t2.ts") }) as never,
+      ]),
+    );
+  };
+
+  /** The smoker answers from its own prompt: the delivery it was given, on the DEV target it was given. */
+  function smoke(host: Host, agentId: string, result: "pass" | "fail"): void {
+    const prompt = host.lastSent(agentId)?.text ?? "";
+    const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+    const facts = section<SmokeFacts>(prompt, "【执行事实 JSON】");
+    host.reply(
+      agentId,
+      fence("smoke-report", {
+        ...identity,
+        testedRef: facts.delivery.deliveryRef,
+        ...facts.devTarget,
+        checks: [{ id: "health", result, evidencePath: `${facts.evidenceDir}/health.log` }],
+      }),
+    );
+  }
+
+  /** The Run has a seat that can smoke on the registered target (agent-m1, with its own budget). */
+  async function withSmoker(): Promise<void> {
+    await store.update(RUN_ID, (current) => {
+      current.roster.push({
+        seatId: JUDGE_SEAT_SMOKE,
+        tier: "B",
+        agentId: "agent-m1",
+        channelId: "claude",
+        duties: ["smoke"],
+        enabled: true,
+      });
+      current.budgets.entries.push({
+        scope: "seat",
+        subjectId: JUDGE_SEAT_SMOKE,
+        limit: 6,
+        reserved: 0,
+        confirmed: 0,
+        observedTurns: 0,
+      });
+      return current;
+    });
+  }
+
+  /** Plan admitted, t1 produced and judged: the point where only the smoke is left for t1. */
+  async function untilSmoke(host: Host, driver: ReturnType<typeof build>["driver"]) {
+    await withSmoker();
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, smokePlan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+  }
+
+  test("t2 stays pending through the review and the smoke, and is dispatched only once the smoke has passed", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    await untilSmoke(host, driver);
+
+    // The review passed, and that is not enough: the smoker is the next to be asked, t2 is not.
+    const reviewed = await stored();
+    expect(states(reviewed)).toEqual({ t1: "review", t2: "pending" });
+    expect(reviewed.tasks[0]?.phase).toBe("smoke");
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2", "agent-m1"]);
+    await driver.kick(RUN_ID);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2", "agent-m1"]);
+
+    // The smoker passes the checklist on the registered DEV target: only now t2 is ready, and goes out.
+    smoke(host, "agent-m1", "pass");
+    await hook(host, driver, "agent-m1");
+    const passed = await stored();
+    expect(states(passed)).toEqual({ t1: "done", t2: "assigned" });
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([
+      "agent-b1",
+      "agent-b2",
+      "agent-m1",
+      "agent-b1",
+    ]);
+    expect(host.lastSent("agent-b1")?.text).toContain('"taskId":"t2"');
+  });
+
+  test("a smoke that fails keeps t2 pending and sends t1 back to its producer", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    await untilSmoke(host, driver);
+
+    smoke(host, "agent-m1", "fail");
+    await hook(host, driver, "agent-m1");
+    const failed = await stored();
+    // t2 never started; t1 is with its producer again, for another attempt.
+    expect(failed.tasks.find((entry) => entry.spec.id === "t2")?.state).toBe("pending");
+    expect(failed.tasks.find((entry) => entry.spec.id === "t2")?.attempts).toBe(0);
+    expect(states(failed).t1).toBe("assigned");
+    expect(failed.tasks[0]?.attempts).toBe(2);
+    expect(host.lastSent("agent-b1")?.text).toContain("【返工说明】");
+    expect(host.sent.filter((entry) => entry.text.includes('"taskId":"t2"'))).toEqual([]);
+  });
+});
+
+describe("two Runs on one repository, and a task whose claims are held", () => {
+  const RUN_B = "run-drv002-b1";
+  const B_COORD = "b-agent-coord";
+  const B_PLAN_MESSAGE = "ffffffff-ffff-4fff-8fff-fffffffffff2";
+  const b = (agentId: string) => `b-${agentId}`;
+  const scopeOf = (file: string) => [
+    { repoId: REPO_ALIAS, kind: "file", path: file, access: "write" },
+  ];
+  const oneTask = (runId: string, file: string, id = "t1") =>
+    fence(
+      "task-dag",
+      dagBlock(runId, [spec(id, `Task ${id}`, { scopes: scopeOf(file) }) as never]),
+    );
+
+  /** A second Run in the same store: its own agents, the same repository. */
+  async function startSecondRun(): Promise<void> {
+    const record = bootstrapRun({ runId: RUN_B, planRequest: true });
+    record.policy.evidenceRoot = evidenceRoot;
+    record.schemaVersion = 2;
+    (record as Record<string, unknown>).readRetries = emptyReadRetries();
+    for (const seat of record.roster) if (seat.agentId !== null) seat.agentId = b(seat.agentId);
+    const planIntent = record.outbox.find((entry) => entry.kind === "wake");
+    if (planIntent) {
+      planIntent.recipient = B_COORD;
+      planIntent.messageId = B_PLAN_MESSAGE;
+    }
+    await store.create(record);
+  }
+
+  async function storedOf(runId: string): Promise<RunRecord> {
+    const read = await store.get(runId);
+    if (read.status !== "ok") throw new Error(`run unreadable: ${read.status}`);
+    return read.record;
+  }
+
+  /** The member says it cannot do the task: the honest `blocked` report. */
+  function stop(host: Host, agentId: string): void {
+    const prompt = host.lastSent(agentId)?.text ?? "";
+    const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+    host.reply(
+      agentId,
+      fence("task-report", {
+        ...identity,
+        status: "blocked",
+        reasonCode: "ENVIRONMENT_UNAVAILABLE",
+        summary: "the check could not be run; stopped",
+        evidence: [],
+      }),
+    );
+  }
+
+  /** Run A has `fileA` in flight with its producer; Run B has its plan admitted and wants `fileB`. */
+  async function bothPlanned(
+    host: Host,
+    driver: ReturnType<typeof build>["driver"],
+    files: string[],
+  ) {
+    await startSecondRun();
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, oneTask(RUN_ID, files[0] ?? ""));
+    await hook(host, driver, COORDINATOR_AGENT);
+    host.planRequestSent(B_COORD, B_PLAN_MESSAGE);
+    host.reply(B_COORD, oneTask(RUN_B, files[1] ?? ""));
+    await hook(host, driver, B_COORD);
+  }
+
+  const memberMessagesOfB = (host: Host) =>
+    host.sent.filter((entry) => entry.agentId === b("agent-b1") || entry.agentId === b("agent-b2"));
+
+  test("a second Run asking for the same file under another case and separator is held back, with the file named as the conflict; once the first Run's task is done, the next pass sends it", async () => {
+    const host = fakeHost();
+    const { driver, service } = build(host);
+    await bothPlanned(host, driver, ["src/Util.ts", "SRC\\util.ts"]);
+
+    // A holds the file and the repository; B's task is ready and cannot start.
+    expect(states(await stored())).toEqual({ t1: "assigned" });
+    const waiting = await storedOf(RUN_B);
+    expect(states(waiting)).toEqual({ t1: "ready" });
+    expect(waiting.tasks[0]?.waitingReason).toBe("dispatch-blocked:lock-conflict");
+    expect(memberMessagesOfB(host)).toEqual([]);
+    const refused = await service.dispatchNext(RUN_B);
+    expect(refused).toMatchObject({ status: "blocked", taskId: "t1", reason: "lock-conflict" });
+    // The file itself is among the conflicts, not only the repository-wide resource: the spelling is
+    // folded, so `SRC\util.ts` meets `src/Util.ts`.
+    const conflicts = (refused as { detail?: { kind: string; path: string; reason: string }[] })
+      .detail;
+    expect(conflicts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "file", path: "src/Util.ts", reason: "path" }),
+      ]),
+    );
+
+    // A's task goes through its review and is done: its claims are released.
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    expect(states(await stored())).toEqual({ t1: "done" });
+    expect((await stored()).resources).toEqual([]);
+
+    // B is sent on the next pass, once.
+    expect((await driver.kick(RUN_B)).dispatched).toBe(1);
+    expect(states(await storedOf(RUN_B))).toEqual({ t1: "assigned" });
+    expect(memberMessagesOfB(host).map((entry) => entry.agentId)).toEqual([b("agent-b1")]);
+    await driver.kick(RUN_B);
+    expect(memberMessagesOfB(host)).toHaveLength(1);
+  });
+
+  test("a task of the same Run is held back by the frozen claims of a task that reported blocked, and the refusal names them as frozen", async () => {
+    const host = fakeHost();
+    const { driver, service } = build(host);
+    host.planRequestSent();
+    host.reply(
+      COORDINATOR_AGENT,
+      fence(
+        "task-dag",
+        dagBlock(RUN_ID, [
+          spec("t1", "First", { scopes: scopeOf("src/t1.ts") }) as never,
+          spec("t2", "Second", { scopes: scopeOf("src/t2.ts") }) as never,
+        ]),
+      ),
+    );
+    await hook(host, driver, COORDINATOR_AGENT);
+    stop(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+
+    const frozen = await stored();
+    expect(states(frozen)).toEqual({ t1: "blocked", t2: "ready" });
+    expect(frozen.resources.length).toBeGreaterThan(0);
+    expect(frozen.resources.every((claim) => claim.frozen)).toBe(true);
+    const sent = host.sent.length;
+    const refused = await service.dispatchNext(RUN_ID);
+    expect(refused).toMatchObject({ status: "blocked", taskId: "t2", reason: "lock-conflict" });
+    expect((refused as { detail?: { taskId: string; reason: string }[] }).detail).toEqual(
+      expect.arrayContaining([expect.objectContaining({ taskId: "t1", reason: "frozen" })]),
+    );
+    await driver.kick(RUN_ID);
+    expect(states(await stored()).t2).toBe("ready");
+    expect(host.sent).toHaveLength(sent);
+  });
+
+  test("another Run's frozen task keeps this Run waiting until that task is cancelled; then the next pass sends", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    await bothPlanned(host, driver, ["src/t1.ts", "src/t1.ts"]);
+    stop(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    const frozen = await stored();
+    expect(states(frozen)).toEqual({ t1: "blocked" });
+    expect(frozen.resources.every((claim) => claim.frozen)).toBe(true);
+
+    // Looking again, here or there, changes nothing: B waits, and nothing was sent to its members.
+    await driver.kick(RUN_B);
+    await driver.kick(RUN_ID);
+    expect(states(await storedOf(RUN_B))).toEqual({ t1: "ready" });
+    expect(memberMessagesOfB(host)).toEqual([]);
+
+    // A's person cancels the frozen task (A4): the claims are released with the answer.
+    const decision = frozen.decisions.find((entry) => entry.state === "open");
+    expect(decision?.dedupeKey.startsWith("stuck:")).toBe(true);
+    const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+    const answer = await control.decide({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      decisionId: decision?.decisionId ?? "",
+      requestId: "ans-cancel",
+      expectedRevision: frozen.revision,
+      reason: "from the test",
+      answer: { action: "cancel" },
+    });
+    expect(answer).toMatchObject({ status: "applied", cancelledTaskIds: ["t1"] });
+    await control.idle();
+    expect(states(await stored())).toEqual({ t1: "cancelled" });
+    expect((await stored()).resources).toEqual([]);
+
+    expect((await driver.kick(RUN_B)).dispatched).toBe(1);
+    expect(memberMessagesOfB(host).map((entry) => entry.agentId)).toEqual([b("agent-b1")]);
+  });
+
+  test("another Run's task whose delivery is not known keeps its claims, and this Run waits", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    await startSecondRun();
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, oneTask(RUN_ID, "src/t1.ts"));
+    await hook(host, driver, COORDINATOR_AGENT);
+    // A's producer delivers without the evidence the gate wants, and the request for it is lost on the
+    // way: nothing proves it arrived, so the claims are frozen.
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    host.loseNextSend();
+    await hook(host, driver, "agent-b1");
+    const unknown = await stored();
+    expect(unknown.outbox.some((entry) => entry.state === "outcome-unknown")).toBe(true);
+    expect(unknown.resources.every((claim) => claim.frozen)).toBe(true);
+
+    host.planRequestSent(B_COORD, B_PLAN_MESSAGE);
+    host.reply(B_COORD, oneTask(RUN_B, "src/t1.ts"));
+    await hook(host, driver, B_COORD);
+    await driver.kick(RUN_B);
+    expect(states(await storedOf(RUN_B))).toEqual({ t1: "ready" });
+    expect((await storedOf(RUN_B)).tasks[0]?.waitingReason).toBe("dispatch-blocked:lock-conflict");
+    expect(memberMessagesOfB(host)).toEqual([]);
+  });
+
+  test("known limitation: a member closed in the middle of its turn is not noticed; the task stays assigned with its claims, and a cancellation of the Run keeps waiting for a turn end; the host is sent nothing", async () => {
+    const host = fakeHost();
+    const readSeat = async (agentId: string) => {
+      const refreshed = await host.port.agents.ref(agentId).refresh();
+      return refreshed?.agent
+        ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+        : null;
+    };
+    const { driver } = build(host, {
+      cancelFinisher: createCancelFinisher({ store, readSeat }),
+      // As production reads the host on a recovery: an agent that still reports a running turn is not idle.
+      reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const before = await stored();
+    expect(states(before)).toEqual({ t1: "assigned", t2: "pending" });
+    const sentBefore = host.sent.length;
+
+    // The person closes the member while it works: the host reports the close and no turn end.
+    host.runningAgents.add("agent-b1");
+    await driver.onHook({ name: "agent.closed", agentId: "agent-b1" });
+    await driver.kick(RUN_ID);
+    await driver.recover();
+    const closed = await stored();
+    // Nothing moved: the task is still the member's, its claims are kept, and no other member is chosen.
+    expect(states(closed)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(closed.tasks[0]?.attempts).toBe(before.tasks[0]?.attempts);
+    expect(closed.resources).toEqual(before.resources);
+    expect(closed.assignments.filter((entry) => entry.state !== "ended")).toHaveLength(
+      before.assignments.filter((entry) => entry.state !== "ended").length,
+    );
+    expect(host.sent).toHaveLength(sentBefore);
+
+    // Cancelling the Run waits for the turn that will not end.
+    const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+    const out = await control.cancel({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId: "cancel-1",
+      expectedRevision: closed.revision,
+      reason: "from the test",
+    });
+    expect(out).toMatchObject({ status: "applied", lifecycle: "paused" });
+    expect((out as { waiting: { turns: number } }).waiting.turns).toBeGreaterThanOrEqual(1);
+    await control.idle();
+    await driver.kick(RUN_ID);
+    const waiting = await stored();
+    expect(waiting.lifecycle).toBe("paused");
+    expect(states(waiting)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(waiting.resources).toEqual(before.resources);
+    expect(host.sent).toHaveLength(sentBefore);
+    expect(host.calls.archives).toBe(0);
+  });
+});
+
 describe("why a Run does not move", () => {
   test("a dirty working tree is shown on the task, and a kick after it is clean dispatches", async () => {
     const host = fakeHost();
@@ -681,6 +1072,63 @@ describe("why a Run does not move", () => {
     expect(again.status).toBe("replayed");
     await driver.kick(RUN_ID);
     expect(toMember()).toHaveLength(1);
+  });
+
+  test("a dispatch that was committed and never sent is withdrawn locally when the Run is cancelled: the Run is the cause, its claims go, and the host is sent nothing", async () => {
+    const host = fakeHost();
+    const readSeat = async (agentId: string) => {
+      const refreshed = await host.port.agents.ref(agentId).refresh();
+      return refreshed?.agent
+        ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+        : null;
+    };
+    // The process stops between the commit of the dispatch and its send: the service's outbox sends nothing.
+    const { driver } = build(
+      host,
+      { cancelFinisher: createCancelFinisher({ store, readSeat }) },
+      undefined,
+      { runOutbox: async () => [] as never },
+    );
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const held = await stored();
+    expect(states(held).t1).toBe("assigned");
+    const dispatch = held.outbox.find((entry) => entry.kind === "dispatch");
+    expect(dispatch).toMatchObject({ state: "prepared", localCancellation: null });
+    expect(held.resources.length).toBeGreaterThan(0);
+    expect(host.sent).toEqual([]);
+
+    // The person pauses, and the held dispatch stays held: a kick and a recovery send nothing either.
+    const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+    const ask = async (requestId: string) => ({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId,
+      expectedRevision: (await stored()).revision,
+      reason: "from the test",
+    });
+    const cancelled = await control.cancel(await ask("cancel-1"));
+    expect(cancelled.status).toBe("applied");
+    await control.idle();
+    await driver.kick(RUN_ID);
+    await driver.recover();
+
+    const after = await stored();
+    expect(after.lifecycle).toBe("cancelled");
+    expect(states(after)).toEqual({ t1: "cancelled", t2: "cancelled" });
+    const withdrawn = after.outbox.find((entry) => entry.kind === "dispatch");
+    expect(withdrawn).toMatchObject({
+      state: "failed",
+      localCancellation: { reason: "cancel-before-send", cause: "run-cancelled" },
+    });
+    // A message that never went out leaves no claim and no usable nonce behind.
+    expect(after.resources).toEqual([]);
+    const nonce = after.nonceRegistry.find((entry) => entry.taskId === "t1");
+    expect(nonce).toMatchObject({ acceptedAt: null, revokeReason: "cancel-before-send" });
+    expect(nonce?.revokedAt).not.toBeNull();
+    // Nothing was ever sent, and nothing archived or interrupted: the plan request was the only message.
+    expect(host.sent).toEqual([]);
   });
 
   test("a Run still waiting for its DAG has nothing to dispatch", async () => {
@@ -906,6 +1354,75 @@ describe("permission waiting and idle events", () => {
       expect(retry.armed).toBe(false);
     } finally {
       await retry.dispose();
+    }
+  });
+});
+
+describe("a person talks to a member the Run is waiting on", () => {
+  test("known limitation: a message the person typed is not a delivery and changes no task, assignment, decision or alert; no abnormal-activity record is made", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    const before = await stored();
+    expect(states(before)).toEqual({ t1: "assigned", t2: "pending" });
+    const sentBefore = host.sent.length;
+
+    // The person types into the member's chat: a message the Engine did not send starts a turn of its own,
+    // the member answers in words (no report block), and the turn ends.
+    const userTurn = "turn-typed-by-the-person";
+    await driver.onHook({ name: "agent.turn_started", agentId: "agent-b1", turnId: userTurn });
+    host.addUserMessage("agent-b1", userTurn, "typed-by-the-person-1");
+    host.reply("agent-b1", "Sure, I will look at that after the task.");
+    await driver.onHook({ name: "agent.turn_ended", agentId: "agent-b1", turnId: userTurn });
+    await driver.kick(RUN_ID);
+
+    const after = await stored();
+    // Not a delivery, not progress: the task and its attempt are as they were.
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(after.tasks).toEqual(before.tasks);
+    expect(after.assignments).toEqual(before.assignments);
+    expect(after.outbox).toEqual(before.outbox);
+    expect(after.resources).toEqual(before.resources);
+    // Not reported either: no decision, no alert, no waiting reason on the task.
+    expect(after.decisions).toEqual([]);
+    expect(after.alerts).toEqual(before.alerts);
+    expect(after.alerts).toEqual([]);
+    expect(host.sent).toHaveLength(sentBefore);
+    expect(host.calls.archives).toBe(0);
+  });
+});
+
+describe("a Run left alone for a long time", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  test("an idle Run, 24 hours later, has made no call to the host, written nothing and left no timer behind", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const host = fakeHost();
+      const { driver } = build(host);
+      host.planRequestSent();
+      host.reply(COORDINATOR_AGENT, plan());
+      await hook(host, driver, COORDINATOR_AGENT);
+      // t1 is with its producer, whose turn has not ended: nothing is due, and nothing will be.
+      const idle = await stored();
+      expect(states(idle)).toEqual({ t1: "assigned", t2: "pending" });
+      const sent = host.sent.length;
+      const reads = host.calls.reads;
+      expect(vi.getTimerCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(DAY_MS);
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(host.sent).toHaveLength(sent);
+      expect(host.calls).toEqual({ reads, archives: 0 });
+      const after = await stored();
+      expect(after.revision).toBe(idle.revision);
+      expect(after.alerts).toEqual(idle.alerts);
+      expect(after.eventReceipts).toEqual(idle.eventReceipts);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

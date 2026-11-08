@@ -10,6 +10,7 @@ import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { buildLaunchPlan, type LaunchPlan } from "../../shared/domain/launch-plan";
 import { COORDINATOR_SEAT_ID, REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
+import { engineLaunchGate, resolveTeamRunEngine } from "../../shared/domain/run-engine/team-config";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PaseoPort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config";
@@ -576,6 +577,82 @@ describe("the switch that starts Engine Runs is off, and a Run that was started 
     expect(refused.status).toBe("rejected");
     expect(refused.issues.map((issue) => issue.code)).not.toContain("run-missing");
     off.dispose();
+  });
+});
+
+describe("a Team's runEngine block that is damaged or removed after the Run was started", () => {
+  test("the Run is still read, kicked and controlled on the policy and roster it froze; only a new launch sees the damaged block", async () => {
+    const host = fakeHost();
+    const wired = runtime();
+    const started = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    if (!started.ok) throw new Error(`start failed: ${started.message} ${started.detail}`);
+    await wired.recover();
+    const frozen = await stored();
+    const frozenPolicy = JSON.stringify(frozen.policy);
+    const frozenRoster = JSON.stringify(frozen.roster);
+    expect(frozen.policy.perTask.protocolResends).toBeGreaterThan(0);
+
+    // The Team is edited on: the block the Run was started from is gutted in place, then the whole block is
+    // removed, and a copy of it is saved with a field the schema refuses.
+    engine.enabled = false;
+    engine.seats = [];
+    engine.policy.perTask.protocolResends = 0;
+    engine.policy.run.failedTasks = 0;
+    const damaged = { runEngine: { version: 1, enabled: true, seats: "nonsense" } };
+    const removed = {};
+    const seats = plan.seats.map((seat) => seat.logicalSeatId);
+    const gateOf = (team: { runEngine?: unknown }) =>
+      engineLaunchGate({
+        resolution: resolveTeamRunEngine(team),
+        logicalSeatIds: seats,
+        engineSupported: true,
+      });
+    // A new launch is refused (damaged) or goes the old way (removed); this Run is not asked.
+    expect(gateOf(damaged).blockers.length).toBeGreaterThan(0);
+    expect(gateOf(removed)).toMatchObject({ blockers: [], engine: false });
+
+    // The Run: listed and read, its coordinator's plan admitted and dispatched, kicked, paused and resumed.
+    const queries = createRunQueries({ store, ensureReady: async () => undefined });
+    expect((await queries.list({ runContractVersion: 1 })).runs.map((run) => run.runId)).toEqual([
+      RUN_ID,
+    ]);
+    await coordinatorPlans(host, started.coordinatorId);
+    await wired.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: started.coordinatorId,
+        turnId: host.turnOf(started.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.port,
+    );
+    const running = await stored();
+    expect(states(running)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(host.sent).toHaveLength(2);
+    expect((await queries.get({ runContractVersion: 1, runId: RUN_ID })).status).toBe("ready");
+
+    expect((await wired.control.kick({ runContractVersion: 1, runId: RUN_ID })).status).toBe("ok");
+    const ask = async (requestId: string) => ({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId,
+      expectedRevision: (await stored()).revision,
+      reason: "from the test",
+    });
+    expect((await wired.control.pause(await ask("pause-1"))).status).toBe("applied");
+    expect((await wired.control.resume(await ask("resume-1"))).status).toBe("applied");
+    await wired.control.idle();
+
+    // Everything it did, it did on what it froze at the start.
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(JSON.stringify(after.policy)).toBe(frozenPolicy);
+    expect(JSON.stringify(after.roster)).toBe(frozenRoster);
+    wired.dispose();
   });
 });
 
