@@ -19,6 +19,7 @@ import { buildSeatPlan } from "../../shared/domain/seat-plan";
 import { RunTeamEngineConfigSchema } from "../../shared/schemas/run-engine/config";
 import { TeamSchema } from "../../shared/schemas/team";
 import { TeamsDocumentSchema } from "../../shared/settings";
+import { runEngineZh } from "../../shared/zh/run-engine";
 import {
   allAvailable,
   architect,
@@ -273,6 +274,19 @@ describe("what launch would say, shown while editing", () => {
     let block: unknown = filled();
     for (const seatId of SEATS) block = setEngineSeat(block, seatId, { enabled: false });
     expect(evaluateEngineBlock(block, { seatIds: SEATS }).blockers.length).toBeGreaterThan(0);
+  });
+
+  test("a coordinator turn budget of 0 is a blocker the moment it is typed, and 1 clears it", () => {
+    const zero = setEngineNumber(filled(), "strategicTurns", "0");
+    const blocked = evaluateEngineBlock(zero, { seatIds: SEATS });
+    expect(blocked.issues).toEqual([]);
+    expect(blocked.blockers).toEqual([runEngineZh.launch.coordinatorBudgetEmpty]);
+    expect(blocked.ready).toBe(false);
+    const one = evaluateEngineBlock(setEngineNumber(zero, "strategicTurns", "1"), {
+      seatIds: SEATS,
+    });
+    expect(one.blockers).toEqual([]);
+    expect(one.ready).toBe(true);
   });
 
   test("a producer with no independent reviewer gets the reviewer warning", () => {

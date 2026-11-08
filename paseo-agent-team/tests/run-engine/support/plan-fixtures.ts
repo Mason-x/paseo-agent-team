@@ -38,6 +38,7 @@ export function prepared(
     role?: typeof ROLE;
     sameAgent?: boolean;
     templateVersion?: number;
+    schemaVersion?: 1 | 2;
   } = {},
 ): {
   record: RunRecord;
@@ -46,6 +47,7 @@ export function prepared(
   const task = options.task ?? "Add a login page.";
   const base = bootstrapRun({ runId: "run-plan01-a1" });
   base.outbox = [];
+  if (options.schemaVersion !== undefined) base.schemaVersion = options.schemaVersion;
   delete (base.launch as Record<string, unknown>).dagControl;
   base.launch.modelPlan.task = task;
   (base.launch as Record<string, unknown>).seatProfiles = {

@@ -11,6 +11,7 @@ import { LAUNCH_PLANNER_VERSION } from "../launch-hash";
 import type { LaunchPlan } from "../launch-plan";
 import { MODE_CONTRACT_VERSION } from "../mode-contract";
 import { identifyModelFamily } from "../model-family";
+import { reserveCoordinatorTurn } from "./coordinator-budget";
 import { COORDINATOR_DUTY, COORDINATOR_SEAT_ID } from "./dag-admission";
 import { emptyReadRetries } from "./read-retry";
 
@@ -374,7 +375,8 @@ export type PlanRequestInput = {
  * The control nonce comes into the record here and nowhere earlier: its digest (`launch.dagControl`),
  * its text (the intent's arguments, which the request is rebuilt from) and the request's hash land in
  * one commit, so no crash can leave a digest whose nonce is lost. A Run gets one plan request and
- * one nonce; asking again is refused rather than quietly replacing them.
+ * one nonce; asking again is refused rather than quietly replacing them. It also takes the
+ * coordinator's first turn from its budget (`coordinator-budget.ts`).
  */
 export function addPlanRequest(record: RunRecord, input: PlanRequestInput): RunRecord {
   const coordinator = record.roster.find((seat) => seat.seatId === COORDINATOR_SEAT_ID);
@@ -385,7 +387,13 @@ export function addPlanRequest(record: RunRecord, input: PlanRequestInput): RunR
   if (launch.dagControl !== undefined || record.outbox.some((entry) => entry.kind === "wake")) {
     throw new Error("the plan request was already prepared");
   }
-  const next = structuredClone(record);
+  // The plan request is the coordinator's first turn, paid in the same commit as the request. A Run
+  // is only started with at least one turn (the launch gate and the preflight), so this does not refuse.
+  const reservation = reserveCoordinatorTurn(record, `plan:${record.runId}:1`, input.messageId);
+  if (reservation.status !== "reserved") {
+    throw new Error("the coordinator has no turn left for the plan request");
+  }
+  const next = reservation.next;
   (next.launch as Record<string, unknown>).dagControl = {
     nonceDigest: input.controlNonceDigest,
     issuedAt: input.now,

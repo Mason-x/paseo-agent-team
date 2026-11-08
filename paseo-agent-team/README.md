@@ -197,7 +197,7 @@ decisions, channels and alerts, and a history with the cause of each event. Thes
 only when the Run offers them:
 
 - **重新规划** (re-plan), while the Run waits for a task graph: asks the coordinator again, with a
-  reason you write.
+  reason you write. It takes one turn from the coordinator's turn budget (see 追加预算).
 - **重试** (retry) on a decision the Engine opened for a stopped task (D1, D3, D4): after you
   confirm, the task gets one more attempt from where it stopped. Nothing is released until every
   turn of the task is proven ended.
@@ -216,7 +216,10 @@ only when the Run offers them:
 - **追加预算** (add turns), on a seat of the Run: a seat's turn budget is a limit, and a task that
   needs a seat whose turns ran out waits with a warning that says so. Adding 1 to 64 turns (1024 in
   all) lets what was held back go on; the Run's frozen policy is not changed, the new limit is
-  recorded on the Run.
+  recorded on the Run. The coordinator has a row of its own, with the Team's 协调者回合数上限
+  (12 by default, at least 1 to start a Run): the plan request and each re-plan take one turn, a
+  format re-send of the plan does not, and no turn is given back. A re-plan with no turn left is
+  refused with a warning; add turns to the coordinator's row and ask again.
 - **取消这个 Run** (cancel the Run), with a reason you write: nothing new is dispatched from then on
   (the Run is paused and cannot be resumed), and once every turn that was running is proven ended on
   the host's own record, every unfinished task is cancelled and every claim released. It sends no

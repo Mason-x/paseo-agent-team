@@ -1,4 +1,5 @@
 import type { RunRecord } from "../../schemas/run-engine/ledger";
+import { reserveCoordinatorTurn } from "./coordinator-budget";
 import { COORDINATOR_SEAT_ID, readDagControl, withDagControl } from "./dag-admission";
 import { transitionIntent } from "./effect-state";
 import { currentPlanRequest, isPlanRequest, type ReplanFacts } from "./plan-repair";
@@ -25,7 +26,9 @@ import { resolveAlerts } from "./run-alert";
  *  - the Run goes back to `bootstrapping` (a plan request is out, nothing read yet), which is also
  *    what refuses a second re-plan while this one is unanswered; a refusal of the new plan moves it
  *    to `awaiting-dag` again, exactly as for the first;
- *  - the re-send limit counts the re-sends of the newest plan request, so it starts from zero.
+ *  - the re-send limit counts the re-sends of the newest plan request, so it starts from zero;
+ *  - the coordinator's turn budget pays one turn for the new plan request (`coordinator-budget.ts`), and a
+ *    re-plan it cannot pay for is refused as `budget-exhausted` with the record untouched.
  *
  * Asking again with the same `requestId` is the same request: it finds its audit event and answers
  * `replayed` without writing. A pure function like `noteTask` and `transitionIntent`: the reducer's
@@ -58,7 +61,8 @@ export type ReplanRefusal =
   | { code: "request-id-reused" }
   | { code: "replan-not-allowed"; lifecycle: string }
   | { code: "plan-request-missing" }
-  | { code: "delivery-unresolved" };
+  | { code: "delivery-unresolved" }
+  | { code: "budget-exhausted" };
 
 export type ReplanResult =
   | { ok: true; replayed: false; next: RunRecord; epoch: number; intentId: string }
@@ -114,8 +118,19 @@ export function requestReplan(record: RunRecord, input: ReplanRequest): ReplanRe
   const epoch = record.outbox.filter(isPlanRequest).length + 1;
   const previousRefusal = lastRefusal(record);
 
+  // The re-plan is one more model call of the coordinator, paid from its budget in this same commit. A
+  // re-plan the budget cannot pay for is refused and changes nothing; the way out is more turns.
+  const reservation = reserveCoordinatorTurn(
+    record,
+    `plan:${record.runId}:${epoch}`,
+    input.messageId,
+  );
+  if (reservation.status === "exhausted") return { ok: false, code: "budget-exhausted" };
+  // A message of this epoch is already in the outbox: it is already paid for and already asked.
+  if (reservation.status === "already-counted") return { ok: true, replayed: true, epoch };
+
   // The old epoch's messages that would still go out: failed, not removed (the audit trail names them).
-  let next = record;
+  let next = reservation.next;
   const superseded: string[] = [];
   for (const intent of toCoordinator) {
     if (intent.state !== "prepared") continue;

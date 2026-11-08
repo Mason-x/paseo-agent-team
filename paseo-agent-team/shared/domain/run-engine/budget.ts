@@ -108,8 +108,14 @@ export function predebit(
 export const BUDGET_LIMIT_MAX = 1024;
 export const BUDGET_INCREASED_EVENT = "budget-increased";
 
-/** The alert a seat whose turn budget ran out gets; the numbers make a new limit a new alert. */
+/**
+ * The alert a seat whose turn budget ran out gets; the numbers make a new limit a new alert. The
+ * coordinator is no seat a person assigned work to, so it is named as the coordinator. Its id is
+ * written out here because this module cannot import `dag-admission` (which imports this one); a test
+ * ties the two spellings together.
+ */
 export function budgetExhaustedAlertPrefix(seatId: string): string {
+  if (seatId === "coordinator") return "协调者的回合预算已用完";
   return `席位 ${seatId} 的回合预算已用完`;
 }
 

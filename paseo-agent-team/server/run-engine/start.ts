@@ -27,6 +27,7 @@ import type { PaseoAdapter } from "../../shared/paseo/adapter";
 import type { Role } from "../../shared/schemas/role";
 import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import { runEngineZh } from "../../shared/zh/run-engine";
 import { alertIdFor, sha256Hex } from "./digest";
 import { type Effects, payloadHash, type SendableIntent } from "./effects";
 import {
@@ -147,6 +148,10 @@ export async function startEngineRun(
   input.onProgress?.({ step: "preflight" });
   if (plan.task.length > MAX_ENGINE_TASK_CHARS) {
     return refuse("preflight", `任务描述超过 ${MAX_ENGINE_TASK_CHARS} 字，Engine Run 放不下`);
+  }
+  // The launch gate says this first; this keeps a caller that skipped it from creating a Run that can never plan.
+  if (engine.policy.run.strategicTurns < 1) {
+    return refuse("preflight", runEngineZh.launch.coordinatorBudgetEmpty);
   }
   const inspected = await inspectRepo(input.workspaceDirectory);
   if (!inspected.ok) {

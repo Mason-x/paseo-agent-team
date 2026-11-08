@@ -2084,8 +2084,26 @@ describe("add turns to a seat", () => {
     expect(await b.control.budget(ask(held.revision, { seatId: "seat-zz" }))).toMatchObject({
       issues: [{ code: "seat-missing" }],
     });
-    expect(await b.control.budget(ask(held.revision, { seatId: "coordinator" }))).toMatchObject({
-      issues: [{ code: "budget-missing" }],
+    // A seat of the roster with no budget in the entries or the policy. The coordinator is none: its
+    // entry is built when a person asks for turns for it (the coordinator's budget group below).
+    await store.update(RUN_ID, (current) => {
+      current.roster.push({
+        seatId: "seat-zz-nobudget",
+        tier: "B",
+        agentId: null,
+        channelId: "claude",
+        duties: ["implement"],
+        enabled: true,
+      });
+      return current;
+    });
+    const bare = await stored();
+    expect(
+      await b.control.budget(ask(bare.revision, { seatId: "seat-zz-nobudget" })),
+    ).toMatchObject({ issues: [{ code: "budget-missing" }] });
+    await store.update(RUN_ID, (current) => {
+      current.roster = current.roster.filter((seat) => seat.seatId !== "seat-zz-nobudget");
+      return current;
     });
     await store.update(RUN_ID, (current) => {
       const entry = current.budgets.entries.find((e) => e.subjectId === "seat-b1");
@@ -2128,6 +2146,145 @@ describe("add turns to a seat", () => {
     for (const secret of ["nonce", "prompt", "semanticArgs", "outbox"]) {
       expect(text).not.toContain(secret);
     }
+  });
+});
+
+describe("the coordinator's turn budget", () => {
+  const coordinatorEntry = (record: RunRecord) =>
+    record.budgets.entries.find((e) => e.scope === "seat" && e.subjectId === "coordinator");
+  const exhaustion = (record: RunRecord) =>
+    record.alerts.filter((alert) =>
+      alert.summary.startsWith(budgetExhaustedAlertPrefix("coordinator")),
+    );
+
+  /** The plan was refused for what it says; the coordinator may take one turn, and the plan request took it. */
+  async function oneTurnUsed(host: Host, b: Built): Promise<RunRecord> {
+    await store.update(RUN_ID, (current) => {
+      current.policy.run.strategicTurns = 1;
+      return current;
+    });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, wrongPlan());
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    const waiting = await stored();
+    expect(waiting.lifecycle).toBe("awaiting-dag");
+    return waiting;
+  }
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] a re-plan with no turns left is refused with one warning and nothing sent; turns added from the page take the warning down and the re-plan goes out once",
+    async (version) => {
+      const host = fakeHost();
+      const b = build(host);
+      const waiting = await oneTurnUsed(host, b);
+      const policyBefore = JSON.stringify(waiting.policy);
+      expect(waiting.schemaVersion).toBe(version === "v1" ? 1 : 2);
+
+      const out = await b.control.replan(request(waiting.revision));
+      expect(out).toMatchObject({
+        status: "rejected",
+        epoch: null,
+        issues: [{ code: "budget-exhausted" }],
+      });
+      await b.control.idle();
+      const refused = await stored();
+      // Nothing moved: no message, no new plan request, the same wait.
+      expect(host.sent).toHaveLength(0);
+      expect(refused.lifecycle).toBe("awaiting-dag");
+      expect(refused.outbox.filter((i) => i.kind === "wake")).toHaveLength(1);
+      expect(readDagControl(refused)).toEqual(readDagControl(waiting));
+      // The entry was built from the one plan request the Run holds, and the warning is said once.
+      expect(coordinatorEntry(refused)).toMatchObject({ limit: 1, reserved: 1 });
+      const said = exhaustion(refused);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toMatchObject({ state: "open", severity: "warning" });
+      expect(said[0]?.summary).toContain("在 Runs 页追加预算");
+
+      // Asking again changes nothing and says nothing more.
+      const again = await b.control.replan(request(refused.revision, { requestId: "req-2" }));
+      expect(again).toMatchObject({ status: "rejected", issues: [{ code: "budget-exhausted" }] });
+      expect((await stored()).revision).toBe(refused.revision);
+
+      // The way out: turns for the coordinator, from the page's budget control.
+      const added = await b.control.budget({
+        runContractVersion: 1 as const,
+        runId: RUN_ID,
+        requestId: "bud-1",
+        expectedRevision: refused.revision,
+        reason: "from the page",
+        seatId: "coordinator",
+        by: 2,
+      });
+      expect(added).toMatchObject({ status: "applied", seatId: "coordinator", limit: 3 });
+      await b.control.idle();
+      const raised = await stored();
+      expect(coordinatorEntry(raised)).toMatchObject({ limit: 3, reserved: 1 });
+      expect(exhaustion(raised).map((a) => a.state)).toEqual(["resolved"]);
+      // The frozen policy is the Run's start: the limit lives in the entry.
+      expect(JSON.stringify(raised.policy)).toBe(policyBefore);
+      expect(host.sent).toHaveLength(0);
+
+      const go = await b.control.replan(request(raised.revision, { requestId: "req-3" }));
+      expect(go).toMatchObject({ status: "applied", epoch: 2, issues: [] });
+      await b.control.idle();
+      const replanned = await stored();
+      expect(coordinatorEntry(replanned)).toMatchObject({ limit: 3, reserved: 2 });
+      expect(host.sent.map((entry) => entry.agentId)).toEqual([COORDINATOR_AGENT]);
+
+      // The same request again is the same request: nothing more is counted or sent.
+      const replay = await b.control.replan(request(replanned.revision, { requestId: "req-3" }));
+      expect(replay).toMatchObject({ status: "replayed", epoch: 2 });
+      await b.control.idle();
+      expect(coordinatorEntry(await stored())?.reserved).toBe(2);
+      expect(host.sent).toHaveLength(1);
+    },
+  );
+
+  test("turns added to a coordinator that never asked for a re-plan build its row first, from the plan request the Run already used", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, wrongPlan());
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    const waiting = await stored();
+    expect(coordinatorEntry(waiting)).toBeUndefined();
+
+    const added = await b.control.budget({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId: "bud-1",
+      expectedRevision: waiting.revision,
+      reason: "from the page",
+      seatId: "coordinator",
+      by: 2,
+    });
+    // The policy's 12 turns, two more, and the one the plan request took.
+    expect(added).toMatchObject({ status: "applied", seatId: "coordinator", limit: 14 });
+    await b.control.idle();
+    const after = await stored();
+    expect(coordinatorEntry(after)).toMatchObject({ limit: 14, reserved: 1 });
+    expect(JSON.stringify(after.policy)).toBe(JSON.stringify(waiting.policy));
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test("the page's budget answer for the coordinator names the coordinator's row, and an unknown seat is still refused", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const waiting = await oneTurnUsed(host, b);
+    expect(
+      await b.control.budget({
+        runContractVersion: 1 as const,
+        runId: RUN_ID,
+        requestId: "bud-9",
+        expectedRevision: waiting.revision,
+        reason: "x",
+        seatId: "seat-zz",
+        by: 1,
+      }),
+    ).toMatchObject({ issues: [{ code: "seat-missing" }] });
+    // Looking at a refusal wrote nothing, and did not give the coordinator a row it was not asked for.
+    expect((await stored()).revision).toBe(waiting.revision);
+    expect(coordinatorEntry(await stored())).toBeUndefined();
   });
 });
 

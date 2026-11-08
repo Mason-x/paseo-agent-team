@@ -308,6 +308,26 @@ describe("startEngineRun", () => {
     expect(host.sent[0]?.text).toContain("Add a login page.");
   });
 
+  test("the plan request is the coordinator's first turn: its budget entry takes the policy's limit with one reserved, and the policy is not written", async () => {
+    const { deps } = setup();
+    await startEngineRun(deps, input());
+    const record = await stored();
+    const entry = record.budgets.entries.find(
+      (candidate) => candidate.scope === "seat" && candidate.subjectId === COORDINATOR_SEAT_ID,
+    );
+    expect(entry).toEqual({
+      scope: "seat",
+      subjectId: COORDINATOR_SEAT_ID,
+      limit: engine.policy.run.strategicTurns,
+      reserved: 1,
+      confirmed: 0,
+      observedTurns: 0,
+    });
+    expect(record.policy.seatBudgets.map((candidate) => candidate.subjectId)).not.toContain(
+      COORDINATOR_SEAT_ID,
+    );
+  });
+
   test("the ledger holds the control nonce only as a digest, apart from the request it is rebuilt from", async () => {
     const { deps } = setup();
     await startEngineRun(deps, input());
@@ -568,6 +588,29 @@ describe("startEngineRun: failures", () => {
     expect(result).toMatchObject({
       ok: false,
       step: "preflight",
+      archived: false,
+      agentIdsKept: [],
+    });
+    expect(await store.get(RUN_ID)).toEqual({ status: "missing" });
+    expect(agents.requests).toHaveLength(0);
+    expect(host.sent).toHaveLength(0);
+  });
+
+  test("a coordinator turn budget of 0 stops the launch before anything exists: there is no turn to send the plan request in", async () => {
+    const { agents, host, deps } = setup();
+    const result = await startEngineRun(
+      deps,
+      input({
+        engine: {
+          ...engine,
+          policy: { ...engine.policy, run: { ...engine.policy.run, strategicTurns: 0 } },
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      step: "preflight",
+      message: "协调者回合预算为 0，无法发出计划请求；请先增加预算",
       archived: false,
       agentIdsKept: [],
     });

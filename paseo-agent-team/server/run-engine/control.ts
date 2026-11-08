@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { increaseSeatBudget } from "../../shared/domain/run-engine/budget";
+import {
+  budgetExhaustedAlert,
+  budgetStatus,
+  increaseSeatBudget,
+} from "../../shared/domain/run-engine/budget";
 import {
   CANCEL_COMPLETED_EVENT,
   CANCEL_PENDING_ALERT,
@@ -10,6 +14,8 @@ import {
   readCancelRequest,
   withCancelRequest,
 } from "../../shared/domain/run-engine/cancel-request";
+import { ensureCoordinatorBudget } from "../../shared/domain/run-engine/coordinator-budget";
+import { COORDINATOR_SEAT_ID } from "../../shared/domain/run-engine/dag-admission";
 import { answerDecision } from "../../shared/domain/run-engine/decision-answer";
 import {
   compilePlanRequest,
@@ -434,8 +440,9 @@ export function createRunControl(options: RunControlOptions) {
     let written: Awaited<ReturnType<RunStore["update"]>>;
     try {
       written = await store.update(input.runId, (current) => {
+        // The coordinator's entry is built on first use; any other seat's row is read as it is.
         const result = increaseSeatBudget(
-          current,
+          input.seatId === COORDINATOR_SEAT_ID ? ensureCoordinatorBudget(current) : current,
           {
             seatId: input.seatId,
             by: input.by,
@@ -549,6 +556,28 @@ export function createRunControl(options: RunControlOptions) {
                   ? "retry"
                   : "none",
             );
+            if (result.code === "budget-exhausted") {
+              // Said once per limit, with the way out; the record keeps the entry it was just built with.
+              const based = ensureCoordinatorBudget(current);
+              const status = budgetStatus(based, COORDINATOR_SEAT_ID);
+              if (status === null) return null;
+              const summary = budgetExhaustedAlert(
+                COORDINATOR_SEAT_ID,
+                status.entry.reserved,
+                status.entry.limit,
+              );
+              const raised = raiseAlert(
+                based,
+                { alertId: alertIdFor(summary), severity: "warning", summary },
+                clock.now(),
+              );
+              if (!raised.changed && based === current) return null;
+              if (!checkLedgerInvariants(raised.next).ok) {
+                outcome.refused = refused("ledger-refused", {}, "inspect");
+                return null;
+              }
+              return raised.next;
+            }
             return null;
           }
           if (result.replayed) {

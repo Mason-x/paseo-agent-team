@@ -175,11 +175,16 @@ describe("increaseSeatBudget", () => {
         false,
       ),
     ).toEqual({ ok: false, code: "seat-missing" });
-    // The coordinator's seat is in the roster and has no turn budget.
+    // A seat that is in the roster and has no turn budget, in the entries or in the frozen policy. The
+    // coordinator is no such seat any more: its entry is built on first use (coordinator-budget.test.ts).
+    const bare = fresh();
+    bare.budgets.entries = bare.budgets.entries.filter((e) => e.subjectId !== "seat-b2");
+    bare.policy.seatBudgets = bare.policy.seatBudgets.filter((e) => e.subjectId !== "seat-b2");
+    expect(bare.roster.some((seat) => seat.seatId === "seat-b2")).toBe(true);
     expect(
       increaseSeatBudget(
-        record,
-        input({ seatId: "coordinator", expectedRevision: record.revision }),
+        bare,
+        input({ seatId: "seat-b2", expectedRevision: bare.revision }),
         false,
       ),
     ).toEqual({ ok: false, code: "budget-missing" });

@@ -45,6 +45,7 @@ export const RUN_ACTION_CODES = [
   // replan
   "replan-not-allowed",
   "plan-request-missing",
+  "budget-exhausted",
   "delivery-unresolved",
   "plan-unbuildable",
   // decide

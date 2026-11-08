@@ -162,6 +162,7 @@ export const runEngineZh = {
       "replan-not-allowed": (params: Record<string, string | number | boolean>) =>
         `现在不能重新规划${typeof params.lifecycle === "string" ? `（Run 当前${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}：只有还在等任务图、且协调者尚未交出可用任务图时才可以`,
       "plan-request-missing": () => "找不到当前的计划请求，无法重新规划",
+      "budget-exhausted": () => "协调者回合预算已用完，请先在预算区域追加回合数，再重新规划",
       "delivery-unresolved": () =>
         "上一条发给协调者的消息是否送达还没有确定，为避免重复发送，暂时不能重新规划；稍后再试，或先点“立即检查并推进”",
       "plan-unbuildable": () => "无法生成新的计划请求，请上报这个问题",
@@ -198,6 +199,7 @@ export const runEngineZh = {
     seatUnknown: (seatId: string) => `Run 引擎配置里的席位 ${seatId} 不在团队的启用成员中`,
     seatMissing: (seatId: string) => `团队成员席位 ${seatId} 没有对应的 Run 引擎席位配置`,
     noEnabledSeat: "Run 引擎配置里没有启用的席位",
+    coordinatorBudgetEmpty: "协调者回合预算为 0，无法发出计划请求；请先增加预算",
     unsupported:
       "该团队已启用 Run 引擎，但当前版本尚不能执行 Engine Run；为避免静默改用旧流程，已阻止启动",
     /** Engine start needs the ledger and the daemon's server id; `reason` is a short code. */
