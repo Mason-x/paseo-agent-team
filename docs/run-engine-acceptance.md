@@ -276,6 +276,8 @@
 - tests/run-view/runs-tab.test.ts :: both are listed together; neither list hides, replaces or invents the other — 渲染 `RunsTab`：真实 `run.list` 查询（真实 store 里的 Engine Run）与标签派生的协调者链路 Run 同时出现，Engine 段在上（A16）
 - tests/run-view/runs-tab.test.ts :: with no Engine Run the page is what it was: the Engine section is not drawn and the chain's Run is — 没有 Engine Run 时不画 Engine 段，链路的 Run 照旧（A16）
 - tests/run-engine/runtime.test.ts :: the Run is still read, kicked and controlled on the policy and roster it froze; only a new launch sees the damaged block — Run 启动后 Team 的块被原地掏空、整块删除、另存一份坏块：新的启动被阻断或走旧链路，既有 Run 仍被列出、读取、入账派发、kick、暂停与继续，台账里冻结的策略与席位逐字节不变（A16）
+- tests/run-view/launch-dialog.test.ts :: a host that cannot run the Engine: the blocker is shown, the old chain is not offered, and launch stays off — 挂载 `LaunchDialog`：不支持 Engine 的宿主给出阻断文案，启动按钮关闭，不调用启动（A17）
+- tests/run-view/launch-dialog.test.ts :: a roster that does not match the Team names the missing seat — 挂载 `LaunchDialog`：席位对不上时点名缺的席位，启动按钮关闭（A17）
 
 缺口：无（页面本身不读取开关，开关关闭时 `run.list` 与控制仍可用由 runtime.test.ts 既有两例证明；没有把两者放进同一个渲染用例）。
 
@@ -352,8 +354,13 @@
 - tests/run-view/waiting.test.ts :: replan and cancellation events do not claim unproved sends or released claims
 - tests/run-view/engine-view.test.ts :: shows an alert's summary and states when the responsible party is unknown
 - tests/run-view/run-engine-editor.test.ts :: the planned Profiles of the seats let the editor warn about a Codex seat that is not full-access
+- tests/run-view/run-engine-section.test.ts :: a Codex seat whose Profile is not full-access gets the warning, once the plan has answered — 挂载 Team 编辑器的 Run Engine 区（A17）：规划回答之后警告出现，之前没有
+- tests/run-view/run-engine-section.test.ts :: editing a policy number writes the block back with every field it did not know — 编辑策略数字后保留未知字段（A17）
+- tests/run-view/seat-profile-facts.test.ts :: TeamEditor hands the plan's rows to the section and does not build the facts itself — 源码扫描：`TeamEditor` 把规划行交给该区（A17）
+- tests/run-view/launch-dialog.test.ts :: kickoff-pending: the plan request is submitted, it takes minutes, do not start again — 挂载 `LaunchDialog`：运行中文案（A17）
+- tests/run-view/launch-dialog.test.ts :: a failed launch shows the error, its detail and the kickoff message to copy — 挂载 `LaunchDialog`：失败的启动显示错误与详情，可复制启动消息（A17）
 
-缺口：没有真实浏览器与窄屏检查，只有对源码的静态保护（无固定宽度、按钮最小高度、可换行、单个滚动条）；断线重连只测了纯会话规则；"原因与台账一致"靠源码扫描，没有端到端比对；服务端推送式失效没有做（B8）。需 DEV。
+缺口：没有真实浏览器与窄屏检查，只有对源码的静态保护（无固定宽度、按钮最小高度、可换行、单个滚动条）；断线重连只测了纯会话规则；"原因与台账一致"靠源码扫描，没有端到端比对；服务端推送式失效没有做（B8）。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。需 DEV。
 
 ## 这份表之外还没做的
 

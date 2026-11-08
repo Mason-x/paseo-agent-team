@@ -44,6 +44,7 @@
 | A15 验收缺口补测 I | 已做（六组全部提交） | 86d8c97（测试）+ 计划第 60 点 | 3306 | AC02、03、06、07、11、19 的缺口补测，只加测试；验收表无状态升级（各自仍有别的缺口）；变异 25 次运行，15 被抓，10 存活均为多层去重的有意冗余 |
 | A16 验收缺口补测 II | 已做（七组全部提交） | c271e12（测试）+ 计划第 61 点 | 3319 | AC01、09、10、14、16、17、20 的引擎级补测，只加测试；AC01、AC09、AC16 升为已覆盖，AC10、AC20 为已知限制现状测试；变异 27 次运行，21 被抓，6 存活（5 项首次选错或只破坏单层，改后被抓；1 项有意冗余） |
 | A14 协调者回合预算（修正版 A11） | 已做 | a23ae38（代码）+ 计划第 62 点 | 3346 | `policy.run.strategicTurns` 做成协调者的回合预算：计划请求与重新规划各扣一回合（`budgets.entries` 里 `coordinator` 条目），计划格式重发不计、不退还，耗尽时重新规划被拒并告警，`run.budget` 可追加；`strategicTurns < 1` 时启动被阻断；无 schema/RPC/模板变化；变异 15 个点全部被抓；回滚演练通过 |
+| A17 UI 接线与渲染测试 | 已做 | 9508aed（代码+测试）+ 计划第 63 点 | 3358 | 把 `TeamEditor` 给 `RunEngineEditor` 的 Profile 接线抽成 `RunEngineSection`（行为不变），挂载测试覆盖 Codex 警告与不猜的行；`LaunchDialog` 渲染测试覆盖 Engine 阻断/警告、kickoff-pending、失败；变异 12 项全抓到 |
 
 ## 待批准
 
@@ -318,13 +319,15 @@
 - **T4 `creating` 阶段崩溃后的完整续办**：重建 `CreateMemberInput` 需要的信息仍未冻结，完整续办推迟。A8 已实现重启后安全关闭并告警，不创建、不发送、不归档；创建成功但还没登记的 Agent 只能靠席位提示人工查找。
 - **T7a 归档式取消**：A5 已实现不打断、不归档的延迟取消与 RPC，等在途回合确实结束后才释放占用。原计划的在途成员归档式取消仍推迟，见 B4 裁决。
 - **第 5 节 DEV 真实验证**：没做。需要 DEV daemon、Profile、探针仓库、真实模型额度，规则要求"时间和额度还够才做"，我没有把握，不勉强。可验证项（补证模板是否被遵守、`replan` 的 v4 提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查）都在验收表的"DEV 记录"栏里记为没有。
-- **T5c 待补缺口**：Profile 警告只在 Team 规划返回后、且每个席位恰有一行已选 Profile 时才出现，候选、未解析或与编辑器席位号对不上的行被跳过而不是猜；`TeamEditor` 本身无法挂载测试，接线只有源码扫描保护。策略中预算、DEV 目标、evidenceRoot 等保持原值，当前界面没有编辑入口。
+- **T5c 待补缺口**：Profile 警告只在 Team 规划返回后、且每个席位恰有一行已选 Profile 时才出现，候选、未解析或与编辑器席位号对不上的行被跳过而不是猜；`TeamEditor` 本身无法挂载测试（A17 已把接线抽成 `RunEngineSection` 并挂载测试，`TeamEditor` 只剩源码扫描保护）。策略中预算、DEV 目标、evidenceRoot 等保持原值，当前界面没有编辑入口。
 - **成员回合中被关闭或归档（AC10 的“Agent 失联”）和用户直接发给成员的消息（AC20）**：A16 只写了现状测试（名字带 known limitation）。引擎对 `agent.closed`/`agent.archived` 没有反应，若宿主在关闭运行中的 Agent 时不发 `turn_ended`，任务和 Run 的取消会一直等；用户发给成员的消息被静默忽略，不报警。按 `docs/next-phase-plan.md` 2.12 不修，README 警告由 A18 补，A12 探针取证。
 - **新界面没有真实浏览器检查**：只有源码层的保护和渲染测试（`react-test-renderer`），窄屏、折行、断线重连都没有真实看过。
-- **`LaunchDialog` 本身没有渲染测试**：它调用 `launch-job-copy.ts` 的接线只靠类型检查。
+- **`LaunchDialog` 的渲染测试**（已由 A17 补上，`tests/run-view/launch-dialog.test.ts`）：此前它调用 `launch-job-copy.ts` 的接线只靠类型检查。
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
+
+- **A17**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 200 个文件 3358 通过（3 todo，A14 后 3346 加 12：`run-engine-section.test.ts` 4 项、`launch-dialog.test.ts` 7 项、`seat-profile-facts.test.ts` 1 项；文件数 198 加 2）、verify:package 通过；`version-flow` 并行时一次 Windows `EBUSY`，单独重跑 23 项通过。第一次尝试就通过全部定向用例。变异（`a17.json`，12 项）全部被抓到：容器不把 `seatProfiles` 交给编辑器、容器不算 Profile、多塞一个不在规划行里的席位、`TeamEditor` 不渲染容器、`TeamEditor` 不交规划行、启动对话框丢掉 kickoff-pending 文案、丢掉未确认完成的提示、不显示失败、丢掉复制启动消息按钮、阻断时启动按钮仍开着、预览不显示阻断、预览不显示警告；5 个源码文件经 `cmp` 逐字节还原。与计划文字的差异：(1) 原有源码扫描用例不能原样保留（它扫的字符串随接线搬进了新文件），改成扫 `RunEngineSection.tsx` 并另加一例确认 `TeamEditor` 把规划行交给该组件、自己不再直接渲染 `RunEngineEditor`、不再算 Profile 事实；(2) 对话框测试不 mock `@tanstack/react-query`，用真实的 `QueryClientProvider` 和 `useQuery`，只 mock 插件的 `useRpc`、`Modal`、`useToast`、`copyText` 和目标上下文 hook，Engine 阻断与警告文案来自真实的启动计划器（`buildLaunchPlan`）。`TeamEditor` 本身仍没有挂载（它引入整个宿主）。没有真实浏览器检查。
 
 - **A14**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 198 个文件 3346 通过（3 todo，A16 后 3319 加 27）、verify:package 通过。第一次实现就通过全部定向用例，没有走到第二次尝试。先写失败测试再实现：新增的 `coordinator-budget.test.ts`、`control.test.ts`、`start.test.ts`、`team-config.test.ts`、`team-config-edit.test.ts` 用例在实现前分别因缺模块或断言不成立而变红。变异（`a14.json`，15 个点）：启动不扣、重新规划不扣、已付的回合不识别、旧 Run 条目从 0 起、耗尽不拒绝、`run.budget` 不先建协调者条目、启动门不看（Team 编辑器与预检各一项）、计划格式重发也扣、耗尽时每次问都写告警、追加预算改了冻结策略、协调者告警写成席位口吻、条目限额为 0、懒建时不数已 `failed` 的计划请求、拒绝码没有中文，全部被抓到。首轮 3 项存活，原因都在我的测试编排而不是缺用例：对 `coordinator` 追加预算的集成用例里条目已被前一次被拒的重新规划建好（补了“旧 Run 没有条目”一例）；前缀特判那项和 `control.test.ts` 一起跑时 `-t turn.budget` 把纯函数用例过滤掉了（单跑 `coordinator-budget.test.ts` 即被抓）；缺中文那项跑错了测试文件（穷举在 `tests/run-view/controls.test.ts`）。源码经 `cmp` 逐字节还原（每轮脚本输出 ALL RESTORED）。回滚演练：`git show`/`git archive` 取 `f1f1e48` 的整个 `shared/` 到仓库外临时目录，旧版 `RunRecordSchema` 读一份带 `coordinator` 条目（`reserved: 2`）的 v2 记录解析通过且条目保留，旧版 `checkLedgerInvariants` 通过；临时目录里的 `node_modules` 是指向主工作区的 junction，用后先 `rmdir` 摘掉再删目录，主工作区的 `node_modules` 完好。与计划文字的差异：(1) `budget.ts` 的前缀函数对字面量 `coordinator` 做了特判（计划要求前缀对协调者给出“协调者的回合预算已用完”，而 `budget.ts` 不能导入 `dag-admission`），这是计划“不碰 `budget.ts`”一句里“循环依赖迫使最小改动”的那种例外，`coordinator-budget.test.ts` 把两处写法绑在一起；(2) 重新规划遇到 `already-counted`（同键或同消息号已在 outbox）按重放处理，返回 `replayed`，正常路径到不了；(3) `support/plan-fixtures.ts`（测试辅助，不是共享夹具 `base.ts`）的 `prepared()` 多一个 `schemaVersion` 选项，让纯函数用例能跑 v1 与 v2。DEV 未验证。
 
