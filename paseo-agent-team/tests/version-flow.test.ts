@@ -148,7 +148,8 @@ describe("version flow", () => {
     const versions = createVersionService(serviceDeps(seededFiles()));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
     expect(checked.ok).toBe(true);
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.updateAvailable).toBe(true);
     expect(checked.job.result.canUpdate).toBe(true);
     expect(checked.job.result.remote.installTarget?.kind).toBe("release-tag");
@@ -167,7 +168,8 @@ describe("version flow", () => {
     });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.installTarget?.kind).toBe("default-branch");
     expect(checked.job.result.remote.installTarget?.ref).toBe("refs/heads/trunk");
 
@@ -181,7 +183,8 @@ describe("version flow", () => {
       const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
       const versions = createVersionService(serviceDeps(seededFiles(), git));
       const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-      if (!checked.ok || !checked.job.result) throw new Error("check failed");
+      if (!checked.ok || !checked.job.result)
+        throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
       expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
       expect(checked.job.result.canUpdate).toBe(true);
     },
@@ -191,7 +194,8 @@ describe("version flow", () => {
     const git = directoryGit({ "get-url": ok("--upload-pack=calc") });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.error?.code).toBe("unsupported_remote");
     expect(checked.job.result.canUpdate).toBe(false);
   });
@@ -200,7 +204,8 @@ describe("version flow", () => {
     const git = directoryGit({ "--symbolic-full-name": ok("origin/drill-badlock") });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.installTarget?.kind).toBe("release-tag");
     expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
     expect(checked.job.result.canUpdate).toBe(false);
@@ -216,7 +221,8 @@ describe("version flow", () => {
     };
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
     expect(
       checked.job.result.blockers.find((item) => item.code === "branch_mismatch")?.detail,
@@ -282,7 +288,8 @@ describe("version flow", () => {
       spawnRunner: undefined,
     });
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     await files.remove(path.join(directory, "big.txt"));
     const started = await versions.startUpdate(
       paseo,
@@ -751,7 +758,8 @@ describe("version flow", () => {
     files.data.delete(path.join(PLUGIN, "server", "version", "runner.mjs"));
     const versions = createVersionService(serviceDeps(files));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",
@@ -774,7 +782,8 @@ describe("version flow", () => {
     );
     const versions = createVersionService(serviceDeps(files));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",
@@ -828,7 +837,8 @@ describe("version flow", () => {
     );
     const versions = createVersionService(deps);
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",

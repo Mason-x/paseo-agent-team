@@ -215,7 +215,8 @@ async function checkWith(
 ): Promise<{ info: VersionInfo; state: string }> {
   const versions = createVersionService(serviceDeps(files, git, options));
   const checked = await versions.check(paseo, options.request ?? REQUEST);
-  if (!checked.ok || !checked.job.result) throw new Error("check failed");
+  if (!checked.ok || !checked.job.result)
+    throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
   return { info: checked.job.result, state: checked.job.state };
 }
 
