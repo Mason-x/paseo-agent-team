@@ -39,6 +39,7 @@ import {
   teamPlanRpc,
 } from "./shared/rpc";
 import {
+  runBudgetRpc,
   runCancelRpc,
   runDecideRpc,
   runGetRpc,
@@ -318,6 +319,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(runResumeRpc, (input, { paseo }) => {
     engine.bind(paseo);
     return engine.control.resume(input);
+  });
+  server.handle(runBudgetRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.budget(input);
   });
   server.handle(runCancelRpc, (input, { paseo }) => {
     engine.bind(paseo);

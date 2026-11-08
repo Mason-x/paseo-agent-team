@@ -1,5 +1,6 @@
 import type { RunDetailView, RunIssueView } from "../../schemas/run-engine/rpc";
 import type {
+  RunBudgetOutput,
   RunCancelOutput,
   RunDecideOutput,
   RunKickOutput,
@@ -47,6 +48,16 @@ export type CancelOffer = {
   reason: string;
 };
 
+export type BudgetOffer = {
+  seatId: string;
+  /** What the person reads: the seat, what is reserved and the limit. */
+  line: string;
+  reserved: number;
+  limit: number;
+  exhausted: boolean;
+  reason: string;
+};
+
 export type ControlsView = {
   /** The revision the page last read; the write is refused as `revision-conflict` if the Run moved on. */
   revision: number;
@@ -55,6 +66,7 @@ export type ControlsView = {
   pause: boolean;
   resume: boolean;
   cancelRun: boolean;
+  budgets: BudgetOffer[];
   retries: RetryOffer[];
   cancels: CancelOffer[];
   /** False when there is nothing to offer at all (a finished Run, nothing waiting for a person). */
@@ -63,7 +75,7 @@ export type ControlsView = {
 
 export function controlsOf(
   run: Pick<RunDetailView, "revision" | "capabilities" | "decisions" | "tasks"> &
-    Partial<Pick<RunDetailView, "dag">>,
+    Partial<Pick<RunDetailView, "dag" | "budgets">>,
 ): ControlsView {
   const named = new Set(run.capabilities.supportedControls);
   const titleOf = new Map(run.tasks.map((task) => [task.taskId, task.title]));
@@ -110,6 +122,22 @@ export function controlsOf(
   const pause = named.has("pause");
   const resume = named.has("resume");
   const cancelRun = named.has("cancel");
+  const budgets: BudgetOffer[] = named.has("budget")
+    ? (run.budgets ?? [])
+        .filter((entry) => entry.scope === "seat")
+        .map((entry) => ({
+          seatId: entry.subjectId,
+          line: zh.controls.budget.line(
+            displayText(entry.subjectId, 64),
+            entry.reserved,
+            entry.limit,
+          ),
+          reserved: entry.reserved,
+          limit: entry.limit,
+          exhausted: entry.reserved >= entry.limit,
+          reason: zh.controls.budget.reason(displayText(entry.subjectId, 64)),
+        }))
+    : [];
   return {
     revision: run.revision,
     replan,
@@ -117,9 +145,18 @@ export function controlsOf(
     pause,
     resume,
     cancelRun,
+    budgets,
     retries,
     cancels,
-    any: replan || kick || pause || resume || cancelRun || retries.length > 0 || cancels.length > 0,
+    any:
+      replan ||
+      kick ||
+      pause ||
+      resume ||
+      cancelRun ||
+      budgets.length > 0 ||
+      retries.length > 0 ||
+      cancels.length > 0,
   };
 }
 
@@ -227,6 +264,18 @@ export function cancelRunNotice(output: RunCancelOutput): ActionNotice {
       output.waiting === null
         ? zh.controls.cancelRun.done
         : zh.controls.cancelRun.waiting(output.waiting.turns, output.waiting.deliveries),
+    refresh: true,
+  };
+}
+
+export function budgetNotice(output: RunBudgetOutput): ActionNotice {
+  if (output.status === "rejected") return rejected(output.issues);
+  if (output.status === "replayed") {
+    return { tone: "neutral", text: zh.controls.result.replayed, refresh: true };
+  }
+  return {
+    tone: "success",
+    text: zh.controls.budget.applied(displayText(output.seatId, 64), output.limit ?? 0),
     refresh: true,
   };
 }

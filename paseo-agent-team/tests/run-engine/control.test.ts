@@ -15,6 +15,7 @@ import { createRunObserver } from "../../server/run-engine/observer";
 import { projectDetail } from "../../server/run-engine/projection";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
+import { budgetExhaustedAlertPrefix } from "../../shared/domain/run-engine/budget";
 import {
   CANCEL_COMPLETED_EVENT,
   CANCEL_PENDING_ALERT,
@@ -874,7 +875,13 @@ describe("decide", () => {
     const view = projectDetail(frozen);
     if (!view.ok) throw new Error("projection failed");
     expect(view.view.decisions.map((d) => d.actions)).toEqual([["retry", "cancel"]]);
-    expect(view.view.capabilities.supportedControls).toEqual(["decide", "kick", "pause", "cancel"]);
+    expect(view.view.capabilities.supportedControls).toEqual([
+      "decide",
+      "kick",
+      "pause",
+      "cancel",
+      "budget",
+    ]);
 
     const out = await b.control.decide(answer(decision?.decisionId ?? "", frozen.revision));
     expect(out).toMatchObject({ status: "applied", taskId: "t1", issues: [] });
@@ -1978,6 +1985,144 @@ describe("cancel the Run", () => {
       "runContractVersion",
       "status",
       "waiting",
+    ]);
+    const text = JSON.stringify(out);
+    for (const secret of ["nonce", "prompt", "semanticArgs", "outbox"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
+
+describe("add turns to a seat", () => {
+  const ask = (revision: number, over: Record<string, unknown> = {}) => ({
+    runContractVersion: 1 as const,
+    runId: RUN_ID,
+    requestId: "bud-1",
+    expectedRevision: revision,
+    reason: "from the page",
+    seatId: "seat-b1",
+    by: 2,
+    ...over,
+  });
+  const exhaustion = (record: RunRecord) =>
+    record.alerts.filter((alert) =>
+      alert.summary.startsWith(budgetExhaustedAlertPrefix("seat-b1")),
+    );
+
+  /** seat-b1 may take two turns; t1 takes the first and the second, then t2 has none left. */
+  async function runOut(host: Host, b: Built): Promise<RunRecord> {
+    await store.update(RUN_ID, (current) => {
+      const entry = current.budgets.entries.find((e) => e.subjectId === "seat-b1");
+      if (entry) entry.limit = 2;
+      return current;
+    });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, b.driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    await hook(host, b.driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, b.driver, "agent-b2");
+    return stored();
+  }
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] a task held back for want of turns is said so once, and goes out once after the seat is given more",
+    async (version) => {
+      const host = fakeHost();
+      const b = build(host);
+      const held = await runOut(host, b);
+      expect(held.schemaVersion).toBe(version === "v1" ? 1 : 2);
+      expect(states(held)).toEqual({ t1: "done", t2: "ready" });
+      expect(held.tasks.find((t) => t.spec.id === "t2")?.waitingReason).toBe(
+        "dispatch-blocked:budget-exhausted",
+      );
+      // Said once, with the way out, however often the Run is looked at.
+      await b.driver.kick(RUN_ID);
+      await b.driver.kick(RUN_ID);
+      const said = exhaustion(await stored());
+      expect(said).toHaveLength(1);
+      expect(said[0]).toMatchObject({ state: "open", severity: "warning" });
+      expect(said[0]?.summary).toContain("在 Runs 页追加预算");
+      const sentBefore = host.sent.length;
+      const policyBefore = JSON.stringify((await stored()).policy);
+
+      const out = await b.control.budget(ask((await stored()).revision));
+      expect(out).toMatchObject({ status: "applied", seatId: "seat-b1", limit: 4, issues: [] });
+      await b.control.idle();
+      const after = await stored();
+      // What was held back went out, once; the alert is resolved; the policy is as it was.
+      expect(states(after)).toEqual({ t1: "done", t2: "assigned" });
+      expect(host.sent).toHaveLength(sentBefore + 1);
+      expect(host.lastSent("agent-b1")?.text).toContain("t2");
+      expect(exhaustion(after)[0]?.state).toBe("resolved");
+      expect(JSON.stringify(after.policy)).toBe(policyBefore);
+      expect(after.budgets.entries.find((e) => e.subjectId === "seat-b1")?.limit).toBe(4);
+
+      // The same answer again, or a kick, changes and sends nothing.
+      const replay = await b.control.budget(ask(1));
+      expect(replay).toMatchObject({ status: "replayed", limit: 4 });
+      await b.control.idle();
+      await b.driver.kick(RUN_ID);
+      expect(host.sent).toHaveLength(sentBefore + 1);
+      expect((await stored()).revision).toBe(after.revision);
+      expect(await b.control.budget(ask(1, { by: 3 }))).toMatchObject({
+        status: "rejected",
+        issues: [{ code: "request-id-reused" }],
+      });
+    },
+  );
+
+  test("the refusals: stale revision, unknown seat, no budget, over the ceiling, a Run being cancelled", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const held = await runOut(host, b);
+    expect(await b.control.budget(ask(held.revision + 3))).toMatchObject({
+      status: "rejected",
+      issues: [{ code: "revision-conflict", params: { current: held.revision } }],
+    });
+    expect(await b.control.budget(ask(held.revision, { seatId: "seat-zz" }))).toMatchObject({
+      issues: [{ code: "seat-missing" }],
+    });
+    expect(await b.control.budget(ask(held.revision, { seatId: "coordinator" }))).toMatchObject({
+      issues: [{ code: "budget-missing" }],
+    });
+    await store.update(RUN_ID, (current) => {
+      const entry = current.budgets.entries.find((e) => e.subjectId === "seat-b1");
+      if (entry) entry.limit = 1020;
+      return current;
+    });
+    const raised = await stored();
+    expect(await b.control.budget(ask(raised.revision, { by: 10 }))).toMatchObject({
+      issues: [{ code: "budget-cap", params: { max: 1024 } }],
+    });
+    expect((await stored()).revision).toBe(raised.revision);
+
+    await b.control.cancel({
+      runContractVersion: 1,
+      runId: RUN_ID,
+      requestId: "c-1",
+      expectedRevision: raised.revision,
+      reason: "stop",
+    });
+    const cancelling = await stored();
+    expect(await b.control.budget(ask(cancelling.revision, { requestId: "bud-2" }))).toMatchObject({
+      issues: [{ code: "lifecycle-not-allowed" }],
+    });
+  });
+
+  test("what the answer carries is counts, ids and codes", async () => {
+    const host = fakeHost();
+    const b = build(host);
+    const held = await runOut(host, b);
+    const out = await b.control.budget(ask(held.revision));
+    expect(Object.keys(out).sort()).toEqual([
+      "issues",
+      "limit",
+      "revision",
+      "runContractVersion",
+      "seatId",
+      "status",
     ]);
     const text = JSON.stringify(out);
     for (const secret of ["nonce", "prompt", "semanticArgs", "outbox"]) {

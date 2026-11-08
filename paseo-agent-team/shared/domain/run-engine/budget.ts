@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { RunBudgetEntrySchema, RunRecord } from "../../schemas/run-engine/ledger";
+import { resolveAlerts } from "./run-alert";
 
 type RunBudgetEntry = z.infer<typeof RunBudgetEntrySchema>;
 
@@ -100,4 +101,108 @@ export function predebit(
         }
       : null;
   return { status: "reserved", entry: next, warning };
+}
+
+// --- more turns for a seat, by a person's request (A6) --------------------------------------------------
+
+export const BUDGET_LIMIT_MAX = 1024;
+export const BUDGET_INCREASED_EVENT = "budget-increased";
+
+/** The alert a seat whose turn budget ran out gets; the numbers make a new limit a new alert. */
+export function budgetExhaustedAlertPrefix(seatId: string): string {
+  return `席位 ${seatId} 的回合预算已用完`;
+}
+
+export function budgetExhaustedAlert(seatId: string, reserved: number, limit: number): string {
+  return `${budgetExhaustedAlertPrefix(seatId)}（已预留 ${reserved}/${limit}）。在 Runs 页追加预算后会继续。`;
+}
+
+export type BudgetIncrease = {
+  seatId: string;
+  by: number;
+  requestId: string;
+  /** The revision the caller read; a different one now is `revision-conflict`. */
+  expectedRevision: number;
+  reason: string;
+  now: string;
+};
+
+export type BudgetRefusal =
+  | { code: "revision-conflict"; current: number }
+  | { code: "request-id-reused" }
+  | { code: "lifecycle-not-allowed"; lifecycle: string }
+  | { code: "seat-missing" }
+  | { code: "budget-missing" }
+  | { code: "budget-cap"; max: number };
+
+export type BudgetIncreaseResult =
+  | { ok: true; replayed: false; next: RunRecord; limit: number }
+  | { ok: true; replayed: true; limit: number | null }
+  | ({ ok: false } & BudgetRefusal);
+
+/**
+ * Gives a seat more turns. The checks run in the usual order: a request with this id already
+ * written (the same one is `replayed`, another one under the same id is `request-id-reused`), the
+ * revision, then what the Run allows. The frozen policy is never touched: the new limit is written to
+ * `budgets.entries`, which the reservations already read first. The seat's exhaustion alert, if any, is
+ * resolved. A pure function that writes an audit event; the reducer's vocabulary is not extended.
+ */
+export function increaseSeatBudget(
+  record: RunRecord,
+  input: BudgetIncrease,
+  cancelAsked: boolean,
+): BudgetIncreaseResult {
+  const reason = input.reason.slice(0, 200);
+  const prior = record.events.find(
+    (event) => event.kind === BUDGET_INCREASED_EVENT && event.payload.requestId === input.requestId,
+  );
+  if (prior !== undefined) {
+    const same =
+      prior.payload.seatId === input.seatId &&
+      prior.payload.by === input.by &&
+      prior.payload.reason === reason;
+    if (!same) return { ok: false, code: "request-id-reused" };
+    const after = prior.payload.limitAfter;
+    return { ok: true, replayed: true, limit: typeof after === "number" ? after : null };
+  }
+  if (record.revision !== input.expectedRevision) {
+    return { ok: false, code: "revision-conflict", current: record.revision };
+  }
+  if (record.lifecycle === "finished" || record.lifecycle === "cancelled" || cancelAsked) {
+    return { ok: false, code: "lifecycle-not-allowed", lifecycle: record.lifecycle };
+  }
+  if (!record.roster.some((seat) => seat.seatId === input.seatId)) {
+    return { ok: false, code: "seat-missing" };
+  }
+  const entry = findSeatBudget(record, input.seatId);
+  if (!entry) return { ok: false, code: "budget-missing" };
+  const limit = entry.limit + input.by;
+  if (limit > BUDGET_LIMIT_MAX) return { ok: false, code: "budget-cap", max: BUDGET_LIMIT_MAX };
+
+  const next = structuredClone(record);
+  const raised: RunBudgetEntry = { ...entry, limit };
+  const index = next.budgets.entries.findIndex(
+    (candidate) => candidate.scope === "seat" && candidate.subjectId === input.seatId,
+  );
+  if (index >= 0) next.budgets.entries[index] = raised;
+  else next.budgets.entries.push(raised);
+  const seq = next.counters.eventsThroughSeq + 1;
+  next.counters.eventsThroughSeq = seq;
+  next.events.push({
+    seq,
+    kind: BUDGET_INCREASED_EVENT,
+    at: input.now,
+    payload: {
+      requestId: input.requestId,
+      seatId: input.seatId,
+      by: input.by,
+      limitBefore: entry.limit,
+      limitAfter: limit,
+      reason,
+    },
+  });
+  next.updatedAt = input.now;
+  const prefix = budgetExhaustedAlertPrefix(input.seatId);
+  const resolved = resolveAlerts(next, (alert) => alert.summary.startsWith(prefix), input.now);
+  return { ok: true, replayed: false, next: resolved.next, limit };
 }

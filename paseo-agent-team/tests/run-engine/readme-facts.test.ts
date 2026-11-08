@@ -60,6 +60,7 @@ describe("the Run Engine section of the README agrees with the code", () => {
 
   test("the controls it names are the ones the server ships, under the page's own labels", () => {
     expect([...RUN_ACTION_CONTROLS].sort()).toEqual([
+      "budget",
       "cancel",
       "decide",
       "kick",
@@ -73,6 +74,7 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain(runEngineZh.controls.pause.button);
     expect(section).toContain(runEngineZh.controls.cancelTask.button);
     expect(section).toContain(runEngineZh.controls.cancelRun.submit);
+    expect(section).toContain(runEngineZh.controls.budget.title);
     expect(section).toContain(runEngineZh.controls.resume.button);
   });
 

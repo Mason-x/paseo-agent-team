@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { increaseSeatBudget } from "../../shared/domain/run-engine/budget";
 import {
   CANCEL_COMPLETED_EVENT,
   CANCEL_PENDING_ALERT,
@@ -21,6 +22,8 @@ import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-al
 import { RUN_CONTRACT_VERSION, type RunIssueView } from "../../shared/schemas/run-engine/rpc";
 import type {
   RunActionCode,
+  RunBudgetInput,
+  RunBudgetOutput,
   RunCancelInput,
   RunCancelOutput,
   RunDecideInput,
@@ -412,6 +415,98 @@ export function createRunControl(options: RunControlOptions) {
     };
   }
 
+  /**
+   * More turns for one seat (`increaseSeatBudget`): the usual order of checks, one update, the invariants,
+   * and a push after the commit so what the budget held back is dispatched.
+   */
+  async function budgetRequest(input: RunBudgetInput): Promise<RunBudgetOutput> {
+    const closed = (revision: number, found: RunIssueView): RunBudgetOutput => ({
+      ...BASE,
+      status: "rejected",
+      revision,
+      seatId: input.seatId,
+      limit: null,
+      issues: [found],
+    });
+    const loaded = await load(input.runId);
+    if (!loaded.ok) return closed(0, loaded.issue);
+    const outcome: { refused?: Refused; replayed?: number | null; applied?: number } = {};
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        const result = increaseSeatBudget(
+          current,
+          {
+            seatId: input.seatId,
+            by: input.by,
+            requestId: input.requestId,
+            expectedRevision: input.expectedRevision,
+            reason: input.reason,
+            now: clock.now(),
+          },
+          cancelPending(current),
+        );
+        if (!result.ok) {
+          outcome.refused = refused(
+            result.code,
+            result.code === "revision-conflict"
+              ? { current: result.current }
+              : result.code === "lifecycle-not-allowed"
+                ? { lifecycle: result.lifecycle }
+                : result.code === "budget-cap"
+                  ? { max: result.max }
+                  : {},
+            result.code === "revision-conflict" ? "refresh" : "none",
+          );
+          return null;
+        }
+        if (result.replayed) {
+          outcome.replayed = result.limit;
+          return null;
+        }
+        const checked = checkLedgerInvariants(result.next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        outcome.applied = result.limit;
+        return result.next;
+      });
+    } catch (error) {
+      log(`budget of ${input.runId} could not be written`, error);
+      return closed(0, issue("ledger-refused", {}, "retry"));
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action } = outcome.refused;
+      return closed(revision, issue(code, params, action));
+    }
+    if (outcome.replayed !== undefined) {
+      return {
+        ...BASE,
+        status: "replayed",
+        revision,
+        seatId: input.seatId,
+        limit: outcome.replayed,
+        issues: [],
+      };
+    }
+    // What the budget held back is dispatched by the push, not by this handler.
+    push(input.runId);
+    return {
+      ...BASE,
+      status: "applied",
+      revision,
+      seatId: input.seatId,
+      limit: outcome.applied ?? null,
+      issues: [],
+    };
+  }
+
   return {
     /**
      * Asks the coordinator for a new plan. Only a Run that is waiting for one (`awaiting-dag`) can be
@@ -614,6 +709,11 @@ export function createRunControl(options: RunControlOptions) {
      */
     pause(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
       return lifecycleRequest("pause", input);
+    },
+
+    /** Gives a seat more turns; what it held back is dispatched after the commit. */
+    budget(input: RunBudgetInput): Promise<RunBudgetOutput> {
+      return budgetRequest(input);
     },
 
     /** Cancels the whole Run once every running turn is proven ended; see `cancelRequest`. */

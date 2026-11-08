@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+  runBudgetRpc,
   runCancelRpc,
   runDecideRpc,
   runKickRpc,
@@ -12,6 +13,8 @@ import {
 import {
   RUN_ACTION_CODES,
   RUN_ACTION_CONTROLS,
+  RunBudgetInputSchema,
+  RunBudgetOutputSchema,
   RunCancelInputSchema,
   RunCancelOutputSchema,
   RunDecideInputSchema,
@@ -170,6 +173,36 @@ describe("inputs", () => {
     expect(RunCancelOutputSchema.safeParse(out).success).toBe(false);
   });
 
+  test("budget: a seat and 1 to 64 turns, strictly", () => {
+    const ok = { ...base, seatId: "seat-b1", by: 4 };
+    expect(RunBudgetInputSchema.safeParse(ok).success).toBe(true);
+    for (const bad of [
+      { ...ok, by: 0 },
+      { ...ok, by: 65 },
+      { ...ok, by: 1.5 },
+      { ...ok, seatId: "" },
+      { ...ok, limit: 100 },
+      { ...ok, extra: 1 },
+      { ...base, by: 4 },
+      { ...base, seatId: "seat-b1" },
+    ]) {
+      expect(RunBudgetInputSchema.safeParse(bad).success).toBe(false);
+    }
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 4,
+      seatId: "seat-b1",
+      limit: 10,
+      issues: [],
+    };
+    expect(RunBudgetOutputSchema.safeParse(out).success).toBe(true);
+    expect(
+      RunBudgetOutputSchema.safeParse({ ...out, status: "rejected", limit: null }).success,
+    ).toBe(true);
+    expect(RunBudgetOutputSchema.safeParse({ ...out, limit: -1 }).success).toBe(false);
+  });
+
   test("kick: a Run id and nothing else", () => {
     expect(RunKickInputSchema.safeParse({ runContractVersion: 1, runId: RUN }).success).toBe(true);
     for (const bad of [
@@ -252,7 +285,7 @@ describe("outputs", () => {
     ).toBe(false);
   });
 
-  test("the names the capabilities may carry are the six that exist", () => {
+  test("the names the capabilities may carry are the seven that exist", () => {
     expect([...RUN_ACTION_CONTROLS]).toEqual([
       "replan",
       "decide",
@@ -260,6 +293,7 @@ describe("outputs", () => {
       "pause",
       "resume",
       "cancel",
+      "budget",
     ]);
     expect(runReplanRpc.name).toBe("agent-team.run.replan");
     expect(runDecideRpc.name).toBe("agent-team.run.decide");
@@ -267,6 +301,7 @@ describe("outputs", () => {
     expect(runPauseRpc.name).toBe("agent-team.run.pause");
     expect(runResumeRpc.name).toBe("agent-team.run.resume");
     expect(runCancelRpc.name).toBe("agent-team.run.cancel");
+    expect(runBudgetRpc.name).toBe("agent-team.run.budget");
   });
 });
 

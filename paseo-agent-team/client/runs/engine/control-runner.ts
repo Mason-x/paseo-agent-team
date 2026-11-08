@@ -1,5 +1,7 @@
 import {
   type ActionNotice,
+  type BudgetOffer,
+  budgetNotice,
   type CancelOffer,
   cancelRunNotice,
   decideNotice,
@@ -12,6 +14,8 @@ import {
 } from "../../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../../shared/schemas/run-engine/rpc";
 import type {
+  RunBudgetInput,
+  RunBudgetOutput,
   RunCancelInput,
   RunCancelOutput,
   RunDecideInput,
@@ -39,7 +43,14 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
  *    not refreshed on its account.
  */
 
-export type ControlKey = "replan" | "kick" | "pause" | "resume" | "cancel" | `decide:${string}`;
+export type ControlKey =
+  | "replan"
+  | "kick"
+  | "pause"
+  | "resume"
+  | "cancel"
+  | `budget:${string}`
+  | `decide:${string}`;
 
 export type ControlState = {
   pending: ControlKey | null;
@@ -53,6 +64,7 @@ export type ControlDeps = {
   kick(input: RunKickInput): Promise<RunKickOutput>;
   pause(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
   cancel(input: RunCancelInput): Promise<RunCancelOutput>;
+  budget(input: RunBudgetInput): Promise<RunBudgetOutput>;
   resume(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
   /** Reads the Run again. A failure here is the page's own error, not the control's. */
   refresh(): Promise<void>;
@@ -186,6 +198,25 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
             requestId: requestIdFor(signature),
             expectedRevision,
             reason: text.slice(0, 600),
+          }),
+        ),
+      );
+    },
+
+    /** More turns for one seat; the reason is written by the page. */
+    addBudget(offer: BudgetOffer, by: number, expectedRevision: number): Promise<boolean> {
+      if (!Number.isInteger(by) || by < 1 || by > 64) return Promise.resolve(false);
+      const signature = `budget:${offer.seatId}:${by}:${expectedRevision}`;
+      return run(`budget:${offer.seatId}`, signature, async () =>
+        budgetNotice(
+          await deps.budget({
+            runContractVersion: RUN_CONTRACT_VERSION,
+            runId: deps.runId,
+            requestId: requestIdFor(signature),
+            expectedRevision,
+            reason: offer.reason,
+            seatId: offer.seatId,
+            by,
           }),
         ),
       );

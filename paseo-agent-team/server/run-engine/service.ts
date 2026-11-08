@@ -125,7 +125,14 @@ export type DispatchNextResult =
       reason: "no-seat";
       denials: readonly SeatDenial[];
     }
-  | { status: "blocked"; taskId: string; reason: string; detail?: unknown }
+  | {
+      status: "blocked";
+      taskId: string;
+      reason: string;
+      detail?: unknown;
+      /** For a budget refusal: the seat whose budget it is (not part of any wire shape). */
+      seatId?: string;
+    }
   | {
       status: "dispatched";
       taskId: string;
@@ -304,6 +311,9 @@ export function createEngineService(options: EngineServiceOptions) {
           taskId,
           reason: built.reason,
           detail: built.conflicts,
+          ...(built.reason === "budget-exhausted" || built.reason === "budget-missing"
+            ? { seatId: spec.seatId }
+            : {}),
         };
         return null;
       }

@@ -67,6 +67,22 @@ export const runEngineZh = {
       help: "立即核对宿主、补收漏掉的报告、发出还没发出的消息，并推进一次。不会替成员完成任何任务，也不会放开冻结的占用。",
       button: "立即检查并推进",
     },
+    budget: {
+      title: "追加预算",
+      help: "席位的回合预算用完后，需要它的任务不会再派发。给这个席位追加回合数后，被挡住的任务会继续。一次追加 1 到 64 个，累计上限 1024。",
+      byLabel: "追加的回合数",
+      button: "追加预算",
+      confirmTitle: "确认追加预算？",
+      confirm: "确认追加",
+      cancel: "返回",
+      invalid: "请填 1 到 64 的整数",
+      reason: (seatId: string) => `从 Runs 页给席位 ${seatId} 追加预算`,
+      line: (seatId: string, reserved: number, limit: number) =>
+        `席位 ${seatId}：已预留 ${reserved} / 上限 ${limit}`,
+      willBe: (seatId: string, by: number, limit: number) =>
+        `给席位 ${seatId} 追加 ${by} 个回合，上限变为 ${limit}。`,
+      applied: (seatId: string, limit: number) => `席位 ${seatId} 的上限现在是 ${limit}`,
+    },
     cancelRun: {
       title: "取消整个 Run",
       help: "不再派发新任务；等进行中的回合结束后，取消全部未完成的任务并释放占用。不会给成员发消息，也不会回滚代码：已经提交的改动留在分支上，需要的话请自己 revert。进行中的回合很长时要等它结束。",
@@ -150,6 +166,10 @@ export const runEngineZh = {
         `现在不能执行这个操作${typeof params.lifecycle === "string" ? `（Run 当前${own(LIFECYCLE_ZH, params.lifecycle)}）` : ""}：只有运行中的 Run 才能暂停，只有已暂停的 Run 才能继续`,
       "cancel-pending": () =>
         "这个 Run 已经请求取消，正在等进行中的回合结束；现在不能再暂停、继续或回应决策",
+      "seat-missing": () => "这个 Run 里没有这个席位",
+      "budget-missing": () => "这个席位没有预算记录，无法追加",
+      "budget-cap": (params: Record<string, string | number | boolean>) =>
+        `追加后会超过上限${typeof params.max === "number" ? `（最多 ${params.max}）` : ""}`,
       "launch-in-progress": () => "这个 Run 还在启动（创建成员或发送计划请求），启动完成后才能取消",
       "ledger-refused": () => "台账拒绝了这次修改，没有任何改动；请刷新后再试，持续出现请上报",
     },
@@ -421,6 +441,7 @@ export const runEngineZh = {
       "run-paused": "Run 暂停",
       "run-resumed": "Run 恢复",
       "run-control-requested": "暂停或继续的请求",
+      "budget-increased": "追加预算",
       "run-cancel-requested": "请求取消 Run",
       "run-cancel-completed": "Run 取消完成",
       "run-finished": "Run 结束",

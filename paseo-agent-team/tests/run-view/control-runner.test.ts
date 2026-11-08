@@ -7,6 +7,7 @@ import {
 import { controlsOf, type RetryOffer } from "../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../shared/schemas/run-engine/rpc";
 import type {
+  RunBudgetOutput,
   RunCancelOutput,
   RunDecideOutput,
   RunKickOutput,
@@ -42,6 +43,15 @@ const cancelled = (waiting: RunCancelOutput["waiting"] = null): RunCancelOutput 
   revision: 6,
   lifecycle: "cancelled",
   waiting,
+  issues: [],
+});
+
+const raised = (limit = 7): RunBudgetOutput => ({
+  ...BASE,
+  status: "applied",
+  revision: 6,
+  seatId: "seat-b1",
+  limit,
   issues: [],
 });
 
@@ -83,6 +93,7 @@ function setup(overrides: Partial<ControlDeps> = {}) {
     pause: vi.fn(async () => lifecycle("paused")),
     resume: vi.fn(async () => lifecycle("active")),
     cancel: vi.fn(async () => cancelled()),
+    budget: vi.fn(async () => raised()),
     refresh: vi.fn(async () => undefined),
     newId: () => {
       counter += 1;
@@ -221,6 +232,49 @@ describe("kick", () => {
       runId: "run-ctl-a1",
     });
     expect(runner.state.notice?.text).toBe(zh.controls.result.kick.dispatched(1));
+  });
+});
+
+describe("adding turns to a seat", () => {
+  const offer = {
+    seatId: "seat-b1",
+    line: "x",
+    reserved: 2,
+    limit: 2,
+    exhausted: true,
+    reason: zh.controls.budget.reason("seat-b1"),
+  };
+
+  test("sends the seat, the number of turns and the revision the page read, and says the new limit", async () => {
+    const { runner, deps } = setup();
+    expect(await runner.addBudget(offer, 4, 9)).toBe(true);
+    expect(deps.budget).toHaveBeenCalledWith({
+      runContractVersion: RUN_CONTRACT_VERSION,
+      runId: "run-ctl-a1",
+      requestId: "req-1",
+      expectedRevision: 9,
+      reason: offer.reason,
+      seatId: "seat-b1",
+      by: 4,
+    });
+    expect(runner.state.notice?.text).toBe(zh.controls.budget.applied("seat-b1", 7));
+    expect(deps.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([0, 65, 1.5, Number.NaN])("%s turns are not sent", async (by) => {
+    const { runner, deps } = setup();
+    expect(await runner.addBudget(offer, by, 9)).toBe(false);
+    expect(deps.budget).not.toHaveBeenCalled();
+  });
+
+  test("a request that got no answer is asked again under the same id; another number is another request", async () => {
+    const budget = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue(raised());
+    const { runner } = setup({ budget });
+    await runner.addBudget(offer, 4, 9);
+    expect(runner.state.notice?.text).toBe(zh.controls.result.transport);
+    await runner.addBudget(offer, 4, 9);
+    await runner.addBudget(offer, 8, 9);
+    expect(budget.mock.calls.map((call) => call[0].requestId)).toEqual(["req-1", "req-1", "req-2"]);
   });
 });
 

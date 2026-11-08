@@ -207,6 +207,10 @@ only when the Run offers them:
   usual.
 - **继续** (resume), while the Run is paused: reads the host, takes in what arrived meanwhile, sends
   what was held back once, and dispatches again.
+- **追加预算** (add turns), on a seat of the Run: a seat's turn budget is a limit, and a task that
+  needs a seat whose turns ran out waits with a warning that says so. Adding 1 to 64 turns (1024 in
+  all) lets what was held back go on; the Run's frozen policy is not changed, the new limit is
+  recorded on the Run.
 - **取消这个 Run** (cancel the Run), with a reason you write: nothing new is dispatched from then on
   (the Run is paused and cannot be resumed), and once every turn that was running is proven ended on
   the host's own record, every unfinished task is cancelled and every claim released. It sends no

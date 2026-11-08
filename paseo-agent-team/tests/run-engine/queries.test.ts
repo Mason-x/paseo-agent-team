@@ -261,7 +261,7 @@ describe("run.list", () => {
       runEngine: 1,
       observationOnly: true,
       enabled: false,
-      supportedControls: ["replan", "decide", "kick", "pause", "resume", "cancel"],
+      supportedControls: ["replan", "decide", "kick", "pause", "resume", "cancel", "budget"],
     });
     expect(out.runs).toEqual([]);
   });

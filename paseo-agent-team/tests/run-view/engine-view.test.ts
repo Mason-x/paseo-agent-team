@@ -477,6 +477,7 @@ describe("EngineView controls", () => {
     onRetry: vi.fn(),
     onCancelTask: vi.fn(),
     onCancelRun: vi.fn(),
+    onAddBudget: vi.fn(),
     onKick: vi.fn(),
     onPause: vi.fn(),
     onResume: vi.fn(),
@@ -659,6 +660,49 @@ describe("EngineView controls", () => {
     const none = await mount(withControls(["kick"]), { controls: handlers() });
     expect(button(none.root, zh.controls.cancelRun.submit)).toBeUndefined();
     await renderer.act(async () => none.unmount());
+  });
+
+  test("a seat's budget can be raised: a number, a confirmation that says the new limit, then the handler", async () => {
+    const calls = handlers();
+    const base = runView();
+    const view = await mount(
+      ready({
+        ...base,
+        capabilities: { ...base.capabilities, supportedControls: ["budget"] },
+        budgets: [
+          {
+            scope: "seat",
+            subjectId: "seat-b1",
+            limit: 2,
+            reserved: 2,
+            confirmed: 1,
+            observedTurns: 1,
+          },
+        ],
+      }),
+      { controls: calls },
+    );
+    const label = `${zh.controls.budget.button} seat-b1`;
+    const input = view.root.findAll(
+      (node) => node.props?.accessibilityLabel === `${zh.controls.budget.byLabel} seat-b1`,
+    )[0];
+    // Not a number in range: only said.
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("100"),
+    );
+    await press(view.root, label);
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.budget.invalid);
+    expect(calls.onAddBudget).not.toHaveBeenCalled();
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("3"),
+    );
+    await press(view.root, label);
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.budget.willBe("seat-b1", 3, 5));
+    await press(view.root, zh.controls.budget.confirm);
+    expect(calls.onAddBudget).toHaveBeenCalledTimes(1);
+    expect(calls.onAddBudget.mock.calls[0]?.[1]).toBe(3);
+    expect(calls.onAddBudget.mock.calls[0]?.[0]).toMatchObject({ seatId: "seat-b1" });
+    await renderer.act(async () => view.unmount());
   });
 
   test("cancelling the confirmation sends nothing", async () => {

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type {
+  BudgetOffer,
   CancelOffer,
   ControlsView,
   NoticeTone,
@@ -20,6 +21,7 @@ export type EngineControlsProps = {
   onRetry: (offer: RetryOffer) => void;
   onCancelTask: (offer: CancelOffer) => void;
   onCancelRun: (reason: string) => void;
+  onAddBudget: (offer: BudgetOffer, by: number) => void;
   onKick: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -69,6 +71,89 @@ function ActionButton({
   );
 }
 
+/** One seat's budget: how many turns to add (1 to 64, 4 to begin with) and a confirmation. */
+function BudgetRow({
+  theme,
+  offer,
+  busy,
+  onAdd,
+}: {
+  theme: PluginTheme;
+  offer: BudgetOffer;
+  busy: boolean;
+  onAdd: (by: number) => void;
+}) {
+  const [text, setText] = useState("4");
+  const [bad, setBad] = useState(false);
+  const [confirming, setConfirming] = useState<number | null>(null);
+  return (
+    <View style={{ gap: 4 }}>
+      <Text
+        style={{
+          color: offer.exhausted ? theme.colors.statusWarning : theme.colors.foreground,
+          fontSize: 12,
+        }}
+      >
+        {offer.line}
+      </Text>
+      <ImeTextInput
+        accessibilityLabel={`${zh.controls.budget.byLabel} ${offer.seatId}`}
+        initialValue="4"
+        keyboardType="number-pad"
+        editable={!busy}
+        onChangeText={(value: string) => {
+          setText(value);
+          setBad(false);
+        }}
+        style={{
+          minHeight: 36,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          borderRadius: 8,
+          padding: 8,
+          color: theme.colors.foreground,
+        }}
+      />
+      {bad ? (
+        <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+          {zh.controls.budget.invalid}
+        </Text>
+      ) : null}
+      <ActionButton
+        theme={theme}
+        label={`${zh.controls.budget.button} ${offer.seatId}`}
+        disabled={busy}
+        onPress={() => {
+          const by = Number(text.trim());
+          if (!Number.isInteger(by) || by < 1 || by > 64) {
+            setBad(true);
+            return;
+          }
+          setConfirming(by);
+        }}
+      />
+      <ConfirmDialog
+        theme={theme}
+        open={confirming !== null}
+        title={zh.controls.budget.confirmTitle}
+        body={
+          confirming === null
+            ? ""
+            : zh.controls.budget.willBe(offer.seatId, confirming, offer.limit + confirming)
+        }
+        confirmLabel={zh.controls.budget.confirm}
+        cancelLabel={zh.controls.budget.cancel}
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          const by = confirming;
+          setConfirming(null);
+          if (by !== null) onAdd(by);
+        }}
+      />
+    </View>
+  );
+}
+
 /**
  * The controls of one Run: ask for a new plan, retry a task that stopped, nudge the Run. Everything
  * offered comes from `view` (what the server named), nothing is guessed here. While one request is in
@@ -83,6 +168,7 @@ export function EngineControls(props: EngineControlsProps) {
     onRetry,
     onCancelTask,
     onCancelRun,
+    onAddBudget,
     onKick,
     onPause,
     onResume,
@@ -239,6 +325,26 @@ export function EngineControls(props: EngineControlsProps) {
             disabled={busy}
             onPress={onResume}
           />
+        </View>
+      ) : null}
+
+      {view.budgets.length > 0 ? (
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+            {zh.controls.budget.title}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {zh.controls.budget.help}
+          </Text>
+          {view.budgets.map((offer) => (
+            <BudgetRow
+              key={offer.seatId}
+              theme={theme}
+              offer={offer}
+              busy={busy}
+              onAdd={(by) => onAddBudget(offer, by)}
+            />
+          ))}
         </View>
       ) : null}
 

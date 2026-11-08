@@ -26,6 +26,7 @@ export const RUN_ACTION_CONTROLS = [
   "pause",
   "resume",
   "cancel",
+  "budget",
 ] as const;
 export type RunActionControl = (typeof RUN_ACTION_CONTROLS)[number];
 
@@ -57,6 +58,10 @@ export const RUN_ACTION_CODES = [
   "lifecycle-not-allowed",
   "cancel-pending",
   "launch-in-progress",
+  // budget
+  "seat-missing",
+  "budget-missing",
+  "budget-cap",
   // anything the ledger itself refuses
   "ledger-refused",
 ] as const;
@@ -159,6 +164,28 @@ export const RunCancelOutputSchema = z.object({
   issues: z.array(RunIssueViewSchema).max(100),
 });
 export type RunCancelOutput = z.infer<typeof RunCancelOutputSchema>;
+
+// --- run.budget ------------------------------------------------------------------------------
+
+/** More turns for one seat. The limit is at most 1024 in all; one request adds 1 to 64. */
+export const RunBudgetInputSchema = z.strictObject({
+  ...WriteShape,
+  /** A seat of the Run's roster. */
+  seatId: Text(128),
+  by: z.number().int().min(1).max(64),
+});
+export type RunBudgetInput = z.input<typeof RunBudgetInputSchema>;
+
+export const RunBudgetOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  revision: z.number().int().nonnegative(),
+  seatId: Text(128),
+  /** The seat's limit after the call; null when rejected. */
+  limit: z.number().int().nonnegative().nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunBudgetOutput = z.infer<typeof RunBudgetOutputSchema>;
 
 // --- run.kick -------------------------------------------------------------------------------
 

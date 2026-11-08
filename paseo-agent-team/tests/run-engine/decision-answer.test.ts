@@ -258,7 +258,7 @@ describe("supportedControlsOf", () => {
     for (const state of ["preparing", "creating"] as const) {
       expect(
         supportedControlsOf({ lifecycle: "bootstrapping", decisions: [], launch: { state } }),
-      ).toEqual(["kick"]);
+      ).toEqual(["kick", "budget"]);
     }
     expect(
       supportedControlsOf({
@@ -270,18 +270,24 @@ describe("supportedControlsOf", () => {
   });
 
   test("names only the controls this Run can use right now, in a fixed order", () => {
-    expect(live("bootstrapping")).toEqual(["kick", "cancel"]);
-    expect(live("awaiting-dag")).toEqual(["replan", "kick", "cancel"]);
-    expect(live("active")).toEqual(["kick", "pause", "cancel"]);
-    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause", "cancel"]);
+    expect(live("bootstrapping")).toEqual(["kick", "cancel", "budget"]);
+    expect(live("awaiting-dag")).toEqual(["replan", "kick", "cancel", "budget"]);
+    expect(live("active")).toEqual(["kick", "pause", "cancel", "budget"]);
+    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause", "cancel", "budget"]);
     // A paused Run answers nothing: the decision waits until it is resumed.
-    expect(live("paused", [decision()])).toEqual(["kick", "resume", "cancel"]);
-    expect(live("paused")).toEqual(["kick", "resume", "cancel"]);
-    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick", "pause", "cancel"]);
+    expect(live("paused", [decision()])).toEqual(["kick", "resume", "cancel", "budget"]);
+    expect(live("paused")).toEqual(["kick", "resume", "cancel", "budget"]);
+    expect(live("active", [decision({ state: "answered" })])).toEqual([
+      "kick",
+      "pause",
+      "cancel",
+      "budget",
+    ]);
     expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual([
       "kick",
       "pause",
       "cancel",
+      "budget",
     ]);
     expect(live("finished")).toEqual([]);
     expect(live("cancelled")).toEqual([]);

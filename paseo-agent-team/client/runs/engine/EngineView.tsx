@@ -40,6 +40,7 @@ export type EngineViewProps = {
     | "onRetry"
     | "onCancelTask"
     | "onCancelRun"
+    | "onAddBudget"
     | "onKick"
     | "onPause"
     | "onResume"

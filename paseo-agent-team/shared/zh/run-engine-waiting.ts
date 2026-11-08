@@ -399,6 +399,10 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
     label: "暂停或继续的请求",
     cause: "有人从 Runs 页要求暂停或继续这个 Run；请求编号记在台账里，同一个请求不会执行两次",
   },
+  "budget-increased": {
+    label: "追加预算",
+    cause: "有人给一个席位追加了回合预算；因预算用完而被挡住的任务会继续派发",
+  },
   "run-cancel-requested": {
     label: "请求取消 Run",
     cause: "有人从 Runs 页要求取消整个 Run；不再派发新任务，等进行中的回合结束后才会取消",

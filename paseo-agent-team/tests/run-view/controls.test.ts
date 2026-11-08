@@ -138,6 +138,54 @@ describe("controlsOf: only what the server named is offered", () => {
     expect([named.cancelRun, named.any]).toEqual([true, true]);
   });
 
+  test("a budget is offered per seat, only when the server names it, and says what is reserved", () => {
+    const withBudgets = {
+      ...run({ supportedControls: ["budget"], decisions: [] }),
+      budgets: [
+        {
+          scope: "seat" as const,
+          subjectId: "seat-b1",
+          limit: 2,
+          reserved: 2,
+          confirmed: 1,
+          observedTurns: 1,
+        },
+        {
+          scope: "seat" as const,
+          subjectId: "seat-b2",
+          limit: 6,
+          reserved: 1,
+          confirmed: 0,
+          observedTurns: 0,
+        },
+        {
+          scope: "group" as const,
+          subjectId: "grp",
+          limit: 9,
+          reserved: 9,
+          confirmed: 0,
+          observedTurns: 0,
+        },
+      ],
+    };
+    const view = controlsOf(withBudgets);
+    expect(view.budgets.map((offer) => offer.seatId)).toEqual(["seat-b1", "seat-b2"]);
+    expect(view.budgets[0]).toMatchObject({
+      exhausted: true,
+      limit: 2,
+      line: zh.controls.budget.line("seat-b1", 2, 2),
+      reason: zh.controls.budget.reason("seat-b1"),
+    });
+    expect(view.budgets[1]?.exhausted).toBe(false);
+    expect(view.any).toBe(true);
+    expect(
+      controlsOf({
+        ...withBudgets,
+        capabilities: { ...withBudgets.capabilities, supportedControls: ["kick"] },
+      }).budgets,
+    ).toEqual([]);
+  });
+
   test("replan is offered only when the server names it", () => {
     expect(controlsOf(run({ supportedControls: ["kick"] })).replan).toBe(false);
     expect(controlsOf(run({ supportedControls: ["replan", "kick"] })).replan).toBe(true);
@@ -152,6 +200,7 @@ describe("controlsOf: only what the server named is offered", () => {
       pause: false,
       resume: false,
       cancelRun: false,
+      budgets: [],
       retries: [],
       cancels: [],
       any: false,

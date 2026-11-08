@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { budgetExhaustedAlert, budgetStatus } from "../../shared/domain/run-engine/budget";
 import {
   openStuckDecision,
   stoppedTasksWithoutDecision,
 } from "../../shared/domain/run-engine/decision-answer";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { CancelFinisher } from "./cancel";
 import type { Compactor } from "./compact";
 import type { DagIntake } from "./dag";
-import { sha256Hex } from "./digest";
+import { alertIdFor, sha256Hex } from "./digest";
 import type { Intake } from "./intake";
 import type { IngestResult, ObserverHookEvent, ObserverHost, RunObserver } from "./observer";
 import type { DispatchNextResult, EngineService } from "./service";
@@ -107,7 +109,33 @@ export function createEngineDriver(options: DriverOptions) {
     const { taskId } = result;
     await options.store.update(runId, (current) => {
       const noted = noteTask(current, taskId, reason, { now: clock.now() });
-      return noted.ok && noted.changed ? noted.next : null;
+      let next = noted.ok && noted.changed ? noted.next : current;
+      let changed = noted.ok && noted.changed;
+      // A seat whose turns ran out says so once per limit, with the way out.
+      if (
+        result.status === "blocked" &&
+        result.reason === "budget-exhausted" &&
+        result.seatId !== undefined
+      ) {
+        const status = budgetStatus(current, result.seatId);
+        if (status !== null) {
+          const summary = budgetExhaustedAlert(
+            result.seatId,
+            status.entry.reserved,
+            status.entry.limit,
+          );
+          const raised = raiseAlert(
+            next,
+            { alertId: alertIdFor(summary), severity: "warning", summary },
+            clock.now(),
+          );
+          if (raised.changed) {
+            next = raised.next;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : null;
     });
   }
 

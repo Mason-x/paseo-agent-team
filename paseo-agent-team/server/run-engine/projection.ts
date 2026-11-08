@@ -54,6 +54,7 @@ export function supportedControlsOf(
     pause: record.lifecycle === "active" && !cancelling,
     resume: record.lifecycle === "paused" && !cancelling,
     cancel: live && !cancelling && !starting,
+    budget: live && !cancelling,
   };
   return RUN_ACTION_CONTROLS.filter((name) => usable[name]);
 }
