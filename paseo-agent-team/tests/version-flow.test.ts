@@ -19,7 +19,8 @@ import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
 import { VERSION_PROCESS_TIMEOUT_MS } from "./setup/load-timeouts";
 
-const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const ROOT =
+  process.platform === "win32" ? "C:\\" : path.join(tmpdir(), "agent-team-version-fixture");
 const HOME = path.join(ROOT, "paseo-dev");
 const REPOSITORY = path.join(ROOT, "repo");
 const PLUGIN = path.join(REPOSITORY, "paseo-agent-team");

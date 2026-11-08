@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { gitOk } from "../server/version/git";
@@ -12,7 +13,8 @@ import { createVersionService } from "../server/version/service";
 import { storeRoot } from "../server/version/store";
 import type { RemoteTarget, VersionInfo } from "../shared/version";
 
-const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const ROOT =
+  process.platform === "win32" ? "C:\\" : path.join(tmpdir(), "agent-team-version-fixture");
 const HOME = path.join(ROOT, "paseo-dev");
 const PLUGIN = path.join(ROOT, "repo", "paseo-agent-team");
 const REPOSITORY = path.join(ROOT, "repo");

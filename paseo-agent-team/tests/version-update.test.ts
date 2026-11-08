@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { cliArgs, manualUpdateCommand } from "../server/version/cli";
@@ -6,7 +7,8 @@ import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
 import type { Job, VersionInfo } from "../shared/version";
 
-const ROOT = process.platform === "win32" ? "C:\\" : "/";
+const ROOT =
+  process.platform === "win32" ? "C:\\" : path.join(tmpdir(), "agent-team-version-fixture");
 const HOME = path.join(ROOT, "paseo-dev");
 const REPOSITORY = path.join(ROOT, "repo");
 const PLUGIN = path.join(REPOSITORY, "paseo-agent-team");
