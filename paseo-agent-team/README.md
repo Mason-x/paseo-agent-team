@@ -185,11 +185,43 @@ back within the limit; the alert is taken down by itself.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
 waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
-approve from the Runs page yet, and it does not retry a transient failure after a
-message was dispatched by itself. A Run holds at most 8192 events: old history is folded into a
-summary (it cannot be expanded again), and when the ledger nears a limit it stops starting new work
-and says so, so a very long Run is finished and restarted rather than overfilled. Acceptance status per scenario is in
-`docs/run-engine-acceptance.md` in the repository.
+approve from the Runs page, it cannot cancel one task while a member is still working on it (a
+cancel waits for the turn to end), it cannot hand a task to another seat, it does not retry a
+transient failure after a message was dispatched by itself, and it cannot resume a launch that was
+interrupted while members were being created. A Run holds at most 8192 events: old history is folded
+into a summary (it cannot be expanded again), and when the ledger nears a limit it stops starting
+new work and says so, so a very long Run is finished and restarted rather than overfilled.
+Acceptance status per scenario is in `docs/run-engine-acceptance.md` in the repository; the
+decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
+
+**Do not close or archive a member's Agent while a Run is live.** The Engine does not react to it
+and cannot recover such a task yet: the task stays assigned with its claims, and cancelling the Run
+or the task keeps waiting for a turn end that the closed Agent may never send. Cancel from the Runs
+page and let the turns end, then archive what you no longer want.
+
+**Advanced fields.** Two policy fields have no control in the Team editor. They live in the Team's
+`runEngine` block under `policy` (Teams are stored in the host setting `agent-team-teams`), and the
+editor keeps them as they are when it saves, as it does every field it does not know (an excerpt:
+the block also holds `version`, `enabled`, `seats` and the other `policy` fields the editor wrote):
+
+```json
+{
+  "runEngine": {
+    "policy": {
+      "devTargets": [{ "serverId": "dev-1", "host": "127.0.0.1:6799", "home": "D:/dev/paseo-home" }],
+      "evidenceRoot": "auto"
+    }
+  }
+}
+```
+
+- `devTargets` (at most 16 entries of `serverId`, `host`, `home`) registers the DEV Paseo instances a
+  task's smoke check may run against. `host` needs an explicit port other than 6767 and no
+  credentials; `home` must not be a `.paseo` directory. A task graph that declares a smoke check
+  while no entry has a usable `host` is refused. Leave it empty if no task needs a smoke check.
+- `evidenceRoot` is `"auto"` (the default: `<PASEO_HOME>/agent-team-evidence/<runId>`) or an
+  absolute directory outside the repository, which is created when missing. Members write their
+  evidence there, and the quality gate only accepts reported paths under it.
 
 **Follow and steer a Run.** **Agent Teams → 运行 → Engine 运行** lists the Runs and opens one: the
 task graph, each task with why it waits, who clears it and what happens next, locks, budgets,

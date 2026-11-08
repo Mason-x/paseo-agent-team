@@ -2,8 +2,15 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
+import { AUTO_EVIDENCE_ROOT } from "../../server/run-engine/repo";
 import { RUN_ENGINE_ENV } from "../../server/run-engine/runtime";
-import { RUN_SCHEMA_VERSION, RunRecordSchema } from "../../shared/schemas/run-engine/ledger";
+import { DEFAULT_ENGINE_LIMITS } from "../../shared/domain/run-engine/team-config-edit";
+import {
+  RUN_SCHEMA_VERSION,
+  RunDevTargetSchema,
+  RunPolicySnapshotSchema,
+  RunRecordSchema,
+} from "../../shared/schemas/run-engine/ledger";
 import { RUN_ACTION_CONTROLS } from "../../shared/schemas/run-engine/rpc-actions";
 import { runEngineZh } from "../../shared/zh/run-engine";
 
@@ -76,6 +83,49 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain(runEngineZh.controls.cancelRun.submit);
     expect(section).toContain(runEngineZh.controls.budget.title);
     expect(section).toContain(runEngineZh.controls.resume.button);
+  });
+
+  test("the advanced fields it shows are written in the shape the schema reads", () => {
+    const fence = /```json\n([\s\S]*?)\n```/u.exec(section);
+    expect(fence, "the advanced-fields example is missing").not.toBeNull();
+    const example = JSON.parse((fence as RegExpExecArray)[1] as string) as {
+      runEngine: { policy: { devTargets: unknown[]; evidenceRoot: string } };
+    };
+    const { devTargets, evidenceRoot } = example.runEngine.policy;
+    expect(devTargets.length).toBeGreaterThan(0);
+    for (const target of devTargets)
+      expect(RunDevTargetSchema.safeParse(target).success).toBe(true);
+    expect(Object.keys(RunDevTargetSchema.shape).sort()).toEqual(["home", "host", "serverId"]);
+    expect(Object.keys(RunPolicySnapshotSchema.shape)).toEqual(
+      expect.arrayContaining(["devTargets", "evidenceRoot"]),
+    );
+    expect(evidenceRoot).toBe(AUTO_EVIDENCE_ROOT);
+    // "at most 16 entries" is the schema's.
+    const max = (
+      RunPolicySnapshotSchema.shape.devTargets as unknown as {
+        _zod: { def: { checks?: { _zod: { def: { maximum?: number } } }[] } };
+      }
+    )._zod.def.checks
+      ?.map((check) => check._zod.def.maximum)
+      .find((value) => value !== undefined);
+    expect(max).toBe(16);
+    expect(section).toContain("at most 16 entries");
+    expect(section).toContain("agent-team-teams");
+  });
+
+  test("the defaults it quotes for the failed-task and coordinator-turn limits are the editor's", () => {
+    expect(DEFAULT_ENGINE_LIMITS.run.failedTasks).toBe(3);
+    expect(DEFAULT_ENGINE_LIMITS.run.strategicTurns).toBe(12);
+    expect(section).toContain(runEngineZh.teamEditor.numbers.failedTasks.split("（")[0] as string);
+    expect(section).toContain(
+      runEngineZh.teamEditor.numbers.strategicTurns.split("（")[0] as string,
+    );
+    expect(section).toContain("3 by default");
+    expect(section).toContain("12 by default");
+  });
+
+  test("it warns not to close or archive a member while a Run is live", () => {
+    expect(section).toContain("Do not close or archive a member's Agent while a Run is live");
   });
 
   test("the page labels it points to exist", () => {
