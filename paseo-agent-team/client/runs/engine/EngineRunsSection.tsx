@@ -6,7 +6,8 @@ import type { RunHealthEntrySchema, RunSummaryView } from "../../../shared/schem
 import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
 import { EngineView } from "./EngineView";
-import { useEngineRun, useEngineRuns } from "./use-engine-run";
+import { useEngineControls } from "./use-engine-controls";
+import { useEngineRun, type useEngineRuns } from "./use-engine-run";
 
 type Health = z.output<typeof RunHealthEntrySchema>;
 
@@ -22,6 +23,7 @@ function RunDetailPane({
   runId: string;
 }) {
   const { session, error, loadingOlder, refresh, loadOlder } = useEngineRun(hostId, runId, true);
+  const { state: controlState, runner } = useEngineControls(runId, refresh);
   return (
     <View>
       <EngineView
@@ -31,6 +33,39 @@ function RunDetailPane({
         older={session.older}
         loadingOlder={loadingOlder}
         embedded
+        controls={{
+          state: controlState,
+          onReplan: (reason) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.replan(reason, held.run.revision);
+          },
+          onRetry: (offer) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.retry(offer, held.run.revision);
+          },
+          onAddBudget: (offer, by) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.addBudget(offer, by, held.run.revision);
+          },
+          onCancelRun: (reason) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.cancelRun(reason, held.run.revision);
+          },
+          onCancelTask: (offer) => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.cancelTask(offer, held.run.revision);
+          },
+          onKick: () => void runner.kick(),
+          onPause: () => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.pause(held.run.revision);
+          },
+          onResume: () => {
+            const held = session.state;
+            if (held?.kind === "ready") void runner.resume(held.run.revision);
+          },
+          onDismiss: () => runner.dismiss(),
+        }}
         onRefresh={() => void refresh()}
         onLoadOlder={(cursor) => void loadOlder(cursor)}
       />
@@ -115,19 +150,22 @@ function HealthRow({ theme, entry }: { theme: PluginTheme; entry: Health }) {
 
 /**
  * Engine runs on this host. Renders nothing while there is nothing to show, so a host without any
- * Engine run looks exactly like before. Read-only: the list and detail only call `run.list` and
- * `run.get`.
+ * Engine run looks exactly like before. The list and detail read with `run.list` and `run.get`; the
+ * controls in a detail (replan, retry, kick, pause, resume) are the only writes, and only what the server names.
  */
 export function EngineRunsSection({
   theme,
   layout,
   hostId,
+  engine,
 }: {
   theme: PluginTheme;
   layout: Pick<PluginLayout, "compact">;
   hostId: string;
+  /** The page's one Engine list: the label-derived list reads the same answer, so they never disagree. */
+  engine: ReturnType<typeof useEngineRuns>;
 }) {
-  const { runs, health, capabilities, error } = useEngineRuns(hostId);
+  const { runs, health, capabilities, error } = engine;
   if (runs.length === 0 && health.length === 0 && !error) return null;
   return (
     <View style={{ gap: 8 }}>
@@ -135,7 +173,11 @@ export function EngineRunsSection({
         <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>
           {zh.list.title}
         </Text>
-        {capabilities?.observationOnly ? (
+        {capabilities && capabilities.supportedControls.length > 0 ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {zh.list.controlsHint}
+          </Text>
+        ) : capabilities ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
             {zh.list.observeOnly}
           </Text>

@@ -11,6 +11,8 @@ import {
   buildDispatch,
   buildReviewDispatch,
 } from "../../shared/domain/run-engine/dispatch-builder";
+import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
+import { replyAnchor, requestReportRepair } from "../../shared/domain/run-engine/report-repair";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
 import { readyRun } from "./support/ready-run";
@@ -424,5 +426,74 @@ describe("settleAgent: reviewer", () => {
     expect(after.decisions.some((decision) => decision.subjectId === "t1")).toBe(true);
     // The claims stay, frozen: nothing is released by a decision waiting for a person.
     expect(after.resources.some((claim) => claim.taskId === "t1" && claim.frozen)).toBe(true);
+  });
+});
+
+describe("a report is committed only if it was read from the message that is still the one to read (plan point 37)", () => {
+  /** A repair that has already gone out (sending) for the assignment: the reply to read moves to it. */
+  async function sendRepairNow(messageId: string, intentId = "intent-repair-race") {
+    await store.update(RUN_ID, (current) => {
+      const assignment = current.assignments.find((entry) => entry.assignmentId === ASSIGNMENT);
+      if (!assignment) return null;
+      const drafted = requestReportRepair(current, {
+        assignmentId: ASSIGNMENT,
+        anchor: replyAnchor(current, assignment),
+        reason: "report-missing",
+        issues: [],
+        intentId,
+        messageId,
+        payloadHash: "0".repeat(64),
+        templateVersion: 1,
+        now: "2026-11-05T12:01:00.000Z",
+      });
+      if (!drafted.ok) return null;
+      const sending = transitionIntent(drafted.next, intentId, "sending", {
+        now: "2026-11-05T12:01:01.000Z",
+      });
+      return sending.ok ? sending.next : null;
+    });
+  }
+
+  test("a newer repair that went out while the old reply was being read wins: nothing is written", async () => {
+    const record = await seed();
+    let raced = false;
+    let revisionAfterRace = -1;
+    const h = harness(async () => {
+      if (!raced) {
+        raced = true;
+        // The host is read, and in the meantime a newer repair is sent. The reply handed back is the old one.
+        await sendRepairNow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1");
+        revisionAfterRace = (await stored()).revision;
+      }
+      return window(doneReport(record));
+    });
+    await turnEnded(h);
+
+    const results = await h.intake.settleAgent(AGENT);
+    expect(results).toEqual([{ status: "stale" }]);
+    const after = await stored();
+    expect(after.revision).toBe(revisionAfterRace);
+    expect(after.assignments.find((entry) => entry.assignmentId === ASSIGNMENT)).toMatchObject({
+      state: "assigned",
+      acceptedProof: null,
+    });
+    expect(after.tasks.find((task) => task.spec.id === "t2")?.state).toBe("assigned");
+    expect(after.outbox.find((entry) => entry.id === "intent-repair-race")).toMatchObject({
+      state: "sending",
+    });
+    expect(h.onSettled).not.toHaveBeenCalled();
+
+    // The next pass reads the reply to the newer message and settles it, and the repair goes away.
+    const again = await h.intake.settleAgent(AGENT);
+    expect(again[0]?.status).toBe("settled");
+    expect((await stored()).outbox.some((entry) => entry.id === "intent-repair-race")).toBe(false);
+  });
+
+  test("a reply read from the current anchor is committed as before", async () => {
+    const record = await seed();
+    await sendRepairNow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2");
+    const h = harness(() => window(doneReport(record)));
+    await turnEnded(h);
+    expect((await h.intake.settleAgent(AGENT))[0]?.status).toBe("settled");
   });
 });

@@ -1,14 +1,28 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import { runDecideRpc, runKickRpc, runReplanRpc } from "../../shared/rpc/run-engine";
+import {
+  runBudgetRpc,
+  runCancelRpc,
+  runDecideRpc,
+  runKickRpc,
+  runPauseRpc,
+  runReplanRpc,
+  runResumeRpc,
+} from "../../shared/rpc/run-engine";
 import {
   RUN_ACTION_CODES,
   RUN_ACTION_CONTROLS,
+  RunBudgetInputSchema,
+  RunBudgetOutputSchema,
+  RunCancelInputSchema,
+  RunCancelOutputSchema,
   RunDecideInputSchema,
   RunDecideOutputSchema,
   RunKickInputSchema,
   RunKickOutputSchema,
+  RunLifecycleInputSchema,
+  RunLifecycleOutputSchema,
   RunReplanInputSchema,
   RunReplanOutputSchema,
 } from "../../shared/schemas/run-engine/rpc-actions";
@@ -67,6 +81,126 @@ describe("inputs", () => {
     ]) {
       expect(RunDecideInputSchema.safeParse(bad).success).toBe(false);
     }
+  });
+
+  test("pause and resume: the same strict shape as replan, a request id, a revision and a reason", () => {
+    expect(RunLifecycleInputSchema.safeParse(base).success).toBe(true);
+    const { reason: _reason, ...noReason } = base;
+    const { expectedRevision: _revision, ...noRevision } = base;
+    for (const bad of [
+      { ...base, extra: 1 },
+      { ...base, nonce: "x" },
+      { ...base, lifecycle: "paused" },
+      { ...base, requestId: "" },
+      { ...base, reason: "" },
+      { ...base, reason: "x".repeat(601) },
+      { ...base, expectedRevision: -1 },
+      { ...base, runContractVersion: 2 },
+      noReason,
+      noRevision,
+    ]) {
+      expect(RunLifecycleInputSchema.safeParse(bad).success).toBe(false);
+    }
+    expect(
+      RunLifecycleOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "applied",
+        revision: 4,
+        lifecycle: "paused",
+        issues: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      RunLifecycleOutputSchema.safeParse({
+        runContractVersion: 1,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        issues: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  test("decide accepts retry and cancel with nothing more, and the output may list the cancelled tasks", () => {
+    const ok = { ...base, decisionId: DECISION };
+    expect(RunDecideInputSchema.safeParse({ ...ok, answer: { action: "cancel" } }).success).toBe(
+      true,
+    );
+    expect(
+      RunDecideInputSchema.safeParse({ ...ok, answer: { action: "cancel", extra: 1 } }).success,
+    ).toBe(false);
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 5,
+      decisionId: DECISION,
+      taskId: "t1",
+      issues: [],
+    };
+    expect(RunDecideOutputSchema.safeParse(out).success).toBe(true);
+    expect(
+      RunDecideOutputSchema.safeParse({ ...out, cancelledTaskIds: ["t1", "t2"] }).success,
+    ).toBe(true);
+    expect(RunDecideOutputSchema.safeParse({ ...out, cancelledTaskIds: [""] }).success).toBe(false);
+  });
+
+  test("cancel: the same strict request as the others, and an answer that may say what it waits for", () => {
+    expect(RunCancelInputSchema.safeParse(base).success).toBe(true);
+    for (const bad of [
+      { ...base, extra: 1 },
+      { ...base, force: true },
+      { ...base, reason: "" },
+      { ...base, reason: "x".repeat(601) },
+      { ...base, requestId: "" },
+      { ...base, expectedRevision: -1 },
+    ]) {
+      expect(RunCancelInputSchema.safeParse(bad).success).toBe(false);
+    }
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 4,
+      lifecycle: "paused",
+      issues: [],
+    };
+    expect(RunCancelOutputSchema.safeParse({ ...out, waiting: null }).success).toBe(true);
+    expect(
+      RunCancelOutputSchema.safeParse({ ...out, waiting: { turns: 1, deliveries: 0 } }).success,
+    ).toBe(true);
+    expect(
+      RunCancelOutputSchema.safeParse({ ...out, waiting: { turns: -1, deliveries: 0 } }).success,
+    ).toBe(false);
+    expect(RunCancelOutputSchema.safeParse(out).success).toBe(false);
+  });
+
+  test("budget: a seat and 1 to 64 turns, strictly", () => {
+    const ok = { ...base, seatId: "seat-b1", by: 4 };
+    expect(RunBudgetInputSchema.safeParse(ok).success).toBe(true);
+    for (const bad of [
+      { ...ok, by: 0 },
+      { ...ok, by: 65 },
+      { ...ok, by: 1.5 },
+      { ...ok, seatId: "" },
+      { ...ok, limit: 100 },
+      { ...ok, extra: 1 },
+      { ...base, by: 4 },
+      { ...base, seatId: "seat-b1" },
+    ]) {
+      expect(RunBudgetInputSchema.safeParse(bad).success).toBe(false);
+    }
+    const out = {
+      runContractVersion: 1,
+      status: "applied",
+      revision: 4,
+      seatId: "seat-b1",
+      limit: 10,
+      issues: [],
+    };
+    expect(RunBudgetOutputSchema.safeParse(out).success).toBe(true);
+    expect(
+      RunBudgetOutputSchema.safeParse({ ...out, status: "rejected", limit: null }).success,
+    ).toBe(true);
+    expect(RunBudgetOutputSchema.safeParse({ ...out, limit: -1 }).success).toBe(false);
   });
 
   test("kick: a Run id and nothing else", () => {
@@ -151,11 +285,23 @@ describe("outputs", () => {
     ).toBe(false);
   });
 
-  test("the names the capabilities may carry are the three that exist", () => {
-    expect([...RUN_ACTION_CONTROLS]).toEqual(["replan", "decide", "kick"]);
+  test("the names the capabilities may carry are the seven that exist", () => {
+    expect([...RUN_ACTION_CONTROLS]).toEqual([
+      "replan",
+      "decide",
+      "kick",
+      "pause",
+      "resume",
+      "cancel",
+      "budget",
+    ]);
     expect(runReplanRpc.name).toBe("agent-team.run.replan");
     expect(runDecideRpc.name).toBe("agent-team.run.decide");
     expect(runKickRpc.name).toBe("agent-team.run.kick");
+    expect(runPauseRpc.name).toBe("agent-team.run.pause");
+    expect(runResumeRpc.name).toBe("agent-team.run.resume");
+    expect(runCancelRpc.name).toBe("agent-team.run.cancel");
+    expect(runBudgetRpc.name).toBe("agent-team.run.budget");
   });
 });
 

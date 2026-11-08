@@ -9,12 +9,14 @@ import {
   evidenceRepairOf,
   validStoredEvidenceRepair,
 } from "../../shared/domain/run-engine/evidence-repair";
+import { isRepairWake } from "../../shared/domain/run-engine/report-repair";
 import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortActiveTurnBehavior } from "../../shared/paseo/port";
 import type { RunEffectIntent, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { findDispatchEcho } from "./host";
+import type { ReadFailure } from "./read-retry";
 import {
   deliveredFiles,
   dispatchWorkspace,
@@ -51,6 +53,8 @@ export type EffectsOptions = {
    */
   compile(intent: SendableIntent, record: RunRecord): string | null;
   clock?: { now(): string };
+  /** Told when the live state of a seat could not be read before a supplement, so it is read again. */
+  onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   /** The Run's shared Workspace, to recheck a supplement just before it is sent. Defaults to `launch.workspace`. */
   resolveWorkspace?(record: RunRecord): { workspaceId: string; directory: string } | null;
   /**
@@ -84,6 +88,17 @@ export function payloadHash(text: string): string {
 
 function isSendable(intent: RunEffectIntent): intent is SendableIntent {
   return intent.kind === "dispatch" || intent.kind === "wake";
+}
+
+/**
+ * A Run that is paused, finished or cancelled sends nothing new. The plan request goes out while the
+ * Run is still `bootstrapping` or `awaiting-dag`, so those lifecycles send as usual. What is already
+ * on the host (`sending`, `outcome-unknown`) is still read and settled by echo in every lifecycle:
+ * that only reads. A `prepared` intent is left as it is; when the Run is `active` again it goes out
+ * once, because the ledger still says `prepared`.
+ */
+function lifecycleMaySend(lifecycle: RunRecord["lifecycle"]): boolean {
+  return lifecycle !== "paused" && lifecycle !== "finished" && lifecycle !== "cancelled";
 }
 
 function errorCode(error: unknown): string {
@@ -139,7 +154,22 @@ export function createEffects(options: EffectsOptions) {
       return false;
     }
     try {
-      const snapshot = (await options.port.agents.ref(assignment.agentId).refresh())?.agent;
+      let refreshed: Awaited<ReturnType<ReturnType<typeof options.port.agents.ref>["refresh"]>>;
+      try {
+        refreshed = await options.port.agents.ref(assignment.agentId).refresh();
+      } catch (error) {
+        // Only this read is handed to the re-checks; a repository that cannot be inspected is not.
+        try {
+          await options.onReadFailure?.(record.runId, {
+            type: "seat",
+            agentId: assignment.agentId,
+          });
+        } catch (failure) {
+          log(`could not note the failed read of ${assignment.agentId}`, failure);
+        }
+        throw error;
+      }
+      const snapshot = refreshed?.agent;
       const pending = Array.isArray(snapshot?.pendingPermissions)
         ? snapshot.pendingPermissions.length > 0
         : Boolean(snapshot?.pendingPermissions);
@@ -192,8 +222,8 @@ export function createEffects(options: EffectsOptions) {
     intentId: string,
     to: IntentTarget,
     reason?: string,
-  ): Promise<{ ok: boolean; changed: boolean }> {
-    const holder = { ok: false, changed: false };
+  ): Promise<{ ok: boolean; changed: boolean; superseded: boolean }> {
+    const holder = { ok: false, changed: false, superseded: false };
     await options.store.update(runId, (current, context) => {
       const intent = current.outbox.find((entry) => entry.id === intentId);
       const assignment = current.assignments.find(
@@ -201,6 +231,26 @@ export function createEffects(options: EffectsOptions) {
       );
       const repair = assignment && evidenceRepairOf(current, assignment);
       const now = clock.now();
+      // The claim to send is taken in the commit that moves the intent, so a pause or an end that
+      // landed after the snapshot of the caller still wins: nothing moves, nothing is sent.
+      if (to === "sending" && !lifecycleMaySend(current.lifecycle)) return null;
+      // A report-format repair only makes sense while its assignment still waits for a report. If it
+      // does not (a report was accepted, the assignment ended) the request is out of date: it goes to
+      // `failed` in this same commit and nothing is sent. This races atomically with the intake.
+      if (to === "sending" && intent?.state === "prepared" && isRepairWake(intent)) {
+        const waiting =
+          assignment !== undefined &&
+          (assignment.state === "assigned" || assignment.state === "in_progress") &&
+          assignment.acceptedProof === null;
+        if (!waiting) {
+          const dropped = transitionIntent(current, intentId, "failed", {
+            now,
+            reason: "superseded-before-send",
+          });
+          holder.superseded = dropped.ok && dropped.changed;
+          return dropped.ok && dropped.changed ? dropped.next : null;
+        }
+      }
       if (to === "sending" && repair && assignment && intent) {
         const task = current.tasks.find((entry) => entry.spec.id === assignment.taskId);
         const head = producerHead(current, assignment.taskId);
@@ -308,6 +358,7 @@ export function createEffects(options: EffectsOptions) {
     for (let sentCount = 0; sentCount < maxPerCall; ) {
       const record = await snapshot(runId);
       if (!record) return;
+      if (!lifecycleMaySend(record.lifecycle)) return;
       const dispatches = record.outbox.filter(isSendable);
       // An agent whose last delivery is unresolved gets nothing more until that is settled.
       const blocked = new Set(
@@ -349,7 +400,12 @@ export function createEffects(options: EffectsOptions) {
 
       // Commit the intent to `sending` first. If this throws, nothing was sent. Only the runner
       // whose commit made the move owns the send; anyone else stops and leaves it to that runner.
-      if (!(await settleDetailed(runId, intent.id, "sending")).changed) return;
+      const claim = await settleDetailed(runId, intent.id, "sending");
+      if (!claim.changed) {
+        if (!claim.superseded) return;
+        report.failed.push(intent.id);
+        continue;
+      }
       sentCount += 1;
       try {
         await options.port.agents

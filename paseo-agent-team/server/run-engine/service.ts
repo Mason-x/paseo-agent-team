@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
+  CAPACITY_REFUSE_ALERT,
+  CAPACITY_WARN_ALERT,
+  type CompactionLimits,
+  capacityIssue,
+} from "../../shared/domain/run-engine/compaction";
+import {
   judgedNothing,
   producerHead,
   resolveD,
@@ -18,6 +24,11 @@ import {
   evidenceRepairOf,
 } from "../../shared/domain/run-engine/evidence-repair";
 import {
+  FAILED_LIMIT_ALERT_PREFIX,
+  failedLimitAlert,
+  failedTaskLimit,
+} from "../../shared/domain/run-engine/failure-limit";
+import {
   checkEvidenceGate,
   checkReviewGate,
   devEndpoint,
@@ -30,6 +41,7 @@ import {
   smokerSemanticArgs,
   templateVersionFor,
 } from "../../shared/domain/run-engine/prompt-template";
+import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import {
   eligibleReviewSeats,
   planDispatchWithReasons,
@@ -42,6 +54,7 @@ import { reviewRequirement } from "../../shared/domain/run-engine/tier";
 import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
+import { alertIdFor } from "./digest";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
 import type { ReadFailure } from "./read-retry";
 import {
@@ -99,6 +112,8 @@ export type EngineServiceOptions = {
    * down so the read is tried again later (`read-retry.ts`); the dispatch is not retried by this.
    */
   onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
+  /** Lower thresholds for tests; the defaults are the ledger-sized ones in `compaction.ts`. */
+  capacityLimits?: Partial<CompactionLimits>;
   ids?: { uuid(): string };
   clock?: { now(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -115,7 +130,14 @@ export type DispatchNextResult =
       reason: "no-seat";
       denials: readonly SeatDenial[];
     }
-  | { status: "blocked"; taskId: string; reason: string; detail?: unknown }
+  | {
+      status: "blocked";
+      taskId: string;
+      reason: string;
+      detail?: unknown;
+      /** For a budget refusal: the seat whose budget it is (not part of any wire shape). */
+      seatId?: string;
+    }
   | {
       status: "dispatched";
       taskId: string;
@@ -149,8 +171,13 @@ type Work =
  * The next unit of work, in task order. A delivered task needs a reviewer until one is bound to its
  * current producer, and then (if it has a smoke) a smoker once the review gate has passed. A judge
  * that was dispatched but has not reported keeps the task waiting; it is never dispatched twice.
+ * With `startNew` false a task that has not started (`ready`) is passed over, so the failed-task gate
+ * can still reach the work under way behind it (a rework, a review, a smoke, a supplement).
  */
-function nextWork(record: RunRecord): Work | null {
+function nextWork(
+  record: RunRecord,
+  options: { startNew: boolean } = { startNew: true },
+): Work | null {
   // A supplement keeps the repository claim already held by its task. Consider it before new
   // tasks, which otherwise can be blocked by that claim and prevent the holder from progressing.
   if (record.schemaVersion === 2) {
@@ -173,6 +200,9 @@ function nextWork(record: RunRecord): Work | null {
     }
   }
   for (const task of record.tasks) {
+    // A task that has not started yet (`ready`) is skipped when nothing new may start, and the walk goes
+    // on to the work already under way: a rework, a review, a smoke.
+    if (task.state === "ready" && !options.startNew) continue;
     if (task.state === "ready" || task.state === "rework") return { kind: "produce", task };
     if (task.state !== "review") continue;
     // Sent back for rework but the judges are not all finished yet: nothing to dispatch.
@@ -294,6 +324,9 @@ export function createEngineService(options: EngineServiceOptions) {
           taskId,
           reason: built.reason,
           detail: built.conflicts,
+          ...(built.reason === "budget-exhausted" || built.reason === "budget-missing"
+            ? { seatId: spec.seatId }
+            : {}),
         };
         return null;
       }
@@ -717,17 +750,117 @@ export function createEngineService(options: EngineServiceOptions) {
     );
   }
 
+  /** One alert per kind, found again by its text, so asking again writes nothing. */
+  async function noteCapacity(runId: string, level: "refuse" | "warn"): Promise<void> {
+    const summary = level === "refuse" ? CAPACITY_REFUSE_ALERT : CAPACITY_WARN_ALERT;
+    try {
+      await options.store.update(runId, (current) => {
+        const raised = raiseAlert(
+          current,
+          {
+            alertId: alertIdFor(summary),
+            severity: level === "refuse" ? "critical" : "warning",
+            summary,
+          },
+          clock.now(),
+        );
+        return raised.changed ? raised.next : null;
+      });
+    } catch (error) {
+      log(`could not note the ledger capacity of ${runId}`, error);
+    }
+  }
+
+  /**
+   * One critical alert while the failed-task limit is exceeded and a task that has not started is held
+   * back by it, found again by its fixed prefix so asking again writes nothing. Once the count is back within the limit the alert is taken down, but
+   * only if there is one to take down: a Run that never exceeded it is never written to for this.
+   */
+  async function noteFailedLimit(runId: string, limit: number): Promise<void> {
+    try {
+      await options.store.update(runId, (current) => {
+        const raised = raiseAlert(
+          current,
+          {
+            alertId: alertIdFor(FAILED_LIMIT_ALERT_PREFIX),
+            severity: "critical",
+            summary: failedLimitAlert(limit),
+          },
+          clock.now(),
+        );
+        return raised.changed ? raised.next : null;
+      });
+    } catch (error) {
+      log(`could not note the failed-task limit of ${runId}`, error);
+    }
+  }
+
+  async function clearFailedLimit(runId: string): Promise<void> {
+    try {
+      await options.store.update(runId, (current) => {
+        const resolved = resolveAlerts(
+          current,
+          (alert) => alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
+          clock.now(),
+        );
+        return resolved.changed ? resolved.next : null;
+      });
+    } catch (error) {
+      log(`could not take down the failed-task alert of ${runId}`, error);
+    }
+  }
+
   async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
     // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
     // its DAG, have nothing to send.
     if (read.record.lifecycle !== "active") return { status: "idle" };
-    const work = nextWork(read.record);
-    if (!work) return { status: "idle" };
-    if (work.kind === "produce") return dispatchProducer(runId, read.record, work.task);
-    if (work.kind === "evidence") return dispatchEvidence(runId, read.record, work.task);
-    return dispatchJudge(runId, read.record, work.task, work.kind);
+    // Near a ledger limit nothing new starts, so what is in flight can still be taken in and finished.
+    const capacity = capacityIssue(read.record, {
+      bytesHigh: read.needsCompaction,
+      limits: options.capacityLimits,
+    });
+    if (capacity !== null) await noteCapacity(runId, capacity.level);
+    const failures = failedTaskLimit(read.record);
+    if (
+      !failures.exceeded &&
+      read.record.alerts.some(
+        (alert) =>
+          alert.state !== "resolved" && alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
+      )
+    ) {
+      await clearFailedLimit(runId);
+    }
+    const first = nextWork(read.record);
+    if (!first) return { status: "idle" };
+    if (capacity?.level === "refuse") {
+      return { status: "blocked", taskId: first.task.spec.id, reason: "ledger-capacity" };
+    }
+    let work: Work = first;
+    let record = read.record;
+    // More failed tasks than the policy allows: no task that has not started yet is started (a `ready`
+    // one, which includes a failed task a person has just sent back to the start). What is already under
+    // way goes on: the review, the smoke, the supplement and the rework of a task that has begun, and
+    // the paths that do not come through here (intake, repair, the outbox). A task held back must not
+    // hide the work behind it, so the walk skips it, and the seat planning does not see it either (it
+    // would otherwise be given the seat the work under way needs).
+    if (failures.exceeded) {
+      const held = read.record.tasks.some((entry) => entry.state === "ready");
+      if (held) await noteFailedLimit(runId, failures.limit);
+      const underway = nextWork(read.record, { startNew: false });
+      if (underway === null) {
+        return { status: "blocked", taskId: first.task.spec.id, reason: "failed-task-limit" };
+      }
+      work = underway;
+      record = {
+        ...read.record,
+        tasks: read.record.tasks.filter((entry) => entry.state !== "ready"),
+      };
+    }
+    if (work.kind === "produce") return dispatchProducer(runId, record, work.task);
+    if (work.kind === "evidence") return dispatchEvidence(runId, record, work.task);
+    return dispatchJudge(runId, record, work.task, work.kind);
   }
 
   return {

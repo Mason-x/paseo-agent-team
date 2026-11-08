@@ -39,11 +39,15 @@ import {
   teamPlanRpc,
 } from "./shared/rpc";
 import {
+  runBudgetRpc,
+  runCancelRpc,
   runDecideRpc,
   runGetRpc,
   runKickRpc,
   runListRpc,
+  runPauseRpc,
   runReplanRpc,
+  runResumeRpc,
 } from "./shared/rpc/run-engine";
 import { preferencesSettings, rolesSettings, teamsSettings } from "./shared/settings";
 import {
@@ -307,6 +311,22 @@ export default function contribute(server: PluginServerContext) {
   server.handle(runDecideRpc, (input, { paseo }) => {
     engine.bind(paseo);
     return engine.control.decide(input);
+  });
+  server.handle(runPauseRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.pause(input);
+  });
+  server.handle(runResumeRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.resume(input);
+  });
+  server.handle(runBudgetRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.budget(input);
+  });
+  server.handle(runCancelRpc, (input, { paseo }) => {
+    engine.bind(paseo);
+    return engine.control.cancel(input);
   });
   server.handle(runKickRpc, (input, { paseo }) => {
     engine.bind(paseo);

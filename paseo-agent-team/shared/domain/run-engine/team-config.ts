@@ -100,6 +100,8 @@ export function engineLaunchGate(input: {
     if (!configured.has(seatId)) blockers.push(zh.seatMissing(seatId));
   }
   if (!resolution.config.seats.some((seat) => seat.enabled)) blockers.push(zh.noEnabledSeat);
+  // The plan request is the coordinator's first turn: with none, the Run could never ask for a plan.
+  if (resolution.config.policy.run.strategicTurns < 1) blockers.push(zh.coordinatorBudgetEmpty);
   if (!input.engineSupported) blockers.push(zh.unsupported);
 
   const warnings = [

@@ -32,6 +32,7 @@ import { MEMBER_CREATION_OPTIONS, type MemberCreation } from "../shared/team-mod
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { MemberEditor } from "./MemberEditor";
 import { ModelRow } from "./ModelRow";
+import { RunEngineSection } from "./RunEngineSection";
 import {
   buildMemberCreationField,
   duplicateMemberPair,
@@ -110,6 +111,10 @@ export function TeamEditor({
   const [memberCreation, setMemberCreation] = useState<MemberCreation>("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [memberCreationTouched, setMemberCreationTouched] = useState(false);
+  // The stored `Team.runEngine` as it is edited here. Written back only once a person changed it:
+  // an untouched block is carried through the save as the extension it is.
+  const [runEngine, setRunEngine] = useState<unknown>(team?.runEngine);
+  const [runEngineTouched, setRunEngineTouched] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState<ConflictKind | null>(null);
   const [formSeed, setFormSeed] = useState(0);
@@ -202,6 +207,8 @@ export function TeamEditor({
       setMemberCreation(readMemberCreation(next?.memberCreation));
       setAdvancedOpen(false);
       setMemberCreationTouched(false);
+      setRunEngine(next?.runEngine);
+      setRunEngineTouched(false);
       setErrors({});
       setConflict(null);
       setFormSeed((seed) => seed + 1);
@@ -271,6 +278,7 @@ export function TeamEditor({
         memberCreationTouched,
       }),
       operatingRules: operatingRules.trim() || undefined,
+      ...(runEngineTouched ? { runEngine } : {}),
       enabled: true,
       createdAt: baseline.current?.createdAt ?? now,
       updatedAt: now,
@@ -566,6 +574,17 @@ export function TeamEditor({
                 {zh.addMember}
               </Text>
             </Pressable>
+            <RunEngineSection
+              theme={theme}
+              members={members}
+              planRows={planResult?.rows}
+              value={runEngine}
+              revision={formSeed}
+              onChange={(next) => {
+                setRunEngine(next);
+                setRunEngineTouched(true);
+              }}
+            />
             <TextField
               theme={theme}
               label={zh.operatingRules}

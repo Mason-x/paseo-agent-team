@@ -152,3 +152,68 @@ describe("applyOlder", () => {
     expect(applyOlder(session, { nonsense: true }).session).toBe(session);
   });
 });
+
+describe("a dropped connection and coming back (the view never flashes empty)", () => {
+  test("a full answer for the revision already shown changes nothing, so nothing repaints", () => {
+    const rec = record(3);
+    const session = loaded(rec);
+    const again = applyRefresh(session, output(rec));
+    expect(again.session).toBe(session);
+    expect(again.needFull).toBe(false);
+  });
+
+  test("a full answer for the same revision with a different notice is shown", () => {
+    const rec = record(3);
+    const session = loaded(rec);
+    const cursor = historyPage(rec, undefined).page.nextCursor ?? "";
+    // Asking with an expired cursor returns the same revision with the "cursor expired" notice.
+    const expired = {
+      ...rec,
+      checkpoint: { ...(rec.checkpoint ?? ({} as never)), throughSeq: 5 },
+    };
+    const answer = output(expired as RunRecord, cursor);
+    expect(answer.issues.length).toBeGreaterThan(0);
+    const step = applyRefresh(session, answer);
+    expect(step.session).not.toBe(session);
+    expect(step.session.state?.kind).toBe("ready");
+  });
+
+  test("a failed read applies nothing: the next `unchanged` still lines up", () => {
+    // The hook keeps the session across a transport error; the pure rule is that nothing was applied.
+    const session = loaded(record(4));
+    const step = applyRefresh(session, unchanged(4));
+    expect(step.session).toBe(session);
+    expect(step.needFull).toBe(false);
+  });
+
+  test("a revision that went backwards (the Run was replaced) is shown, not ignored", () => {
+    const session = loaded(record(9));
+    const step = applyRefresh(session, output(record(2)));
+    expect(step.session.state?.kind === "ready" && step.session.state.run.revision).toBe(2);
+    expect(step.session.older).toEqual([]);
+  });
+
+  test("another Run at the same revision number replaces the shown one", () => {
+    const session = loaded(record(3));
+    const other = record(3);
+    other.runId = "run-ses002-a1";
+    const step = applyRefresh(session, output(other));
+    expect(step.session).not.toBe(session);
+    expect(step.session.state?.kind === "ready" && step.session.state.run.runId).toBe(
+      "run-ses002-a1",
+    );
+  });
+
+  test("after the Run could not be read, a good answer shows it again", () => {
+    let session = loaded(record(2));
+    session = applyRefresh(session, failure("corrupt", "run-corrupt")).session;
+    expect(session.state).toMatchObject({ kind: "failure" });
+    session = applyRefresh(session, output(record(2))).session;
+    expect(session.state?.kind).toBe("ready");
+  });
+
+  test("`unchanged` after a failure cannot be trusted and asks for the full view", () => {
+    const session = applyRefresh(loaded(record(2)), failure("missing", "run-missing")).session;
+    expect(applyRefresh(session, unchanged(2)).needFull).toBe(true);
+  });
+});

@@ -1,6 +1,7 @@
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { type ReactNode, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { controlsOf } from "../../../shared/domain/run-engine/controls";
 import {
   type Badge,
   buildEngineModel,
@@ -11,6 +12,7 @@ import {
 import type { RunHistoryPage } from "../../../shared/schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
+import { EngineControls, type EngineControlsProps } from "./EngineControls";
 import { EngineStatus } from "./EngineStatus";
 
 export type EngineViewProps = {
@@ -27,6 +29,23 @@ export type EngineViewProps = {
   loadingOlder?: boolean;
   /** Render without its own scroller, for a page that already scrolls. */
   embedded?: boolean;
+  /**
+   * The controls of this Run (replan, retry, kick, pause, resume). Left out, the view only observes: no button is
+   * drawn, and nothing is said about controls either.
+   */
+  controls?: Pick<
+    EngineControlsProps,
+    | "state"
+    | "onReplan"
+    | "onRetry"
+    | "onCancelTask"
+    | "onCancelRun"
+    | "onAddBudget"
+    | "onKick"
+    | "onPause"
+    | "onResume"
+    | "onDismiss"
+  >;
   onRefresh: () => void;
   onLoadOlder: (cursor: string) => void;
 };
@@ -174,6 +193,22 @@ function DagPanel({ theme, model }: { theme: PluginTheme; model: EngineModel }) 
   );
 }
 
+function Explain({
+  theme,
+  explain,
+}: {
+  theme: PluginTheme;
+  explain: { why: string; who: string; next: string };
+}) {
+  return (
+    <View style={{ gap: 1 }}>
+      <Muted theme={theme}>{`${zh.explain.why}：${explain.why}`}</Muted>
+      <Muted theme={theme}>{`${zh.explain.who}：${explain.who}`}</Muted>
+      <Muted theme={theme}>{`${zh.explain.next}：${explain.next}`}</Muted>
+    </View>
+  );
+}
+
 function TaskRow({ theme, row }: { theme: PluginTheme; row: EngineModel["tasks"][number] }) {
   const [open, setOpen] = useState(false);
   return (
@@ -209,6 +244,7 @@ function TaskRow({ theme, row }: { theme: PluginTheme; row: EngineModel["tasks"]
           {row.lastEvent ? (
             <Muted theme={theme}>{zh.taskRow.lastEvent(row.lastEvent)}</Muted>
           ) : null}
+          <Explain theme={theme} explain={row.explain} />
         </View>
       ) : null}
     </View>
@@ -302,6 +338,7 @@ function DecisionPanel({ theme, model }: { theme: PluginTheme; model: EngineMode
               ) : null}
               <Muted theme={theme}>{row.summary}</Muted>
               {row.answered ? <Muted theme={theme}>{row.answered}</Muted> : null}
+              <Explain theme={theme} explain={row.explain} />
             </View>
           ))}
     </Section>
@@ -343,7 +380,9 @@ function ChannelAlertPanel({ theme, model }: { theme: PluginTheme; model: Engine
                 >
                   {`${row.severity} · ${row.stateLabel}`}
                 </Text>
-                <Muted theme={theme}>{row.summary}</Muted>
+                <Muted theme={theme}>{row.explain.why}</Muted>
+                <Muted theme={theme}>{`${zh.explain.who}：${row.explain.who}`}</Muted>
+                <Muted theme={theme}>{`${zh.explain.next}：${row.explain.next}`}</Muted>
               </View>
             )),
           ]}
@@ -376,6 +415,7 @@ function HistoryList({
               <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
                 {row.detail ? `${row.label} · ${row.detail}` : row.label}
               </Text>
+              <Muted theme={theme}>{row.cause}</Muted>
               <Muted theme={theme}>{`#${row.seq} · ${row.at}`}</Muted>
             </View>
           ))}
@@ -399,7 +439,11 @@ function HistoryList({
           </Text>
         </Pressable>
       ) : model.history.length > 0 ? (
-        <Muted theme={theme}>{zh.history.noMore}</Muted>
+        <Muted theme={theme}>
+          {model.compactedThroughSeq !== null
+            ? zh.history.compacted(model.compactedThroughSeq)
+            : zh.history.noMore}
+        </Muted>
       ) : null}
     </Section>
   );
@@ -420,7 +464,9 @@ export function EngineView(props: EngineViewProps) {
     <Frame>
       <View style={{ padding: layout.compact ? 12 : 16, gap: 12 }}>
         <Header theme={theme} model={model} />
-        {model.readOnly ? <Muted theme={theme}>{zh.readOnly}</Muted> : null}
+        {props.controls && state.kind === "ready" ? (
+          <EngineControls theme={theme} view={controlsOf(state.run)} {...props.controls} />
+        ) : null}
         {model.notices.map((notice) => (
           <Muted key={notice} theme={theme}>
             {notice}

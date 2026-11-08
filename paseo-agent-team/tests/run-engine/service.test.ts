@@ -97,9 +97,17 @@ const emptyPage: PortTimelinePage = {
 
 type Sent = { agentId: string; text: string; options: unknown };
 
-function fakeHost(options: { snapshot?: PortAgentSnapshot; send?: () => Promise<void> } = {}) {
+function fakeHost(
+  options: {
+    snapshot?: PortAgentSnapshot | ((agentId: string) => PortAgentSnapshot);
+    send?: () => Promise<void>;
+  } = {},
+) {
   const sent: Sent[] = [];
-  const snapshot: PortAgentSnapshot = options.snapshot ?? { status: "idle", activeTurn: null };
+  const snapshot = (agentId: string): PortAgentSnapshot =>
+    typeof options.snapshot === "function"
+      ? options.snapshot(agentId)
+      : (options.snapshot ?? { status: "idle", activeTurn: null });
   const port: PaseoEnginePort = {
     agents: {
       ref: (agentId) => ({
@@ -109,8 +117,8 @@ function fakeHost(options: { snapshot?: PortAgentSnapshot; send?: () => Promise<
         },
         archive: async () => undefined,
         timeline: { refetch: async () => emptyPage },
-        current: () => snapshot,
-        refresh: async () => ({ agent: snapshot }),
+        current: () => snapshot(agentId),
+        refresh: async () => ({ agent: snapshot(agentId) }),
       }),
     },
   };
@@ -567,6 +575,37 @@ describe("dispatchNext", () => {
     expect(await makeService(failed).dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
     expect(permission.sent).toHaveLength(0);
     expect(failed.sent).toHaveLength(0);
+  });
+
+  test("an idle eligible seat is used while another eligible seat waits for permission", async () => {
+    await seed((record) => {
+      const first = record.roster.find((seat) => seat.seatId === "seat-b1");
+      if (!first) throw new Error("fixture lost seat-b1");
+      record.roster.push({ ...first, seatId: "seat-b3", agentId: "agent-b3" });
+      record.budgets.entries.push({
+        scope: "seat",
+        subjectId: "seat-b3",
+        limit: 6,
+        reserved: 0,
+        confirmed: 0,
+        observedTurns: 0,
+      });
+    });
+    const host = fakeHost({
+      snapshot: (agentId) => ({
+        status: "idle",
+        activeTurn: null,
+        pendingPermissions: agentId === "agent-b1" ? [{ id: "p" }] : [],
+      }),
+    });
+    const result = await makeService(host, {
+      resolveSeat: (_record, seatId) =>
+        seatId === "seat-b1" || seatId === "seat-b3"
+          ? { profile: PROFILE_HAIKU, available: true, order: seatId === "seat-b1" ? 0 : 1 }
+          : null,
+    }).dispatchNext(RUN_ID);
+    expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b3" });
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b3"]);
   });
 
   test("with no ready task there is nothing to do", async () => {

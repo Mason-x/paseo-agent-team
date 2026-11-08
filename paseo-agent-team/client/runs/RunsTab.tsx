@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   buildRunRows,
+  type EngineRunStanding,
   filterCounts,
   filterRows,
   isLive,
@@ -27,6 +28,7 @@ import { EmptyState } from "../shared/EmptyState";
 import { ErrorState } from "../shared/ErrorState";
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { EngineRunsSection } from "./engine/EngineRunsSection";
+import { useEngineRuns } from "./engine/use-engine-run";
 import { useTeamRuns } from "./use-team-runs";
 
 const CLOCK_INTERVAL_MS = 30_000;
@@ -180,6 +182,7 @@ function RunCard({
         <RunDetail
           theme={theme}
           run={run}
+          phase={progress.phase}
           onOpenAgent={navigation ? (agentId) => navigation.openAgent({ agentId }) : undefined}
         />
       ) : null}
@@ -240,8 +243,10 @@ function FilterChips({
 }
 
 /**
- * Engine runs (ledger-backed, read-only) above the label-derived runs. The two lists never share
- * state: an Engine run is not rebuilt from labels, and a labelled run gets no ledger invented.
+ * Engine runs (ledger-backed, read-only) above the label-derived runs. An Engine run is not rebuilt
+ * from labels and a labelled run gets no ledger invented. The one thing the second list takes from
+ * the first is where a Run stands: an Engine run is launched with labels too, so it appears in both,
+ * and the ledger's lifecycle (not its idle coordinator) says whether it is blocked, cancelled or done.
  */
 export function RunsTab({
   theme,
@@ -257,14 +262,16 @@ export function RunsTab({
   /** Runs recorded in preferences by versions that did not label the task on the agent. */
   legacyRuns: readonly RunSummary[];
 }) {
+  const engine = useEngineRuns(hostId);
   return (
     <View style={{ gap: 12 }}>
-      <EngineRunsSection theme={theme} layout={layout} hostId={hostId} />
+      <EngineRunsSection theme={theme} layout={layout} hostId={hostId} engine={engine} />
       <LabelledRunsTab
         theme={theme}
         hostId={hostId}
         navigation={navigation}
         legacyRuns={legacyRuns}
+        engineRuns={engine.runs}
       />
     </View>
   );
@@ -276,11 +283,13 @@ function LabelledRunsTab({
   hostId,
   navigation,
   legacyRuns,
+  engineRuns,
 }: {
   theme: PluginTheme;
   hostId: string;
   navigation: Navigation;
   legacyRuns: readonly RunSummary[];
+  engineRuns: readonly EngineRunStanding[];
 }) {
   const paseo = usePaseo();
   const toast = useToast();
@@ -291,7 +300,7 @@ function LabelledRunsTab({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [followUp, setFollowUp] = useState<FollowUpTarget | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<TeamRun | null>(null);
-  const rows = useMemo(() => buildRunRows(runs), [runs]);
+  const rows = useMemo(() => buildRunRows(runs, engineRuns), [runs, engineRuns]);
   const counts = useMemo(() => filterCounts(rows), [rows]);
   const shown = useMemo(() => filterRows(rows, filter), [rows, filter]);
 

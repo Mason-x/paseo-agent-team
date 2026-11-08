@@ -146,6 +146,159 @@ If the coordinator asks for a permission, the Crew panel offers **Allow, don't a
 session** next to Allow / Deny. It retargets the provider's suggested rule to the running session,
 so nothing is written to disk.
 
+## Run Engine (opt-in)
+
+By default a launched Team runs on the coordinator chain described above: the coordinator decides
+who works on what. The Run Engine is a second way to run a Team that is off unless you turn it on.
+The coordinator only writes the task graph; the Engine itself (plain code, no model of its own)
+dispatches each task to a member seat, takes the member's report, checks the evidence, asks an
+independent reviewer (and a DEV smoke where the task declares one), sends back what failed, and
+stops at a decision for a person when it will not undo something by itself.
+
+**Turn it on.** Two things, both required:
+
+1. Start the daemon with `PASEO_AGENT_TEAM_RUN_ENGINE=1`. Without it a Team that has the Engine
+   enabled is refused at launch with a message; it never falls back to the coordinator chain
+   silently.
+2. In **Agent Teams → Teams**, edit the Team and open **Run 引擎**: switch it on, give each seat a
+   tier (S, A, B), its duties (implement, review, smoke) and its channel (normally its Profile's
+   provider, for example `claude`), and check the policy numbers. The launch preview shows what
+   would be refused or warned about before you start (a seat missing for a member, no independent
+   reviewer at the tier a task needs, a Codex Profile that is not full-access).
+
+The Workspace must be a git repository on a branch with a clean tree and a usable committer
+identity: members commit their work there, and the evidence is written outside the repository
+(`<PASEO_HOME>/agent-team-evidence/<runId>` when the evidence root is `auto`).
+
+**What it does.** One Run is one ledger file. Every message to a member goes through an outbox: the
+intent is written first, sent once, and a result that is not known is checked against the member's
+timeline and never sent twice. A report that is missing or malformed is asked for again a bounded
+number of times; evidence the gate refuses is asked for again on the same delivery; a host read
+that failed is read again 1, 2 and 4 seconds later; once the read works again the Engine takes in
+what it missed and goes on by itself, for each source at most 3 times, after which a note asks you to
+press 立即检查并推进. A paused, finished or
+cancelled Run sends nothing new. So does a Run with more failed tasks than its policy allows (the
+Team's 允许失败的任务数, 3 by default, frozen when the Run starts; a cancelled or blocked task is not a
+failed one): no task that has not started yet is started and a critical alert says so, while work
+already under way (reports, repairs, reviews, smoke runs, supplements, reworks) goes on and is
+finished. Retry or cancel the failed tasks at their decision to bring the count
+back within the limit; the alert is taken down by itself.
+
+**What it does not do.** It never answers a permission request for an agent: a task whose agent
+waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
+approve from the Runs page, it cannot cancel one task while a member is still working on it (a
+cancel waits for the turn to end), it cannot hand a task to another seat, it does not retry a
+transient failure after a message was dispatched by itself, and it cannot resume a launch that was
+interrupted while members were being created. A Run holds at most 8192 events: old history is folded
+into a summary (it cannot be expanded again), and when the ledger nears a limit it stops starting
+new work and says so, so a very long Run is finished and restarted rather than overfilled.
+Acceptance status per scenario is in `docs/run-engine-acceptance.md` in the repository; the
+decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
+
+**Do not close or archive a member's Agent while a Run is live.** The Engine does not react to it
+and cannot recover such a task yet: the task stays assigned with its claims, and cancelling the Run
+or the task keeps waiting for a turn end that the closed Agent may never send. Cancel from the Runs
+page and let the turns end, then archive what you no longer want.
+
+**Advanced fields.** Two policy fields have no control in the Team editor. They live in the Team's
+`runEngine` block under `policy` (Teams are stored in the host setting `agent-team-teams`), and the
+editor keeps them as they are when it saves, as it does every field it does not know (an excerpt:
+the block also holds `version`, `enabled`, `seats` and the other `policy` fields the editor wrote):
+
+```json
+{
+  "runEngine": {
+    "policy": {
+      "devTargets": [{ "serverId": "dev-1", "host": "127.0.0.1:6799", "home": "D:/dev/paseo-home" }],
+      "evidenceRoot": "auto"
+    }
+  }
+}
+```
+
+- `devTargets` (at most 16 entries of `serverId`, `host`, `home`) registers the DEV Paseo instances a
+  task's smoke check may run against. `host` needs an explicit port other than 6767 and no
+  credentials; `home` must not be a `.paseo` directory. A task graph that declares a smoke check
+  while no entry has a usable `host` is refused. Leave it empty if no task needs a smoke check.
+- `evidenceRoot` is `"auto"` (the default: `<PASEO_HOME>/agent-team-evidence/<runId>`) or an
+  absolute directory outside the repository, which is created when missing. Members write their
+  evidence there, and the quality gate only accepts reported paths under it.
+
+**Follow and steer a Run.** **Agent Teams → 运行 → Engine 运行** lists the Runs and opens one: the
+task graph, each task with why it waits, who clears it and what happens next, locks, budgets,
+decisions, channels and alerts, and a history with the cause of each event. These controls appear
+only when the Run offers them:
+
+- **重新规划** (re-plan), while the Run waits for a task graph: asks the coordinator again, with a
+  reason you write. It takes one turn from the coordinator's turn budget (see 追加预算).
+- **重试** (retry) on a decision the Engine opened for a stopped task (D1, D3, D4): after you
+  confirm, the task gets one more attempt from where it stopped. Nothing is released until every
+  turn of the task is proven ended.
+- **取消任务** (cancel a task), on the same decisions: the task and every task that depends on it are
+  cancelled and their claims released, once every turn of the task is proven ended. Nothing is sent to
+  a member and nothing is rolled back: what was committed stays on the branch, revert it yourself if
+  you do not want it. A decision for a task stopped by a member's answer to an evidence request offers
+  only this, because a retry would throw the delivery away.
+- **立即检查并推进** (kick): reads the host, takes in reports that were missed, sends what was
+  prepared and not yet sent, and moves the Run on. It completes no task for a member.
+- **暂停派发** (pause), while the Run is running: nothing new is dispatched and no new message goes
+  to a member. Turns already running go on to their end and a report that arrives is taken in as
+  usual.
+- **继续** (resume), while the Run is paused: reads the host, takes in what arrived meanwhile, sends
+  what was held back once, and dispatches again.
+- **追加预算** (add turns), on a seat of the Run: a seat's turn budget is a limit, and a task that
+  needs a seat whose turns ran out waits with a warning that says so. Adding 1 to 64 turns (1024 in
+  all) lets what was held back go on; the Run's frozen policy is not changed, the new limit is
+  recorded on the Run. The coordinator has a row of its own, with the Team's 协调者回合数上限
+  (12 by default, at least 1 to start a Run): the plan request and each re-plan take one turn, a
+  format re-send of the plan does not, and no turn is given back. A re-plan with no turn left is
+  refused with a warning; add turns to the coordinator's row and ask again.
+- **取消这个 Run** (cancel the Run), with a reason you write: nothing new is dispatched from then on
+  (the Run is paused and cannot be resumed), and once every turn that was running is proven ended on
+  the host's own record, every unfinished task is cancelled and every claim released. It sends no
+  message, archives nothing and interrupts nothing, so it costs no model call; it does not roll back
+  code. A long running turn is waited for, and a delivery whose result is not known keeps it waiting
+  (the page says what for; **立即检查并推进** looks again). A Run that is still being set up cannot be
+  cancelled yet; one that has no task yet is cancelled at once.
+
+A refusal is shown in words; if the Run changed since you looked, the page reads it again and asks
+you to try once more. A request is never applied twice.
+
+**Recover and roll back.**
+
+- After a restart the daemon recovers every live Run from its ledger and works out again which
+  reads and sends are due. One case needs a person: a Run whose launch was interrupted while its
+  members were being created cannot be resumed. It is closed with a critical alert that lists the
+  Agents already recorded for it (it may be missing ones that were created but not recorded, the
+  coordinator is created first). Look for those Agents in Paseo, archive them if you do not want
+  them, and start the Run again; nothing is archived for you.
+- New Runs are written as ledger schema v2; this version reads v1 and v2. A Run written as v1 is
+  not migrated and is not given evidence supplements. An older plugin version cannot read a v2
+  Run: it keeps the file untouched, and because it then cannot see which files that Run holds it
+  refuses to grant new write claims to any Run, in any repository. Do not roll back while an
+  Engine Run is live.
+- If a member answers an evidence request with "blocked" or "failed", the task stays frozen with
+  its claims and a decision is opened that offers only 取消任务 (there is no Retry, because a retry
+  would throw the delivery away). Look at the member's conversation, then cancel the task or leave
+  it frozen; re-assigning is not in the page yet.
+- A host restart loses the turn a member was in the middle of. The Engine reads the member's reply
+  three times, then leaves a warning that says the tries are used up (`incomplete:dispatch-not-found`)
+  and the Run does not move on: the task stays in review or assigned, a kick sends nothing and writes
+  nothing, and cancelling the whole Run keeps waiting for a turn end the host never reports. The way
+  out is yours: wait until the member is idle in Paseo, send it one message that asks only for a reply
+  of OK, wait for its answer, then press **立即检查并推进**. The member's own turn then reaches the
+  Engine as the host's record and lets the cancellation finish; it is not certain to recover the Run.
+  **继续** (resume) is no way out, and the Engine never asks the member again by itself; if the member
+  does not answer, cancel and start the Run again.
+- Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
+  Runs that already exist can still be listed and read, still take hooks, recovery and the
+  controls, and run to the end.
+
+**Where the data is.** `<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json` is the ledger;
+damaged or unreadable ledgers are kept as they are and listed on the page, never repaired or
+overwritten. The design, the numbered implementation record and the open work are in
+`docs/run-engine-iteration-plan.md`.
+
 ## Limits
 
 - Requires Paseo `>=0.12.0` (checked on 0.12.0 and 0.13.0-beta.1). Only the public plugin SDK is used. The manifest schema accepts

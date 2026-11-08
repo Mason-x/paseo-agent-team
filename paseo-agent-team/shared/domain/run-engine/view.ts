@@ -8,6 +8,11 @@ import {
 } from "../../schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../zh/run-engine";
 import { isDecisionPending } from "./decision-state";
+import { displayText } from "./display-text";
+import { eventCause } from "./timeline";
+import { explainAlert, explainDecision, explainTask, type TaskExplanation } from "./waiting";
+
+export { displayText };
 
 /**
  * Pure view model for the Runs page Engine view (RE-R07). Everything here is deterministic and
@@ -16,24 +21,6 @@ import { isDecisionPending } from "./decision-state";
  */
 
 export const MAX_DAG_NODES = 64;
-
-const ZERO_WIDTH = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0xfeff]);
-
-/** Strip controls, bidi/zero-width marks, fold whitespace, cut by code point. */
-export function displayText(value: unknown, max: number, fallback = ""): string {
-  if (typeof value !== "string") return fallback;
-  let folded = "";
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) folded += " ";
-    else if (ZERO_WIDTH.has(code) || /\p{Bidi_Control}/u.test(character)) continue;
-    else folded += character;
-  }
-  const clean = folded.replace(/\s+/gu, " ").trim();
-  if (clean === "") return fallback;
-  const points = [...clean];
-  return points.length <= max ? clean : `${points.slice(0, Math.max(1, max - 1)).join("")}…`;
-}
 
 /** `2026-10-29T01:02:03.000Z` -> `2026-10-29 01:02:03`: locale-free and stable. */
 export function shortTime(iso: string): string {
@@ -253,6 +240,8 @@ export type TaskRowView = {
   blocked: string | null;
   lastEvent: string | null;
   frozen: boolean;
+  /** Why it waits, who clears it, what happens next. */
+  explain: TaskExplanation;
 };
 
 export function taskRow(task: RunTaskView, context: TaskContext): TaskRowView {
@@ -297,6 +286,7 @@ export function taskRow(task: RunTaskView, context: TaskContext): TaskRowView {
         ? null
         : `${eventLabel(latest.kind, latest.summary)} · ${shortTime(latest.at)}`,
     frozen: task.frozen,
+    explain: explainTask(task, context.decisions),
   };
 }
 
@@ -397,6 +387,7 @@ export type DecisionRowView = {
   summary: string;
   createdAt: string;
   answered: string | null;
+  explain: TaskExplanation;
 };
 
 export function decisionRows(
@@ -424,6 +415,7 @@ export function decisionRows(
           action === null
             ? null
             : zh.decisions.chose(zh.decisions.action[action] ?? textOf(action, 24)),
+        explain: explainDecision(decision),
       };
     })
     .sort(
@@ -464,6 +456,7 @@ export type AlertRowView = {
   stateLabel: string;
   open: boolean;
   summary: string;
+  explain: TaskExplanation;
   createdAt: string;
 };
 
@@ -478,6 +471,7 @@ export function alertRows(alerts: RunDetailView["alerts"]): AlertRowView[] {
       stateLabel: zh.alerts.state[alert.state] ?? textOf(alert.state, 16),
       open: alert.state === "open",
       summary: displayText(alert.summary, 300, "—"),
+      explain: explainAlert(alert),
       createdAt: shortTime(alert.createdAt),
       rank: SEVERITY_RANK[alert.severity] ?? 3,
     }))
@@ -539,6 +533,8 @@ export type HistoryRowView = {
   label: string;
   detail: string | null;
   known: boolean;
+  /** Why this happens, from the kind alone; a kind with no words gets the general sentence. */
+  cause: string;
 };
 
 function eventLabel(kind: string, summary: string): string {
@@ -566,6 +562,7 @@ export function historyRows(pages: readonly RunHistoryPage[]): HistoryRowView[] 
         label: eventLabel(entry.kind, entry.summary),
         detail: known && entry.taskId !== null ? textOf(entry.taskId, 64) : null,
         known,
+        cause: eventCause(entry.kind).cause,
       };
     });
 }
@@ -586,8 +583,9 @@ export type EngineModel = {
   alerts: AlertRowView[];
   history: HistoryRowView[];
   nextCursor: string | null;
+  /** Set when older events were folded into the checkpoint; shown after the last page. */
+  compactedThroughSeq: number | null;
   notices: string[];
-  readOnly: boolean;
 };
 
 export function buildEngineModel(
@@ -618,8 +616,8 @@ export function buildEngineModel(
     alerts: alertRows(run.alerts),
     history: historyRows(pages),
     nextCursor: (older.at(-1) ?? history).nextCursor,
+    compactedThroughSeq: (older.at(-1) ?? history).compactedThroughSeq ?? null,
     notices: state.notices,
-    readOnly: run.capabilities.observationOnly,
   };
 }
 

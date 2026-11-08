@@ -1,28 +1,57 @@
 import { randomUUID } from "node:crypto";
+import {
+  budgetExhaustedAlert,
+  budgetStatus,
+  increaseSeatBudget,
+} from "../../shared/domain/run-engine/budget";
+import {
+  CANCEL_COMPLETED_EVENT,
+  CANCEL_PENDING_ALERT,
+  CANCEL_REQUEST_EVENT,
+  CANCEL_TASK_REASON,
+  cancelPending,
+  planCancelFinish,
+  readCancelRequest,
+  withCancelRequest,
+} from "../../shared/domain/run-engine/cancel-request";
+import { ensureCoordinatorBudget } from "../../shared/domain/run-engine/coordinator-budget";
+import { COORDINATOR_SEAT_ID } from "../../shared/domain/run-engine/dag-admission";
 import { answerDecision } from "../../shared/domain/run-engine/decision-answer";
 import {
   compilePlanRequest,
   PLAN_REPLAN_VERSION,
 } from "../../shared/domain/run-engine/engine-prompts";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
+import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { requestReplan } from "../../shared/domain/run-engine/replan";
+import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import { RUN_CONTRACT_VERSION, type RunIssueView } from "../../shared/schemas/run-engine/rpc";
 import type {
   RunActionCode,
+  RunBudgetInput,
+  RunBudgetOutput,
+  RunCancelInput,
+  RunCancelOutput,
   RunDecideInput,
   RunDecideOutput,
   RunKickInput,
   RunKickOutput,
+  RunLifecycleInput,
+  RunLifecycleOutput,
   RunReplanInput,
   RunReplanOutput,
 } from "../../shared/schemas/run-engine/rpc-actions";
-import { sha256Hex } from "./digest";
+import { alertIdFor, sha256Hex } from "./digest";
 import type { EngineDriver } from "./driver";
 import { payloadHash } from "./effects";
+import { planLifecycleMove } from "./lifecycle";
 import type { RunStore } from "./store";
 
+/** The audit event of a pause or resume; its `requestId` is how a repeat is recognised. */
+export const LIFECYCLE_REQUEST_EVENT = "run-control-requested";
+
 /**
- * The Run Engine's writing RPCs (P06): `replan`, `decide` and `kick`. A person asks; the ledger
+ * The Run Engine's writing RPCs (P06): `replan`, `decide` and `kick`, and `pause` and `resume` (A3). A person asks; the ledger
  * decides. Each write is ONE store update that reads the Run, asks a pure function whether the request
  * is allowed and what it changes, checks the ledger invariants on the result, and commits or changes
  * nothing. The handler sends no message itself: after a commit it asks the driver to push the Run on
@@ -106,6 +135,385 @@ export function createRunControl(options: RunControlOptions) {
   const revisionOf = (written: Awaited<ReturnType<RunStore["update"]>>): number =>
     written.status === "committed" ? written.record.revision : written.revision;
 
+  /**
+   * One pause or resume. The checks run in a fixed order, as in every write here: find a request with
+   * this id first (the same request is answered `replayed`, a different one under the same id is
+   * `request-id-reused`), then the revision the caller saw, then the lifecycle. The lifecycle change is
+   * the reducer's own event (`planLifecycleMove`); the audit event written with it carries the request
+   * id so a repeat is recognised, and nothing else (no nonce, no text of a message).
+   */
+  async function lifecycleRequest(
+    action: "pause" | "resume",
+    input: RunLifecycleInput,
+  ): Promise<RunLifecycleOutput> {
+    const loaded = await load(input.runId);
+    if (!loaded.ok) {
+      return { ...BASE, status: "rejected", revision: 0, lifecycle: null, issues: [loaded.issue] };
+    }
+    const reason = input.reason.slice(0, 200);
+    const outcome: {
+      refused?: Refused;
+      replayed?: boolean;
+      applied?: boolean;
+      lifecycle: string | null;
+    } = { lifecycle: null };
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        outcome.lifecycle = current.lifecycle;
+        const prior = current.events.find(
+          (event) =>
+            event.kind === LIFECYCLE_REQUEST_EVENT && event.payload.requestId === input.requestId,
+        );
+        if (prior !== undefined) {
+          if (prior.payload.action === action && prior.payload.reason === reason) {
+            outcome.replayed = true;
+          } else {
+            outcome.refused = refused("request-id-reused");
+          }
+          return null;
+        }
+        if (current.revision !== input.expectedRevision) {
+          outcome.refused = refused("revision-conflict", { current: current.revision }, "refresh");
+          return null;
+        }
+        // A cancellation that was asked for decides what happens to the Run: nobody resumes it.
+        if (cancelPending(current)) {
+          outcome.refused = refused("cancel-pending");
+          return null;
+        }
+        const plan = planLifecycleMove(
+          current,
+          action === "pause" ? "run-paused" : "run-resumed",
+          clock.now(),
+        );
+        if (!plan.ok) {
+          outcome.refused = refused("lifecycle-not-allowed", { lifecycle: current.lifecycle });
+          return null;
+        }
+        const next = plan.next;
+        const seq = next.counters.eventsThroughSeq + 1;
+        next.counters.eventsThroughSeq = seq;
+        next.events.push({
+          seq,
+          kind: LIFECYCLE_REQUEST_EVENT,
+          at: clock.now(),
+          payload: { requestId: input.requestId, action, reason },
+        });
+        const checked = checkLedgerInvariants(next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        outcome.applied = true;
+        outcome.lifecycle = next.lifecycle;
+        return next;
+      });
+    } catch (error) {
+      log(`${action} of ${input.runId} could not be written`, error);
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        issues: [issue("ledger-refused", {}, "retry")],
+      };
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action: next } = outcome.refused;
+      return {
+        ...BASE,
+        status: "rejected",
+        revision,
+        lifecycle: outcome.lifecycle,
+        issues: [issue(code, params, next)],
+      };
+    }
+    if (outcome.replayed) {
+      return { ...BASE, status: "replayed", revision, lifecycle: outcome.lifecycle, issues: [] };
+    }
+    // A pause moves nothing on; a resume asks the driver to settle, send what was held and dispatch.
+    if (action === "resume") push(input.runId);
+    return { ...BASE, status: "applied", revision, lifecycle: outcome.lifecycle, issues: [] };
+  }
+
+  /**
+   * Cancels the whole Run, later: the request is written, new dispatches stop (the Run is paused), and
+   * the cancellation is finished by `cancel.ts` once every running turn is proven ended. A Run that has
+   * no task yet is cancelled in the same commit. Nothing is sent, archived or interrupted. The checks run
+   * in the usual order: a repeat of this request first, then the revision, then what the Run allows.
+   */
+  async function cancelRequest(input: RunCancelInput): Promise<RunCancelOutput> {
+    const loaded = await load(input.runId);
+    if (!loaded.ok) {
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        waiting: null,
+        issues: [loaded.issue],
+      };
+    }
+    const outcome: {
+      refused?: Refused;
+      replayed?: boolean;
+      applied?: boolean;
+      lifecycle: string | null;
+      waiting: RunCancelOutput["waiting"];
+    } = { lifecycle: null, waiting: null };
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        outcome.lifecycle = current.lifecycle;
+        const existing = readCancelRequest(current);
+        if (existing.kind === "valid" && existing.value.requestId === input.requestId) {
+          if (existing.value.reason === input.reason) outcome.replayed = true;
+          else outcome.refused = refused("request-id-reused");
+          return null;
+        }
+        if (
+          existing.kind === "invalid" ||
+          (existing.kind === "valid" && existing.value.completedAt === null)
+        ) {
+          outcome.refused = refused("cancel-pending");
+          return null;
+        }
+        if (current.revision !== input.expectedRevision) {
+          outcome.refused = refused("revision-conflict", { current: current.revision }, "refresh");
+          return null;
+        }
+        if (current.lifecycle === "finished" || current.lifecycle === "cancelled") {
+          outcome.refused = refused("lifecycle-not-allowed", { lifecycle: current.lifecycle });
+          return null;
+        }
+        if (current.launch.state === "preparing" || current.launch.state === "creating") {
+          outcome.refused = refused("launch-in-progress", {}, "retry");
+          return null;
+        }
+        const now = clock.now();
+        const request = {
+          version: 1 as const,
+          requestId: input.requestId,
+          reason: input.reason,
+          requestedAt: now,
+          completedAt: null as string | null,
+        };
+        let next = withCancelRequest(current, request);
+        const audit = (kind: string, payload: Record<string, unknown>) => {
+          const seq = next.counters.eventsThroughSeq + 1;
+          next.counters.eventsThroughSeq = seq;
+          next.events.push({ seq, kind, at: now, payload });
+          next.updatedAt = now;
+        };
+        audit(CANCEL_REQUEST_EVENT, {
+          requestId: input.requestId,
+          reason: input.reason.slice(0, 200),
+        });
+        // No new work starts from here on.
+        if (next.lifecycle === "active") {
+          const paused = planLifecycleMove(next, "run-paused", now);
+          if (!paused.ok) {
+            outcome.refused = refused("lifecycle-not-allowed", { lifecycle: next.lifecycle });
+            return null;
+          }
+          next = paused.next;
+        }
+        next = raiseAlert(
+          next,
+          {
+            alertId: alertIdFor(CANCEL_PENDING_ALERT),
+            severity: "warning",
+            summary: CANCEL_PENDING_ALERT,
+          },
+          now,
+        ).next;
+        let done = false;
+        if (next.lifecycle === "bootstrapping" || next.lifecycle === "awaiting-dag") {
+          // No task, no assignment, no claim: there is nothing to wait for.
+          const cancelled = reduceRun(
+            next,
+            {
+              kind: "run-cancelled",
+              reason: CANCEL_TASK_REASON,
+              controlNonceDigest: sha256Hex(uuid()),
+              cancelIntents: [],
+              preparedCancelIntents: [],
+            },
+            { now, newId: () => uuid() },
+          );
+          if (!cancelled.ok) {
+            outcome.refused = refused("ledger-refused", { invariant: "run-cancelled" }, "inspect");
+            return null;
+          }
+          next = withCancelRequest(cancelled.next, { ...request, completedAt: now });
+          next = resolveAlerts(next, (alert) => alert.summary === CANCEL_PENDING_ALERT, now).next;
+          audit(CANCEL_COMPLETED_EVENT, { requestId: input.requestId, tasks: 0 });
+          done = true;
+        }
+        const checked = checkLedgerInvariants(next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        if (!done) {
+          const plan = planCancelFinish(next, "assume-idle");
+          outcome.waiting =
+            plan.kind === "wait"
+              ? { turns: plan.turns, deliveries: plan.deliveries }
+              : { turns: 0, deliveries: 0 };
+        }
+        outcome.applied = true;
+        outcome.lifecycle = next.lifecycle;
+        return next;
+      });
+    } catch (error) {
+      log(`cancel of ${input.runId} could not be written`, error);
+      return {
+        ...BASE,
+        status: "rejected",
+        revision: 0,
+        lifecycle: null,
+        waiting: null,
+        issues: [issue("ledger-refused", {}, "retry")],
+      };
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action } = outcome.refused;
+      return {
+        ...BASE,
+        status: "rejected",
+        revision,
+        lifecycle: outcome.lifecycle,
+        waiting: null,
+        issues: [issue(code, params, action)],
+      };
+    }
+    if (outcome.replayed) {
+      return {
+        ...BASE,
+        status: "replayed",
+        revision,
+        lifecycle: outcome.lifecycle,
+        waiting: null,
+        issues: [],
+      };
+    }
+    // The cancellation is finished by the driver's pass: ask it to look now.
+    push(input.runId);
+    return {
+      ...BASE,
+      status: "applied",
+      revision,
+      lifecycle: outcome.lifecycle,
+      waiting: outcome.waiting,
+      issues: [],
+    };
+  }
+
+  /**
+   * More turns for one seat (`increaseSeatBudget`): the usual order of checks, one update, the invariants,
+   * and a push after the commit so what the budget held back is dispatched.
+   */
+  async function budgetRequest(input: RunBudgetInput): Promise<RunBudgetOutput> {
+    const closed = (revision: number, found: RunIssueView): RunBudgetOutput => ({
+      ...BASE,
+      status: "rejected",
+      revision,
+      seatId: input.seatId,
+      limit: null,
+      issues: [found],
+    });
+    const loaded = await load(input.runId);
+    if (!loaded.ok) return closed(0, loaded.issue);
+    const outcome: { refused?: Refused; replayed?: number | null; applied?: number } = {};
+    let written: Awaited<ReturnType<RunStore["update"]>>;
+    try {
+      written = await store.update(input.runId, (current) => {
+        // The coordinator's entry is built on first use; any other seat's row is read as it is.
+        const result = increaseSeatBudget(
+          input.seatId === COORDINATOR_SEAT_ID ? ensureCoordinatorBudget(current) : current,
+          {
+            seatId: input.seatId,
+            by: input.by,
+            requestId: input.requestId,
+            expectedRevision: input.expectedRevision,
+            reason: input.reason,
+            now: clock.now(),
+          },
+          cancelPending(current),
+        );
+        if (!result.ok) {
+          outcome.refused = refused(
+            result.code,
+            result.code === "revision-conflict"
+              ? { current: result.current }
+              : result.code === "lifecycle-not-allowed"
+                ? { lifecycle: result.lifecycle }
+                : result.code === "budget-cap"
+                  ? { max: result.max }
+                  : {},
+            result.code === "revision-conflict" ? "refresh" : "none",
+          );
+          return null;
+        }
+        if (result.replayed) {
+          outcome.replayed = result.limit;
+          return null;
+        }
+        const checked = checkLedgerInvariants(result.next);
+        if (!checked.ok) {
+          outcome.refused = refused(
+            "ledger-refused",
+            { invariant: checked.violations[0]?.invariant ?? "?" },
+            "inspect",
+          );
+          return null;
+        }
+        outcome.applied = result.limit;
+        return result.next;
+      });
+    } catch (error) {
+      log(`budget of ${input.runId} could not be written`, error);
+      return closed(0, issue("ledger-refused", {}, "retry"));
+    }
+    const revision = revisionOf(written);
+    if (outcome.refused) {
+      const { code, params, action } = outcome.refused;
+      return closed(revision, issue(code, params, action));
+    }
+    if (outcome.replayed !== undefined) {
+      return {
+        ...BASE,
+        status: "replayed",
+        revision,
+        seatId: input.seatId,
+        limit: outcome.replayed,
+        issues: [],
+      };
+    }
+    // What the budget held back is dispatched by the push, not by this handler.
+    push(input.runId);
+    return {
+      ...BASE,
+      status: "applied",
+      revision,
+      seatId: input.seatId,
+      limit: outcome.applied ?? null,
+      issues: [],
+    };
+  }
+
   return {
     /**
      * Asks the coordinator for a new plan. Only a Run that is waiting for one (`awaiting-dag`) can be
@@ -148,6 +556,28 @@ export function createRunControl(options: RunControlOptions) {
                   ? "retry"
                   : "none",
             );
+            if (result.code === "budget-exhausted") {
+              // Said once per limit, with the way out; the record keeps the entry it was just built with.
+              const based = ensureCoordinatorBudget(current);
+              const status = budgetStatus(based, COORDINATOR_SEAT_ID);
+              if (status === null) return null;
+              const summary = budgetExhaustedAlert(
+                COORDINATOR_SEAT_ID,
+                status.entry.reserved,
+                status.entry.limit,
+              );
+              const raised = raiseAlert(
+                based,
+                { alertId: alertIdFor(summary), severity: "warning", summary },
+                clock.now(),
+              );
+              if (!raised.changed && based === current) return null;
+              if (!checkLedgerInvariants(raised.next).ok) {
+                outcome.refused = refused("ledger-refused", {}, "inspect");
+                return null;
+              }
+              return raised.next;
+            }
             return null;
           }
           if (result.replayed) {
@@ -215,7 +645,12 @@ export function createRunControl(options: RunControlOptions) {
         status: "rejected" as const,
       };
       if (!loaded.ok) return { ...closed, revision: 0, issues: [loaded.issue] };
-      const outcome: { refused?: Refused; replayed?: string | null; applied?: string } = {};
+      const outcome: {
+        refused?: Refused;
+        replayed?: string | null;
+        applied?: string;
+        cancelled?: string[];
+      } = {};
       let written: Awaited<ReturnType<RunStore["update"]>>;
       try {
         written = await store.update(input.runId, (current) => {
@@ -226,6 +661,8 @@ export function createRunControl(options: RunControlOptions) {
             reason: input.reason,
             action: input.answer.action,
             now: clock.now(),
+            newId: () => uuid(),
+            controlNonceDigest: sha256Hex(uuid()),
           });
           if (!result.ok) {
             const params: Params =
@@ -261,6 +698,7 @@ export function createRunControl(options: RunControlOptions) {
             return null;
           }
           outcome.applied = result.taskId;
+          outcome.cancelled = result.cancelled;
           return result.next;
         });
       } catch (error) {
@@ -289,8 +727,32 @@ export function createRunControl(options: RunControlOptions) {
         revision,
         decisionId: input.decisionId,
         taskId: outcome.applied ?? null,
+        ...(outcome.cancelled === undefined ? {} : { cancelledTaskIds: outcome.cancelled }),
         issues: [],
       };
+    },
+
+    /**
+     * Stops new work from starting. Only an `active` Run pauses; what is already running goes on to the
+     * end of its turn and a report that arrives is taken in as usual. See `lifecycleRequest`.
+     */
+    pause(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
+      return lifecycleRequest("pause", input);
+    },
+
+    /** Gives a seat more turns; what it held back is dispatched after the commit. */
+    budget(input: RunBudgetInput): Promise<RunBudgetOutput> {
+      return budgetRequest(input);
+    },
+
+    /** Cancels the whole Run once every running turn is proven ended; see `cancelRequest`. */
+    cancel(input: RunCancelInput): Promise<RunCancelOutput> {
+      return cancelRequest(input);
+    },
+
+    /** Lets a `paused` Run go on; the driver is asked to push it, so what was held goes out once. */
+    resume(input: RunLifecycleInput): Promise<RunLifecycleOutput> {
+      return lifecycleRequest("resume", input);
     },
 
     /**

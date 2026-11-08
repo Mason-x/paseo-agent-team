@@ -6,11 +6,29 @@ import { describe, expect, test, vi } from "vitest";
 vi.mock("react-native", () => {
   const host = (name: string) => (props: Record<string, unknown>) =>
     h(name, props, props.children as never);
-  return { View: host("View"), Text: host("Text"), Pressable: host("Pressable") };
+  return {
+    View: host("View"),
+    Text: host("Text"),
+    Pressable: host("Pressable"),
+    Platform: { OS: "web" },
+  };
 });
-vi.mock("@getpaseo/plugin/client/react-native", () => ({
-  ScrollView: (props: Record<string, unknown>) => h("ScrollView", props, props.children as never),
-}));
+vi.mock("@getpaseo/plugin/client/react-native", () => {
+  const modal = Object.assign(
+    (props: Record<string, unknown>) =>
+      props.open ? h("Modal", props, props.children as never) : null,
+    {
+      Content: (props: Record<string, unknown>) =>
+        h("ModalContent", props, props.children as never),
+    },
+  );
+  return {
+    ScrollView: (props: Record<string, unknown>) => h("ScrollView", props, props.children as never),
+    Modal: modal,
+    TextInput: (props: Record<string, unknown>) => h("TextInput", props),
+    Icon: () => null,
+  };
+});
 
 import { EngineView } from "../../client/runs/engine/EngineView";
 import {
@@ -163,6 +181,29 @@ function button(root: Node, label: string): Node | undefined {
 }
 
 describe("EngineView mounted rendering", () => {
+  test("shows an alert's summary and states when the responsible party is unknown", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          alerts: [
+            {
+              alertId: "alert-a1",
+              state: "open",
+              severity: "warning",
+              summary: "宿主读取失败",
+              createdAt: AT,
+            },
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("宿主读取失败");
+    expect(text).toContain(`${zh.explain.who}：需根据告警内容判断`);
+    expect(text).toContain(`${zh.explain.next}：查看并按告警内容处理`);
+    await renderer.act(async () => view.unmount());
+  });
+
   test("renders server text literally, uses DTO capabilities, and exposes only read/refresh controls", async () => {
     const canary = runView({
       team: { id: "t", name: "Team‮ **x**", rawMode: "m", modeContract: 2, plannerVersion: 2 },
@@ -172,7 +213,9 @@ describe("EngineView mounted rendering", () => {
     const text = textNodes(view.root);
     expect(text).toContain("**x** <b>");
     expect(view.root.findAll((node) => node.type === "b")).toHaveLength(0);
-    expect(text.join("\n")).toContain(zh.readOnly);
+    // No controls were handed to the view, so it neither draws a button for one nor claims read-only.
+    expect(text.join("\n")).not.toContain(zh.controls.title);
+    expect(text.join("\n")).not.toContain("只读");
     const labels = view.root
       .findAll((node) => node.type === "Pressable")
       .map((node) => node.props.accessibilityLabel);
@@ -355,7 +398,7 @@ describe("EngineView mounted rendering", () => {
     await renderer.act(async () => compact.unmount());
   });
 
-  test("a false DTO capability hides the read-only banner without adding controls", async () => {
+  test("the view never calls itself read-only, whatever the fixed DTO flag says", async () => {
     const view = await mount(
       ready(
         runView({
@@ -368,7 +411,7 @@ describe("EngineView mounted rendering", () => {
         }),
       ),
     );
-    expect(textNodes(view.root).join("\n")).not.toContain(zh.readOnly);
+    expect(textNodes(view.root).join("\n")).not.toContain("只读");
     expect(view.root.findAll((node) => node.type === "Pressable").length).toBeGreaterThan(0);
     await renderer.act(async () => view.unmount());
   });
@@ -424,5 +467,370 @@ describe("EngineView mounted rendering", () => {
     const loading = await mount(ready(), { loadingOlder: true });
     expect(button(loading.root, "加载更早")?.props.disabled).toBe(true);
     await renderer.act(async () => loading.unmount());
+  });
+});
+
+describe("EngineView controls", () => {
+  const DECISION = "6f1c2a44-3b7e-4f0a-9a11-000000000001";
+  const retryDecision = (): RunDetailView["decisions"][number] => ({
+    decisionId: DECISION,
+    category: "D3",
+    state: "open",
+    subjectId: "T1",
+    summary: "质量阶梯已用完",
+    createdAt: AT,
+    answeredAction: null,
+    actions: ["retry"],
+  });
+  const withControls = (names: string[], extra: Partial<RunDetailView> = {}) =>
+    ready(
+      runView({
+        capabilities: {
+          runEngine: 1,
+          observationOnly: true,
+          enabled: false,
+          supportedControls: names,
+        },
+        ...extra,
+      }),
+    );
+  const handlers = () => ({
+    state: { pending: null, notice: null } as never,
+    onReplan: vi.fn(),
+    onRetry: vi.fn(),
+    onCancelTask: vi.fn(),
+    onCancelRun: vi.fn(),
+    onAddBudget: vi.fn(),
+    onKick: vi.fn(),
+    onPause: vi.fn(),
+    onResume: vi.fn(),
+    onDismiss: vi.fn(),
+  });
+  const press = (root: Node, label: string) =>
+    renderer.act(async () => (button(root, label)?.props.onPress as (() => void) | undefined)?.());
+  const disabled = (root: Node, label: string) =>
+    (button(root, label)?.props.accessibilityState as { disabled?: boolean } | undefined)?.disabled;
+
+  test("a button appears only for a control the server named", async () => {
+    const view = await mount(withControls(["kick"]), { controls: handlers() });
+    expect(button(view.root, zh.controls.kick.button)).toBeDefined();
+    expect(button(view.root, zh.controls.replan.submit)).toBeUndefined();
+    expect(textNodes(view.root).join("\n")).not.toContain(zh.noControls);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("pause and resume appear only when named, each calls its own handler without a confirmation, and pause says what it does", async () => {
+    const calls = handlers();
+    const running = await mount(withControls(["kick", "pause"]), { controls: calls });
+    expect(button(running.root, zh.controls.resume.button)).toBeUndefined();
+    expect(textNodes(running.root).join("\n")).toContain(zh.controls.pause.help);
+    await press(running.root, zh.controls.pause.button);
+    expect(calls.onPause).toHaveBeenCalledTimes(1);
+    expect(calls.onResume).not.toHaveBeenCalled();
+    await renderer.act(async () => running.unmount());
+
+    const paused = await mount(withControls(["kick", "resume"]), { controls: calls });
+    expect(button(paused.root, zh.controls.pause.button)).toBeUndefined();
+    await press(paused.root, zh.controls.resume.button);
+    expect(calls.onResume).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => paused.unmount());
+
+    const busy = await mount(withControls(["pause"]), {
+      controls: { ...calls, state: { pending: "pause", notice: null } },
+    });
+    expect(disabled(busy.root, zh.controls.pause.button)).toBe(true);
+    await renderer.act(async () => busy.unmount());
+  });
+
+  test("nothing named: no button, and the view says there is nothing to do", async () => {
+    const view = await mount(withControls([]), { controls: handlers() });
+    expect(button(view.root, zh.controls.kick.button)).toBeUndefined();
+    expect(button(view.root, zh.controls.replan.submit)).toBeUndefined();
+    expect(textNodes(view.root).join("\n")).toContain(zh.noControls);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("no controls handed in: not even the section is drawn", async () => {
+    const view = await mount(withControls(["kick", "replan", "decide"]));
+    expect(textNodes(view.root).join("\n")).not.toContain(zh.controls.title);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("kick calls the handler, and all buttons are disabled while a request is in flight", async () => {
+    const calls = handlers();
+    const view = await mount(withControls(["kick", "replan"]), { controls: calls });
+    expect(disabled(view.root, zh.controls.kick.button)).toBe(false);
+    await press(view.root, zh.controls.kick.button);
+    expect(calls.onKick).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => view.unmount());
+
+    const busy = await mount(withControls(["kick", "replan"]), {
+      controls: { ...calls, state: { pending: "kick", notice: null } },
+    });
+    expect(disabled(busy.root, zh.controls.kick.button)).toBe(true);
+    expect(disabled(busy.root, zh.controls.replan.submit)).toBe(true);
+    expect(textNodes(busy.root).join("\n")).toContain(zh.controls.pending);
+    await renderer.act(async () => busy.unmount());
+  });
+
+  test("replan needs a reason: a blank press only says so, a written one is sent", async () => {
+    const calls = handlers();
+    const view = await mount(withControls(["replan"]), { controls: calls });
+    await press(view.root, zh.controls.replan.submit);
+    expect(calls.onReplan).not.toHaveBeenCalled();
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.replan.needReason);
+
+    const input = view.root.findAll((node) => node.type === "TextInput")[0];
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("缺少 API"),
+    );
+    expect(textNodes(view.root).join("\n")).not.toContain(zh.controls.replan.needReason);
+    await press(view.root, zh.controls.replan.submit);
+    expect(calls.onReplan).toHaveBeenCalledWith("缺少 API");
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("a retry is offered per decision, and needs a confirmation that says what it will do", async () => {
+    const calls = handlers();
+    const view = await mount(
+      withControls(["decide"], {
+        decisions: [retryDecision()],
+        tasks: [task("T1", { title: "Core" })],
+      }),
+      { controls: calls },
+    );
+    const label = `${zh.controls.retry.button} Core`;
+    await press(view.root, label);
+    expect(calls.onRetry).not.toHaveBeenCalled();
+    const dialog = view.root.findAll((node) => node.type === "Modal")[0];
+    expect(dialog?.props.title).toBe(zh.controls.retry.confirmTitle);
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.retry.explain.D3 as string);
+
+    await press(view.root, zh.controls.retry.confirm);
+    expect(calls.onRetry).toHaveBeenCalledTimes(1);
+    expect(calls.onRetry.mock.calls[0]?.[0]).toMatchObject({
+      decisionId: DECISION,
+      category: "D3",
+    });
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("a cancel is offered only when the decision's actions include it, and the confirmation names the tasks that go with it and says the code stays", async () => {
+    const calls = handlers();
+    const tasks = [task("T1", { title: "Core" }), task("T2", { title: "Use of core" })];
+    const base = runView({ tasks });
+    const view = await mount(
+      ready({
+        ...base,
+        dag: {
+          revision: 1,
+          tasks: base.dag.tasks.map((node) =>
+            node.taskId === "T2" ? { ...node, deps: ["T1"], layer: 1 } : node,
+          ),
+        },
+        capabilities: { ...base.capabilities, supportedControls: ["decide"] },
+        decisions: [{ ...retryDecision(), actions: ["retry", "cancel"] }],
+      }),
+      { controls: calls },
+    );
+    await press(view.root, `${zh.controls.cancelTask.button} Core`);
+    expect(calls.onCancelTask).not.toHaveBeenCalled();
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(zh.controls.cancelTask.explain);
+    expect(text).toContain(zh.controls.cancelTask.downstream("Use of core"));
+    expect(text).toContain("revert");
+    await press(view.root, zh.controls.cancelTask.confirm);
+    expect(calls.onCancelTask).toHaveBeenCalledTimes(1);
+    expect(calls.onCancelTask.mock.calls[0]?.[0]).toMatchObject({ decisionId: DECISION });
+    expect(calls.onRetry).not.toHaveBeenCalled();
+    await renderer.act(async () => view.unmount());
+
+    // No cancel action, no cancel button.
+    const plain = await mount(
+      withControls(["decide"], {
+        decisions: [retryDecision()],
+        tasks: [task("T1", { title: "Core" })],
+      }),
+      { controls: handlers() },
+    );
+    expect(button(plain.root, `${zh.controls.cancelTask.button} Core`)).toBeUndefined();
+    await renderer.act(async () => plain.unmount());
+  });
+
+  test("cancelling the Run needs a reason and a confirmation that says what it does", async () => {
+    const calls = handlers();
+    const view = await mount(withControls(["kick", "cancel"]), { controls: calls });
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.cancelRun.help);
+    // Without a reason it only says so.
+    await press(view.root, zh.controls.cancelRun.submit);
+    expect(calls.onCancelRun).not.toHaveBeenCalled();
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.cancelRun.needReason);
+    expect(view.root.findAll((node) => node.type === "Modal")).toHaveLength(0);
+    const input = view.root.findAll(
+      (node) => node.props?.accessibilityLabel === zh.controls.cancelRun.reasonLabel,
+    )[0];
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("wrong plan"),
+    );
+    await press(view.root, zh.controls.cancelRun.submit);
+    expect(calls.onCancelRun).not.toHaveBeenCalled();
+    const dialog = view.root.findAll((node) => node.type === "Modal")[0];
+    expect(dialog?.props.title).toBe(zh.controls.cancelRun.confirmTitle);
+    await press(view.root, zh.controls.cancelRun.confirm);
+    expect(calls.onCancelRun).toHaveBeenCalledExactlyOnceWith("wrong plan");
+    await renderer.act(async () => view.unmount());
+
+    const none = await mount(withControls(["kick"]), { controls: handlers() });
+    expect(button(none.root, zh.controls.cancelRun.submit)).toBeUndefined();
+    await renderer.act(async () => none.unmount());
+  });
+
+  test("a seat's budget can be raised: a number, a confirmation that says the new limit, then the handler", async () => {
+    const calls = handlers();
+    const base = runView();
+    const view = await mount(
+      ready({
+        ...base,
+        capabilities: { ...base.capabilities, supportedControls: ["budget"] },
+        budgets: [
+          {
+            scope: "seat",
+            subjectId: "seat-b1",
+            limit: 2,
+            reserved: 2,
+            confirmed: 1,
+            observedTurns: 1,
+          },
+        ],
+      }),
+      { controls: calls },
+    );
+    const label = `${zh.controls.budget.button} seat-b1`;
+    const input = view.root.findAll(
+      (node) => node.props?.accessibilityLabel === `${zh.controls.budget.byLabel} seat-b1`,
+    )[0];
+    // Not a number in range: only said.
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("100"),
+    );
+    await press(view.root, label);
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.budget.invalid);
+    expect(calls.onAddBudget).not.toHaveBeenCalled();
+    await renderer.act(async () =>
+      (input?.props.onChangeText as ((text: string) => void) | undefined)?.("3"),
+    );
+    await press(view.root, label);
+    expect(textNodes(view.root).join("\n")).toContain(zh.controls.budget.willBe("seat-b1", 3, 5));
+    await press(view.root, zh.controls.budget.confirm);
+    expect(calls.onAddBudget).toHaveBeenCalledTimes(1);
+    expect(calls.onAddBudget.mock.calls[0]?.[1]).toBe(3);
+    expect(calls.onAddBudget.mock.calls[0]?.[0]).toMatchObject({ seatId: "seat-b1" });
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("cancelling the confirmation sends nothing", async () => {
+    const calls = handlers();
+    const view = await mount(
+      withControls(["decide"], {
+        decisions: [retryDecision()],
+        tasks: [task("T1", { title: "Core" })],
+      }),
+      { controls: calls },
+    );
+    await press(view.root, `${zh.controls.retry.button} Core`);
+    await press(view.root, zh.controls.retry.cancel);
+    expect(calls.onRetry).not.toHaveBeenCalled();
+    expect(view.root.findAll((node) => node.type === "Modal")).toHaveLength(0);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("a decision the server did not offer a retry for gets no button", async () => {
+    const view = await mount(
+      withControls(["decide"], { decisions: [{ ...retryDecision(), actions: [] }] }),
+      { controls: handlers() },
+    );
+    expect(
+      view.root
+        .findAll((node) => node.type === "Pressable")
+        .some((node) => String(node.props.accessibilityLabel).startsWith(zh.controls.retry.button)),
+    ).toBe(false);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("the answer is shown in words and can be dismissed", async () => {
+    const calls = handlers();
+    const notice = { tone: "warning", text: "Run 在你查看之后又有了变化", refresh: true };
+    const view = await mount(withControls(["kick"]), {
+      controls: { ...calls, state: { pending: null, notice } },
+    });
+    expect(textNodes(view.root).join("\n")).toContain(notice.text);
+    await press(view.root, notice.text);
+    expect(calls.onDismiss).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => view.unmount());
+  });
+});
+
+describe("EngineView says why, who and what next", () => {
+  test("an expanded task shows the three lines for its waiting reason", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          tasks: [
+            task("T1", {
+              state: "in_progress",
+              waitingReason: "dispatch-blocked:workspace-dirty",
+            }),
+          ],
+        }),
+      ),
+    );
+    await renderer.act(async () =>
+      (button(view.root, "展开 T1")?.props.onPress as (() => void) | undefined)?.(),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(`${zh.explain.why}：`);
+    expect(text).toContain("工作树不干净");
+    expect(text).toContain(`${zh.explain.who}：`);
+    expect(text).toContain(`${zh.explain.next}：`);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("a decision says who answers it, and whether this page can", async () => {
+    const view = await mount(
+      ready(
+        runView({
+          decisions: [
+            {
+              decisionId: "6f1c2a44-3b7e-4f0a-9a11-000000000001",
+              category: "D3",
+              state: "open",
+              subjectId: "T1",
+              summary: "x",
+              createdAt: AT,
+              answeredAction: null,
+              actions: ["retry"],
+            },
+          ],
+        }),
+      ),
+    );
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain(`${zh.explain.who}：你`);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("every history event carries its cause, and a kind nobody has words for is not hidden", async () => {
+    const history = {
+      events: [
+        { seq: 1, kind: "task-dispatched", at: AT, taskId: "T1", summary: "task-dispatched" },
+        { seq: 2, kind: "from-the-future", at: AT, taskId: null, summary: "from-the-future" },
+      ],
+      nextCursor: null,
+    };
+    const view = await mount(ready(runView(), history));
+    const text = textNodes(view.root).join("\n");
+    expect(text).toContain("有合格席位和锁");
+    expect(text).toContain("没有这类事件的说明");
+    await renderer.act(async () => view.unmount());
   });
 });

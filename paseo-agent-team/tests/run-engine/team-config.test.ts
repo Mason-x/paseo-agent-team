@@ -154,6 +154,16 @@ describe("launch gate for Team.runEngine", () => {
     ).toEqual([zh.noEnabledSeat]);
   });
 
+  test("a coordinator turn budget under 1 blocks the launch: the plan request would have no turn to be sent in", () => {
+    const supported = { runEngineSupported: true };
+    const withTurns = (strategicTurns: number) =>
+      config({ policy: policy({ run: { failedTasks: 3, strategicTurns } }) });
+    expect(plan(withTurns(0), supported).blockers).toEqual([zh.coordinatorBudgetEmpty]);
+    expect(plan(withTurns(1), supported).blockers).toEqual([]);
+    // A block that is off is not judged: it never takes the Engine path.
+    expect(plan({ ...withTurns(0), enabled: false }, supported).blockers).toEqual([]);
+  });
+
   test("derived positional seat ids (legacy members without seatId) are matched too", () => {
     const legacy = buildLaunchPlan({
       team: {

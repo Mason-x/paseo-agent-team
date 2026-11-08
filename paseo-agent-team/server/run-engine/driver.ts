@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { budgetExhaustedAlert, budgetStatus } from "../../shared/domain/run-engine/budget";
 import {
   openStuckDecision,
   stoppedTasksWithoutDecision,
 } from "../../shared/domain/run-engine/decision-answer";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { CancelFinisher } from "./cancel";
+import type { Compactor } from "./compact";
 import type { DagIntake } from "./dag";
-import { sha256Hex } from "./digest";
+import { alertIdFor, sha256Hex } from "./digest";
 import type { Intake } from "./intake";
 import type { IngestResult, ObserverHookEvent, ObserverHost, RunObserver } from "./observer";
 import type { DispatchNextResult, EngineService } from "./service";
@@ -68,6 +72,10 @@ export type DriverOptions = {
    * were tried again and no longer matter. It must not move the Run; its failure is logged only.
    */
   onPassed?: (runId: string) => void | Promise<void>;
+  /** Folds the old events of a Run into its checkpoint at the start of a pass (`compact.ts`). */
+  compactor?: Pick<Compactor, "compactIfNeeded">;
+  /** Finishes a cancellation that was asked for, at the start of a pass (`cancel.ts`). */
+  cancelFinisher?: Pick<CancelFinisher, "finish">;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -101,7 +109,33 @@ export function createEngineDriver(options: DriverOptions) {
     const { taskId } = result;
     await options.store.update(runId, (current) => {
       const noted = noteTask(current, taskId, reason, { now: clock.now() });
-      return noted.ok && noted.changed ? noted.next : null;
+      let next = noted.ok && noted.changed ? noted.next : current;
+      let changed = noted.ok && noted.changed;
+      // A seat whose turns ran out says so once per limit, with the way out.
+      if (
+        result.status === "blocked" &&
+        result.reason === "budget-exhausted" &&
+        result.seatId !== undefined
+      ) {
+        const status = budgetStatus(current, result.seatId);
+        if (status !== null) {
+          const summary = budgetExhaustedAlert(
+            result.seatId,
+            status.entry.reserved,
+            status.entry.limit,
+          );
+          const raised = raiseAlert(
+            next,
+            { alertId: alertIdFor(summary), severity: "warning", summary },
+            clock.now(),
+          );
+          if (raised.changed) {
+            next = raised.next;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : null;
     });
   }
 
@@ -150,6 +184,17 @@ export function createEngineDriver(options: DriverOptions) {
   }
 
   async function pass(runId: string): Promise<KickReport> {
+    if (options.compactor) {
+      // Its own commit, before anything else of this pass; a failure is logged inside and does not stop the pass.
+      const read = await options.store.get(runId);
+      if (read.status === "ok") {
+        await options.compactor.compactIfNeeded(runId, { bytesHigh: read.needsCompaction });
+      }
+    }
+    if (options.cancelFinisher) {
+      // Its own commit; it never throws, and a Run it cancels has nothing more to dispatch below.
+      await options.cancelFinisher.finish(runId);
+    }
     let dispatched = 0;
     let last: DispatchNextResult = { status: "idle" };
     for (let step = 0; step < MAX_STEPS; step += 1) {

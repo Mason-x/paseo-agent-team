@@ -7,6 +7,8 @@ import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { type FilesPort, nodeFiles } from "../version/process";
 import { readServerId } from "../version/service";
+import { createCancelFinisher } from "./cancel";
+import { createCompactor } from "./compact";
 import { createRunControl } from "./control";
 import { createDagIntake } from "./dag";
 import { createEngineDriver, type EngineDriver } from "./driver";
@@ -17,7 +19,12 @@ import { createRunObserver, type ObserverHookEvent } from "./observer";
 import { createReadRetry } from "./read-retry";
 import { type CommitIdentity, commitIdentity } from "./repo";
 import { createEngineService, type SeatSource } from "./service";
-import { type EngineStartInput, type EngineStartResult, startEngineRun } from "./start";
+import {
+  type EngineStartInput,
+  type EngineStartResult,
+  failInterruptedLaunches,
+  startEngineRun,
+} from "./start";
 import type { RunStore } from "./store";
 
 /**
@@ -99,7 +106,11 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     },
   };
 
-  const observer = createRunObserver({ store, log });
+  // Reads a host that failed to answer again a few times. It is defined before what reads, because
+  // they report to it; the timer behind it is created below.
+  const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
+    readRetry.note(runId, failure);
+  const observer = createRunObserver({ store, log, onReadFailure });
   const host = createObserverHost(port);
   // Reads a host that failed to answer again a few times and says what came of it. It holds two
   // functions that read and nothing that sends, settles or dispatches.
@@ -110,10 +121,15 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
       const refreshed = await port.agents.ref(agentId).refresh();
       if (!refreshed?.agent) throw new Error("the host returned no agent state");
     },
+    // A read that works again moves the Run on, as a person's kick would.
+    // Not waited for: the timer must not stand still while the Run is pushed on.
+    onRecovered: (runId) => {
+      driver
+        .retryRun(runId, { afterWrite: true })
+        .catch((error: unknown) => log(`could not push ${runId} on after a read recovered`, error));
+    },
     log,
   });
-  const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
-    readRetry.note(runId, failure);
   // Reconcile has no hook behind it, so it must not call a turn that is still running finished.
   const reconcileHost = createObserverHost(port, { requireIdle: true });
   const resolveWorkspace = (record: RunRecord) => {
@@ -125,6 +141,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     port,
     compile: compileEngineIntent,
     resolveWorkspace,
+    onReadFailure,
     log,
   });
   const service = createEngineService({
@@ -163,6 +180,18 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     service,
     outbox: { run: (runId) => effects.runOutbox(runId) },
     onPassed: (runId) => readRetry.sweep(runId),
+    compactor: createCompactor({ store, log }),
+    cancelFinisher: createCancelFinisher({
+      store,
+      readSeat: async (agentId) => {
+        const refreshed = await port.agents.ref(agentId).refresh();
+        return refreshed?.agent
+          ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+          : null;
+      },
+      onReadFailure,
+      log,
+    }),
     log,
   });
   const control = createRunControl({
@@ -182,6 +211,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     return { ok: true, serverId, paseoHome: home };
   }
 
+  /** Counts concurrent starts, so a duplicate finishing cannot expose a launch still in progress. */
+  const starting = new Map<string, number>();
   let recovering: Promise<void> | null = null;
   /** One recovery at a time: hooks that ask while it runs share it instead of starting another. */
   function recover(): Promise<void> {
@@ -189,6 +220,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     const attempt = (async () => {
       await options.ensureReady();
       if (!store.ready) return;
+      // A launch that a restart cut off will never go on: close it before anything looks at it.
+      const closed = await failInterruptedLaunches({
+        store,
+        isStarting: (runId) => starting.has(runId),
+        log,
+      });
+      if (closed > 0) log(`run engine closed ${closed} interrupted launch(es)`);
       const { runs } = await driver.recover();
       if (runs > 0) log(`run engine recovered ${runs} live run(s)`);
       // Works out from the ledger which reads are due again, so a restart does not lose them.
@@ -256,10 +294,18 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
             agentIdsKept: [],
           };
         }
-        return startEngineRun(
-          { store, adapter, effects, commitIdentity: options.commitIdentity, log },
-          { ...input, serverId: found.serverId, paseoHome: found.paseoHome },
-        );
+        const runId = input.plan.runId;
+        starting.set(runId, (starting.get(runId) ?? 0) + 1);
+        try {
+          return await startEngineRun(
+            { store, adapter, effects, commitIdentity: options.commitIdentity, log },
+            { ...input, serverId: found.serverId, paseoHome: found.paseoHome },
+          );
+        } finally {
+          const left = (starting.get(runId) ?? 1) - 1;
+          if (left === 0) starting.delete(runId);
+          else starting.set(runId, left);
+        }
       },
     } satisfies EngineLaunchHost,
   };

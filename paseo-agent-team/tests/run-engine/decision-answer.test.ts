@@ -4,10 +4,12 @@ import {
   answerableActions,
   answerDecision,
   classifyDecision,
+  decisionKindOf,
   openStuckDecision,
   stoppedTasksWithoutDecision,
 } from "../../shared/domain/run-engine/decision-answer";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import { assignmentsForRun } from "../fixtures/run-engine/base";
 import { bootstrapRun } from "./support/bootstrap-run";
 
 /**
@@ -98,16 +100,90 @@ describe("classifyDecision", () => {
   });
 
   test("offers `retry` only while the decision waits and is one it can answer", () => {
-    expect(answerableActions(decision())).toEqual(["retry"]);
-    expect(answerableActions(decision({ state: "waiting-human" }))).toEqual(["retry"]);
-    expect(answerableActions(decision({ state: "answered" }))).toEqual([]);
-    expect(answerableActions(decision({ state: "superseded" }))).toEqual([]);
-    expect(answerableActions(decision({ category: "D2", dedupeKey: "other:1" }))).toEqual([]);
+    const active = { lifecycle: "active" } as const;
+    expect(answerableActions(active, decision())).toEqual(["retry", "cancel"]);
+    expect(answerableActions(active, decision({ state: "waiting-human" }))).toEqual([
+      "retry",
+      "cancel",
+    ]);
+    expect(answerableActions(active, decision({ state: "answered" }))).toEqual([]);
+    expect(answerableActions(active, decision({ state: "superseded" }))).toEqual([]);
+    expect(answerableActions(active, decision({ category: "D2", dedupeKey: "other:1" }))).toEqual(
+      [],
+    );
+    // A decision of the evidence chain has no retry: it would throw the delivery away.
+    expect(
+      answerableActions(
+        active,
+        decision({ category: "D1", dedupeKey: "evidence-stuck:assignment-t1-a1" }),
+      ),
+    ).toEqual(["cancel"]);
+    // A Run that is not live answers nothing.
+    for (const lifecycle of [
+      "paused",
+      "bootstrapping",
+      "awaiting-dag",
+      "finished",
+      "cancelled",
+    ] as const) {
+      expect(answerableActions({ lifecycle }, decision())).toEqual([]);
+    }
+  });
+});
+
+describe("decisionKindOf", () => {
+  test("classifies quality, stopped actors, missing reports and cancellations without exposing ledger details", () => {
+    const record = withDecision();
+    record.assignments = assignmentsForRun(record.runId);
+    const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1");
+    const judge = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-r1");
+    if (!producer || !judge) throw new Error("fixture lost its producer or reviewer");
+    expect(decisionKindOf(record, decision())).toBe("quality-d4");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D3", dedupeKey: "quality:assignment-t1-a1:D3" }),
+      ),
+    ).toBe("quality-d3");
+    const stoppedProducer = decision({
+      category: "D1",
+      dedupeKey: `stuck:${producer.assignmentId}`,
+    });
+    const stoppedJudge = decision({ category: "D1", dedupeKey: `stuck:${judge.assignmentId}` });
+    expect(decisionKindOf(record, stoppedProducer)).toBe("stuck-producer");
+    expect(decisionKindOf(record, stoppedJudge)).toBe("stuck-judge");
+    judge.purpose = "smoker";
+    expect(decisionKindOf(record, stoppedJudge)).toBe("stuck-judge");
+    producer.acceptedProof = null;
+    expect(
+      decisionKindOf(record, {
+        ...stoppedProducer,
+        limbo: { turnId: "turn-1", endedEventKey: "ended-1" },
+      }),
+    ).toBe("limbo-producer");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D1", dedupeKey: `evidence-stuck:${producer.assignmentId}` }),
+      ),
+    ).toBe("evidence-stuck");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D1", dedupeKey: "cancel:t1", cancelIntents: [] }),
+      ),
+    ).toBe("cancel");
+    expect(decisionKindOf(record, decision({ category: "D2", dedupeKey: "other:1" }))).toBe(
+      "other",
+    );
+    expect(decisionKindOf(record, decision({ category: "D1", dedupeKey: "stuck:missing" }))).toBe(
+      "other",
+    );
   });
 });
 
 describe("answerDecision refuses what it should, and writes nothing", () => {
-  test("an unknown decision, a decision of another kind, an action that is not retry", () => {
+  test("an unknown decision, a decision of another kind, an action this build cannot take", () => {
     const record = withDecision();
     const before = structuredClone(record);
     expect(answerDecision(record, request(record, { decisionId: "x" }))).toEqual({
@@ -127,7 +203,7 @@ describe("answerDecision refuses what it should, and writes nothing", () => {
       ok: false,
       code: "decision-not-answerable",
     });
-    for (const action of ["reject", "cancel", "assign-seat", "increase-budget"]) {
+    for (const action of ["reject", "assign-seat", "increase-budget"]) {
       expect(answerDecision(record, request(record, { action }))).toEqual({
         ok: false,
         code: "action-unsupported",
@@ -210,14 +286,62 @@ describe("supportedControlsOf", () => {
   const live = (lifecycle: RunRecord["lifecycle"], decisions: Decision[] = []) =>
     supportedControlsOf({ lifecycle, decisions });
 
+  test("a cancellation that was asked for leaves only kick; a Run still starting cannot be cancelled", () => {
+    const decisions = [decision()];
+    const cancelling = (value: unknown) =>
+      supportedControlsOf({ lifecycle: "paused", decisions, cancelRequest: value } as never);
+    const request = {
+      version: 1,
+      requestId: "c",
+      reason: "r",
+      requestedAt: "2026-11-08T10:00:00.000Z",
+      completedAt: null,
+    };
+    expect(cancelling(request)).toEqual(["kick"]);
+    // One that cannot be read counts as wanted as well.
+    expect(cancelling({ nonsense: true })).toEqual(["kick"]);
+    // Nothing is offered to pause or cancel again once it is done, and the Run is over anyway.
+    expect(
+      supportedControlsOf({
+        lifecycle: "cancelled",
+        decisions,
+        cancelRequest: { ...request, completedAt: request.requestedAt },
+      } as never),
+    ).toEqual([]);
+    for (const state of ["preparing", "creating"] as const) {
+      expect(
+        supportedControlsOf({ lifecycle: "bootstrapping", decisions: [], launch: { state } }),
+      ).toEqual(["kick", "budget"]);
+    }
+    expect(
+      supportedControlsOf({
+        lifecycle: "active",
+        decisions: [decision()],
+        cancelRequest: request,
+      } as never),
+    ).toEqual(["kick"]);
+  });
+
   test("names only the controls this Run can use right now, in a fixed order", () => {
-    expect(live("bootstrapping")).toEqual(["kick"]);
-    expect(live("awaiting-dag")).toEqual(["replan", "kick"]);
-    expect(live("active")).toEqual(["kick"]);
-    expect(live("active", [decision()])).toEqual(["decide", "kick"]);
-    expect(live("paused", [decision()])).toEqual(["decide", "kick"]);
-    expect(live("active", [decision({ state: "answered" })])).toEqual(["kick"]);
-    expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual(["kick"]);
+    expect(live("bootstrapping")).toEqual(["kick", "cancel", "budget"]);
+    expect(live("awaiting-dag")).toEqual(["replan", "kick", "cancel", "budget"]);
+    expect(live("active")).toEqual(["kick", "pause", "cancel", "budget"]);
+    expect(live("active", [decision()])).toEqual(["decide", "kick", "pause", "cancel", "budget"]);
+    // A paused Run answers nothing: the decision waits until it is resumed.
+    expect(live("paused", [decision()])).toEqual(["kick", "resume", "cancel", "budget"]);
+    expect(live("paused")).toEqual(["kick", "resume", "cancel", "budget"]);
+    expect(live("active", [decision({ state: "answered" })])).toEqual([
+      "kick",
+      "pause",
+      "cancel",
+      "budget",
+    ]);
+    expect(live("active", [decision({ category: "D2", dedupeKey: "other:1" })])).toEqual([
+      "kick",
+      "pause",
+      "cancel",
+      "budget",
+    ]);
     expect(live("finished")).toEqual([]);
     expect(live("cancelled")).toEqual([]);
   });

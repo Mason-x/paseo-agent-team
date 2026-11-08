@@ -138,14 +138,27 @@ afterEach(async () => {
 // --- fakes -------------------------------------------------------------------------------------
 
 function fakeAdapter(
-  options: { failures?: Record<string, number>; onCreate?: () => Promise<void> } = {},
+  options: {
+    /** Keys whose create throws BEFORE anything is made, this many times. */
+    failures?: Record<string, number>;
+    /** Keys whose create makes the agent, remembers it under the key, then throws (the answer is lost). */
+    lostAnswers?: Record<string, number>;
+    /** Agents the host already had that belong to nobody in this launch. */
+    unrelated?: string[];
+    onCreate?: () => Promise<void>;
+  } = {},
 ) {
   const byKey = new Map<string, string>();
   const requests: CreateMemberInput[] = [];
   const archived: string[] = [];
   const failures = { ...options.failures };
+  const lostAnswers = { ...options.lostAnswers };
+  const unrelated = [...(options.unrelated ?? [])];
   return {
     requests,
+    /** Every agent the host holds, the unrelated ones included. */
+    hostAgents: () => new Set([...byKey.values(), ...unrelated]),
+    unrelated,
     archived,
     agents: () => new Set(byKey.values()),
     adapter: {
@@ -160,6 +173,11 @@ function fakeAdapter(
         }
         const agentId = byKey.get(key) ?? `agent-${byKey.size + 1}`;
         byKey.set(key, agentId);
+        const lost = lostAnswers[key] ?? 0;
+        if (lost > 0) {
+          lostAnswers[key] = lost - 1;
+          throw new Error(`the answer for ${key} was lost`);
+        }
         return { agentId };
       },
       archiveAgent: async (agentId: string) => {
@@ -288,6 +306,26 @@ describe("startEngineRun", () => {
       messageId: intent?.messageId,
     });
     expect(host.sent[0]?.text).toContain("Add a login page.");
+  });
+
+  test("the plan request is the coordinator's first turn: its budget entry takes the policy's limit with one reserved, and the policy is not written", async () => {
+    const { deps } = setup();
+    await startEngineRun(deps, input());
+    const record = await stored();
+    const entry = record.budgets.entries.find(
+      (candidate) => candidate.scope === "seat" && candidate.subjectId === COORDINATOR_SEAT_ID,
+    );
+    expect(entry).toEqual({
+      scope: "seat",
+      subjectId: COORDINATOR_SEAT_ID,
+      limit: engine.policy.run.strategicTurns,
+      reserved: 1,
+      confirmed: 0,
+      observedTurns: 0,
+    });
+    expect(record.policy.seatBudgets.map((candidate) => candidate.subjectId)).not.toContain(
+      COORDINATOR_SEAT_ID,
+    );
   });
 
   test("the ledger holds the control nonce only as a digest, apart from the request it is rebuilt from", async () => {
@@ -422,6 +460,27 @@ describe("startEngineRun", () => {
     expect(keys.filter((key) => key === seatKey(first?.seatId ?? ""))).toHaveLength(2);
   });
 
+  test("an agent made and remembered under its key whose answer was lost is the one the next ask returns: one agent per seat, none extra", async () => {
+    const [first] = engine.seats;
+    const lostKey = seatKey(first?.seatId ?? "");
+    const { agents, deps } = setup({ lostAnswers: { [lostKey]: 1 } });
+    const result = await startEngineRun(deps, input());
+    expect(result).toMatchObject({ ok: true, launchState: "running" });
+    if (!result.ok) return;
+    // The seat was asked twice with its key, and the second ask got the agent the first one made.
+    const asks = agents.requests.filter((request) => request.idempotencyKey === lostKey);
+    expect(asks).toHaveLength(2);
+    expect(agents.requests).toHaveLength(4);
+    // The host holds exactly one agent per seat (coordinator plus two members), and the Run binds those.
+    expect(agents.agents().size).toBe(3);
+    const record = await stored();
+    const bound = record.roster.map((seat) => seat.agentId).filter((id) => id !== null);
+    expect(new Set(bound)).toEqual(agents.agents());
+    expect(new Set(bound).size).toBe(bound.length);
+    expect(result.memberIds).toHaveLength(2);
+    expect(new Set([result.coordinatorId, ...result.memberIds])).toEqual(agents.agents());
+  });
+
   test("a seat the Team turned off gets no agent and stays unbound", async () => {
     const [first, second] = engine.seats;
     const disabled: RunTeamEngineConfig = {
@@ -537,6 +596,29 @@ describe("startEngineRun: failures", () => {
     expect(host.sent).toHaveLength(0);
   });
 
+  test("a coordinator turn budget of 0 stops the launch before anything exists: there is no turn to send the plan request in", async () => {
+    const { agents, host, deps } = setup();
+    const result = await startEngineRun(
+      deps,
+      input({
+        engine: {
+          ...engine,
+          policy: { ...engine.policy, run: { ...engine.policy.run, strategicTurns: 0 } },
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      step: "preflight",
+      message: "协调者回合预算为 0，无法发出计划请求；请先增加预算",
+      archived: false,
+      agentIdsKept: [],
+    });
+    expect(await store.get(RUN_ID)).toEqual({ status: "missing" });
+    expect(agents.requests).toHaveLength(0);
+    expect(host.sent).toHaveLength(0);
+  });
+
   test("a Workspace git cannot commit in stops the launch before anything exists", async () => {
     const { agents, host, deps } = setup();
     const result = await startEngineRun(
@@ -594,6 +676,23 @@ describe("startEngineRun: failures", () => {
     expect(agents.archived).toHaveLength(1);
     expect((await stored()).launch.state).toBe("failed");
     expect(host.sent).toHaveLength(0);
+  });
+
+  test("a failed launch archives only the agents this launch created, not another agent the host holds", async () => {
+    const second = engine.seats[1];
+    const { agents, deps } = setup({
+      unrelated: ["agent-someone-elses"],
+      failures: { [seatKey(second?.seatId ?? "")]: 2 },
+    });
+    const result = await startEngineRun(deps, input());
+    expect(result).toMatchObject({ ok: false, step: "member", archived: true, agentIdsKept: [] });
+    // Created before the failure: the coordinator and the first member. Nothing else is touched.
+    expect(agents.agents().size).toBe(2);
+    expect(new Set(agents.archived)).toEqual(agents.agents());
+    expect(agents.archived).toHaveLength(2);
+    expect(agents.archived).not.toContain("agent-someone-elses");
+    expect(agents.hostAgents().has("agent-someone-elses")).toBe(true);
+    expect((await stored()).launch.state).toBe("failed");
   });
 
   test("or kept, and named, if it does not", async () => {

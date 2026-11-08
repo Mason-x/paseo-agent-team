@@ -3,12 +3,14 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createRunQueries } from "../../server/run-engine/queries";
 import { createEngineRuntime, seatSourceOf } from "../../server/run-engine/runtime";
 import type { EngineStartInput } from "../../server/run-engine/start";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { buildLaunchPlan, type LaunchPlan } from "../../shared/domain/launch-plan";
 import { COORDINATOR_SEAT_ID, REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
+import { engineLaunchGate, resolveTeamRunEngine } from "../../shared/domain/run-engine/team-config";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PaseoPort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config";
@@ -493,5 +495,311 @@ describe("seatSourceOf", () => {
       order: record.roster.findIndex((entry) => entry.seatId === seat?.seatId),
     });
     expect(seatSourceOf(record, "no-such-seat")).toBeNull();
+  });
+});
+
+describe("the switch that starts Engine Runs is off, and a Run that was started goes on", () => {
+  /** The same ledger, a runtime built the way a daemon without the switch builds it. */
+  async function started(host: Host) {
+    const on = runtime();
+    const result = await on.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    if (!result.ok) throw new Error(`start failed: ${result.message} ${result.detail}`);
+    await on.recover();
+    on.dispose();
+    return result;
+  }
+
+  test("it cannot start a new Run, but a hook still admits the plan and dispatches", async () => {
+    const host = fakeHost();
+    const first = await started(host);
+    const off = runtime({ supported: false });
+    expect(off.launchHost.supported).toBe(false);
+
+    await coordinatorPlans(host, first.coordinatorId);
+    await off.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: first.coordinatorId,
+        turnId: host.turnOf(first.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.port,
+    );
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(host.sent).toHaveLength(2);
+    off.dispose();
+  });
+
+  test("a restart without the switch recovers a Run whose plan arrived unheard, and a kick still works", async () => {
+    const host = fakeHost();
+    const first = await started(host);
+    await coordinatorPlans(host, first.coordinatorId);
+
+    const off = runtime({ supported: false });
+    off.bind(host.port);
+    await off.recover();
+    expect(states(await stored())).toEqual({ t1: "assigned", t2: "pending" });
+
+    const kicked = await off.control.kick({ runContractVersion: 1, runId: RUN_ID });
+    expect(kicked.status).toBe("ok");
+    // Nothing was sent twice by recovering and kicking: every message is its own, and the task
+    // prompt went out once. (The scripted host reports every agent idle, so a reconcile may also
+    // ask a member that never answered for its report; that is a different message.)
+    expect(new Set(host.sent.map((entry) => entry.messageId)).size).toBe(host.sent.length);
+    expect(host.sent.filter((entry) => entry.text.includes("【执行事实 JSON】"))).toHaveLength(1);
+    off.dispose();
+  });
+
+  test("it can still be listed and read, and its controls still answer", async () => {
+    const host = fakeHost();
+    await started(host);
+    const queries = createRunQueries({ store, ensureReady: async () => undefined });
+    const list = await queries.list({ runContractVersion: 1 });
+    expect(list.runs.map((run) => run.runId)).toEqual([RUN_ID]);
+    const detail = await queries.get({ runContractVersion: 1, runId: RUN_ID });
+    expect(detail.status).toBe("ready");
+
+    const off = runtime({ supported: false });
+    const refused = await off.control.replan({
+      runContractVersion: 1,
+      runId: RUN_ID,
+      requestId: "req-1",
+      expectedRevision: 1,
+      reason: "x",
+    });
+    // The Run is not waiting for a plan, so the refusal is the Run's own, not "the Engine is off".
+    expect(refused.status).toBe("rejected");
+    expect(refused.issues.map((issue) => issue.code)).not.toContain("run-missing");
+    off.dispose();
+  });
+});
+
+describe("a Team's runEngine block that is damaged or removed after the Run was started", () => {
+  test("the Run is still read, kicked and controlled on the policy and roster it froze; only a new launch sees the damaged block", async () => {
+    const host = fakeHost();
+    const wired = runtime();
+    const started = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    if (!started.ok) throw new Error(`start failed: ${started.message} ${started.detail}`);
+    await wired.recover();
+    const frozen = await stored();
+    const frozenPolicy = JSON.stringify(frozen.policy);
+    const frozenRoster = JSON.stringify(frozen.roster);
+    expect(frozen.policy.perTask.protocolResends).toBeGreaterThan(0);
+
+    // The Team is edited on: the block the Run was started from is gutted in place, then the whole block is
+    // removed, and a copy of it is saved with a field the schema refuses.
+    engine.enabled = false;
+    engine.seats = [];
+    engine.policy.perTask.protocolResends = 0;
+    engine.policy.run.failedTasks = 0;
+    const damaged = { runEngine: { version: 1, enabled: true, seats: "nonsense" } };
+    const removed = {};
+    const seats = plan.seats.map((seat) => seat.logicalSeatId);
+    const gateOf = (team: { runEngine?: unknown }) =>
+      engineLaunchGate({
+        resolution: resolveTeamRunEngine(team),
+        logicalSeatIds: seats,
+        engineSupported: true,
+      });
+    // A new launch is refused (damaged) or goes the old way (removed); this Run is not asked.
+    expect(gateOf(damaged).blockers.length).toBeGreaterThan(0);
+    expect(gateOf(removed)).toMatchObject({ blockers: [], engine: false });
+
+    // The Run: listed and read, its coordinator's plan admitted and dispatched, kicked, paused and resumed.
+    const queries = createRunQueries({ store, ensureReady: async () => undefined });
+    expect((await queries.list({ runContractVersion: 1 })).runs.map((run) => run.runId)).toEqual([
+      RUN_ID,
+    ]);
+    await coordinatorPlans(host, started.coordinatorId);
+    await wired.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: started.coordinatorId,
+        turnId: host.turnOf(started.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.port,
+    );
+    const running = await stored();
+    expect(states(running)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(host.sent).toHaveLength(2);
+    expect((await queries.get({ runContractVersion: 1, runId: RUN_ID })).status).toBe("ready");
+
+    expect((await wired.control.kick({ runContractVersion: 1, runId: RUN_ID })).status).toBe("ok");
+    const ask = async (requestId: string) => ({
+      runContractVersion: 1 as const,
+      runId: RUN_ID,
+      requestId,
+      expectedRevision: (await stored()).revision,
+      reason: "from the test",
+    });
+    expect((await wired.control.pause(await ask("pause-1"))).status).toBe("applied");
+    expect((await wired.control.resume(await ask("resume-1"))).status).toBe("applied");
+    await wired.control.idle();
+
+    // Everything it did, it did on what it froze at the start.
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(JSON.stringify(after.policy)).toBe(frozenPolicy);
+    expect(JSON.stringify(after.roster)).toBe(frozenRoster);
+    wired.dispose();
+  });
+});
+
+describe("a launch that a restart cut off", () => {
+  async function started(host: Host) {
+    const wired = runtime();
+    const result = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    expect(result.ok).toBe(true);
+    return wired;
+  }
+
+  test.each(["preparing", "creating"] as const)(
+    "a Run left %s is closed by the next process's recovery, with an alert, and the host is not called",
+    async (state) => {
+      const host = fakeHost();
+      const first = await started(host);
+      first.dispose();
+      await store.update(RUN_ID, (current) => {
+        current.launch.state = state;
+        // A real crash in these phases happened before the plan request was prepared.
+        current.outbox = [];
+        return current;
+      });
+      const created = vi.spyOn(host.adapter, "createAgent");
+      const archived = vi.spyOn(host.adapter, "archiveAgent");
+      const agentRef = vi.spyOn(host.port.agents, "ref");
+      const second = runtime();
+      second.bind(host.port as unknown as PaseoPort);
+      await second.recover();
+      const after = await stored();
+      expect(after.launch.state).toBe("failed");
+      expect(after.events.some((e) => e.kind === "launch-state" && e.payload.to === "failed")).toBe(
+        true,
+      );
+      const alert = after.alerts.find((entry) => entry.summary.startsWith("启动在"));
+      expect(alert?.severity).toBe("critical");
+      expect(alert?.summary).toContain(state === "preparing" ? "创建记录" : "创建成员");
+      expect(alert?.summary).toContain("已登记的 Agent");
+      expect(created).not.toHaveBeenCalled();
+      expect(archived).not.toHaveBeenCalled();
+      expect(agentRef).not.toHaveBeenCalled();
+
+      // A second recovery writes nothing.
+      await second.recover();
+      expect((await stored()).revision).toBe(after.revision);
+      second.dispose();
+    },
+  );
+
+  test.each(["kickoff-pending", "running", "failed", "cancelled"] as const)(
+    "a Run whose launch is %s is not touched",
+    async (state) => {
+      const host = fakeHost();
+      const first = await started(host);
+      first.dispose();
+      await store.update(RUN_ID, (current) => {
+        current.launch.state = state;
+        return current;
+      });
+      const second = runtime();
+      second.bind(host.port as unknown as PaseoPort);
+      await second.recover();
+      const after = await stored();
+      expect(after.launch.state).toBe(state);
+      expect(after.alerts.some((entry) => entry.summary.startsWith("启动在"))).toBe(false);
+      expect(JSON.stringify(after.events).includes("interrupted-while")).toBe(false);
+      second.dispose();
+    },
+  );
+
+  test("a duplicate start finishing does not expose another start still creating agents to recovery", async () => {
+    const host = fakeHost();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = host.adapter.createAgent;
+    let blocked = false;
+    host.adapter.createAgent = async (request: CreateMemberInput) => {
+      if (!blocked) {
+        blocked = true;
+        await gate;
+      }
+      return original(request);
+    };
+    const wired = runtime();
+    const first = wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    try {
+      for (let i = 0; i < 200 && !blocked; i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(blocked).toBe(true);
+      const duplicate = await wired.launchHost.start(
+        startInput(),
+        host.port as unknown as PaseoPort,
+        host.adapter,
+      );
+      expect(duplicate.ok).toBe(false);
+      await wired.recover();
+      expect((await stored()).launch.state).toBe("creating");
+    } finally {
+      release();
+      await first;
+      wired.dispose();
+    }
+    expect((await stored()).launch.state).not.toBe("failed");
+  });
+
+  test("a launch this process is still carrying out is slow, not interrupted", async () => {
+    const host = fakeHost();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = host.adapter.createAgent;
+    let blocked = false;
+    host.adapter.createAgent = async (request: CreateMemberInput) => {
+      if (!blocked) {
+        blocked = true;
+        await gate;
+      }
+      return original(request);
+    };
+    const wired = runtime();
+    const running = wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    // Wait until the record exists and the first create is held.
+    for (let i = 0; i < 200 && !blocked; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(blocked).toBe(true);
+    expect((await stored()).launch.state).toBe("creating");
+
+    await wired.recover();
+    expect((await stored()).launch.state).toBe("creating");
+
+    release();
+    const result = await running;
+    expect(result.ok).toBe(true);
+    expect((await stored()).launch.state).not.toBe("failed");
+    wired.dispose();
   });
 });

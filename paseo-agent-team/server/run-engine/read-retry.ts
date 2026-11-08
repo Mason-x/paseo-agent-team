@@ -6,10 +6,12 @@ import {
   noteReadFailure,
   type ObservedRun,
   type ReadRetryTarget,
+  recoveredItems,
   type StartedTry,
   sweepReadRetries,
   type TryOutcome,
 } from "../../shared/domain/run-engine/read-retry";
+import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { alertIdFor, sha256Hex } from "./digest";
 import type { ReplyWindow } from "./protocol";
 import type { RunStore } from "./store";
@@ -43,6 +45,12 @@ export type ReadRetryOptions = {
   readReply(agentId: string, messageId: string): Promise<ReplyWindow>;
   /** Reads the live state of an agent; throws when it cannot. Read only. */
   readSeat(agentId: string): Promise<void>;
+  /**
+   * Called once, after the commit that records a read that works again for a source that is still
+   * waited on (the first few times only). The owner pushes the Run on, as a person's kick would. A
+   * failure here is only logged.
+   */
+  onRecovered?: (runId: string) => void | Promise<void>;
   clock?: { now(): string };
   /** Runs `run` after `ms`; returns what cancels it. Defaults to `setTimeout`. */
   schedule?: (run: () => void, ms: number) => () => void;
@@ -154,7 +162,9 @@ export function createReadRetry(options: ReadRetryOptions) {
       }
       // 3. Record what the reads found. A reply that was read gets the receipt that is already on the
       //    ledger for its turn, never a new one.
+      let before: RunRecord | null = null;
       const ended = await options.store.update(runId, (current) => {
+        before = current;
         const withReceipts = outcomes.map((outcome) => {
           if (!outcome.ok || outcome.turnId === undefined) return outcome;
           const item = started.find((entry) => entry.key === outcome.key);
@@ -171,6 +181,14 @@ export function createReadRetry(options: ReadRetryOptions) {
         return result.changed ? result.next : null;
       });
       track(runId, ended.record);
+      // After the commit, never before it: what is pushed on must find the result on the ledger.
+      if (before !== null && recoveredItems(before, ended.record).length > 0) {
+        try {
+          await options.onRecovered?.(runId);
+        } catch (error) {
+          log(`could not push ${runId} on after a read recovered`, error);
+        }
+      }
     } catch (error) {
       log(`read re-check of ${runId} could not be recorded`, error);
       due.set(runId, nowMs() + ERROR_BACKOFF_MS);

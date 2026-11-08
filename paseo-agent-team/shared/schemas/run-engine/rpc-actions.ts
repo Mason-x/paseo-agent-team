@@ -19,7 +19,15 @@ const ContractShape = { runContractVersion: z.literal(RUN_CONTRACT_VERSION) };
 const Text = (max: number) => z.string().min(1).max(max);
 
 /** The names `capabilities.supportedControls` may carry for the controls that exist. */
-export const RUN_ACTION_CONTROLS = ["replan", "decide", "kick"] as const;
+export const RUN_ACTION_CONTROLS = [
+  "replan",
+  "decide",
+  "kick",
+  "pause",
+  "resume",
+  "cancel",
+  "budget",
+] as const;
 export type RunActionControl = (typeof RUN_ACTION_CONTROLS)[number];
 
 /**
@@ -37,6 +45,7 @@ export const RUN_ACTION_CODES = [
   // replan
   "replan-not-allowed",
   "plan-request-missing",
+  "budget-exhausted",
   "delivery-unresolved",
   "plan-unbuildable",
   // decide
@@ -46,6 +55,14 @@ export const RUN_ACTION_CODES = [
   "action-unsupported",
   "task-not-releasable",
   "run-not-active",
+  // pause, resume and cancel
+  "lifecycle-not-allowed",
+  "cancel-pending",
+  "launch-in-progress",
+  // budget
+  "seat-missing",
+  "budget-missing",
+  "budget-cap",
   // anything the ledger itself refuses
   "ledger-refused",
 ] as const;
@@ -83,9 +100,10 @@ export type RunReplanOutput = z.infer<typeof RunReplanOutputSchema>;
 // --- run.decide -----------------------------------------------------------------------------
 
 /** What a person can answer a decision with today. The other actions of the ledger come later. */
-export const RUN_DECIDE_ACTIONS = ["retry"] as const;
+export const RUN_DECIDE_ACTIONS = ["retry", "cancel"] as const;
 export const RunDecideAnswerSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("retry") }),
+  z.strictObject({ action: z.literal("cancel") }),
 ]);
 export type RunDecideAnswer = z.infer<typeof RunDecideAnswerSchema>;
 
@@ -103,9 +121,72 @@ export const RunDecideOutputSchema = z.object({
   decisionId: z.string().uuid(),
   /** The task the decision was about, when there is one. */
   taskId: Text(64).nullable(),
+  /** For `cancel`: the task and every task that depended on it, now cancelled. */
+  cancelledTaskIds: z.array(Text(64)).max(64).optional(),
   issues: z.array(RunIssueViewSchema).max(100),
 });
 export type RunDecideOutput = z.infer<typeof RunDecideOutputSchema>;
+
+// --- run.pause / run.resume ------------------------------------------------------------------
+
+/** Both take the same request: pause and resume differ only in the RPC they are sent to. */
+export const RunLifecycleInputSchema = z.strictObject(WriteShape);
+export type RunLifecycleInput = z.input<typeof RunLifecycleInputSchema>;
+
+export const RunLifecycleOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  /** The Run's revision after the call (the current one when rejected). */
+  revision: z.number().int().nonnegative(),
+  /** The lifecycle after the call; null when the Run cannot be read. */
+  lifecycle: Text(32).nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunLifecycleOutput = z.infer<typeof RunLifecycleOutputSchema>;
+
+// --- run.cancel ------------------------------------------------------------------------------
+
+/** Same strict request as the others: a request id, the revision the caller read and a reason. */
+export const RunCancelInputSchema = z.strictObject(WriteShape);
+export type RunCancelInput = z.input<typeof RunCancelInputSchema>;
+
+export const RunCancelOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  revision: z.number().int().nonnegative(),
+  lifecycle: Text(32).nullable(),
+  /** What the cancellation still waits for when it was not completed at once. */
+  waiting: z
+    .object({
+      turns: z.number().int().nonnegative(),
+      deliveries: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunCancelOutput = z.infer<typeof RunCancelOutputSchema>;
+
+// --- run.budget ------------------------------------------------------------------------------
+
+/** More turns for one seat. The limit is at most 1024 in all; one request adds 1 to 64. */
+export const RunBudgetInputSchema = z.strictObject({
+  ...WriteShape,
+  /** A seat of the Run's roster. */
+  seatId: Text(128),
+  by: z.number().int().min(1).max(64),
+});
+export type RunBudgetInput = z.input<typeof RunBudgetInputSchema>;
+
+export const RunBudgetOutputSchema = z.object({
+  ...ContractShape,
+  status: RunActionStatusSchema,
+  revision: z.number().int().nonnegative(),
+  seatId: Text(128),
+  /** The seat's limit after the call; null when rejected. */
+  limit: z.number().int().nonnegative().nullable(),
+  issues: z.array(RunIssueViewSchema).max(100),
+});
+export type RunBudgetOutput = z.infer<typeof RunBudgetOutputSchema>;
 
 // --- run.kick -------------------------------------------------------------------------------
 

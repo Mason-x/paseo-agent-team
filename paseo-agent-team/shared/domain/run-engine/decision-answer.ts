@@ -4,12 +4,13 @@ import type {
   RunStoredTaskReport,
 } from "../../schemas/run-engine/ledger";
 import { RunStoredTaskReportSchema } from "../../schemas/run-engine/ledger";
+import { cancelPending } from "./cancel-request";
 import { isDecisionPending } from "./decision-state";
 import { producerHead, resolveD } from "./delivery-binding";
 import { evidenceRepairOf } from "./evidence-repair";
 import { reduceRun } from "./reducer";
 import { settleRepairs } from "./report-repair";
-import { hasUnsettledEffects, isNormalEnded } from "./transitions";
+import { hasUnsettledEffects, isNormalEnded, outstandingAssignments } from "./transitions";
 
 /**
  * Answering a decision a person is asked about (P06). A decision "waits for a person" when a task
@@ -23,7 +24,7 @@ import { hasUnsettledEffects, isNormalEnded } from "./transitions";
  *    left cannot be used, and the Engine has asked for it as often as it may. The task is not frozen
  *    (it is still `assigned`); it only has nobody to wait for.
  *
- * The one answer is `retry`: one more attempt, taken from where the stop happened. What it does depends
+ * `retry` is one more attempt, taken from where the stop happened. What it does depends
  * on what stopped (`planResume`), and it never does more than one thing:
  *
  *   rework   the delivery failed review or smoke and exists: the task goes back to `rework`, keeps its
@@ -41,8 +42,16 @@ import { hasUnsettledEffects, isNormalEnded } from "./transitions";
  * sent may be unsettled, and no cancellation may be pending. The Run must be `active`.
  *
  * Counters and gates are not touched. A retry is exactly one more attempt: the caps are measured at the
- * next quality failure, which opens the next decision. `reject`, `cancel`, `assign-seat` and the budget
- * answers are not here (cancellation and the full release path are later work).
+ * next quality failure, which opens the next decision.
+ *
+ * The other answer is `cancel` (`answerCancel`): the task is cancelled, its claims are released, and so
+ * is everything that depends on it. It asks for the same proof as a retry (every turn of the task ended,
+ * nothing it sent unsettled) and then goes through the reducer's own cancellation: the task is frozen and
+ * the reducer's D1 `cancel:<task>` is answered `cancel` in the same commit, which is the authorization
+ * that lets the second `cancel-requested` release a claim kept from a delivery that was sent. Code that
+ * was committed stays where it is. `evidence-stuck:<assignment>` is the decision for a task stopped by a
+ * member's answer to an evidence request: a retry would throw the delivery away, so only `cancel` is
+ * offered for it. `reject`, `assign-seat` and the budget answers are not here.
  *
  * Like `noteTask` and `transitionIntent`, pure functions on the record that write an audit event; the
  * reducer's `decision` event stays unsupported and its vocabulary is not extended.
@@ -57,12 +66,16 @@ const OPEN_TASK: readonly Task["state"][] = ["assigned", "in_progress"];
 
 export const STUCK_KEY_PREFIX = "stuck:";
 export const QUALITY_KEY_PREFIX = "quality:";
+export const EVIDENCE_STUCK_KEY_PREFIX = "evidence-stuck:";
 export const DECISION_OPENED_EVENT = "decision-opened";
 export const DECISION_ANSWERED_EVENT = "decision-answered";
 
 export type AnswerableKind =
   | { kind: "quality"; level: "D3" | "D4"; producerAssignmentId: string }
-  | { kind: "stuck"; assignmentId: string };
+  | { kind: "stuck"; assignmentId: string }
+  | { kind: "evidence-stuck"; assignmentId: string };
+
+export type DecisionAction = "retry" | "cancel";
 
 /** What a decision is about, or `null` when this build cannot answer it (cancellation, approval, ...). */
 export function classifyDecision(decision: Decision): AnswerableKind | null {
@@ -82,12 +95,63 @@ export function classifyDecision(decision: Decision): AnswerableKind | null {
     const assignmentId = key.slice(STUCK_KEY_PREFIX.length);
     return assignmentId === "" ? null : { kind: "stuck", assignmentId };
   }
+  if (key.startsWith(EVIDENCE_STUCK_KEY_PREFIX) && decision.category === "D1") {
+    const assignmentId = key.slice(EVIDENCE_STUCK_KEY_PREFIX.length);
+    return assignmentId === "" ? null : { kind: "evidence-stuck", assignmentId };
+  }
   return null;
 }
 
-/** The answers a person may give right now, for the Runs page. Empty when it cannot be answered. */
-export function answerableActions(decision: Decision): "retry"[] {
-  return isDecisionPending(decision) && classifyDecision(decision) !== null ? ["retry"] : [];
+export type DecisionKind =
+  | "quality-d3"
+  | "quality-d4"
+  | "stuck-producer"
+  | "stuck-judge"
+  | "limbo-producer"
+  | "evidence-stuck"
+  | "cancel"
+  | "other";
+
+/** A redacted display kind derived from existing facts, without changing what can be answered. */
+export function decisionKindOf(
+  record: Pick<RunRecord, "assignments">,
+  decision: Decision,
+): DecisionKind {
+  if (
+    decision.category === "D1" &&
+    decision.subjectId !== null &&
+    decision.dedupeKey === `cancel:${decision.subjectId}`
+  )
+    return "cancel";
+  const kind = classifyDecision(decision);
+  if (kind === null) return "other";
+  if (kind.kind === "quality") return kind.level === "D3" ? "quality-d3" : "quality-d4";
+  if (kind.kind === "evidence-stuck") return "evidence-stuck";
+  const assignment = record.assignments.find((entry) => entry.assignmentId === kind.assignmentId);
+  if (!assignment || assignment.taskId !== decision.subjectId) return "other";
+  if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") return "stuck-judge";
+  if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return "other";
+  return limboEvidence(decision) === null ? "stuck-producer" : "limbo-producer";
+}
+
+/** What each kind of decision can be answered with; a supplement stopped by a member has no retry. */
+function actionsOfKind(kind: AnswerableKind): DecisionAction[] {
+  return kind.kind === "evidence-stuck" ? ["cancel"] : ["retry", "cancel"];
+}
+
+/**
+ * The answers a person may give right now, for the Runs page. Empty when it cannot be answered, and
+ * while the Run is not `active` (a paused Run answers nothing).
+ */
+export function answerableActions(
+  record: Pick<RunRecord, "lifecycle">,
+  decision: Decision,
+): DecisionAction[] {
+  if (record.lifecycle !== "active" || cancelPending(record) || !isDecisionPending(decision)) {
+    return [];
+  }
+  const kind = classifyDecision(decision);
+  return kind === null ? [] : actionsOfKind(kind);
 }
 
 function taskOf(record: RunRecord, taskId: string): Task | undefined {
@@ -152,10 +216,12 @@ export function openStuckDecision(
   if (task === undefined || assignment === undefined || assignment.taskId !== input.taskId) {
     return { changed: false };
   }
-  if (evidenceRepairOf(record, assignment)) return { changed: false };
+  // A supplement of the evidence chain that a member answered with blocked or failed has its own key:
+  // its decision never offers a retry, which would throw the delivery away.
+  const evidence = evidenceRepairOf(record, assignment) !== null;
   if (task.state !== "blocked" && task.state !== "failed") return { changed: false };
   if (!isBlockedOrFailedReport(assignment.acceptedProof)) return { changed: false };
-  const dedupeKey = `${STUCK_KEY_PREFIX}${input.assignmentId}`;
+  const dedupeKey = `${evidence ? EVIDENCE_STUCK_KEY_PREFIX : STUCK_KEY_PREFIX}${input.assignmentId}`;
   if (
     record.decisions.some(
       (entry) =>
@@ -174,7 +240,9 @@ export function openStuckDecision(
     dedupeKey,
     cancelIntents: null,
     subjectId: input.taskId,
-    summary: stoppedSummary(task, assignment),
+    summary: evidence
+      ? `补证请求没有完成（${stoppedReport(assignment)?.status ?? "blocked"}），任务 ${task.spec.id} 已冻结；只能取消这个任务。`
+      : stoppedSummary(task, assignment),
     createdAt: input.now,
     answeredAt: null,
     answer: null,
@@ -292,13 +360,7 @@ export function stoppedTasksWithoutDecision(
     const assignment = record.assignments.find(
       (entry) => entry.assignmentId === task.currentAssignmentId,
     );
-    if (
-      assignment === undefined ||
-      evidenceRepairOf(record, assignment) ||
-      !isBlockedOrFailedReport(assignment.acceptedProof)
-    ) {
-      continue;
-    }
+    if (assignment === undefined || !isBlockedOrFailedReport(assignment.acceptedProof)) continue;
     found.push({ taskId: task.spec.id, assignmentId: assignment.assignmentId });
   }
   return found;
@@ -312,8 +374,12 @@ export type AnswerRequest = {
   /** The revision the caller read; a different one now is `revision-conflict`. */
   expectedRevision: number;
   reason: string;
-  action: "retry";
+  action: DecisionAction;
   now: string;
+  /** Ids for what a cancellation opens (the reducer's own decision). */
+  newId?: (kind: string) => string;
+  /** SHA-256 of a nonce nobody keeps, for the cancellation events (shared code has no crypto). */
+  controlNonceDigest?: string;
 };
 
 export type AnswerRefusal =
@@ -326,7 +392,7 @@ export type AnswerRefusal =
   | { code: "task-not-releasable"; reason: string };
 
 export type AnswerResult =
-  | { ok: true; replayed: false; next: RunRecord; taskId: string }
+  | { ok: true; replayed: false; next: RunRecord; taskId: string; cancelled?: string[] }
   | { ok: true; replayed: true; taskId: string | null }
   | ({ ok: false } & AnswerRefusal);
 
@@ -432,17 +498,32 @@ function planResume(
   return { ok: true, resume: { kind: "fresh" } };
 }
 
+/** The attempt of a producer whose turn ended, and the receipt the host gave for it. */
+export type EndedAttempt = {
+  assignmentId: string;
+  turnId: string;
+  endedEventKey: string;
+  now: string;
+  /**
+   * Leave the nonce to the caller. A retry revokes it here because the task leaves the attempt at once;
+   * a cancellation does not, because the task is still `assigned` until the reducer freezes or cancels it,
+   * and a revoked nonce on a live attempt breaks the ledger invariants (the reducer revokes it itself).
+   */
+  leaveNonce?: boolean;
+};
+
 /**
  * Closes the attempt of a producer whose turn ended without a usable report, with the reducer's own
  * events on the turn and the receipt the host gave: `turn-started` if the attempt never recorded one,
  * then `turn-ended`. The attempt's unanswered re-sends leave the outbox, and its nonce, never accepted,
- * is revoked so nothing it might still say can be taken for a report.
+ * is revoked so nothing it might still say can be taken for a report. A retry and a cancellation both
+ * start from here.
  */
-function abandonAttempt(
+export function closeEndedAttempt(
   record: RunRecord,
-  resume: Extract<Resume, { kind: "abandon" }>,
-  now: string,
+  resume: EndedAttempt,
 ): { ok: true; next: RunRecord } | { ok: false; reason: string } {
+  const { now } = resume;
   const assignment = record.assignments.find((entry) => entry.assignmentId === resume.assignmentId);
   if (assignment === undefined) return { ok: false, reason: "decision-stale" };
   const facts = { now, newId: () => "unused" };
@@ -470,11 +551,220 @@ function abandonAttempt(
   const nonce = working.nonceRegistry.find(
     (entry) => entry.assignmentId === assignment.assignmentId && entry.nonce === assignment.nonce,
   );
-  if (nonce && nonce.acceptedAt === null && nonce.revokedAt === null) {
+  if (!resume.leaveNonce && nonce && nonce.acceptedAt === null && nonce.revokedAt === null) {
     nonce.revokedAt = now;
     nonce.revokeReason = "abandoned-by-retry";
   }
   return { ok: true, next: working };
+}
+
+/** Every task that cannot run once `taskId` is cancelled: those that depend on it, through any chain. */
+function downstreamOf(record: RunRecord, taskId: string): string[] {
+  const found = new Set<string>([taskId]);
+  const order: string[] = [];
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const task of record.tasks) {
+      if (found.has(task.spec.id) || !task.spec.deps.some((dep) => found.has(dep))) continue;
+      found.add(task.spec.id);
+      order.push(task.spec.id);
+      grew = true;
+    }
+  }
+  return order;
+}
+
+type CancelPlan = { ok: true; close: EndedAttempt | null } | { ok: false; reason: string };
+
+/**
+ * Whether the stop the decision is about is still the task's stop, and what has to be closed first. The
+ * same questions as `planResume`, without its need for a delivery to go back to: a task can be
+ * cancelled whether or not anything was delivered.
+ */
+function planCancel(
+  record: RunRecord,
+  decision: Decision,
+  kind: AnswerableKind,
+  taskId: string,
+  now: string,
+): CancelPlan {
+  const task = taskOf(record, taskId);
+  if (task === undefined) return { ok: false, reason: "task-missing" };
+  if (task.state === "done" || task.state === "cancelled")
+    return { ok: false, reason: "state-changed" };
+  if (kind.kind === "quality") {
+    const expected = kind.level === "D3" ? "failed" : "blocked";
+    if (task.state !== expected) return { ok: false, reason: "state-changed" };
+    const head = producerHead(record, taskId);
+    if (head.kind !== "ok" || head.assignment.assignmentId !== kind.producerAssignmentId) {
+      return { ok: false, reason: "decision-stale" };
+    }
+    return { ok: true, close: null };
+  }
+  const assignment = record.assignments.find((entry) => entry.assignmentId === kind.assignmentId);
+  if (
+    assignment === undefined ||
+    assignment.taskId !== taskId ||
+    task.currentAssignmentId !== assignment.assignmentId
+  ) {
+    return { ok: false, reason: "decision-stale" };
+  }
+  const supplement = evidenceRepairOf(record, assignment) !== null;
+  if (supplement !== (kind.kind === "evidence-stuck"))
+    return { ok: false, reason: "decision-stale" };
+  if (assignment.acceptedProof === null) {
+    // A producer whose turn ended with nothing usable (`openLimboDecision`): close the attempt first.
+    const evidence = limboEvidence(decision);
+    if (evidence === null || !PRODUCER_PURPOSES.includes(assignment.purpose)) {
+      return { ok: false, reason: "decision-stale" };
+    }
+    if (!OPEN_ASSIGNMENT.includes(assignment.state) || !OPEN_TASK.includes(task.state)) {
+      return { ok: false, reason: "state-changed" };
+    }
+    const ended = record.eventReceipts.find(
+      (receipt) =>
+        receipt.eventKey === evidence.endedEventKey &&
+        receipt.kind === "turn_ended" &&
+        receipt.agentId === assignment.agentId &&
+        receipt.turnId === evidence.turnId,
+    );
+    if (ended === undefined) return { ok: false, reason: "turn-not-ended" };
+    return {
+      ok: true,
+      close: {
+        assignmentId: assignment.assignmentId,
+        turnId: evidence.turnId,
+        endedEventKey: evidence.endedEventKey,
+        now,
+        leaveNonce: true,
+      },
+    };
+  }
+  if (!isBlockedOrFailedReport(assignment.acceptedProof)) {
+    return { ok: false, reason: "decision-stale" };
+  }
+  if (task.state !== "blocked" && task.state !== "failed") {
+    return { ok: false, reason: "state-changed" };
+  }
+  return { ok: true, close: null };
+}
+
+/**
+ * `cancel`: the task and everything that depends on it are cancelled, in one commit or not at all.
+ * The task goes through the reducer's own `cancel-requested` (a task with no claim is cancelled by it;
+ * one that holds a claim kept from a delivery that was sent is frozen and the reducer opens its D1
+ * `cancel:<task>`). That D1 is then answered `cancel` on the person's behalf (`via` names the decision
+ * they answered) and a second `cancel-requested` releases the claim: the reducer's authorization.
+ */
+function answerCancel(
+  record: RunRecord,
+  decision: Decision,
+  kind: AnswerableKind,
+  taskId: string,
+  input: AnswerRequest,
+): AnswerResult {
+  const refuse = (reason: string): AnswerResult => ({
+    ok: false,
+    code: "task-not-releasable",
+    reason,
+  });
+  const { newId, controlNonceDigest } = input;
+  if (newId === undefined || controlNonceDigest === undefined)
+    return refuse("cancel-facts-missing");
+  const planned = planCancel(record, decision, kind, taskId, input.now);
+  if (!planned.ok) return refuse(planned.reason);
+  let next = structuredClone(record);
+  if (planned.close !== null) {
+    const closed = closeEndedAttempt(next, planned.close);
+    if (!closed.ok) return refuse(closed.reason);
+    next = closed.next;
+  }
+  // Nothing is released that is not proven stopped.
+  if (outstandingAssignments(next, taskId).length > 0) return refuse("actors-unsettled");
+  if (hasUnsettledEffects(next, taskId)) return refuse("effects-unsettled");
+  // Everything that depends on the task can never run; each must be untouched so far.
+  const downstream = downstreamOf(next, taskId).filter(
+    (id) => taskOf(next, id)?.state !== "cancelled",
+  );
+  for (const id of downstream) {
+    const dependent = taskOf(next, id) as Task;
+    if (
+      dependent.state !== "pending" ||
+      next.assignments.some((entry) => entry.taskId === id) ||
+      next.resources.some((claim) => claim.taskId === id)
+    ) {
+      return refuse("dependent-active");
+    }
+  }
+
+  const facts = { now: input.now, newId };
+  const cancel = (id: string): string | null => {
+    const reduced = reduceRun(
+      next,
+      {
+        kind: "cancel-requested",
+        taskIds: [id],
+        reason: "decision-cancel",
+        controlNonceDigest,
+        cancelIntents: [],
+        preparedCancelIntents: [],
+      },
+      facts,
+    );
+    if (!reduced.ok) return `reducer-${String(reduced.params.reason ?? reduced.code)}`;
+    next = reduced.next;
+    return null;
+  };
+  const answer = (target: Decision, taskIds: string[], via?: string): void => {
+    target.state = "answered";
+    target.answeredAt = input.now;
+    target.answer = {
+      action: "cancel",
+      taskIds,
+      answeredAt: input.now,
+      requestId: input.requestId,
+      reason: input.reason.slice(0, 600),
+      ...(via === undefined ? {} : { via }),
+    };
+  };
+
+  const first = cancel(taskId);
+  if (first !== null) return refuse(first);
+  if (taskOf(next, taskId)?.state !== "cancelled") {
+    // Frozen: it holds a claim kept from a delivery that was sent. The reducer's D1 is the
+    // authorization to release it, and the person has just answered `cancel`.
+    const cancelDecision = next.decisions.find(
+      (entry) =>
+        entry.category === "D1" &&
+        entry.subjectId === taskId &&
+        entry.dedupeKey === `cancel:${taskId}` &&
+        entry.cancelIntents?.length === 0 &&
+        isDecisionPending(entry),
+    );
+    if (cancelDecision === undefined) return refuse("cancel-not-released");
+    answer(cancelDecision, [taskId], decision.decisionId);
+    const second = cancel(taskId);
+    if (second !== null) return refuse(second);
+    if (taskOf(next, taskId)?.state !== "cancelled") return refuse("cancel-not-released");
+  }
+  for (const id of downstream) {
+    const failure = cancel(id);
+    if (failure !== null) return refuse(failure);
+  }
+
+  const cancelled = [taskId, ...downstream];
+  answer(find(next, input.decisionId) as Decision, cancelled);
+  // The release is bound to the decision that authorized it (the reducer's D1 when there was one).
+  const task = taskOf(next, taskId) as Task;
+  task.releaseDecisionId ??= decision.decisionId;
+  audit(next, DECISION_ANSWERED_EVENT, input.now, {
+    decisionId: decision.decisionId,
+    taskId,
+    action: "cancel",
+    cancelled,
+    requestId: input.requestId,
+  });
+  return { ok: true, replayed: false, next, taskId, cancelled };
 }
 
 function find(record: RunRecord, decisionId: string): Decision | undefined {
@@ -499,18 +789,20 @@ export function answerDecision(record: RunRecord, input: AnswerRequest): AnswerR
   if (kind === null || decision.subjectId === null) {
     return { ok: false, code: "decision-not-answerable", category: decision.category };
   }
-  if (input.action !== "retry")
+  if (!actionsOfKind(kind).includes(input.action)) {
     return { ok: false, code: "action-unsupported", action: input.action };
+  }
   if (record.lifecycle !== "active") {
     return { ok: false, code: "run-not-active", lifecycle: record.lifecycle };
   }
   const taskId = decision.subjectId;
+  if (input.action === "cancel") return answerCancel(record, decision, kind, taskId, input);
   const planned = planResume(record, decision, kind, taskId);
   if (!planned.ok) return { ok: false, code: "task-not-releasable", reason: planned.reason };
 
   let next = structuredClone(record);
   if (planned.resume.kind === "abandon") {
-    const closed = abandonAttempt(next, planned.resume, input.now);
+    const closed = closeEndedAttempt(next, { ...planned.resume, now: input.now });
     if (!closed.ok) return { ok: false, code: "task-not-releasable", reason: closed.reason };
     next = closed.next;
   }

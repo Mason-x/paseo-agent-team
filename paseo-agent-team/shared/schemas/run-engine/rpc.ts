@@ -154,6 +154,8 @@ export type RunHistoryEntryView = z.infer<typeof RunHistoryEntryViewSchema>;
 export const RunHistoryPageSchema = z.object({
   events: z.array(RunHistoryEntryViewSchema).max(50),
   nextCursor: Text(256).nullable(),
+  /** Events up to this sequence number were folded into the checkpoint and are no longer listed. */
+  compactedThroughSeq: z.number().int().nonnegative().optional(),
 });
 
 /** Frozen failure codes for R07 copy; lower-case hyphen style. */
@@ -194,6 +196,8 @@ export const RunBudgetViewSchema = z.object({
 export const RunDecisionViewSchema = z.object({
   decisionId: z.string().uuid(),
   category: Text(2),
+  /** Open string: newer servers may introduce kinds that older clients can still display. */
+  kind: Text(32).optional(),
   state: z.enum(["open", "answered", "waiting-human", "superseded"]),
   subjectId: RunIdRefSchema.nullable(),
   summary: Text(4096),

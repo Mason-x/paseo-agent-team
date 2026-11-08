@@ -42,6 +42,15 @@ import type { RunStore } from "./store";
  * left waiting as above.
  */
 
+/** The reasons a reply window can be incomplete for that are the host failing to give it whole. */
+const WINDOW_READ_FAILURES: ReadonlySet<string> = new Set([
+  "too-many-pages",
+  "timeline-discontinuity",
+  "epoch-changed",
+  "dispatch-not-found",
+  "turn-unknown",
+]);
+
 export type IntakeResult =
   | { status: "run-unavailable" }
   | { status: "no-assignment" }
@@ -49,6 +58,8 @@ export type IntakeResult =
   | { status: "unverifiable"; reason: UnverifiableReason }
   /** The reply is complete but the host's turn_ended receipt is not recorded yet. */
   | { status: "turn-not-ended" }
+  /** What was read came from a message that is no longer the one to read (a newer repair went out). */
+  | { status: "stale" }
   | { status: "duplicate"; assignmentId: string }
   | { status: "problem"; assignmentId: string; reason: string }
   | {
@@ -315,6 +326,11 @@ export function createIntake(options: IntakeOptions) {
       case "unknown-assignment":
         return { status: "no-assignment" };
       case "unverifiable":
+        // A window the host could not give whole is a read that did not work: read it again later. A
+        // turn that is simply still open, or a reply too large to ever fit, is not.
+        if (WINDOW_READ_FAILURES.has(inspected.reason)) {
+          await reportReadFailure(runId, assignmentId, agentId);
+        }
         return { status: "unverifiable", reason: inspected.reason };
       case "missing":
         return recordProblem(runId, assignmentId, "report-missing", {
@@ -382,11 +398,16 @@ export function createIntake(options: IntakeOptions) {
         holder.result = { status: "duplicate", assignmentId };
         return null;
       }
+      // The reply was read from `anchor` outside the lock. If a newer repair has gone out since, that
+      // read is of an older message: nothing from it is committed, and the next pass reads the new one.
+      if (replyAnchor(current, assignment) !== anchor) {
+        holder.result = { status: "stale" };
+        return null;
+      }
       if (witnesses !== null) {
         const currentWakes = repairWakes(current, assignmentId);
         if (
           !evidenceRepairOf(current, assignment) ||
-          replyAnchor(current, assignment) !== anchor ||
           currentWakes.length !== witnesses.length ||
           currentWakes.some(
             (wake, index) =>

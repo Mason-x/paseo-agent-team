@@ -5,8 +5,10 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createEffects, type EffectsOptions, payloadHash } from "../../server/run-engine/effects";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
+import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import { bootstrapRun } from "./support/bootstrap-run";
 import {
   INTENT_T1,
   INTENT_T2,
@@ -406,5 +408,276 @@ describe("outbox: ordering and concurrency", () => {
       effectsFor(store, host.port).runOutbox("run-fx0032-a1"),
     ]);
     expect(host.sent).toHaveLength(1);
+  });
+});
+
+describe("outbox: a Run that is not live sends nothing new (plan point 36)", () => {
+  const NOW = { now: "2026-11-05T12:00:00.000Z", newId: () => "x" };
+
+  /** The ledger moves to `lifecycle` by the reducer where it has an event, by hand where it has none. */
+  async function setLifecycle(store: RunStore, runId: string, lifecycle: RunRecord["lifecycle"]) {
+    await store.update(runId, (current) => {
+      if (lifecycle === "paused") {
+        const out = reduceRun(current, { kind: "run-paused" }, NOW);
+        return out.ok ? out.next : null;
+      }
+      if (lifecycle === "active" && current.lifecycle === "paused") {
+        const out = reduceRun(current, { kind: "run-resumed" }, NOW);
+        return out.ok ? out.next : null;
+      }
+      return { ...current, lifecycle };
+    });
+  }
+
+  test.each(["paused", "finished", "cancelled"] as const)(
+    "a %s Run keeps its prepared message prepared and sends nothing",
+    async (lifecycle) => {
+      const store = await openStore();
+      await seed(store, "run-fx0040-a1");
+      await setLifecycle(store, "run-fx0040-a1", lifecycle);
+      const host = fakeHost();
+      const report = await effectsFor(store, host.port).runOutbox("run-fx0040-a1");
+      expect(report).toEqual({
+        status: "ok",
+        sent: [],
+        reconciled: [],
+        unknown: [],
+        failed: [],
+      });
+      expect(host.sent).toEqual([]);
+      expect(await intentState(store, "run-fx0040-a1")).toMatchObject({ state: "prepared" });
+    },
+  );
+
+  test.each(["bootstrapping", "awaiting-dag", "active"] as const)(
+    "a %s Run still sends (the plan request goes out while bootstrapping)",
+    async (lifecycle) => {
+      const store = await openStore();
+      await seed(store, "run-fx0041-a1");
+      await setLifecycle(store, "run-fx0041-a1", lifecycle);
+      const host = fakeHost();
+      const report = await effectsFor(store, host.port).runOutbox("run-fx0041-a1");
+      expect(report.sent).toEqual([INTENT_T2]);
+      expect(host.sent).toHaveLength(1);
+    },
+  );
+
+  test("the pause that lands after the caller read the ledger still stops the send", async () => {
+    const store = await openStore();
+    await seed(store, "run-fx0042-a1");
+    const before = await store.get("run-fx0042-a1");
+    if (before.status !== "ok") throw new Error("unreadable");
+    await setLifecycle(store, "run-fx0042-a1", "paused");
+    // Every read the executor makes returns the active ledger it saw before the pause.
+    const stale = { get: async () => before, update: store.update.bind(store) };
+    const host = fakeHost();
+    const report = await effectsFor(stale, host.port).runOutbox("run-fx0042-a1");
+    expect(report.sent).toEqual([]);
+    expect(host.sent).toEqual([]);
+    expect(await intentState(store, "run-fx0042-a1")).toMatchObject({ state: "prepared" });
+  });
+
+  test("a paused Run still reads the host: an unknown delivery is settled by echo, never re-sent", async () => {
+    const store = await openStore();
+    await seed(store, "run-fx0043-a1");
+    await store.update("run-fx0043-a1", (current) => {
+      const moved = transitionIntent(current, INTENT_T2, "sending", {
+        now: "2026-11-05T11:59:00.000Z",
+      });
+      return moved.ok ? moved.next : null;
+    });
+    await setLifecycle(store, "run-fx0043-a1", "paused");
+
+    const host = fakeHost();
+    const effects = effectsFor(store, host.port);
+    const first = await effects.runOutbox("run-fx0043-a1");
+    expect(first.unknown).toEqual([INTENT_T2]);
+    expect(await intentState(store, "run-fx0043-a1")).toMatchObject({ state: "outcome-unknown" });
+
+    host.state.page = echoPage(MESSAGE_T2);
+    const second = await effects.runOutbox("run-fx0043-a1");
+    expect(second.reconciled).toEqual([INTENT_T2]);
+    expect(await intentState(store, "run-fx0043-a1")).toMatchObject({ state: "confirmed" });
+    expect(host.sent).toEqual([]);
+  });
+
+  test("a finished Run still settles an unknown delivery by echo and sends nothing", async () => {
+    const store = await openStore();
+    await seed(store, "run-fx0044-a1");
+    await store.update("run-fx0044-a1", (current) => {
+      const sending = transitionIntent(current, INTENT_T2, "sending", {
+        now: "2026-11-05T11:58:00.000Z",
+      });
+      if (!sending.ok) return null;
+      const moved = transitionIntent(sending.next, INTENT_T2, "outcome-unknown", {
+        now: "2026-11-05T11:59:00.000Z",
+        reason: "send:test",
+      });
+      return moved.ok ? moved.next : null;
+    });
+    await setLifecycle(store, "run-fx0044-a1", "finished");
+    const host = fakeHost({ page: echoPage(MESSAGE_T2) });
+    const report = await effectsFor(store, host.port).runOutbox("run-fx0044-a1");
+    expect(report.reconciled).toEqual([INTENT_T2]);
+    expect(host.sent).toEqual([]);
+  });
+
+  test("the plan request (a wake) goes out while bootstrapping and waits when the Run is paused", async () => {
+    const PLAN_TEXT = "plan request text";
+    const bootstrap = (runId: string): RunRecord => {
+      const record = bootstrapRun({ runId, planRequest: true });
+      const plan = record.outbox.find((intent) => intent.id === "intent-plan-1");
+      if (!plan) throw new Error("fixture lost the plan request");
+      Object.assign(plan, {
+        state: "prepared",
+        confirmedAt: null,
+        payloadHash: payloadHash(PLAN_TEXT),
+      });
+      return record;
+    };
+    const compile = (intent: { id: string }) => (intent.id === "intent-plan-1" ? PLAN_TEXT : null);
+
+    const live = await openStore();
+    await seed(live, "run-fx0046-a1", bootstrap("run-fx0046-a1"));
+    const liveHost = fakeHost();
+    const liveReport = await effectsFor(live, liveHost.port, { compile }).runOutbox(
+      "run-fx0046-a1",
+    );
+    expect(liveReport.sent).toEqual(["intent-plan-1"]);
+
+    for (const lifecycle of ["paused", "finished", "cancelled"] as const) {
+      const runId = `run-fx0047-${lifecycle.slice(0, 2)}`;
+      const store = await openStore();
+      await seed(store, runId, { ...bootstrap(runId), lifecycle });
+      const host = fakeHost();
+      const report = await effectsFor(store, host.port, { compile }).runOutbox(runId);
+      expect(report.sent).toEqual([]);
+      expect(host.sent).toEqual([]);
+      expect(await intentState(store, runId, "intent-plan-1")).toMatchObject({ state: "prepared" });
+    }
+  });
+
+  test("resumed, the prepared message goes out once and only once", async () => {
+    const store = await openStore();
+    await seed(store, "run-fx0045-a1");
+    await setLifecycle(store, "run-fx0045-a1", "paused");
+    const host = fakeHost();
+    const effects = effectsFor(store, host.port);
+    expect((await effects.runOutbox("run-fx0045-a1")).sent).toEqual([]);
+    expect((await effects.runOutbox("run-fx0045-a1")).sent).toEqual([]);
+
+    await setLifecycle(store, "run-fx0045-a1", "active");
+    expect((await effects.runOutbox("run-fx0045-a1")).sent).toEqual([INTENT_T2]);
+    expect((await effects.runOutbox("run-fx0045-a1")).sent).toEqual([]);
+    expect(host.sent).toHaveLength(1);
+    expect(await intentState(store, "run-fx0045-a1")).toMatchObject({ state: "confirmed" });
+  });
+});
+
+describe("outbox: a report-format repair is sent only while its assignment still waits for a report (plan point 37)", () => {
+  const RUN = "run-fx0050-a1";
+  const REPAIR = "intent-repair-1";
+  /** In the fixture t1's assignment has ended and holds its accepted proof; t2's still waits. */
+  const ENDED = { assignmentId: "assignment-t1-a1", taskId: "t1" };
+  const WAITING = { assignmentId: "assignment-t2-a1", taskId: "t2" };
+  const compile = (intent: { id: string }) => (intent.id === REPAIR ? PROMPT_T2 : null);
+
+  /** The original dispatches are confirmed; a prepared repair request aims at `target`. */
+  function repairRun(target: { assignmentId: string; taskId: string } = WAITING): RunRecord {
+    const record = preparedRun(RUN, HASH, {
+      t2: { state: "confirmed", confirmedAt: "2026-11-05T11:00:00.000Z" },
+    });
+    record.outbox.push({
+      id: REPAIR,
+      kind: "wake",
+      recipient: RECIPIENT,
+      messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+      idempotencyKey: `repair:${RUN}:${target.assignmentId}:1`,
+      payloadHash: HASH,
+      templateVersion: 1,
+      state: "prepared",
+      recoverySendCount: 0,
+      createdAt: "2026-11-05T11:30:00.000Z",
+      confirmedAt: null,
+      localCancellation: null,
+      ...target,
+      semanticArgs: {
+        purpose: "repair",
+        ordinal: 1,
+        limit: 3,
+        reason: "report-missing",
+        issues: [],
+        kinds: ["task-report"],
+      },
+    } as RunRecord["outbox"][number]);
+    return record;
+  }
+
+  test("a repair for an assignment that still waits is sent", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun());
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile }).runOutbox(RUN);
+    expect(report.sent).toEqual([REPAIR]);
+    expect(host.sent).toHaveLength(1);
+  });
+
+  test("a repair whose assignment has ended with its report accepted is failed in the same commit and never sent", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun(ENDED));
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile }).runOutbox(RUN);
+    expect(report).toMatchObject({ sent: [], failed: [REPAIR] });
+    expect(host.sent).toEqual([]);
+    expect(await intentState(store, RUN, REPAIR)).toMatchObject({ state: "failed" });
+    const read = await store.get(RUN);
+    if (read.status !== "ok") throw new Error("unreadable");
+    const event = read.record.events.find((entry) => entry.kind === "intent-failed");
+    expect(event?.payload.reason).toBe("superseded-before-send");
+  });
+
+  test("the report that lands after the caller read the ledger still stops the repair", async () => {
+    const store = await openStore();
+    await seed(store, RUN, repairRun());
+    const before = await store.get(RUN);
+    if (before.status !== "ok") throw new Error("unreadable");
+    // The repair now belongs to an assignment that has finished: it happened after the executor's snapshot.
+    await store.update(RUN, (current) => {
+      const intent = current.outbox.find((entry) => entry.id === REPAIR);
+      if (!intent) return null;
+      Object.assign(intent, ENDED);
+      return current;
+    });
+    const stale = { get: async () => before, update: store.update.bind(store) };
+    const host = fakeHost();
+    const report = await effectsFor(stale, host.port, { compile }).runOutbox(RUN);
+    expect(report.sent).toEqual([]);
+    expect(host.sent).toEqual([]);
+    expect(await intentState(store, RUN, REPAIR)).toMatchObject({ state: "failed" });
+  });
+
+  test("a failed repair does not hold up the next message to another agent", async () => {
+    const store = await openStore();
+    const record = repairRun(ENDED);
+    const dispatch = record.outbox.find((entry) => entry.id === INTENT_T1);
+    if (!dispatch) throw new Error("fixture lost the t1 intent");
+    // A second prepared message, for someone else, behind the repair in ledger order.
+    record.outbox.push({
+      ...structuredClone(dispatch),
+      id: "intent-after",
+      recipient: "agent-other",
+      messageId: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+      idempotencyKey: "dispatch-after",
+      payloadHash: HASH,
+      state: "prepared",
+      confirmedAt: null,
+      assignmentId: "assignment-t2-a1",
+      taskId: "t2",
+    } as RunRecord["outbox"][number]);
+    await seed(store, RUN, record);
+    const host = fakeHost();
+    const report = await effectsFor(store, host.port, { compile: () => PROMPT_T2 }).runOutbox(RUN);
+    expect(report.failed).toEqual([REPAIR]);
+    expect(report.sent).toEqual(["intent-after"]);
   });
 });

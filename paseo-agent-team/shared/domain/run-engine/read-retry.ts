@@ -29,6 +29,11 @@ export const READ_RETRY_MAX_ATTEMPTS = 3;
 /** The wait before try 1, 2 and 3. A failed try that was not the last waits for the next entry. */
 export const READ_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 export const READ_RETRY_EVENT = "read-retry-changed";
+/**
+ * A read that works again moves the Run on by itself, but only for the first few times a source
+ * recovers: a host that flaps for ever is not chased for ever, it is left with the warning.
+ */
+export const READ_RETRY_AUTO_CONTINUE_GENERATIONS = 3;
 
 const Time = RunTimeSchema;
 
@@ -174,11 +179,56 @@ function label(target: ReadRetryTarget): string {
     : `Agent ${target.agentId} 的回复（${target.assignmentId}）`;
 }
 
-/** The text of the alert for an item, the same every time so the alert is found again. */
-export function readRetryAlertSummary(item: ReadRetryItem): string {
+/** The reason a used-up re-check carries when the host no longer has the turn it was asked about. */
+const LOST_TURN_CODE = "incomplete:dispatch-not-found";
+
+/**
+ * Said after the fixed text when the host lost the turn (a restart in the middle of it). The Engine does
+ * not settle such a turn and never asks the member again; what a person can do is let the member answer
+ * once, so the host reports a turn of its own. It does not promise that this recovers the Run.
+ */
+export const LOST_TURN_HINT =
+  "。宿主可能丢失了进行中的回合：待该成员在 Paseo 里空闲后，向它发一条只要求回复 OK 的消息，等它回复后点“立即检查并推进”（不保证一定恢复）";
+
+/** The text before the hint was added; alerts written by earlier versions carry exactly this. */
+function earlierAlertSummary(item: ReadRetryItem): string {
   return item.state === "held"
     ? `读取重试已用尽（${item.lastCode ?? "unknown"}）：${label(item.target)}，请检查宿主后 kick`
     : `读取恢复，报告未入账，请 kick：${label(item.target)}`;
+}
+
+/** The text of the alert for an item, the same every time so the alert is found again. */
+export function readRetryAlertSummary(item: ReadRetryItem): string {
+  const base = earlierAlertSummary(item);
+  return item.state === "held" && item.lastCode === LOST_TURN_CODE
+    ? `${base}${LOST_TURN_HINT}`
+    : base;
+}
+
+/** Every text the alert of an item may carry: the current one, and the one of earlier versions. */
+function alertSummariesOf(item: ReadRetryItem): string[] {
+  return [...new Set([readRetryAlertSummary(item), earlierAlertSummary(item)])];
+}
+
+/**
+ * Raises the alert of an item, unless one of earlier wording for the same item is still there: that one
+ * is the same alert, and a second would only say it twice.
+ */
+function raiseItemAlert(
+  record: RunRecord,
+  item: ReadRetryItem,
+  now: string,
+  alertId: (summary: string) => string,
+): RunRecord {
+  const summary = readRetryAlertSummary(item);
+  const earlier = earlierAlertSummary(item);
+  if (
+    earlier !== summary &&
+    record.alerts.some((alert) => alert.state !== "resolved" && alert.summary === earlier)
+  ) {
+    return record;
+  }
+  return raiseAlert(record, { alertId: alertId(summary), severity: "warning", summary }, now).next;
 }
 
 /**
@@ -303,15 +353,7 @@ export function beginTries(
       const after = afterFailure(item, "interrupted", now);
       events.push({ item: after.item, now });
       if (after.exhausted) {
-        next = raiseAlert(
-          next,
-          {
-            alertId: alertId(readRetryAlertSummary(after.item)),
-            severity: "warning",
-            summary: readRetryAlertSummary(after.item),
-          },
-          now,
-        ).next;
+        next = raiseItemAlert(next, after.item, now, alertId);
       }
       return after.item;
     }
@@ -377,24 +419,12 @@ export function finishTries(
             }
           : { lastCode: "superseded" }),
       };
-      if (still) {
-        const summary = readRetryAlertSummary(after);
-        next = raiseAlert(
-          next,
-          { alertId: alertId(summary), severity: "warning", summary },
-          now,
-        ).next;
-      }
+      if (still) next = raiseItemAlert(next, after, now, alertId);
     } else {
       const failed = afterFailure(item, outcome.code.slice(0, 64), now);
       after = failed.item;
       if (failed.exhausted && targetStillWaited(record, item.target)) {
-        const summary = readRetryAlertSummary(after);
-        next = raiseAlert(
-          next,
-          { alertId: alertId(summary), severity: "warning", summary },
-          now,
-        ).next;
+        next = raiseItemAlert(next, after, now, alertId);
       }
     }
     events.push({ item: after, now });
@@ -402,6 +432,32 @@ export function finishTries(
   });
   if (events.length === 0) return { changed: false, next: record };
   return { changed: true, next: commit(next, items, events, now) };
+}
+
+/**
+ * The items a commit moved to `resolved` with a result (the read works again and the thing it was for
+ * is still waited on), for the first `READ_RETRY_AUTO_CONTINUE_GENERATIONS` generations of their source.
+ * Compares the record before and after, so it needs nothing from `finishTries` itself.
+ */
+export function recoveredItems(
+  before: RunRecord,
+  after: RunRecord,
+): { key: string; generation: number }[] {
+  const was = readReadRetries(before);
+  const now = readReadRetries(after);
+  if (now.kind !== "valid") return [];
+  const found: { key: string; generation: number }[] = [];
+  for (const item of now.items) {
+    if (item.state !== "resolved" || item.result === undefined) continue;
+    if (item.generation > READ_RETRY_AUTO_CONTINUE_GENERATIONS) continue;
+    const prior =
+      was.kind === "valid"
+        ? was.items.find((entry) => entry.key === item.key && entry.generation === item.generation)
+        : undefined;
+    if (prior?.state === "resolved") continue;
+    found.push({ key: item.key, generation: item.generation });
+  }
+  return found;
 }
 
 /**
@@ -426,7 +482,7 @@ export function sweepReadRetries(
         ? !targetStillWaited(record, item.target)
         : !notedKeys.has(item.key));
     if (!over) continue;
-    ids.add(alertId(readRetryAlertSummary(item)));
+    for (const summary of alertSummariesOf(item)) ids.add(alertId(summary));
   }
   if (ids.size === 0) return { changed: false, next: record };
   const resolved = resolveAlerts(record, (alert) => ids.has(alert.alertId), now);

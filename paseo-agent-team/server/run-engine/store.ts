@@ -95,7 +95,15 @@ export type RunUpdateResult =
   | { status: "unchanged"; record: RunRecord; revision: number; digest: string };
 
 export type RunStoreReadResult =
-  | { status: "ok"; record: RunRecord; revision: number; digest: string; bytes: number }
+  | {
+      status: "ok";
+      record: RunRecord;
+      revision: number;
+      digest: string;
+      bytes: number;
+      /** The record is at or past the soft size limit: compaction should be tried. */
+      needsCompaction: boolean;
+    }
   | { status: "missing" }
   | { status: "unknown-version"; schemaVersion: number; digest: string }
   | { status: "corrupt"; reason: string; digest: string | null; issuePath: string | null };
@@ -338,6 +346,7 @@ export function createRunStore(options: RunStoreOptions) {
         revision: read.revision,
         digest: read.digest,
         bytes: read.bytes,
+        needsCompaction: read.needsCompaction,
       };
     }
     if (read.status === "missing") return { status: "missing" };

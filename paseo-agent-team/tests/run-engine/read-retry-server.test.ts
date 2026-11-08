@@ -92,8 +92,12 @@ const complete = (turnId = "turn-9"): ReplyWindow => ({
 });
 
 /** A clock the test moves, a scheduler it can look at, and reads whose answers it chooses. */
-function harness(target: RunStore = store) {
+function harness(
+  target: RunStore = store,
+  options: { onRecovered?: (runId: string) => void | Promise<void> } = {},
+) {
   const clock = { at: T0 };
+  const recovered: string[] = [];
   const timers: { ms: number; cancelled: boolean }[] = [];
   const calls = { reply: 0, seat: 0 };
   const answers: { reply: (() => Promise<ReplyWindow>)[]; seat: (() => Promise<void>)[] } = {
@@ -116,6 +120,10 @@ function harness(target: RunStore = store) {
       if (!answer) throw new Error("the host did not answer");
       return answer();
     },
+    onRecovered: async (runId) => {
+      recovered.push(runId);
+      await options.onRecovered?.(runId);
+    },
     readSeat: async () => {
       calls.seat += 1;
       const answer = answers.seat.shift();
@@ -124,7 +132,7 @@ function harness(target: RunStore = store) {
     },
   });
   const live = () => timers.filter((timer) => !timer.cancelled);
-  return { retry, clock, timers, calls, answers, live };
+  return { retry, clock, timers, calls, answers, live, recovered };
 }
 
 describe("after a failed read", () => {
@@ -243,6 +251,148 @@ describe("the tries", () => {
     await h.retry.fire();
     expect(h.calls).toEqual({ reply: 0, seat: 1 });
     expect((await items())[0]).toMatchObject({ state: "resolved" });
+  });
+});
+
+describe("when a read works again", () => {
+  test("the owner is told once, after the result is on the ledger, for a reply and for a seat", async () => {
+    await store.create(record());
+    const seen: string[] = [];
+    const h = harness(store, {
+      onRecovered: async () => {
+        const [item] = await items();
+        seen.push(item?.state ?? "none");
+      },
+    });
+    await h.retry.note(RUN_ID, REPLY);
+    h.answers.reply.push(async () => complete("turn-9"));
+    h.clock.at += 1000;
+    await h.retry.fire();
+    expect(h.recovered).toEqual([RUN_ID]);
+    // Called after the commit: the item it was told about is already resolved.
+    expect(seen).toEqual(["resolved"]);
+    h.clock.at += 10_000;
+    await h.retry.fire();
+    expect(h.recovered).toHaveLength(1);
+
+    const seat = harness();
+    seat.answers.seat.push(async () => undefined);
+    await seat.retry.note(RUN_ID, SEAT);
+    seat.clock.at += 1000;
+    await seat.retry.fire();
+    expect(seat.recovered).toEqual([RUN_ID]);
+  });
+
+  test("a failed try, an item used up, and a thing no longer waited for tell nobody", async () => {
+    await store.create(record());
+    const h = harness();
+    await h.retry.note(RUN_ID, REPLY);
+    for (const wait of [1000, 2000, 4000]) {
+      h.clock.at += wait;
+      await h.retry.fire();
+    }
+    expect((await items())[0]?.state).toBe("held");
+    expect(h.recovered).toEqual([]);
+
+    // The reply is read, but the report is no longer waited for: it is not a recovery.
+    const other = harness();
+    await other.retry.note(RUN_ID, { ...REPLY, anchorMessageId: "a-message-nobody-waits-for" });
+    other.answers.reply.push(async () => complete("turn-9"));
+    other.clock.at += 1000;
+    await other.retry.fire();
+    expect(other.recovered).toEqual([]);
+  });
+
+  test("only the first three times a source recovers are told; the fourth is left with the warning", async () => {
+    await store.create(record());
+    const h = harness();
+    for (let round = 1; round <= 4; round += 1) {
+      await h.retry.note(RUN_ID, REPLY);
+      h.answers.reply.push(async () => complete("turn-9"));
+      h.clock.at += 1000;
+      await h.retry.fire();
+      expect((await items())[0]).toMatchObject({ state: "resolved", generation: round });
+    }
+    expect(h.recovered).toHaveLength(3);
+    expect((await stored()).alerts.some((alert) => alert.summary.includes("读取恢复"))).toBe(true);
+  });
+
+  test("an owner that fails does not stop the timer or undo the record", async () => {
+    await store.create(record());
+    const h = harness(store, {
+      onRecovered: async () => {
+        throw new Error("the push failed");
+      },
+    });
+    await h.retry.note(RUN_ID, REPLY);
+    h.answers.reply.push(async () => complete("turn-9"));
+    h.clock.at += 1000;
+    await h.retry.fire();
+    expect((await items())[0]?.state).toBe("resolved");
+    expect(h.retry.armed).toBe(false);
+    await h.retry.note(RUN_ID, SEAT);
+    expect(h.live()).toHaveLength(1);
+  });
+
+  test("a block that only knows the old target types still reads, and the version has not moved", async () => {
+    await store.create(record());
+    const h = harness();
+    await h.retry.note(RUN_ID, REPLY);
+    await h.retry.note(RUN_ID, SEAT);
+    const block = ((await stored()) as Record<string, unknown>).readRetries as {
+      version: number;
+      items: { target: { type: string } }[];
+    };
+    expect(block.version).toBe(1);
+    expect(block.items.map((item) => item.target.type).sort()).toEqual(["reply", "seat"]);
+  });
+});
+
+describe("reads that reconcile could not make", () => {
+  test("the reply an open assignment waits for is handed to the re-checks, with the assignment's own fields", async () => {
+    await store.create(record());
+    const told: [string, ReadFailure][] = [];
+    const observer = createRunObserver({
+      store,
+      onReadFailure: (runId, failure) => {
+        told.push([runId, failure]);
+      },
+    });
+    const summary = await observer.reconcile({
+      replyWindow: async () => {
+        throw new Error("the host did not answer");
+      },
+    });
+    expect(summary.hostErrors).toBeGreaterThan(0);
+    expect(told).toContainEqual([
+      RUN_ID,
+      expect.objectContaining({
+        type: "reply",
+        agentId: "agent-b1",
+        taskId: "t2",
+        assignmentId: ASSIGNMENT_T2,
+      }),
+    ]);
+    // Only replies of assignments: the coordinator's plan reply is not given one.
+    expect(
+      told.every(([, failure]) => failure.type === "reply" && failure.assignmentId !== ""),
+    ).toBe(true);
+  });
+
+  test("an owner that throws does not break the reconcile", async () => {
+    await store.create(record());
+    const observer = createRunObserver({
+      store,
+      onReadFailure: async () => {
+        throw new Error("cannot note");
+      },
+    });
+    const summary = await observer.reconcile({
+      replyWindow: async () => {
+        throw new Error("the host did not answer");
+      },
+    });
+    expect(summary.hostErrors).toBeGreaterThan(0);
   });
 });
 

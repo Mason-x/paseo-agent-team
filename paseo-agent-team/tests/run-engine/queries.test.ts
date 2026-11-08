@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -6,8 +6,13 @@ import { historyPage, projectDetail } from "../../server/run-engine/projection";
 import { createRunQueries } from "../../server/run-engine/queries";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { RunGetOutputSchema, RunListOutputSchema } from "../../shared/schemas/run-engine/rpc";
+import {
+  RunDecisionViewSchema,
+  RunGetOutputSchema,
+  RunListOutputSchema,
+} from "../../shared/schemas/run-engine/rpc";
 import { assignmentsForRun, noncesForRun, withLedger } from "../fixtures/run-engine/base";
+import { preparedRun } from "./support/prepared-run";
 
 const homes: string[] = [];
 const stores: RunStore[] = [];
@@ -141,6 +146,35 @@ describe("run.get", () => {
 });
 
 describe("projection", () => {
+  test("a decision kind survives the new projection and older clients can strip it", () => {
+    const record = ledger("run-qry010-a1");
+    record.decisions = [
+      {
+        decisionId: "11111111-1111-4111-8111-111111111111",
+        category: "D1",
+        controlNonceDigest: "a".repeat(64),
+        state: "open",
+        dedupeKey: "stuck:assignment-t1-r1",
+        cancelIntents: null,
+        subjectId: "t1",
+        summary: "Reviewer stopped",
+        createdAt: "2026-11-06T10:00:00.000Z",
+        answeredAt: null,
+        answer: null,
+        resolution: null,
+      },
+    ];
+    const projected = projectDetail(record);
+    if (!projected.ok) throw new Error("projection failed");
+    const view = projected.view.decisions[0];
+    expect(view?.kind).toBe("stuck-judge");
+    const oldSchema = RunDecisionViewSchema.omit({ kind: true });
+    const oldView = oldSchema.parse(view);
+    expect(Object.hasOwn(oldView, "kind")).toBe(false);
+    expect(RunDecisionViewSchema.parse({ ...view, kind: "future-kind" }).kind).toBe("future-kind");
+    expect(RunDecisionViewSchema.parse(oldView).kind).toBeUndefined();
+  });
+
   test("a pending task names its first unfinished dependency as the reason it waits", () => {
     const record = ledger("run-qry010-a1");
     const dependent = record.tasks.find((task) => task.spec.deps.length > 0);
@@ -224,6 +258,67 @@ describe("history", () => {
   });
 });
 
+describe("reading a live Run", () => {
+  test("the list, the detail and every history page leave a Run with a message waiting to go out byte for byte as it was, and write nothing", async () => {
+    const { home, store } = await setup();
+    const runId = "run-qry040-a1";
+    const record = preparedRun(runId, "a".repeat(64));
+    // A long history, so the detail has older pages to walk.
+    record.events = Array.from({ length: 120 }, (_, index) => ({
+      seq: index + 1,
+      kind: "audit-note",
+      at: "2026-11-05T00:00:00.000Z",
+      payload: {},
+    }));
+    record.counters.eventsThroughSeq = 120;
+    await store.create(record);
+    expect(record.outbox.some((intent) => intent.state === "prepared")).toBe(true);
+
+    const file = recordFile(home, runId);
+    const filesBefore = await readdir(path.dirname(file));
+    const before = await readFile(file, "utf8");
+
+    // Anything that would write goes through `create` or `update`; count them, and let them through.
+    const writes: string[] = [];
+    const watched = new Proxy(store, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "create" || property === "update") writes.push(String(property));
+          return value.apply(target, args);
+        };
+      },
+    });
+    const queries = createRunQueries({ store: watched, ensureReady: async () => undefined });
+
+    const listed = await queries.list({ runContractVersion: 1 });
+    expect(listed.runs.map((entry) => entry.runId)).toContain(runId);
+    const first = await queries.get({ runContractVersion: 1, runId });
+    expect(first.status).toBe("ready");
+    const cursor = first.status === "ready" ? first.history.nextCursor : null;
+    expect(cursor).not.toBeNull();
+    const older = await queries.get({
+      runContractVersion: 1,
+      runId,
+      historyCursor: cursor ?? undefined,
+    });
+    expect(older.status).toBe("ready");
+    expect((await queries.get({ runContractVersion: 1, runId, knownRevision: 1 })).status).toBe(
+      "unchanged",
+    );
+
+    expect(writes).toEqual([]);
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(await readdir(path.dirname(file))).toEqual(filesBefore);
+    // The waiting message is still waiting: reading is not sending.
+    const after = await store.get(runId);
+    if (after.status !== "ok") throw new Error("run unreadable");
+    expect(after.record.outbox.find((intent) => intent.state === "prepared")).toBeDefined();
+    expect(after.revision).toBe(1);
+  });
+});
+
 describe("run.list", () => {
   test("pages newest first, never repeats a run, and lists damaged runs as health instead of hiding them", async () => {
     const { home, store } = await setup();
@@ -261,7 +356,7 @@ describe("run.list", () => {
       runEngine: 1,
       observationOnly: true,
       enabled: false,
-      supportedControls: ["replan", "decide", "kick"],
+      supportedControls: ["replan", "decide", "kick", "pause", "resume", "cancel", "budget"],
     });
     expect(out.runs).toEqual([]);
   });
