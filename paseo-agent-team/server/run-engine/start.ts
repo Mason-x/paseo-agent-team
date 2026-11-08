@@ -432,3 +432,97 @@ export async function startEngineRun(
     launchState: sent ? "running" : "kickoff-pending",
   };
 }
+
+// --- a launch that a restart cut off ----------------------------------------------------------------
+
+export type InterruptedLaunchOptions = {
+  store: Pick<RunStore, "list" | "get" | "update">;
+  /** True for a Run this process is starting right now: its launch is not interrupted, only slow. */
+  isStarting(runId: string): boolean;
+  clock?: { now(): string };
+  log?: (message: string, detail?: unknown) => void;
+};
+
+const SEATS_SHOWN = 8;
+
+function interruptedSummary(record: RunRecord): string {
+  const step = record.launch.state === "preparing" ? "创建记录" : "创建成员";
+  const bound = record.roster.filter((seat) => seat.agentId);
+  // Agent creation always starts with the coordinator, even though the roster lists it last.
+  const coordinator = record.roster.find((seat) => seat.seatId === COORDINATOR_SEAT_ID);
+  const next =
+    (coordinator?.enabled && !coordinator.agentId ? coordinator : undefined) ??
+    record.roster.find((seat) => seat.enabled && !seat.agentId);
+  const unbound = next ? `可能还有一个已创建但未登记的 Agent（席位 ${next.seatId}）。` : "";
+  const prefix = `启动在${step}时中断（插件或 daemon 重启）。已登记的 Agent：`;
+  const suffix = `；${unbound}这个 Run 不会继续，请重新启动，并在 Agent 列表里归档不再需要的成员。`;
+  const more = `等共 ${bound.length} 个`;
+  // Leave room for the warning and instructions, and never cut an agent identifier in half.
+  const limit = 1000 - prefix.length - suffix.length - more.length;
+  let listed = "";
+  let shown = 0;
+  for (const seat of bound.slice(0, SEATS_SHOWN)) {
+    const item = `${listed ? "，" : ""}${seat.seatId}=${seat.agentId}`;
+    if (listed.length + item.length > limit) break;
+    listed += item;
+    shown += 1;
+  }
+  return `${prefix}${listed || (bound.length ? "详见运行记录" : "无")}${shown < bound.length ? more : ""}${suffix}`;
+}
+
+/**
+ * A launch that was still `preparing` or `creating` when the process stopped will never go on: the
+ * agents it was creating are not known, and nothing here can resume it. It is marked failed, with a
+ * critical alert that names the agents that are on the record and the seat that may have an agent the
+ * record never learned of. Nothing is called on the host and nothing is archived (whether to archive
+ * was a preference of the start, which the record does not keep). A Run this process is starting is
+ * left alone, and a second look finds nothing to do.
+ */
+export async function failInterruptedLaunches(options: InterruptedLaunchOptions): Promise<number> {
+  const clock = options.clock ?? { now: () => new Date().toISOString() };
+  const log = options.log ?? (() => undefined);
+  let failed = 0;
+  try {
+    const listed = await options.store.list();
+    for (const entry of listed.entries) {
+      if (entry.lifecycle === "finished" || entry.lifecycle === "cancelled") continue;
+      if (options.isStarting(entry.runId)) continue;
+      try {
+        let changed = false;
+        await options.store.update(entry.runId, (current) => {
+          const state = current.launch.state;
+          // Judged again on the committed record, and again for the Run that began starting meanwhile.
+          if (
+            current.lifecycle === "finished" ||
+            current.lifecycle === "cancelled" ||
+            (state !== "preparing" && state !== "creating") ||
+            options.isStarting(entry.runId)
+          ) {
+            return null;
+          }
+          const moved = setLaunchState(
+            current,
+            "failed",
+            clock.now(),
+            `interrupted-while-${state}`,
+          );
+          if (!moved.ok) return null;
+          const summary = interruptedSummary(current);
+          const raised = raiseAlert(
+            moved.next,
+            { alertId: alertIdFor(summary), severity: "critical", summary },
+            clock.now(),
+          );
+          changed = true;
+          return raised.next;
+        });
+        if (changed) failed += 1;
+      } catch (error) {
+        log(`could not close the interrupted launch of ${entry.runId}`, error);
+      }
+    }
+  } catch (error) {
+    log("could not look for interrupted launches", error);
+  }
+  return failed;
+}

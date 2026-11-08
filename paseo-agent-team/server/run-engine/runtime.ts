@@ -19,7 +19,12 @@ import { createRunObserver, type ObserverHookEvent } from "./observer";
 import { createReadRetry } from "./read-retry";
 import { type CommitIdentity, commitIdentity } from "./repo";
 import { createEngineService, type SeatSource } from "./service";
-import { type EngineStartInput, type EngineStartResult, startEngineRun } from "./start";
+import {
+  type EngineStartInput,
+  type EngineStartResult,
+  failInterruptedLaunches,
+  startEngineRun,
+} from "./start";
 import type { RunStore } from "./store";
 
 /**
@@ -206,6 +211,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     return { ok: true, serverId, paseoHome: home };
   }
 
+  /** Counts concurrent starts, so a duplicate finishing cannot expose a launch still in progress. */
+  const starting = new Map<string, number>();
   let recovering: Promise<void> | null = null;
   /** One recovery at a time: hooks that ask while it runs share it instead of starting another. */
   function recover(): Promise<void> {
@@ -213,6 +220,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     const attempt = (async () => {
       await options.ensureReady();
       if (!store.ready) return;
+      // A launch that a restart cut off will never go on: close it before anything looks at it.
+      const closed = await failInterruptedLaunches({
+        store,
+        isStarting: (runId) => starting.has(runId),
+        log,
+      });
+      if (closed > 0) log(`run engine closed ${closed} interrupted launch(es)`);
       const { runs } = await driver.recover();
       if (runs > 0) log(`run engine recovered ${runs} live run(s)`);
       // Works out from the ledger which reads are due again, so a restart does not lose them.
@@ -280,10 +294,18 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
             agentIdsKept: [],
           };
         }
-        return startEngineRun(
-          { store, adapter, effects, commitIdentity: options.commitIdentity, log },
-          { ...input, serverId: found.serverId, paseoHome: found.paseoHome },
-        );
+        const runId = input.plan.runId;
+        starting.set(runId, (starting.get(runId) ?? 0) + 1);
+        try {
+          return await startEngineRun(
+            { store, adapter, effects, commitIdentity: options.commitIdentity, log },
+            { ...input, serverId: found.serverId, paseoHome: found.paseoHome },
+          );
+        } finally {
+          const left = (starting.get(runId) ?? 1) - 1;
+          if (left === 0) starting.delete(runId);
+          else starting.set(runId, left);
+        }
       },
     } satisfies EngineLaunchHost,
   };

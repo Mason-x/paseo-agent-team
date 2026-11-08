@@ -578,3 +578,151 @@ describe("the switch that starts Engine Runs is off, and a Run that was started 
     off.dispose();
   });
 });
+
+describe("a launch that a restart cut off", () => {
+  async function started(host: Host) {
+    const wired = runtime();
+    const result = await wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    expect(result.ok).toBe(true);
+    return wired;
+  }
+
+  test.each(["preparing", "creating"] as const)(
+    "a Run left %s is closed by the next process's recovery, with an alert, and the host is not called",
+    async (state) => {
+      const host = fakeHost();
+      const first = await started(host);
+      first.dispose();
+      await store.update(RUN_ID, (current) => {
+        current.launch.state = state;
+        // A real crash in these phases happened before the plan request was prepared.
+        current.outbox = [];
+        return current;
+      });
+      const created = vi.spyOn(host.adapter, "createAgent");
+      const archived = vi.spyOn(host.adapter, "archiveAgent");
+      const agentRef = vi.spyOn(host.port.agents, "ref");
+      const second = runtime();
+      second.bind(host.port as unknown as PaseoPort);
+      await second.recover();
+      const after = await stored();
+      expect(after.launch.state).toBe("failed");
+      expect(after.events.some((e) => e.kind === "launch-state" && e.payload.to === "failed")).toBe(
+        true,
+      );
+      const alert = after.alerts.find((entry) => entry.summary.startsWith("启动在"));
+      expect(alert?.severity).toBe("critical");
+      expect(alert?.summary).toContain(state === "preparing" ? "创建记录" : "创建成员");
+      expect(alert?.summary).toContain("已登记的 Agent");
+      expect(created).not.toHaveBeenCalled();
+      expect(archived).not.toHaveBeenCalled();
+      expect(agentRef).not.toHaveBeenCalled();
+
+      // A second recovery writes nothing.
+      await second.recover();
+      expect((await stored()).revision).toBe(after.revision);
+      second.dispose();
+    },
+  );
+
+  test.each(["kickoff-pending", "running", "failed", "cancelled"] as const)(
+    "a Run whose launch is %s is not touched",
+    async (state) => {
+      const host = fakeHost();
+      const first = await started(host);
+      first.dispose();
+      await store.update(RUN_ID, (current) => {
+        current.launch.state = state;
+        return current;
+      });
+      const second = runtime();
+      second.bind(host.port as unknown as PaseoPort);
+      await second.recover();
+      const after = await stored();
+      expect(after.launch.state).toBe(state);
+      expect(after.alerts.some((entry) => entry.summary.startsWith("启动在"))).toBe(false);
+      expect(JSON.stringify(after.events).includes("interrupted-while")).toBe(false);
+      second.dispose();
+    },
+  );
+
+  test("a duplicate start finishing does not expose another start still creating agents to recovery", async () => {
+    const host = fakeHost();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = host.adapter.createAgent;
+    let blocked = false;
+    host.adapter.createAgent = async (request: CreateMemberInput) => {
+      if (!blocked) {
+        blocked = true;
+        await gate;
+      }
+      return original(request);
+    };
+    const wired = runtime();
+    const first = wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    try {
+      for (let i = 0; i < 200 && !blocked; i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(blocked).toBe(true);
+      const duplicate = await wired.launchHost.start(
+        startInput(),
+        host.port as unknown as PaseoPort,
+        host.adapter,
+      );
+      expect(duplicate.ok).toBe(false);
+      await wired.recover();
+      expect((await stored()).launch.state).toBe("creating");
+    } finally {
+      release();
+      await first;
+      wired.dispose();
+    }
+    expect((await stored()).launch.state).not.toBe("failed");
+  });
+
+  test("a launch this process is still carrying out is slow, not interrupted", async () => {
+    const host = fakeHost();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = host.adapter.createAgent;
+    let blocked = false;
+    host.adapter.createAgent = async (request: CreateMemberInput) => {
+      if (!blocked) {
+        blocked = true;
+        await gate;
+      }
+      return original(request);
+    };
+    const wired = runtime();
+    const running = wired.launchHost.start(
+      startInput(),
+      host.port as unknown as PaseoPort,
+      host.adapter,
+    );
+    // Wait until the record exists and the first create is held.
+    for (let i = 0; i < 200 && !blocked; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(blocked).toBe(true);
+    expect((await stored()).launch.state).toBe("creating");
+
+    await wired.recover();
+    expect((await stored()).launch.state).toBe("creating");
+
+    release();
+    const result = await running;
+    expect(result.ok).toBe(true);
+    expect((await stored()).launch.state).not.toBe("failed");
+    wired.dispose();
+  });
+});
