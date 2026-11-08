@@ -24,6 +24,11 @@ import {
   evidenceRepairOf,
 } from "../../shared/domain/run-engine/evidence-repair";
 import {
+  FAILED_LIMIT_ALERT_PREFIX,
+  failedLimitAlert,
+  failedTaskLimit,
+} from "../../shared/domain/run-engine/failure-limit";
+import {
   checkEvidenceGate,
   checkReviewGate,
   devEndpoint,
@@ -36,7 +41,7 @@ import {
   smokerSemanticArgs,
   templateVersionFor,
 } from "../../shared/domain/run-engine/prompt-template";
-import { raiseAlert } from "../../shared/domain/run-engine/run-alert";
+import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import {
   eligibleReviewSeats,
   planDispatchWithReasons,
@@ -758,6 +763,45 @@ export function createEngineService(options: EngineServiceOptions) {
     }
   }
 
+  /**
+   * One critical alert while the failed-task limit is exceeded, found again by its fixed prefix so
+   * asking again writes nothing. Once the count is back within the limit the alert is taken down, but
+   * only if there is one to take down: a Run that never exceeded it is never written to for this.
+   */
+  async function noteFailedLimit(runId: string, failed: number, limit: number): Promise<void> {
+    try {
+      await options.store.update(runId, (current) => {
+        const raised = raiseAlert(
+          current,
+          {
+            alertId: alertIdFor(FAILED_LIMIT_ALERT_PREFIX),
+            severity: "critical",
+            summary: failedLimitAlert(failed, limit),
+          },
+          clock.now(),
+        );
+        return raised.changed ? raised.next : null;
+      });
+    } catch (error) {
+      log(`could not note the failed-task limit of ${runId}`, error);
+    }
+  }
+
+  async function clearFailedLimit(runId: string): Promise<void> {
+    try {
+      await options.store.update(runId, (current) => {
+        const resolved = resolveAlerts(
+          current,
+          (alert) => alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
+          clock.now(),
+        );
+        return resolved.changed ? resolved.next : null;
+      });
+    } catch (error) {
+      log(`could not take down the failed-task alert of ${runId}`, error);
+    }
+  }
+
   async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
@@ -770,10 +814,26 @@ export function createEngineService(options: EngineServiceOptions) {
       limits: options.capacityLimits,
     });
     if (capacity !== null) await noteCapacity(runId, capacity.level);
+    const failures = failedTaskLimit(read.record);
+    if (
+      !failures.exceeded &&
+      read.record.alerts.some(
+        (alert) =>
+          alert.state !== "resolved" && alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
+      )
+    ) {
+      await clearFailedLimit(runId);
+    }
     const work = nextWork(read.record);
     if (!work) return { status: "idle" };
     if (capacity?.level === "refuse") {
       return { status: "blocked", taskId: work.task.spec.id, reason: "ledger-capacity" };
+    }
+    // More failed tasks than the policy allows: nothing new starts. What is in flight is taken in and
+    // finished by the other paths (intake, repair, the outbox), which do not come through here.
+    if (failures.exceeded) {
+      await noteFailedLimit(runId, failures.failed, failures.limit);
+      return { status: "blocked", taskId: work.task.spec.id, reason: "failed-task-limit" };
     }
     if (work.kind === "produce") return dispatchProducer(runId, read.record, work.task);
     if (work.kind === "evidence") return dispatchEvidence(runId, read.record, work.task);

@@ -66,6 +66,11 @@ export const DISPATCH_BLOCKED_ZH: Record<string, WaitingText> = {
     who: `${YOU}（收尾后重新启动一个 Run）`,
     next: "进行中的工作会继续收尾；之后用新的 Run 做剩下的事",
   },
+  "failed-task-limit": {
+    why: "失败的任务数超过了这个 Run 的策略上限，停止了新的派发",
+    who: YOU,
+    next: "在决策点重试或取消失败的任务，使失败数回到上限以内；进行中的工作会继续收尾",
+  },
   "evidence-not-repairable": {
     why: "证据被退回的原因不是补齐就能解决的（例如检查真的失败了）",
     who: `${YOU}（暂无入口，需要决策）`,

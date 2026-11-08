@@ -177,7 +177,11 @@ number of times; evidence the gate refuses is asked for again on the same delive
 that failed is read again 1, 2 and 4 seconds later; once the read works again the Engine takes in
 what it missed and goes on by itself, for each source at most 3 times, after which a note asks you to
 press 立即检查并推进. A paused, finished or
-cancelled Run sends nothing new.
+cancelled Run sends nothing new. So does a Run with more failed tasks than its policy allows (the
+Team's 允许失败的任务数, 3 by default, frozen when the Run starts; a cancelled or blocked task is not a
+failed one): nothing new is dispatched, a critical alert says so, and work already in flight is
+still taken in and finished. Retry or cancel the failed tasks at their decision to bring the count
+back within the limit; the alert is taken down by itself.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
 waits for permission stays waiting until a person answers in Paseo, as for any agent. It does not
