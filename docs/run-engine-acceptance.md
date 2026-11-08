@@ -303,6 +303,9 @@
 - tests/run-engine/queries.test.ts :: a decision kind survives the new projection and older clients can strip it
 - tests/run-view/controls.test.ts :: the server's decision kind distinguishes the retry and unknown kinds fall back
 - tests/run-view/waiting.test.ts :: explains a known decision kind and falls back for old or future servers
+- tests/run-view/control-runner.test.ts :: uses random bytes for a version 4 UUID when randomUUID is unavailable
+- tests/run-view/control-runner.test.ts :: uses a version 4 UUID even when the platform has no crypto
+- tests/run-view/controls.test.ts :: a request that never got an answer does not ask for a refresh
 
 缺口：没有真实浏览器与窄屏检查，只有对源码的静态保护（无固定宽度、按钮最小高度、可换行、单个滚动条）；断线重连只测了纯会话规则；"原因与台账一致"靠源码扫描，没有端到端比对；服务端推送式失效没有做（B8）。需 DEV。
 
