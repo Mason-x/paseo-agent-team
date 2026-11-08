@@ -9,6 +9,8 @@ const shared = vi.hoisted(() => ({
   calls: [] as { name: string; input: unknown }[],
   toasts: [] as { text: string; options: unknown }[],
   copied: [] as string[],
+  /** RPC calls that have been started and not yet answered or failed. */
+  pending: 0,
 }));
 
 vi.mock("react-native", () => {
@@ -30,9 +32,14 @@ vi.mock("@getpaseo/plugin/client", () => {
       if (known) return known;
       const call = async (input: unknown) => {
         shared.calls.push({ name: contract.name, input });
-        const handler = shared.handlers[contract.name];
-        if (!handler) throw new Error(`no handler for ${contract.name}`);
-        return handler(input);
+        shared.pending += 1;
+        try {
+          const handler = shared.handlers[contract.name];
+          if (!handler) throw new Error(`no handler for ${contract.name}`);
+          return await handler(input);
+        } finally {
+          shared.pending -= 1;
+        }
       };
       cache.set(contract.name, call);
       return call;
@@ -83,6 +90,7 @@ import {
   techLead,
 } from "../fixtures";
 import { policy } from "../fixtures/run-engine/base";
+import { waitUntil } from "./support/wait-until";
 
 type Node = {
   type: unknown;
@@ -184,8 +192,18 @@ const button = (root: Node, label: string): Node => {
   return node;
 };
 
-const settle = async () => {
-  for (let round = 0; round < 6; round += 1) {
+/**
+ * Waits until the call `name` has been made and nothing is left in flight, then lets React take in
+ * the answers (two more turns). Nothing here counts milliseconds: a call that is never made, or never
+ * answered, fails after the bounded wait instead of passing or hanging by luck.
+ */
+const settle = async (name: string) => {
+  await waitUntil(
+    renderer.act,
+    () => shared.calls.some((call) => call.name === name) && shared.pending === 0,
+    { label: `the call ${name} to be made and answered` },
+  );
+  for (let round = 0; round < 2; round += 1) {
     await renderer.act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
@@ -218,7 +236,7 @@ async function mount(onLaunched = vi.fn()) {
       ),
     );
   });
-  await settle();
+  await settle("agent-team.launch.preview");
   return { view, onLaunched };
 }
 
@@ -288,7 +306,7 @@ describe("the launch dialog tells a person what an Engine launch is doing", () =
     await renderer.act(async () =>
       (button(mounted.view.root, zh.launch).props.onPress as () => void)(),
     );
-    await settle();
+    await settle("agent-team.launch.start");
     return mounted;
   }
 

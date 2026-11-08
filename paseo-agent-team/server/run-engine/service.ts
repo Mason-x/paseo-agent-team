@@ -171,8 +171,13 @@ type Work =
  * The next unit of work, in task order. A delivered task needs a reviewer until one is bound to its
  * current producer, and then (if it has a smoke) a smoker once the review gate has passed. A judge
  * that was dispatched but has not reported keeps the task waiting; it is never dispatched twice.
+ * With `startNew` false a task that has not started (`ready`) is passed over, so the failed-task gate
+ * can still reach the work under way behind it (a rework, a review, a smoke, a supplement).
  */
-function nextWork(record: RunRecord): Work | null {
+function nextWork(
+  record: RunRecord,
+  options: { startNew: boolean } = { startNew: true },
+): Work | null {
   // A supplement keeps the repository claim already held by its task. Consider it before new
   // tasks, which otherwise can be blocked by that claim and prevent the holder from progressing.
   if (record.schemaVersion === 2) {
@@ -195,6 +200,9 @@ function nextWork(record: RunRecord): Work | null {
     }
   }
   for (const task of record.tasks) {
+    // A task that has not started yet (`ready`) is skipped when nothing new may start, and the walk goes
+    // on to the work already under way: a rework, a review, a smoke.
+    if (task.state === "ready" && !options.startNew) continue;
     if (task.state === "ready" || task.state === "rework") return { kind: "produce", task };
     if (task.state !== "review") continue;
     // Sent back for rework but the judges are not all finished yet: nothing to dispatch.
@@ -764,11 +772,11 @@ export function createEngineService(options: EngineServiceOptions) {
   }
 
   /**
-   * One critical alert while the failed-task limit is exceeded, found again by its fixed prefix so
-   * asking again writes nothing. Once the count is back within the limit the alert is taken down, but
+   * One critical alert while the failed-task limit is exceeded and a task that has not started is held
+   * back by it, found again by its fixed prefix so asking again writes nothing. Once the count is back within the limit the alert is taken down, but
    * only if there is one to take down: a Run that never exceeded it is never written to for this.
    */
-  async function noteFailedLimit(runId: string, failed: number, limit: number): Promise<void> {
+  async function noteFailedLimit(runId: string, limit: number): Promise<void> {
     try {
       await options.store.update(runId, (current) => {
         const raised = raiseAlert(
@@ -776,7 +784,7 @@ export function createEngineService(options: EngineServiceOptions) {
           {
             alertId: alertIdFor(FAILED_LIMIT_ALERT_PREFIX),
             severity: "critical",
-            summary: failedLimitAlert(failed, limit),
+            summary: failedLimitAlert(limit),
           },
           clock.now(),
         );
@@ -824,20 +832,35 @@ export function createEngineService(options: EngineServiceOptions) {
     ) {
       await clearFailedLimit(runId);
     }
-    const work = nextWork(read.record);
-    if (!work) return { status: "idle" };
+    const first = nextWork(read.record);
+    if (!first) return { status: "idle" };
     if (capacity?.level === "refuse") {
-      return { status: "blocked", taskId: work.task.spec.id, reason: "ledger-capacity" };
+      return { status: "blocked", taskId: first.task.spec.id, reason: "ledger-capacity" };
     }
-    // More failed tasks than the policy allows: nothing new starts. What is in flight is taken in and
-    // finished by the other paths (intake, repair, the outbox), which do not come through here.
+    let work: Work = first;
+    let record = read.record;
+    // More failed tasks than the policy allows: no task that has not started yet is started (a `ready`
+    // one, which includes a failed task a person has just sent back to the start). What is already under
+    // way goes on: the review, the smoke, the supplement and the rework of a task that has begun, and
+    // the paths that do not come through here (intake, repair, the outbox). A task held back must not
+    // hide the work behind it, so the walk skips it, and the seat planning does not see it either (it
+    // would otherwise be given the seat the work under way needs).
     if (failures.exceeded) {
-      await noteFailedLimit(runId, failures.failed, failures.limit);
-      return { status: "blocked", taskId: work.task.spec.id, reason: "failed-task-limit" };
+      const held = read.record.tasks.some((entry) => entry.state === "ready");
+      if (held) await noteFailedLimit(runId, failures.limit);
+      const underway = nextWork(read.record, { startNew: false });
+      if (underway === null) {
+        return { status: "blocked", taskId: first.task.spec.id, reason: "failed-task-limit" };
+      }
+      work = underway;
+      record = {
+        ...read.record,
+        tasks: read.record.tasks.filter((entry) => entry.state !== "ready"),
+      };
     }
-    if (work.kind === "produce") return dispatchProducer(runId, read.record, work.task);
-    if (work.kind === "evidence") return dispatchEvidence(runId, read.record, work.task);
-    return dispatchJudge(runId, read.record, work.task, work.kind);
+    if (work.kind === "produce") return dispatchProducer(runId, record, work.task);
+    if (work.kind === "evidence") return dispatchEvidence(runId, record, work.task);
+    return dispatchJudge(runId, record, work.task, work.kind);
   }
 
   return {

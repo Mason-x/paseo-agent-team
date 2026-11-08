@@ -11,6 +11,8 @@ const shared = vi.hoisted(() => ({
   list: null as null | ((input: unknown) => Promise<unknown>),
   /** The runs the label-derived list (the coordinator chain) finds on the host. */
   labelled: [] as unknown[],
+  /** How many `run.list` calls have answered (or failed): the page has what the host knows when it is above 0. */
+  answered: 0,
 }));
 
 vi.mock("react-native", () => {
@@ -26,7 +28,13 @@ vi.mock("react-native", () => {
 });
 vi.mock("@getpaseo/plugin/client", () => {
   // One function for every render: a new one each time would restart the page's poller on every render.
-  const call = (input: unknown) => shared.list?.(input);
+  const call = async (input: unknown) => {
+    try {
+      return await shared.list?.(input);
+    } finally {
+      shared.answered += 1;
+    }
+  };
   return { usePaseo: () => ({}), useRpc: () => call };
 });
 vi.mock("@getpaseo/plugin/client/react-native", () => {
@@ -62,6 +70,7 @@ import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import type { RunAgentSnapshot, TeamRun } from "../../shared/domain/run-progress";
 import { runEngineZh } from "../../shared/zh/run-engine";
 import { bootstrapRun } from "../run-engine/support/bootstrap-run";
+import { waitUntil } from "./support/wait-until";
 
 /**
  * The Runs page lists the Engine's Runs (from the ledger, through `run.list`) above the Runs the
@@ -91,6 +100,7 @@ let home: string;
 let store: RunStore;
 
 beforeEach(async () => {
+  shared.answered = 0;
   home = await realpath(await mkdtemp(path.join(tmpdir(), "run-tab-")));
   await mkdir(path.join(home, "paseo"));
   store = createRunStore({ home: path.join(home, "paseo"), lock: { acquireTimeoutMs: 300 } });
@@ -124,7 +134,10 @@ const textOf = (root: Node): string =>
     .map((node) => node.children.filter((child) => typeof child === "string").join(""))
     .join("\n");
 
-async function render(): Promise<{ text: string; unmount(): void }> {
+/** Renders the page and waits until the list has answered and the text satisfies `until`. */
+async function render(
+  until: (text: string) => boolean = () => true,
+): Promise<{ text: string; unmount(): void }> {
   const navigation = {} as never;
   let tree: ReturnType<TestRenderer["create"]> | undefined;
   await renderer.act(async () => {
@@ -132,12 +145,17 @@ async function render(): Promise<{ text: string; unmount(): void }> {
       h(RunsTab, { theme, layout, hostId: "host-1", navigation, legacyRuns: [] }),
     );
   });
-  // The list answers on the first tick of its poller; let it land.
-  await renderer.act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  });
   if (!tree) throw new Error("not rendered");
-  return { text: textOf(tree.root), unmount: () => tree?.unmount() };
+  const page = tree;
+  // The list answers on the first tick of its poller: wait for that, not for a guess of how long it takes.
+  await waitUntil(renderer.act, () => shared.answered > 0 && until(textOf(page.root)), {
+    label: "the Runs page to show the list",
+  });
+  // What the answer set in motion in React (one more turn), then read.
+  await renderer.act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return { text: textOf(page.root), unmount: () => page.unmount() };
 }
 
 describe("the Runs page with an Engine Run and a coordinator-chain Run on the same host", () => {
@@ -157,7 +175,9 @@ describe("the Runs page with an Engine Run and a coordinator-chain Run on the sa
     };
     shared.labelled = [chain];
 
-    const page = await render();
+    const page = await render(
+      (text) => text.includes("Engine team") && text.includes("Chain team"),
+    );
     // The Engine section, with the Run from the ledger, and the label-derived Run beneath it.
     expect(page.text).toContain(runEngineZh.list.title);
     expect(page.text).toContain("Engine team");
@@ -179,7 +199,7 @@ describe("the Runs page with an Engine Run and a coordinator-chain Run on the sa
         lastActivityAt: new Date().toISOString(),
       } satisfies TeamRun,
     ];
-    const page = await render();
+    const page = await render((text) => text.includes("Chain team"));
     expect(page.text).not.toContain(runEngineZh.list.title);
     expect(page.text).toContain("Chain team");
     page.unmount();

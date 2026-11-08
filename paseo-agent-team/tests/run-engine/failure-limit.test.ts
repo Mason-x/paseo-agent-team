@@ -87,11 +87,17 @@ describe("failedTaskLimit", () => {
 
 describe("failedLimitAlert", () => {
   test("is the fixed text, and starts with the prefix the service looks for", () => {
-    const text = failedLimitAlert(4, 3);
+    const text = failedLimitAlert(3);
     expect(text).toBe(
-      "失败的任务已超过策略允许的 3 个（现有 4 个），已停止新的派发；进行中的工作会继续收尾。请在决策点重试或取消失败的任务。",
+      "失败的任务已超过策略允许的 3 个，不再开始尚未开始的任务；进行中的工作会继续收尾。请在决策点重试或取消失败的任务。",
     );
     expect(text.startsWith(FAILED_LIMIT_ALERT_PREFIX)).toBe(true);
     expect(FAILED_LIMIT_ALERT_PREFIX).toBe("失败的任务已超过策略允许的");
+  });
+
+  test("names the limit and no count of failed tasks, so an alert that stays open cannot go stale", () => {
+    expect(failedLimitAlert(3)).not.toContain("现有");
+    expect(failedLimitAlert(3).match(/\d+ 个/gu)).toEqual(["3 个"]);
+    expect(failedLimitAlert(5)).toContain("5 个");
   });
 });

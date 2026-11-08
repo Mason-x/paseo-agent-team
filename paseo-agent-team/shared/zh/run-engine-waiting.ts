@@ -67,7 +67,7 @@ export const DISPATCH_BLOCKED_ZH: Record<string, WaitingText> = {
     next: "进行中的工作会继续收尾；之后用新的 Run 做剩下的事",
   },
   "failed-task-limit": {
-    why: "失败的任务数超过了这个 Run 的策略上限，停止了新的派发",
+    why: "失败的任务数超过了这个 Run 的策略上限，不再开始尚未开始的任务",
     who: YOU,
     next: "在决策点重试或取消失败的任务，使失败数回到上限以内；进行中的工作会继续收尾",
   },

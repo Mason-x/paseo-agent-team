@@ -28,7 +28,10 @@ import { resolveAlerts } from "./run-alert";
  *    to `awaiting-dag` again, exactly as for the first;
  *  - the re-send limit counts the re-sends of the newest plan request, so it starts from zero;
  *  - the coordinator's turn budget pays one turn for the new plan request (`coordinator-budget.ts`), and a
- *    re-plan it cannot pay for is refused as `budget-exhausted` with the record untouched.
+ *    re-plan it cannot pay for is refused as `budget-exhausted`. This function leaves the record it was
+ *    given untouched in that case; the caller (`control.ts`) then writes a warning alert that says so,
+ *    once per limit, and for an older record that has no coordinator budget entry yet it creates the
+ *    entry at that moment, so the revision moves although no re-plan happened.
  *
  * Asking again with the same `requestId` is the same request: it finds its audit event and answers
  * `replayed` without writing. A pure function like `noteTask` and `transitionIntent`: the reducer's

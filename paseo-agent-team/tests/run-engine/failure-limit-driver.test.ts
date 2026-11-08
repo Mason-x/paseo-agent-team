@@ -20,7 +20,7 @@ import { compileDispatch } from "../../shared/domain/run-engine/prompt-template"
 import { emptyReadRetries } from "../../shared/domain/run-engine/read-retry";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { PROFILE_HAIKU, task } from "../fixtures/run-engine/base";
+import { PROFILE_HAIKU, spec, task } from "../fixtures/run-engine/base";
 import {
   bootstrapRun,
   COORDINATOR_AGENT,
@@ -28,14 +28,15 @@ import {
   PLAN_MESSAGE_ID,
   planTasks,
 } from "./support/bootstrap-run";
-import { JUDGE_SEAT_REVIEW } from "./support/review-run";
+import { JUDGE_SEAT_REVIEW, JUDGE_SEAT_SMOKE } from "./support/review-run";
 
 /**
  * The failed-task gate in a whole Run: a real store, a real git repository, and the driver with the
  * hooks that tell it a turn ended. Failure modes:
  *  - a Run with more failed tasks than its policy allows still handing out work, or one at its limit
  *    refusing to;
- *  - the gate also shutting out what is already in flight (a report, a repair request);
+ *  - the gate also shutting out what is already under way (a report, a repair request, a review, a
+ *    smoke, an evidence supplement, a rework), or hiding it behind a task that has not started;
  *  - the gate writing the same alert on every pass, or an idle Run being written to at all;
  *  - the way out (a person cancelling failed tasks) not reopening dispatch, or leaving the alert up;
  *  - the gate touching a Run that does not dispatch (paused, still waiting for its plan), the frozen
@@ -193,7 +194,7 @@ function build(host: Host) {
           order: 0,
         };
       }
-      if (seatId === JUDGE_SEAT_REVIEW) {
+      if (seatId === JUDGE_SEAT_REVIEW || seatId === JUDGE_SEAT_SMOKE) {
         return { profile: profile("luna", "profile-dev-luna"), available: true, order: 1 };
       }
       return null;
@@ -261,7 +262,7 @@ function fence(kind: string, body: unknown): string {
 }
 
 /** The member does the work for real: edits a file, commits it, and reports from its prompt. */
-function produce(host: Host, agentId: string): void {
+function produce(host: Host, agentId: string, options: { evidenceId?: string } = {}): void {
   const prompt = host.lastSent(agentId)?.text ?? "";
   const identity = section<Identity>(prompt, "【身份资料 JSON】");
   const facts = section<Facts>(prompt, "【执行事实 JSON】");
@@ -283,7 +284,8 @@ function produce(host: Host, agentId: string): void {
       ref,
       workspace: facts.workspace,
       evidence: data.evidence.map((requirement) => ({
-        id: requirement.id,
+        // A wrong id leaves the required evidence missing: the gate refuses it, the report is real.
+        id: options.evidenceId ?? requirement.id,
         command: requirement.command,
         exitCode: 0,
         summary: "passed",
@@ -295,7 +297,7 @@ function produce(host: Host, agentId: string): void {
   );
 }
 
-function judge(host: Host, agentId: string): void {
+function judge(host: Host, agentId: string, verdict = "可合入"): void {
   const prompt = host.lastSent(agentId)?.text ?? "";
   const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
   const facts = section<Facts>(prompt, "【执行事实 JSON】");
@@ -304,9 +306,59 @@ function judge(host: Host, agentId: string): void {
     fence("review-report", {
       ...identity,
       reviewedRef: facts.delivery.deliveryRef,
-      verdict: "可合入",
-      blockers: [],
+      verdict,
+      blockers: verdict === "可合入" ? [] : [{ id: "b1", summary: "needs a change", path: null }],
       probes: [],
+    }),
+  );
+}
+
+type EvidenceFacts = Facts & {
+  evidenceRepair: { delivery: { ref: unknown; workspace: unknown; changedFiles: string[] } };
+};
+
+/** The member answers an evidence request from its prompt: same delivery, the evidence now complete. */
+function supplement(host: Host, agentId: string): void {
+  const prompt = host.lastSent(agentId)?.text ?? "";
+  const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+  const facts = section<EvidenceFacts>(prompt, "【执行事实 JSON】");
+  const data = section<TaskData>(prompt, "【任务资料 JSON】");
+  const { ref, workspace, changedFiles } = facts.evidenceRepair.delivery;
+  host.reply(
+    agentId,
+    fence("task-report", {
+      ...identity,
+      status: "done",
+      changedFiles,
+      ref,
+      workspace,
+      evidence: data.evidence.map((requirement) => ({
+        id: requirement.id,
+        command: requirement.command,
+        exitCode: 0,
+        summary: "collected",
+        artifactPath: `${facts.evidenceDir}/${requirement.id}.log`,
+        ref,
+        isolation: { homePath: path.join(home, "isolated-home"), outsideRealHome: true },
+      })),
+    }),
+  );
+}
+
+/** The smoker answers from its own prompt: the delivery and the DEV target it was given. */
+function smoke(host: Host, agentId: string): void {
+  const prompt = host.lastSent(agentId)?.text ?? "";
+  const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+  const facts = section<
+    Facts & { devTarget: { devHost: string; devServerId: string; devHome: string } }
+  >(prompt, "【执行事实 JSON】");
+  host.reply(
+    agentId,
+    fence("smoke-report", {
+      ...identity,
+      testedRef: facts.delivery.deliveryRef,
+      ...facts.devTarget,
+      checks: [{ id: "health", result: "pass", evidencePath: `${facts.evidenceDir}/health.log` }],
     }),
   );
 }
@@ -359,11 +411,23 @@ async function cancelFailed(taskId: string): Promise<void> {
   });
 }
 
+/** A task that has not started, first in task order (what a failed task a person retried is, too). */
+async function addReady(taskId: string): Promise<void> {
+  await store.update(RUN_ID, (current) => {
+    const next = structuredClone(current);
+    next.tasks.unshift(task(taskId, "Not started yet", { state: "ready" }));
+    return next;
+  });
+}
+
+const sentTo = (host: Host) => host.sent.map((entry) => entry.agentId);
+
 const gateAlerts = (record: RunRecord) =>
   record.alerts.filter((alert) => alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX));
 const resolvedEvents = (record: RunRecord) =>
   record.events.filter((event) => event.kind === "alert-resolved");
 const t1Of = (record: RunRecord) => record.tasks.find((entry) => entry.spec.id === "t1");
+const t2Of = (record: RunRecord) => record.tasks.find((entry) => entry.spec.id === "t2");
 
 describe("the failed-task gate", () => {
   test("a Run at its limit still hands out work, and says nothing about failures", async () => {
@@ -387,7 +451,7 @@ describe("the failed-task gate", () => {
   });
 
   test.each(["v1", "v2"] as const)(
-    "[%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing",
+    "[%s] over the limit the review of a started task goes out, and the task that waited behind it is then held back: one critical alert, the reason on the task, nothing sent, later passes write nothing",
     async (version) => {
       const { host, driver } = await admitted();
       await addFailed(4);
@@ -395,16 +459,27 @@ describe("the failed-task gate", () => {
       const policyBefore = JSON.stringify((await stored()).policy);
       await hook(host, driver, "agent-b1");
 
+      // The report was taken in and its reviewer was started: the gate does not touch work under way.
+      const reviewing = await stored();
+      expect(states(reviewing).t1).toBe("review");
+      expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
+      expect(t1Of(reviewing)?.waitingReason ?? "").not.toContain("failed-task-limit");
+      // Nothing is held back yet (t2 still waits for t1), so there is nothing to say either.
+      expect(gateAlerts(reviewing)).toEqual([]);
+
+      // The review passes: t2 is the next to start, and that is what the gate refuses.
+      judge(host, "agent-b2");
+      await hook(host, driver, "agent-b2");
       const shut = await stored();
-      // The report was taken in; the reviewer it would have gone to was not started.
-      expect(states(shut).t1).toBe("review");
-      expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
-      expect(t1Of(shut)?.waitingReason).toBe(REASON);
+      expect(states(shut)).toMatchObject({ t1: "done", t2: "ready" });
+      expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
+      expect(shut.tasks.find((entry) => entry.spec.id === "t2")?.waitingReason).toBe(REASON);
       const alerts = gateAlerts(shut);
       expect(alerts).toHaveLength(1);
       expect(alerts[0]).toMatchObject({ severity: "critical", state: "open" });
+      // The limit is named; the number of failed tasks is not (the alert stays up while it changes).
       expect(alerts[0]?.summary).toContain("3 个");
-      expect(alerts[0]?.summary).toContain("现有 4 个");
+      expect(alerts[0]?.summary).not.toContain("现有");
       expect(shut.alerts).toHaveLength(1);
       // Nothing about the record but the above changed: version, frozen policy, invariants.
       expect(shut.schemaVersion).toBe(version === "v1" ? 1 : 2);
@@ -416,14 +491,14 @@ describe("the failed-task gate", () => {
         const kicked = await driver.kick(RUN_ID);
         expect(kicked.dispatched).toBe(0);
         expect(kicked.last).toMatchObject({ status: "blocked", reason: "failed-task-limit" });
-        await hook(host, driver, "agent-b1");
+        await hook(host, driver, "agent-b2");
         expect((await stored()).revision).toBe(shut.revision);
       }
-      expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+      expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
     },
   );
 
-  test("what is already in flight is still taken in, and a report that must be repaired is still asked for again", async () => {
+  test("what is already in flight is still taken in, a report that must be repaired is still asked for again, and the repaired delivery goes to its reviewer", async () => {
     const { host, driver } = await admitted();
     await addFailed(4);
     produce(host, "agent-b1");
@@ -434,19 +509,155 @@ describe("the failed-task gate", () => {
     const before = host.sent.length;
     await hook(host, driver, "agent-b1");
 
-    // The repair request goes out although the gate is shut: it is not new work.
+    // The repair request goes out although the limit is exceeded: it is not new work.
     expect(host.sent).toHaveLength(before + 1);
     expect(host.lastSent("agent-b1")?.text).toContain("【重发身份 JSON】");
     expect(t1Of(await stored())).toMatchObject({ protocolFailures: 1, state: "assigned" });
 
-    // The repaired report is accepted (the task moves on to review) but its reviewer waits for the gate.
+    // The repaired report is accepted and its reviewer is started: the task is under way.
     host.reply("agent-b1", good);
     await hook(host, driver, "agent-b1");
     const after = await stored();
     expect(states(after).t1).toBe("review");
-    expect(host.sent).toHaveLength(before + 1);
-    expect(t1Of(after)?.waitingReason).toBe(REASON);
-    expect(gateAlerts(after)).toHaveLength(1);
+    expect(host.sent).toHaveLength(before + 2);
+    expect(host.lastSent("agent-b2")).toBeDefined();
+    expect(t1Of(after)?.waitingReason ?? "").not.toContain("failed-task-limit");
+    expect(gateAlerts(after)).toEqual([]);
+  });
+
+  test("a task that has not started is held back without hiding the review of a started one behind it", async () => {
+    const { host, driver } = await admitted();
+    await addFailed(4);
+    // g1 has not started and comes first in task order: the review of t1 must still be reached.
+    await addReady("g1");
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+
+    const held = await stored();
+    expect(states(held)).toMatchObject({ g1: "ready", t1: "review" });
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
+    const alerts = gateAlerts(held);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ severity: "critical", state: "open" });
+
+    // The review passes; g1 and t2 are both waiting to start now, and neither is started.
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    const shut = await stored();
+    expect(states(shut)).toMatchObject({ g1: "ready", t1: "done", t2: "ready" });
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
+    expect(gateAlerts(shut)).toHaveLength(1);
+    for (let round = 0; round < 3; round += 1) {
+      expect((await driver.kick(RUN_ID)).last).toMatchObject({
+        status: "blocked",
+        reason: "failed-task-limit",
+      });
+    }
+    expect((await stored()).revision).toBe(shut.revision);
+  });
+
+  test.each([false, true])(
+    "a review that sends a started task back for rework is followed by the producer although the limit is exceeded (not-started task alongside: %s)",
+    async (withReady) => {
+      const { host, driver } = await admitted();
+      await addFailed(4);
+      if (withReady) await addReady("g1");
+      produce(host, "agent-b1");
+      await hook(host, driver, "agent-b1");
+      judge(host, "agent-b2", "修改后合入");
+      await hook(host, driver, "agent-b2");
+
+      const after = await stored();
+      expect(states(after).t1).toBe("assigned");
+      expect(t1Of(after)?.attempts).toBe(2);
+      expect(host.lastSent("agent-b1")?.text).toContain("【返工说明】");
+      expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-b1"]);
+      expect(t1Of(after)?.waitingReason ?? "").not.toContain("failed-task-limit");
+      // Only the task that has not started is held back, and only that is reported.
+      expect(gateAlerts(after)).toHaveLength(withReady ? 1 : 0);
+      if (withReady) expect(states(after).g1).toBe("ready");
+    },
+  );
+
+  test("[v2] a request to add missing evidence to a delivery is sent although the limit is exceeded, and the supplement goes on to review", async () => {
+    const { host, driver } = await admitted();
+    await addFailed(4);
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    await hook(host, driver, "agent-b1");
+
+    const asked = await stored();
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b1"]);
+    expect(host.lastSent("agent-b1")?.text).toContain("补齐已有交付的证据");
+    expect(t1Of(asked)).toMatchObject({ state: "assigned", evidenceReturns: 1 });
+    expect(gateAlerts(asked)).toEqual([]);
+
+    supplement(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    expect(states(await stored()).t1).toBe("review");
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b1", "agent-b2"]);
+  });
+
+  test("a smoke of a started task is sent although the limit is exceeded, and t2 after it is held back", async () => {
+    const host = fakeHost();
+    const driver = build(host);
+    await store.update(RUN_ID, (current) => {
+      current.roster.push({
+        seatId: JUDGE_SEAT_SMOKE,
+        tier: "B",
+        agentId: "agent-m1",
+        channelId: "claude",
+        duties: ["smoke"],
+        enabled: true,
+      });
+      current.budgets.entries.push({
+        scope: "seat",
+        subjectId: JUDGE_SEAT_SMOKE,
+        limit: 6,
+        reserved: 0,
+        confirmed: 0,
+        observedTurns: 0,
+      });
+      return current;
+    });
+    const scope = (file: string) => [
+      { repoId: REPO_ALIAS, kind: "file", path: file, access: "write" },
+    ];
+    host.planRequestSent();
+    host.reply(
+      COORDINATOR_AGENT,
+      fence(
+        "task-dag",
+        dagBlock(RUN_ID, [
+          spec("t1", "Core API surface", {
+            scopes: scope("src/t1.ts"),
+            devSmoke: true,
+            smokeChecklist: ["health"],
+          }) as never,
+          spec("t2", "Core implementation", { deps: ["t1"], scopes: scope("src/t2.ts") }) as never,
+        ]),
+      ),
+    );
+    await hook(host, driver, COORDINATOR_AGENT);
+    await addFailed(4);
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+
+    // The review passed and the smoker is asked although four tasks failed against a limit of three.
+    const smoking = await stored();
+    expect(states(smoking)).toMatchObject({ t1: "review", t2: "pending" });
+    expect(smoking.tasks[0]?.phase).toBe("smoke");
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-m1"]);
+    expect(gateAlerts(smoking)).toEqual([]);
+
+    smoke(host, "agent-m1");
+    await hook(host, driver, "agent-m1");
+    const shut = await stored();
+    expect(states(shut)).toMatchObject({ t1: "done", t2: "ready" });
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-m1"]);
+    expect(shut.tasks.find((entry) => entry.spec.id === "t2")?.waitingReason).toBe(REASON);
+    expect(gateAlerts(shut)).toHaveLength(1);
   });
 
   test("a Run with failures over the limit and nothing left to start is left alone", async () => {
@@ -466,9 +677,13 @@ describe("the failed-task gate", () => {
     await addFailed(5);
     produce(host, "agent-b1");
     await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    // t1 is done; t2, which waited for it, is the next to start, and the gate holds it back.
     const shut = await stored();
+    expect(states(shut)).toMatchObject({ t1: "done", t2: "ready" });
     expect(gateAlerts(shut)).toHaveLength(1);
-    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
 
     // Five failed, one cancelled: four is still over three. The same reason, no second alert, nothing sent.
     await cancelFailed("f5");
@@ -478,29 +693,28 @@ describe("the failed-task gate", () => {
     expect(gateAlerts(stillShut)).toHaveLength(1);
     expect(gateAlerts(stillShut)[0]?.state).toBe("open");
     expect(resolvedEvents(stillShut)).toHaveLength(0);
-    expect(t1Of(stillShut)?.waitingReason).toBe(REASON);
-    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    expect(t2Of(stillShut)?.waitingReason).toBe(REASON);
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
 
-    // Another one cancelled: three is within the limit. The reviewer goes out and the alert is resolved.
+    // Another one cancelled: three is within the limit. t2 goes out and the alert is resolved.
     await cancelFailed("f4");
     const open = await driver.kick(RUN_ID);
     expect(open.dispatched).toBe(1);
-    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-b1"]);
     const reopened = await stored();
+    expect(states(reopened).t2).toBe("assigned");
     expect(gateAlerts(reopened)).toHaveLength(1);
     expect(gateAlerts(reopened)[0]).toMatchObject({ state: "resolved" });
     expect(gateAlerts(reopened)[0]?.resolvedAt).not.toBeNull();
     expect(resolvedEvents(reopened)).toHaveLength(1);
-    expect(t1Of(reopened)?.waitingReason ?? "").not.toContain("failed-task-limit");
+    expect(t2Of(reopened)?.waitingReason ?? "").not.toContain("failed-task-limit");
 
     // From here on the Run is as quiet as one that never had the problem.
-    judge(host, "agent-b2");
-    await hook(host, driver, "agent-b2");
+    for (let round = 0; round < 3; round += 1) await driver.kick(RUN_ID);
     const quiet = await stored();
+    expect(quiet.revision).toBe(reopened.revision);
     expect(resolvedEvents(quiet)).toHaveLength(1);
     expect(gateAlerts(quiet)[0]?.state).toBe("resolved");
-    for (let round = 0; round < 3; round += 1) await driver.kick(RUN_ID);
-    expect((await stored()).revision).toBe(quiet.revision);
   });
 
   test("a gate that opened and shut again raises the alert again", async () => {
@@ -508,22 +722,24 @@ describe("the failed-task gate", () => {
     await addFailed(4);
     produce(host, "agent-b1");
     await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    expect(gateAlerts(await stored())[0]?.state).toBe("open");
     await cancelFailed("f4");
     await driver.kick(RUN_ID);
     expect(gateAlerts(await stored())[0]?.state).toBe("resolved");
-    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-b1"]);
 
-    // The review passes; t2 is ready, and by then two more tasks have failed: five over three.
+    // t2 is with its producer; two more tasks have failed (five over three) and a new one is waiting.
     await addFailed(2);
-    judge(host, "agent-b2");
-    await hook(host, driver, "agent-b2");
+    await addReady("g1");
+    await driver.kick(RUN_ID);
     const shut = await stored();
-    expect(states(shut).t2).toBe("ready");
+    expect(states(shut)).toMatchObject({ t1: "done", t2: "assigned", g1: "ready" });
     expect(gateAlerts(shut)).toHaveLength(1);
     expect(gateAlerts(shut)[0]).toMatchObject({ state: "open", severity: "critical" });
-    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
-    expect(t1Of(shut)?.state).toBe("done");
-    expect(shut.tasks.find((entry) => entry.spec.id === "t2")?.waitingReason).toBe(REASON);
+    expect(sentTo(host)).toEqual(["agent-b1", "agent-b2", "agent-b1"]);
+    expect(shut.tasks.find((entry) => entry.spec.id === "g1")?.waitingReason).toBe(REASON);
   });
 
   test("a paused Run is not touched by the gate", async () => {
