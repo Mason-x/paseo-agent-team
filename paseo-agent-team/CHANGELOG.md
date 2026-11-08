@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [0.6.1](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.6.0...paseo-agent-team-v0.6.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **version:** resolve PASEO_HOME with the path rules of the platform asked about ([1c6fbff](https://github.com/Mason-x/paseo-agent-team/commit/1c6fbff72c30423748e0d1d019ffa7ad287e9377))
+* **version:** resolve PASEO_HOME with the platform's own path rules ([154254d](https://github.com/Mason-x/paseo-agent-team/commit/154254df6860f5af18906f2dc2937a7a4a644523))
+
 ## [0.6.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.6.0) (2026-11-08)
 
 ### Features
