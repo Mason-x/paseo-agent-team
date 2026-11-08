@@ -25,9 +25,9 @@
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
-| AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属 | — | 无 |
+| AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
-| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
+| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单个任务的取消、整个 Run 的延迟取消都有 RPC 与页面入口（回合证明结束才释放，送达不明则等，重启后可完成，并发只生效一次）；"暂停扣住的从未发出的派发"没有 store 级用例；`creating` 崩溃后无人续办；没有 DEV | A8 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
@@ -269,6 +269,8 @@
 - tests/run-engine/read-retry-server.test.ts :: a clock that jumped forward gives each due item one try, not several
 - tests/run-engine/read-retry-server.test.ts :: works the due time out again from the ledger instead of starting over
 - tests/run-engine/read-retry-server.test.ts :: a Run that ends while an item waits is not read, and does not keep the timer spinning
+- tests/run-engine/read-retry-server.test.ts :: only the first three times a source recovers are told; the fourth is left with the warning
+- tests/run-engine/read-retry-server.test.ts :: the reply an open assignment waits for is handed to the re-checks, with the assignment's own fields
 - tests/run-engine/read-retry.test.ts :: a clock that jumped forward gives every due item one try, not several
 - tests/run-engine/read-retry.test.ts :: a try cut off by a restart is used: it waits for the next one, or is used up on the third
 

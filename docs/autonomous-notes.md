@@ -31,6 +31,7 @@
 | A4 决策答复 `cancel` | 已做 | 36d82e9（代码）+ 计划第 47 点 | 3155 | 级联下游；补证冻结用 `evidence-stuck:` 只给 `cancel`；暂停中不给任何答复；变异 11 项全抓到；D3 与跨 Run 用例没写（见第 47 点） |
 | A5 延迟取消整个 Run | 已做 | 940fca6（代码）+ 计划第 48 点 | 3196 | RPC 26 到 27；`cancelRequest` 透传块；从请求到完成宿主无 send/archive；变异 15 项全抓到；必须与 A3 同一版本发布 |
 | A6 追加预算 RPC | 已做 | e55deff（代码）+ 计划第 49 点 | 3224 | RPC 27 到 28；写 `budgets.entries`、不改 `policy`；耗尽告警一次、追加后关闭；变异 10 项全抓到 |
+| A7 读取重查扩面与自动继续 | 已做 | 5f07608（代码）+ 计划第 50 点 | 3236 | 只用已有目标类型，不升版本；恢复后自动继续前 3 次；变异 8 项全抓到（1 项补测后） |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 
 ## 待批准
@@ -306,6 +307,8 @@
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
+
+- **A7**：biome 仅 2 条既有警告；tsc 通过；vitest 191 个文件 3236 通过（3 todo，A6 后 3224 加 12）；verify:package 通过。变异检查 8 项（`a7.json`）全部被抓到，A7-06 首次存活后补了直接测 reconcile 的用例。
 
 - **A6**：biome 仅 2 条既有警告；tsc 通过；vitest 191 个文件 3224 通过（3 todo，A5 后 3196 加 28；`ledger-real-fs` 一次 EBUSY，单独重跑通过）；verify:package 通过。变异检查 10 项（`a6.json`）全部被抓到。
 
