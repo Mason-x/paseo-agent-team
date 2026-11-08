@@ -54,6 +54,10 @@ vi.mock("@getpaseo/plugin/client/react-native", () => {
     useToast: () => ({ show: () => undefined, error: () => undefined }),
   };
 });
+// The expanded card reads the coordinator's timeline; none is needed to see which phase it names.
+vi.mock("../../client/crew/use-digest", () => ({
+  useTimelineDigest: () => ({ data: undefined, isPending: false }),
+}));
 vi.mock("../../client/runs/use-team-runs", () => ({
   useTeamRuns: () => ({
     runs: shared.labelled,
@@ -68,8 +72,11 @@ import { RunsTab } from "../../client/runs/RunsTab";
 import { createRunQueries } from "../../server/run-engine/queries";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import type { RunAgentSnapshot, TeamRun } from "../../shared/domain/run-progress";
+import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import { zh } from "../../shared/zh";
 import { runEngineZh } from "../../shared/zh/run-engine";
 import { bootstrapRun } from "../run-engine/support/bootstrap-run";
+import { readyRun } from "../run-engine/support/ready-run";
 import { waitUntil } from "./support/wait-until";
 
 /**
@@ -137,7 +144,7 @@ const textOf = (root: Node): string =>
 /** Renders the page and waits until the list has answered and the text satisfies `until`. */
 async function render(
   until: (text: string) => boolean = () => true,
-): Promise<{ text: string; unmount(): void }> {
+): Promise<{ text: string; unmount(): void; open(label: string): Promise<string> }> {
   const navigation = {} as never;
   let tree: ReturnType<TestRenderer["create"]> | undefined;
   await renderer.act(async () => {
@@ -155,7 +162,19 @@ async function render(
   await renderer.act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  return { text: textOf(page.root), unmount: () => page.unmount() };
+  return {
+    text: textOf(page.root),
+    unmount: () => page.unmount(),
+    /** Presses the button with this accessibility label and returns the page text afterwards. */
+    async open(label) {
+      const button = page.root.findAll((node) => node.props.accessibilityLabel === label)[0];
+      if (!button) throw new Error(`no button labelled ${label}`);
+      await renderer.act(async () => {
+        (button.props.onPress as () => void)();
+      });
+      return textOf(page.root);
+    },
+  };
 }
 
 describe("the Runs page with an Engine Run and a coordinator-chain Run on the same host", () => {
@@ -185,6 +204,76 @@ describe("the Runs page with an Engine Run and a coordinator-chain Run on the sa
     expect(page.text.indexOf("Engine team")).toBeLessThan(page.text.indexOf("Chain team"));
     page.unmount();
   });
+
+  describe.each([2, 1] as const)(
+    "a Run in both lists is described by the ledger, not by its idle coordinator (schema v%i)",
+    (schemaVersion) => {
+      const at = new Date().toISOString();
+      const idle = (id: string): RunAgentSnapshot => ({
+        ...agent(id),
+        status: "idle",
+        lastUsage: { inputTokens: 1 },
+        attentionTimestamp: at,
+      });
+      const countOf = (text: string, needle: string) => text.split(needle).length - 1;
+
+      /** One Run in the ledger and the same Run, with an idle coordinator, in the label-derived list. */
+      async function seed(lifecycle: RunRecord["lifecycle"], blocked: boolean): Promise<void> {
+        const runId = `run-tab00${schemaVersion}-x1`;
+        const record = { ...readyRun({ runId }), schemaVersion };
+        record.lifecycle = lifecycle;
+        if (blocked) {
+          const task = record.tasks.find((entry) => entry.spec.id === "t2");
+          if (!task) throw new Error("fixture lost t2");
+          task.state = "blocked";
+        }
+        await store.create(record);
+        const queries = createRunQueries({ store, ensureReady: async () => undefined });
+        shared.list = (input) => queries.list(input as never);
+        shared.labelled = [
+          {
+            runId,
+            teamName: "Chain team",
+            coordinator: idle("coord"),
+            members: [idle("member")],
+            startedAt: at,
+            lastActivityAt: at,
+          } satisfies TeamRun,
+        ];
+      }
+
+      test("active and blocked: needs a person, never completed, not counted as ended", async () => {
+        await seed("active", true);
+        const page = await render((text) => text.includes(zh.phaseNeedsYou));
+        expect(page.text).toContain(zh.phaseNeedsYou);
+        expect(page.text).toContain(`${zh.filterAttention} 1`);
+        expect(page.text).toContain(`${zh.filterEnded} 0`);
+        expect(page.text).not.toContain(zh.phaseDone);
+        // Opening the card names the same phase in its plan line, not the idle coordinator's.
+        const opened = await page.open(`${zh.progress} Chain team`);
+        expect(opened).toContain(`${zh.plan} · ${zh.phaseNeedsYou}`);
+        expect(opened).not.toContain(zh.phaseDone);
+        page.unmount();
+      });
+
+      test("cancelled: ended, and called cancelled by the card as well as by the Engine section", async () => {
+        await seed("cancelled", false);
+        const page = await render((text) => countOf(text, zh.phaseCancelled) >= 2);
+        expect(countOf(page.text, zh.phaseCancelled)).toBe(2);
+        expect(page.text).toContain(`${zh.filterEnded} 1`);
+        expect(page.text).not.toContain(zh.phaseDone);
+        page.unmount();
+      });
+
+      test("finished is the only lifecycle shown as completed", async () => {
+        await seed("finished", false);
+        const page = await render((text) => text.includes(zh.phaseDone));
+        expect(countOf(page.text, zh.phaseDone)).toBe(1);
+        expect(page.text).toContain(`${zh.filterEnded} 1`);
+        page.unmount();
+      });
+    },
+  );
 
   test("with no Engine Run the page is what it was: the Engine section is not drawn and the chain's Run is", async () => {
     const queries = createRunQueries({ store, ensureReady: async () => undefined });

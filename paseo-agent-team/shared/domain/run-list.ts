@@ -26,6 +26,7 @@ const BUCKET_BY_PHASE: Record<RunPhase, Bucket> = {
   running: "active",
   done: "ended",
   idle: "ended",
+  cancelled: "ended",
 };
 
 const BUCKET_ORDER: Record<Bucket, number> = { attention: 0, active: 1, ended: 2 };
@@ -47,10 +48,56 @@ export function showsFollowUp(
   return run.coordinator !== undefined && isLive(phase);
 }
 
+/** What the Engine's run list says about one Run; the ledger's word on where it stands. */
+export type EngineRunStanding = { runId: string; lifecycle: string; needsAttention: boolean };
+
+/**
+ * The phase a ledger lifecycle stands for, or null for one this client does not know. Only
+ * `finished` is "done"; a paused Run waits for a person to resume it; an active one needs a person
+ * when a task is blocked or failed, a decision is open or an alert is up (`needsAttention`).
+ */
+export function enginePhase(lifecycle: string, needsAttention: boolean): RunPhase | null {
+  switch (lifecycle) {
+    case "bootstrapping":
+      return "starting";
+    case "awaiting-dag":
+      return "running";
+    case "active":
+      return needsAttention ? "needs-you" : "running";
+    case "paused":
+      return "needs-you";
+    case "finished":
+      return "done";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return null;
+  }
+}
+
+/**
+ * An Engine Run is launched with agent labels too, so the agent list finds it and, from an idle
+ * coordinator, reads it as done. The ledger's lifecycle replaces that reading for any Run the
+ * Engine list names. For a lifecycle this client does not know, the agent reading stands except
+ * that "done" becomes the general "ended": success is never claimed for a state we cannot read.
+ */
+function progressFor(run: TeamRun, engine: ReadonlyMap<string, EngineRunStanding>): RunProgress {
+  const progress = runProgress(run);
+  const standing = engine.get(run.runId);
+  if (!standing) return progress;
+  const phase = enginePhase(standing.lifecycle, standing.needsAttention);
+  if (phase) return { ...progress, phase };
+  return progress.phase === "done" ? { ...progress, phase: "idle" } : progress;
+}
+
 /** Runs that need a person first, then ones in flight, then finished ones; newest first within each. */
-export function buildRunRows(runs: readonly TeamRun[]): RunRow[] {
+export function buildRunRows(
+  runs: readonly TeamRun[],
+  engineRuns: readonly EngineRunStanding[] = [],
+): RunRow[] {
+  const engine = new Map(engineRuns.map((entry) => [entry.runId, entry]));
   return runs
-    .map((run) => ({ run, progress: runProgress(run) }))
+    .map((run) => ({ run, progress: progressFor(run, engine) }))
     .sort((left, right) => {
       const byBucket =
         BUCKET_ORDER[bucketOf(left.progress.phase)] - BUCKET_ORDER[bucketOf(right.progress.phase)];
@@ -116,6 +163,11 @@ export function runTimeLabel(run: TeamRun, phase: RunPhase, now: number): string
   }
   const since = Number.isFinite(lastActive) ? lastActive : started;
   const ago = Number.isFinite(since) ? span(Math.max(0, now - since)) : null;
-  const outcome = phase === "done" ? zh.outcomeDone : zh.outcomeEnded;
+  const outcome =
+    phase === "done"
+      ? zh.outcomeDone
+      : phase === "cancelled"
+        ? zh.outcomeCancelled
+        : zh.outcomeEnded;
   return ago ? zh.agoOutcome(ago, outcome) : zh.justNowOutcome(outcome);
 }

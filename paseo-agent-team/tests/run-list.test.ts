@@ -11,6 +11,7 @@ import {
 } from "../shared/domain/run-list";
 import type { RunAgentSnapshot, TeamRun } from "../shared/domain/run-progress";
 import { runProgress, visibleCountStates } from "../shared/domain/run-progress";
+import { zh } from "../shared/zh";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -197,6 +198,104 @@ describe("taskFromTitle", () => {
     ]) {
       expect(taskFromTitle(title)).toBeUndefined();
     }
+  });
+});
+
+/**
+ * An Engine Run is also launched with agent labels, so the label-derived list finds it too and,
+ * from the coordinator alone (idle between wake-ups), calls it "done". The ledger knows better:
+ * its lifecycle wins for any Run the Engine list names. Failure modes: a blocked active Run counted
+ * as ended, a cancelled Run called completed, an unknown lifecycle passed off as success.
+ */
+describe("Engine lifecycle over agent state", () => {
+  /** What the label-derived list sees for every Engine Run: an idle coordinator whose turn is over. */
+  const looksDone = () => run("run-e", "done", 2 * HOUR);
+  const engine = (lifecycle: string, needsAttention = false) => [
+    { runId: "run-e", lifecycle, needsAttention },
+  ];
+  const phaseOf = (lifecycle: string, needsAttention = false) =>
+    buildRunRows([looksDone()], engine(lifecycle, needsAttention))[0]?.progress.phase;
+
+  test("the agent-only reading of an Engine Run is 'done' (the defect this guards)", () => {
+    expect(buildRunRows([looksDone()])[0]?.progress.phase).toBe("done");
+  });
+
+  test("active with a blocked task or open decision is not done and not ended", () => {
+    const rows = buildRunRows([looksDone()], engine("active", true));
+    expect(rows[0]?.progress.phase).toBe("needs-you");
+    expect(filterCounts(rows)).toEqual({ all: 1, attention: 1, active: 0, ended: 0 });
+    expect(filterRows(rows, "ended")).toEqual([]);
+    expect(isLive("needs-you")).toBe(true);
+    expect(runTimeLabel(rows[0]?.run ?? looksDone(), "needs-you", NOW)).toContain("已运行");
+  });
+
+  test("active with nothing to answer is running, in the active bucket", () => {
+    const rows = buildRunRows([looksDone()], engine("active"));
+    expect(rows[0]?.progress.phase).toBe("running");
+    expect(filterCounts(rows)).toEqual({ all: 1, attention: 0, active: 1, ended: 0 });
+  });
+
+  test("cancelled is its own phase: ended, labelled as cancelled, never as completed", () => {
+    expect(phaseOf("cancelled")).toBe("cancelled");
+    expect(bucketOf("cancelled")).toBe("ended");
+    expect(isLive("cancelled")).toBe(false);
+    expect(zh.phaseCancelled).toBe("已取消");
+    expect(zh.phaseCancelled).not.toBe(zh.phaseDone);
+    expect(zh.phaseCancelled).not.toBe(zh.phaseIdle);
+    const cancelled = { ...looksDone(), lastActivityAt: iso(3 * HOUR) };
+    expect(runTimeLabel(cancelled, "cancelled", NOW)).toBe("3 小时前取消");
+    expect(runTimeLabel({ ...cancelled, lastActivityAt: iso(10_000) }, "cancelled", NOW)).toBe(
+      "刚刚取消",
+    );
+    expect(runTimeLabel(cancelled, "cancelled", NOW)).not.toContain("完成");
+  });
+
+  test("only a finished lifecycle is done", () => {
+    expect(phaseOf("finished")).toBe("done");
+    // A finished Run the agents still show working is still finished: the ledger wins.
+    const working = { ...looksDone(), coordinator: agent("c", { status: "running" }) };
+    expect(buildRunRows([working], engine("finished"))[0]?.progress.phase).toBe("done");
+  });
+
+  test("the other lifecycles map to what a person can do about them", () => {
+    expect(phaseOf("bootstrapping")).toBe("starting");
+    expect(phaseOf("awaiting-dag")).toBe("running");
+    // Paused waits for a person to resume it, whether or not anything is blocked.
+    expect(phaseOf("paused")).toBe("needs-you");
+    expect(phaseOf("paused", true)).toBe("needs-you");
+  });
+
+  test("an unknown lifecycle never reads as completed: done falls back to the general 'ended'", () => {
+    expect(phaseOf("archived-v9")).toBe("idle");
+    expect(phaseOf("")).toBe("idle");
+    // A state the agents show as live stays live; only the claim of success is withheld.
+    const working = { ...looksDone(), coordinator: agent("c", { status: "running" }) };
+    expect(buildRunRows([working], engine("archived-v9"))[0]?.progress.phase).toBe("running");
+  });
+
+  test("a Run the Engine does not list keeps its agent-derived phase", () => {
+    const rows = buildRunRows(
+      [looksDone(), run("run-chain", "done", HOUR)],
+      engine("active", true),
+    );
+    expect(rows.find((row) => row.run.runId === "run-chain")?.progress.phase).toBe("done");
+    expect(buildRunRows([run("run-chain", "done", HOUR)], [])[0]?.progress.phase).toBe("done");
+  });
+
+  test("rows are re-sorted by the ledger's phase: the blocked Run comes before older finished ones", () => {
+    const rows = buildRunRows(
+      [run("older-done", "done", 5 * HOUR), looksDone(), run("newer-done", "done", HOUR)],
+      engine("active", true),
+    );
+    expect(rows.map((row) => row.run.runId)).toEqual(["run-e", "newer-done", "older-done"]);
+  });
+
+  test("the member counts of a cancelled Run leave out members that never got work", () => {
+    const progress = runProgress({
+      coordinator: looksDone().coordinator,
+      members: [agent("a", finished), agent("b")],
+    });
+    expect(visibleCountStates({ ...progress, phase: "cancelled" })).toEqual(["delivered"]);
   });
 });
 

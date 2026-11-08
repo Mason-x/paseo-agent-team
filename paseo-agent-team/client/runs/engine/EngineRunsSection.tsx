@@ -7,7 +7,7 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
 import { EngineView } from "./EngineView";
 import { useEngineControls } from "./use-engine-controls";
-import { useEngineRun, useEngineRuns } from "./use-engine-run";
+import { useEngineRun, type useEngineRuns } from "./use-engine-run";
 
 type Health = z.output<typeof RunHealthEntrySchema>;
 
@@ -157,12 +157,15 @@ export function EngineRunsSection({
   theme,
   layout,
   hostId,
+  engine,
 }: {
   theme: PluginTheme;
   layout: Pick<PluginLayout, "compact">;
   hostId: string;
+  /** The page's one Engine list: the label-derived list reads the same answer, so they never disagree. */
+  engine: ReturnType<typeof useEngineRuns>;
 }) {
-  const { runs, health, capabilities, error } = useEngineRuns(hostId);
+  const { runs, health, capabilities, error } = engine;
   if (runs.length === 0 && health.length === 0 && !error) return null;
   return (
     <View style={{ gap: 8 }}>

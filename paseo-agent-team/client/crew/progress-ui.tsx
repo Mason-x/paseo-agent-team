@@ -17,6 +17,7 @@ export const PHASE_LABELS: Record<RunPhase, string> = {
   failed: zh.phaseFailed,
   done: zh.phaseDone,
   idle: zh.phaseIdle,
+  cancelled: zh.phaseCancelled,
 };
 
 export const MEMBER_STATE_LABELS: Record<MemberState, string> = {

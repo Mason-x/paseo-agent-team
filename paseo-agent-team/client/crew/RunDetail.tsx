@@ -2,6 +2,7 @@ import { Pressable, Text, View } from "react-native";
 import {
   memberState,
   type RunAgentSnapshot,
+  type RunPhase,
   runProgress,
   type TeamRun,
 } from "../../shared/domain/run-progress";
@@ -34,10 +35,12 @@ function PlanSummary({
   theme,
   run,
   coordinator,
+  phase,
 }: {
   theme: PluginTheme;
   run: TeamRun;
   coordinator: RunAgentSnapshot;
+  phase?: RunPhase;
 }) {
   const digest = useTimelineDigest(coordinator);
   const todos = digest.data?.todos;
@@ -48,7 +51,7 @@ function PlanSummary({
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
         <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
-          {zh.plan} · {PHASE_LABELS[progress.phase]}
+          {zh.plan} · {PHASE_LABELS[phase ?? progress.phase]}
         </Text>
         <Text style={muted}>
           {todos
@@ -157,14 +160,20 @@ function MemberProgressRow({
   );
 }
 
-/** Plan and per-member assignment/report for one run. Timelines load only while it is shown. */
+/**
+ * Plan and per-member assignment/report for one run. Timelines load only while it is shown. `phase`
+ * is the phase the list already shows (an Engine run's comes from its ledger); without it the
+ * agents decide.
+ */
 export function RunDetail({
   theme,
   run,
+  phase,
   onOpenAgent,
 }: {
   theme: PluginTheme;
   run: TeamRun;
+  phase?: RunPhase;
   onOpenAgent?: (agentId: string) => void;
 }) {
   return (
@@ -179,7 +188,7 @@ export function RunDetail({
       }}
     >
       {run.coordinator ? (
-        <PlanSummary theme={theme} run={run} coordinator={run.coordinator} />
+        <PlanSummary theme={theme} run={run} coordinator={run.coordinator} phase={phase} />
       ) : null}
       {run.members.map((member) => (
         <MemberProgressRow key={member.id} theme={theme} agent={member} onOpen={onOpenAgent} />
