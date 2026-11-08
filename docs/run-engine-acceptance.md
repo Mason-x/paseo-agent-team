@@ -15,7 +15,7 @@
 
 | ID | 必须观察到的结果 | 状态 | 缺口（一句话） | 待批准 | DEV 记录 |
 | --- | --- | --- | --- | --- | --- |
-| AC01 | T2 不派发；T1 仍需满足其声明的审查和冒烟 | 部分 | 没有"带冒烟的 T1 + 依赖它的 T2"的引擎级用例 | — | 第 20、21 点（正常路径，非注入） |
+| AC01 | T2 不派发；T1 仍需满足其声明的审查和冒烟 | 已覆盖 | —（A16 已补引擎级用例：带冒烟的 T1 与依赖它的 T2，审查通过后 T2 仍是 `pending`，冒烟通过才派发，冒烟失败 T2 保持 `pending`、T1 回到生产者） | — | 第 20、21 点（正常路径，非注入） |
 | AC02 | 不能过完成门；显示具体拒绝原因 | 部分 | 旧 `reviewedRef`、自审、错 DEV 目标现已断言具体原因码（A15）；没有页面端到端 | — | 无 |
 | AC03 | 一次生效；assignment、预算、下一阶段不重复增加 | 已覆盖 | —（A15 已把重放 hook 与 assignment、预算、outbox、修订号的计数放进同一用例） | — | 无 |
 | AC04 | 恢复后执行该意图或按合同终止，不漏记也不额外派一份 | 已覆盖 | "意图提交后、调用前"的中断用抛错和新实例模拟，不是真实进程被杀 | — | 无 |
@@ -23,18 +23,18 @@
 | AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | "已创建但响应丢失"与"不误归档无关 Agent"现已有用例（A15）；去重靠同一个幂等键，没有按运行关联列举查证；创建中崩溃后安全关闭并告警，未登记的 Agent 仍需人工查找，不能完整续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
 | AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，已有用例（A15）；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
-| AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
-| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
+| AC09 | 仅一方获写占用；另一方等待并给出原因 | 已覆盖 | —（A16：两个 Run 的引擎级用例，别名拼写的文件路径被挡并在冲突里点名该文件，第一方完成放占用后另一方下一遍派发） | — | 无 |
+| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"现已在记录层断言不变（A15，只涉及 `turn_ended`）；"早于关键记录"只验证了 store 未就绪和无归属（绑定席位后恰好交付一次已补）；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
-| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；启动中断已安全关闭但不能续办；"暂停扣住的从未发出的派发"没有 store 级用例；没有 DEV | B13 | 无 |
+| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
-| AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
-| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
+| AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
+| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器，假时钟 24 小时空闲 Run 零宿主读写零计时器（A16）；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
 | AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖，且现已断言不写入、文件字节不变（A15）；查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言；M1 对账查询没有处理器可测 | B4 | 第 33 点（未在 DEV 验证） |
-| AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
+| AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源（不做，理由见 `docs/next-phase-plan.md` 2.12/A16：人直接和成员对话是正当用法，没有批准的异常语义）；对有 assignment 的成员发用户消息已有现状测试（A16）；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
 | AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 部分 | 只有宿主读取重查这一个定时器；没有别的截止条件可测 | B7 | 第 35 点（没有 DEV） |
 | AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；没有真实浏览器与小屏检查，重连只测了纯会话规则；其余原因码靠源码扫描而非端到端比对 | B8、B10（剩余字段） | 无 |
 
@@ -48,8 +48,10 @@
 - tests/run-engine/service.test.ts :: a reviewed task with a smoke goes to the smoker, on the registered DEV target
 - tests/run-core/r01g-behavior.test.ts :: true completion makes its pending dependency ready
 - tests/run-core/reducer.test.ts :: a done report and independent review move T2 to done and ready T3
+- tests/run-engine/driver.test.ts :: t2 stays pending through the review and the smoke, and is dispatched only once the smoke has passed — 真实 git 与 driver：T1 声明冒烟，审查通过后 T1 仍在 `smoke` 阶段、冒烟者被请求、T2 一直 `pending`，冒烟在登记的 DEV 目标上通过后才派发 T2（A16）
+- tests/run-engine/driver.test.ts :: a smoke that fails keeps t2 pending and sends t1 back to its producer — 冒烟的检查项失败：T2 从未被派发，T1 回到生产者并带返工说明（A16）
 
-缺口：冒烟未结束的情形只在 reducer 与服务层演示；没有引擎级的"T1 带冒烟、T2 依赖它"用例。
+缺口：无（DEV 真实冒烟仍无记录，见“DEV 记录”栏）。
 
 ### AC02 普通文字称完成、自审、旧 `reviewedRef`、错 DEV 目标
 - tests/run-core/gates.test.ts :: stale D and source-bound self reviewer cannot pass — 断言原因码 `no-valid-review`（A15）
@@ -141,8 +143,9 @@
 - tests/run-engine/service.test.ts :: another Run holding the repository blocks the dispatch even when it also has a t2
 - tests/run-engine/dispatch-builder.test.ts :: an unreadable view of other Runs refuses the grant instead of guessing
 - tests/run-engine/store.test.ts :: a damaged record makes the view untrusted instead of looking free
+- tests/run-engine/driver.test.ts :: a second Run asking for the same file under another case and separator is held back, with the file named as the conflict; once the first Run's task is done, the next pass sends it — 同一个 store 里的两个 Run、同一仓库：Run A 占用 `src/Util.ts`，Run B 请求 `SRC\util.ts`；派发被 `lock-conflict` 挡住，冲突明细里有 `kind: file`、`path: src/Util.ts` 的那一条（不只是整仓 `hot`）；A 的任务审查通过后占用清空，B 下一遍恰好派发一次（A16）
 
-缺口：别名只在锁函数层演示；两个 Run 的派发用例用的是整仓 `hot` 占用，不是带别名拼写的文件路径；"先放开后另一方继续"没有演示。
+缺口：无。
 
 ### AC10 派发结果不明、Agent 失联或取消未确认
 - tests/run-engine/driver.test.ts :: a request whose delivery is unknown stays sent once: claims freeze and nothing is re-sent
@@ -156,8 +159,12 @@
 - tests/run-engine/control.test.ts :: [%s] a D4: the task and everything that depends on it are cancelled, the claims go, the Run finishes, and nothing is sent
 - tests/run-engine/control.test.ts :: work that is not proven stopped, or a dependent that already started, is not cancelled
 - tests/run-engine/driver.test.ts :: the decision of a frozen supplement can only be answered with cancel: a retry is refused, a cancel releases the claim and the dependents
+- tests/run-engine/driver.test.ts :: a task of the same Run is held back by the frozen claims of a task that reported blocked, and the refusal names them as frozen — 同 Run：任务 t1 报告 `blocked` 后占用全部冻结，独立的 t2 的派发被 `lock-conflict` 挡住，明细里有 `reason: frozen`，宿主零发送（A16）
+- tests/run-engine/driver.test.ts :: another Run's frozen task keeps this Run waiting until that task is cancelled; then the next pass sends — 跨 Run：A 的 `blocked` 任务冻结占用，B 一直等；A 的人答复 `cancel` 后占用清空，B 下一遍派发（A4 笔记里记着当时没写的用例，A16 补上）
+- tests/run-engine/driver.test.ts :: another Run's task whose delivery is not known keeps its claims, and this Run waits — 跨 Run：A 的补证请求送达不明（`outcome-unknown`）使占用冻结，B 被挡且宿主零发送
+- tests/run-engine/driver.test.ts :: known limitation: a member closed in the middle of its turn is not noticed; the task stays assigned with its claims, and a cancellation of the Run keeps waiting for a turn end; the host is sent nothing — 现状测试（known limitation）：成员回合中只收到 `agent.closed`，任务仍 `assigned`、占用保留、不选别的成员、宿主零 send/archive；Run 取消返回 `waiting.turns >= 1` 并继续等，Run 停在 `paused`
 
-缺口："Agent 失联"没有用例（夹具 `closed-while-assigned` 没有测试使用）；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，只有锁函数层；没有"取消后另一个 Run 拿到占用"的跨 Run 用例。
+缺口："Agent 失联"仍是已知限制，引擎对 `closed`/`archived` 没有反应，现状测试只是把它固定下来；宿主是否发 `turn_ended` 没有证据（A12 探针可取证，见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
 
 ### AC11 收到报告后 hook 才到，或 hook 早于初始化/关键记录
 - tests/run-engine/observer.test.ts :: a turn end the hooks missed is recovered from the host, and a late hook is then a duplicate
@@ -223,8 +230,9 @@
 - tests/spec/run-core-reducer.spec.test.ts :: an answered cancel decision plus idle refresh releases the frozen claim
 - tests/run-engine/start-recovery.test.ts :: a second look finds nothing and writes nothing
 - tests/run-engine/start-recovery.test.ts :: a failed interrupted launch no longer keeps a read retry timer
+- tests/run-engine/driver.test.ts :: a dispatch that was committed and never sent is withdrawn locally when the Run is cancelled: the Run is the cause, its claims go, and the host is sent nothing — 真实 store：派发已提交（`prepared`）但进程停在发送之前，Run 取消后该意图 `failed`、`localCancellation` 为 `{ reason: cancel-before-send, cause: run-cancelled }`，占用清空、nonce 以 `cancel-before-send` 作废，宿主零发送（A16）
 
-缺口：暂停、续办与取消都已是 RPC 并有页面入口，但没有在 DEV 验证；"暂停扣住的从未发出的派发被本地撤回"没有 store 级用例。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。取消的 RPC 与决策答复见 A4、A5。
+缺口：暂停、续办与取消都已是 RPC 并有页面入口，但没有在 DEV 验证。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。归档式取消（不等回合结束）推迟，见 `docs/next-phase-plan.md` 2.3。取消的 RPC 与决策答复见 A4、A5。
 
 ### AC15 台账损坏、未知版本、CAS 冲突、超过硬上限
 - tests/run-engine/store.test.ts :: corrupt bytes are preserved, quarantined with a diagnostic, and refuse updates
@@ -253,8 +261,11 @@
 - tests/launch-engine-dialog.test.ts :: a damaged block is a blocker that says the old chain is not used
 - tests/run-engine/runtime.test.ts :: it cannot start a new Run, but a hook still admits the plan and dispatches
 - tests/run-engine/runtime.test.ts :: it can still be listed and read, and its controls still answer
+- tests/run-view/runs-tab.test.ts :: both are listed together; neither list hides, replaces or invents the other — 渲染 `RunsTab`：真实 `run.list` 查询（真实 store 里的 Engine Run）与标签派生的协调者链路 Run 同时出现，Engine 段在上（A16）
+- tests/run-view/runs-tab.test.ts :: with no Engine Run the page is what it was: the Engine section is not drawn and the chain's Run is — 没有 Engine Run 时不画 Engine 段，链路的 Run 照旧（A16）
+- tests/run-engine/runtime.test.ts :: the Run is still read, kicked and controlled on the policy and roster it froze; only a new launch sees the damaged block — Run 启动后 Team 的块被原地掏空、整块删除、另存一份坏块：新的启动被阻断或走旧链路，既有 Run 仍被列出、读取、入账派发、kick、暂停与继续，台账里冻结的策略与席位逐字节不变（A16）
 
-缺口：没有"引擎关闭时 Runs 页同时显示协调者链路的旧 Run 与 Engine Run"的用例；没有"台账里已有 Run 的配置损坏"的用例。
+缺口：无（页面本身不读取开关，开关关闭时 `run.list` 与控制仍可用由 runtime.test.ts 既有两例证明；没有把两者放进同一个渲染用例）。
 
 ### AC17 长时间无 hook 且无到期工作；重复普通状态事件
 - tests/run-engine/driver.test.ts :: a hook delivered twice, or for an agent no Run knows, sends nothing more
@@ -264,8 +275,9 @@
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
 - tests/run-engine/driver.test.ts :: idle kicks and repeated or unowned events write nothing and never wake the coordinator
 - tests/run-engine/failure-limit-driver.test.ts :: a Run with failures over the limit and nothing left to start is left alone
+- tests/run-engine/driver.test.ts :: an idle Run, 24 hours later, has made no call to the host, written nothing and left no timer behind — 假计时器前进 24 小时：宿主的读（时间线与席位状态）与归档调用数不变、发送数不变、账本修订号/告警/回执不变，`vi.getTimerCount()` 前后均为 0（A16）
 
-缺口：新用例喂入 5 轮重复事件并 kick，断言修订号不变、没有发送和重查计时器；没有让真实时间长时间过去，也没有断言所有只读宿主调用为零。唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
+缺口：新用例喂入 5 轮重复事件并 kick，断言修订号不变、没有发送和重查计时器；假时钟 24 小时已证明零宿主读写与零计时器（A16）；没有真实时间长跑，也没有 DEV 验证。唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
 
 ### AC18 战略协调者规划后，N 个成员事件正常流转
 - tests/run-engine/driver.test.ts :: two tasks, one after the other: nothing starts until what it waits for has passed every gate — 之后只有给成员的消息，四条，没有重复，没有发给协调者
@@ -287,8 +299,9 @@
 - tests/run-engine/observer.test.ts :: an agent named by two runs is not attributed to either
 - tests/run-engine/observer.test.ts :: another agent's timeline never contains the dispatch, so its text cannot stand in
 - tests/run-engine/intake.test.ts :: an agent with no assignment, and an unknown agent, have nothing to settle
+- tests/run-engine/driver.test.ts :: known limitation: a message the person typed is not a delivery and changes no task, assignment, decision or alert; no abnormal-activity record is made — 现状测试（known limitation）：用户在成员聊天里发消息、成员用文字回答、该回合结束：任务/assignment/outbox/占用逐项不变，无决策、无告警，宿主零发送（A16）
 
-缺口：无 assignment 的活动不会被当成交付，但被静默忽略：不写异常告警、不写审计事件、不核对受影响资源；对有 assignment 的成员发用户消息没有被当作异常测试。
+缺口：不做异常记录，理由见 `docs/next-phase-plan.md` 2.12/A16（人直接和成员对话是正当用法，没有批准的异常语义）：无归属的活动与用户消息都被静默忽略，不写告警、不写审计事件、不核对受影响资源；现状测试只固定"不被当成交付、不改任务状态、不报警"。
 
 ### AC21 定时到期、重启补算、时钟前进或回退
 - tests/run-engine/read-retry-server.test.ts :: a clock that went back never makes a try early, and the wait is cut to 30 seconds
