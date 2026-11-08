@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -12,6 +12,7 @@ import {
   RunListOutputSchema,
 } from "../../shared/schemas/run-engine/rpc";
 import { assignmentsForRun, noncesForRun, withLedger } from "../fixtures/run-engine/base";
+import { preparedRun } from "./support/prepared-run";
 
 const homes: string[] = [];
 const stores: RunStore[] = [];
@@ -254,6 +255,67 @@ describe("history", () => {
     } as RunRecord;
     expect(historyPage(compacted, cursor).issues[0]?.code).toBe("history-cursor-expired");
     expect(historyPage(record, "not-a-cursor").issues[0]?.code).toBe("history-cursor-expired");
+  });
+});
+
+describe("reading a live Run", () => {
+  test("the list, the detail and every history page leave a Run with a message waiting to go out byte for byte as it was, and write nothing", async () => {
+    const { home, store } = await setup();
+    const runId = "run-qry040-a1";
+    const record = preparedRun(runId, "a".repeat(64));
+    // A long history, so the detail has older pages to walk.
+    record.events = Array.from({ length: 120 }, (_, index) => ({
+      seq: index + 1,
+      kind: "audit-note",
+      at: "2026-11-05T00:00:00.000Z",
+      payload: {},
+    }));
+    record.counters.eventsThroughSeq = 120;
+    await store.create(record);
+    expect(record.outbox.some((intent) => intent.state === "prepared")).toBe(true);
+
+    const file = recordFile(home, runId);
+    const filesBefore = await readdir(path.dirname(file));
+    const before = await readFile(file, "utf8");
+
+    // Anything that would write goes through `create` or `update`; count them, and let them through.
+    const writes: string[] = [];
+    const watched = new Proxy(store, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "create" || property === "update") writes.push(String(property));
+          return value.apply(target, args);
+        };
+      },
+    });
+    const queries = createRunQueries({ store: watched, ensureReady: async () => undefined });
+
+    const listed = await queries.list({ runContractVersion: 1 });
+    expect(listed.runs.map((entry) => entry.runId)).toContain(runId);
+    const first = await queries.get({ runContractVersion: 1, runId });
+    expect(first.status).toBe("ready");
+    const cursor = first.status === "ready" ? first.history.nextCursor : null;
+    expect(cursor).not.toBeNull();
+    const older = await queries.get({
+      runContractVersion: 1,
+      runId,
+      historyCursor: cursor ?? undefined,
+    });
+    expect(older.status).toBe("ready");
+    expect((await queries.get({ runContractVersion: 1, runId, knownRevision: 1 })).status).toBe(
+      "unchanged",
+    );
+
+    expect(writes).toEqual([]);
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(await readdir(path.dirname(file))).toEqual(filesBefore);
+    // The waiting message is still waiting: reading is not sending.
+    const after = await store.get(runId);
+    if (after.status !== "ok") throw new Error("run unreadable");
+    expect(after.record.outbox.find((intent) => intent.state === "prepared")).toBeDefined();
+    expect(after.revision).toBe(1);
   });
 });
 

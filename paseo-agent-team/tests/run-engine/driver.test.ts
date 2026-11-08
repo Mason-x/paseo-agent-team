@@ -523,6 +523,37 @@ describe("the loop, from plan to finished Run", () => {
     expect(host.sent).toHaveLength(1);
     expect((await stored()).revision).toBe(before.revision);
   });
+
+  test("a report's turn_ended hook replayed three times and two kicks after it count nothing twice: assignments, budgets, outbox, revision and sends stay as the first ingestion left them", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+
+    // The first ingestion took the report in and started the reviewer.
+    const first = await stored();
+    expect(states(first)).toEqual({ t1: "review", t2: "pending" });
+    const countsOf = (record: RunRecord) => ({
+      assignments: record.assignments.length,
+      reserved: record.budgets.entries.map((entry) => [entry.subjectId, entry.reserved]),
+      outbox: record.outbox.length,
+      receipts: record.eventReceipts.length,
+      revision: record.revision,
+    });
+    const sentAfterFirst = host.sent.map((entry) => entry.messageId);
+    expect(sentAfterFirst).toHaveLength(2);
+
+    for (let replay = 0; replay < 3; replay += 1) await hook(host, driver, "agent-b1");
+    for (let again = 0; again < 2; again += 1) await driver.kick(RUN_ID);
+
+    const after = await stored();
+    expect(countsOf(after)).toEqual(countsOf(first));
+    expect(host.sent.map((entry) => entry.messageId)).toEqual(sentAfterFirst);
+    expect(states(after)).toEqual({ t1: "review", t2: "pending" });
+  });
 });
 
 describe("why a Run does not move", () => {
@@ -676,6 +707,35 @@ describe("recovery and the hook handler", () => {
     expect(states(await stored()).t1).toBe("review");
     // The restart also moved on: the reviewer was asked.
     expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
+  });
+
+  test("a turn_ended hook that comes after recovery already took the report in changes nothing in the record", async () => {
+    const host = fakeHost();
+    const first = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, first.driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1");
+    const turn = host.turnOf("agent-b1");
+
+    // Recovery reads the host, finds the finished turn and takes the report in; no hook was involved.
+    const second = build(host);
+    await second.driver.recover();
+    const settled = await stored();
+    expect(states(settled).t1).toBe("review");
+    const sentAfterRecovery = host.sent.length;
+    expect(settled.eventReceipts.some((receipt) => receipt.dedupeKey.includes(turn))).toBe(true);
+
+    // The hook the host sent for the same turn arrives late, twice.
+    for (let late = 0; late < 2; late += 1) {
+      await second.driver.onHook({ name: "agent.turn_ended", agentId: "agent-b1", turnId: turn });
+    }
+    const after = await stored();
+    expect(after.eventReceipts).toEqual(settled.eventReceipts);
+    expect(after.counters).toEqual(settled.counters);
+    expect(after.assignments).toEqual(settled.assignments);
+    expect(after.revision).toBe(settled.revision);
+    expect(host.sent).toHaveLength(sentAfterRecovery);
   });
 
   test("a plan that arrived while nothing listened is admitted on recovery", async () => {
@@ -1017,6 +1077,42 @@ describe("a report that cannot be used is asked for again", () => {
       waitingReason: "report-missing",
       state: "assigned",
     });
+  });
+
+  test("every refused report is a protocol failure and never a quality failure or a rework, and what the member delivered is left as it is", async () => {
+    const { host, driver } = await brokenReport();
+    const start = t1(await stored());
+    const head = git(repoDir, "rev-parse", "HEAD");
+    expect(git(repoDir, "log", "-1", "--format=%s")).toBe("deliver t1");
+    const limit = (await stored()).policy.perTask.protocolResends;
+    expect(limit).toBeGreaterThan(1);
+    const expectNoQuality = (record: RunRecord, failures: number) => {
+      expect(t1(record)).toMatchObject({
+        state: "assigned",
+        protocolFailures: failures,
+        qualityFailures: 0,
+        reworkCount: 0,
+        attempts: start?.attempts,
+        escalations: [],
+        currentAssignmentId: start?.currentAssignmentId,
+      });
+    };
+
+    // Refused, asked again, refused again, ... until the repair budget is spent.
+    for (let round = 1; round <= limit; round += 1) {
+      await hook(host, driver, "agent-b1");
+      expectNoQuality(await stored(), round);
+      host.reply("agent-b1", "still not a report");
+    }
+    await hook(host, driver, "agent-b1");
+
+    const spent = await stored();
+    expectNoQuality(spent, limit);
+    expect(t1(spent)?.waitingReason).toBe("report-missing");
+    // The member's last reply and its commit are where it left them: nothing was reset or rolled back.
+    expect(host.lastReply("agent-b1")).toBe("still not a report");
+    expect(git(repoDir, "rev-parse", "HEAD")).toBe(head);
+    expect(git(repoDir, "status", "--porcelain")).toBe("");
   });
 
   test("a turn that did not end on its own is not asked again", async () => {

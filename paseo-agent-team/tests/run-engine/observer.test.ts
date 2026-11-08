@@ -179,6 +179,48 @@ describe("hook ingestion", () => {
     expect(observer.needsReconcile).toBe(false);
   });
 
+  test("a hook that came before its seat was bound is delivered exactly once after the binding, however often the buffer is flushed", async () => {
+    const store = await newStore();
+    await store.create(ledger("run-obs005-a1"));
+    const observer = createRunObserver({ store });
+    const LATE = "agent-early";
+    const event = { name: "agent.turn_ended", agentId: LATE, turnId: "turn-first" } as const;
+    expect(await observer.ingest(event)).toEqual({ status: "buffered", reason: "no-owner-yet" });
+    // The same hook delivered again while it still has no owner is held again, but is one fact.
+    expect(await observer.ingest(event)).toEqual({ status: "buffered", reason: "no-owner-yet" });
+    expect(
+      (await receiptsOf(store, "run-obs005-a1")).filter((r) => r.dedupeKey.includes(LATE)),
+    ).toEqual([]);
+
+    await store.update("run-obs005-a1", (record) => ({
+      ...record,
+      roster: [
+        ...record.roster,
+        {
+          seatId: "seat-early",
+          tier: "B",
+          agentId: LATE,
+          channelId: "ch",
+          duties: [],
+          enabled: true,
+        },
+      ],
+    }));
+    await observer.flush();
+    await observer.flush();
+    await observer.flush();
+
+    const mine = (await receiptsOf(store, "run-obs005-a1")).filter((r) =>
+      r.dedupeKey.includes(LATE),
+    );
+    expect(mine.map((r) => r.dedupeKey)).toEqual([`turn_ended:${LATE}:turn-first`]);
+    expect(observer.buffered).toBe(0);
+    // And a fresh delivery of it afterwards is a duplicate that writes nothing.
+    const revision = await revisionOf(store, "run-obs005-a1");
+    expect(await observer.ingest(event)).toEqual({ status: "duplicate", runId: "run-obs005-a1" });
+    expect(await revisionOf(store, "run-obs005-a1")).toBe(revision);
+  });
+
   test("an agent named by two runs is not attributed to either", async () => {
     const store = await newStore();
     await store.create(ledger("run-obs005-a1"));

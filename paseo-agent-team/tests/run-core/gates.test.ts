@@ -165,12 +165,44 @@ describe("R01g three gates use assignment acceptedProof", () => {
     expect(RunRecordSchema.safeParse(record).success).toBe(false);
   });
   test("stale D and source-bound self reviewer cannot pass", () => {
+    // The reason is the one for "no review counts for the current delivery", not a judge's "no".
+    const noValidReview = {
+      ok: false,
+      issues: [
+        {
+          gate: "review",
+          path: ["tasks", "t1", "reviews"],
+          params: { reason: "no-valid-review" },
+        },
+      ],
+    };
     const stale = RunRecordSchema.parse(STALE_REVIEW_LEDGER);
-    expect(checkReviewGate(stale, task(stale, "t1"))).toMatchObject({ ok: false });
+    expect(checkReviewGate(stale, task(stale, "t1"))).toEqual(noValidReview);
     const self = RunRecordSchema.parse(
       INVARIANT_CASES.find((entry) => entry.id === "i7-self-review")?.ledger,
     );
-    expect(checkReviewGate(self, task(self, "t1"))).toMatchObject({ ok: false });
+    expect(checkReviewGate(self, task(self, "t1"))).toEqual(noValidReview);
+  });
+  test("a review of an older reviewedRef does not count for the current delivery", () => {
+    const record = normal();
+    expect(checkReviewGate(record, task(record, "t1"))).toEqual({ ok: true });
+    const reviewer = record.assignments.find((entry) => entry.purpose === "reviewer")!;
+    const proof = reviewer.acceptedProof as { verdict: string; reviewedRef: unknown };
+    // Still a clean verdict from an independent reviewer, but of another commit than the delivered one.
+    expect(proof.verdict).toBe("可合入");
+    proof.reviewedRef = { kind: "git-commit", value: "an-older-commit" };
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+    expect(checkReviewGate(record, task(record, "t1"))).toEqual({
+      ok: false,
+      issues: [
+        {
+          gate: "review",
+          path: ["tasks", "t1", "reviews"],
+          params: { reason: "no-valid-review" },
+        },
+      ],
+    });
+    expect(doneGate(record, task(record, "t1"))).toMatchObject({ ok: false });
   });
   test("L1 frozen family independence", () => {
     const record = normal();
@@ -208,7 +240,17 @@ describe("R01g three gates use assignment acceptedProof", () => {
     smokeProof(missing).devHost = "127.0.0.1:6767";
     missing.policy.devTargets[0]!.host = "127.0.0.1:6767";
     expect(RunRecordSchema.safeParse(missing).success).toBe(true);
-    expect(checkSmokeGate(missing, task(missing, "t6"))).toMatchObject({ ok: false });
+    // A smoke on the default daemon's port is a failed smoke, not a missing one.
+    expect(checkSmokeGate(missing, task(missing, "t6"))).toEqual({
+      ok: false,
+      issues: [
+        {
+          gate: "smoke",
+          path: ["tasks", "t6", "smoke"],
+          params: { reason: "failed-smoke" },
+        },
+      ],
+    });
     expect(checkLedgerInvariants(missing)).toMatchObject({
       ok: false,
       violations: [{ invariant: "I7", params: { reason: "invalid-historical-proof" } }],
