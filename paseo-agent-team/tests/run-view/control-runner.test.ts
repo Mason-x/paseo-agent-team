@@ -3,6 +3,7 @@ import {
   type ControlDeps,
   type ControlState,
   createControlRunner,
+  newRequestId,
 } from "../../client/runs/engine/control-runner";
 import { controlsOf, type RetryOffer } from "../../shared/domain/run-engine/controls";
 import { RUN_CONTRACT_VERSION } from "../../shared/schemas/run-engine/rpc";
@@ -120,6 +121,48 @@ const conflict = {
     },
   ],
 };
+
+describe("request ids", () => {
+  test("uses the platform UUID when available", () => {
+    const randomUUID = vi.fn(() => "6f1c2a44-3b7e-4f0a-9a11-000000000001");
+    vi.stubGlobal("crypto", { randomUUID });
+    try {
+      expect(newRequestId()).toBe("6f1c2a44-3b7e-4f0a-9a11-000000000001");
+      expect(randomUUID).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("uses random bytes for a version 4 UUID when randomUUID is unavailable", () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      bytes.forEach((_, index) => {
+        bytes[index] = index;
+      });
+      return bytes;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+    try {
+      expect(newRequestId()).toBe("00010203-0405-4607-8809-0a0b0c0d0e0f");
+      expect(getRandomValues).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("uses a version 4 UUID even when the platform has no crypto", () => {
+    vi.stubGlobal("crypto", undefined);
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      expect(newRequestId()).toBe("00000000-0000-4000-8000-000000000000");
+      random.mockReturnValue(0.5);
+      expect(newRequestId()).toBe("80808080-8080-4080-8080-808080808080");
+    } finally {
+      random.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("replan", () => {
   test("sends the reason, the revision that was read and a request id, then reads the Run again", async () => {

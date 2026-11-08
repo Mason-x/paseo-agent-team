@@ -305,7 +305,7 @@ export function kickNotice(output: RunKickOutput): ActionNotice {
   }
 }
 
-/** The request never got an answer; the same request id is kept so asking again cannot act twice. */
+/** The request got no answer; only controls with a request id retain it for an identical retry. */
 export function transportNotice(): ActionNotice {
   return { tone: "warning", text: zh.controls.result.transport, refresh: false };
 }

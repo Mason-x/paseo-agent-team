@@ -139,7 +139,7 @@ export const runEngineZh = {
       applied: "已提交",
       replayed: "这个请求已经提交过，没有重复执行",
       refreshed: "已重新读取最新状态",
-      transport: "请求没有送达，请稍后重试（同一个请求不会重复执行）",
+      transport: "没有收到操作结果，服务端可能已执行；请先查看最新状态，再决定是否重试",
       unknownCode: (code: string) => `被拒绝（原因代码 ${code}）`,
       kick: {
         idle: "没有需要推进的内容",

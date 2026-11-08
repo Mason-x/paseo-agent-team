@@ -39,8 +39,8 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
  *    to what was asked: another reason, or another revision, is another request.
  *  - Whatever the server answered, the Run is read again; a `revision-conflict` therefore ends with
  *    the page showing the newer Run and a sentence asking the person to look and try again.
- *  - A transport error is not an answer: the notice says the request did not arrive and the page is
- *    not refreshed on its account.
+ *  - A transport error is not an answer: the server may have acted, and the page is not refreshed on
+ *    its account.
  */
 
 export type ControlKey =
@@ -253,10 +253,19 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
 
 export type ControlRunner = ReturnType<typeof createControlRunner>;
 
-/** A request id for one control press: a UUID where the platform has one, a random string where not. */
+/** A UUID for one control press; prefer platform randomness when it is available. */
 export function newRequestId(): string {
-  const crypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  const crypto = globalThis.crypto;
   if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
-  const part = () => Math.random().toString(16).slice(2, 10).padEnd(8, "0");
-  return `req-${Date.now().toString(16)}-${part()}${part()}`;
+  const bytes = new Uint8Array(16);
+  if (typeof crypto?.getRandomValues === "function") crypto.getRandomValues(bytes);
+  else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

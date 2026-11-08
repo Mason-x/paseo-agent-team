@@ -484,11 +484,15 @@ describe("what is said about an answer", () => {
   });
 
   test("a request that never got an answer does not ask for a refresh", () => {
-    expect(transportNotice()).toEqual({
+    const notice = transportNotice();
+    expect(notice).toEqual({
       tone: "warning",
       text: zh.controls.result.transport,
       refresh: false,
     });
+    expect(notice.text).toContain("可能已执行");
+    expect(notice.text).not.toContain("没有送达");
+    expect(notice.text).not.toContain("不会重复执行");
   });
 });
 
