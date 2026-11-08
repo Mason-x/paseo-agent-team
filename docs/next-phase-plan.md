@@ -1,5 +1,7 @@
 # 下一阶段计划：Run Engine 剩余工作的批准裁决与执行计划
 
+> 2026-11-09：本文的裁决与规则已由 docs/run-engine-todo-plan.md 重审，冲突处以后者为准（修订清单见其 2.2 节）。
+
 编写：2026-11-08，Opus 5.5 max。用户已授权：下列所有待批准事项由本文裁决，先后顺序与做法由本文决定，实施会话不再向用户提问。
 基线：`main` 的 `5533722`；分支 `autonomous-p05-p08`，当前 HEAD `f1f1e48`（相对基线 57 个提交：15 feat、6 fix、2 test、34 docs，工作树干净）。
 插件根目录 `paseo-agent-team/`，下文路径都相对它（`docs/` 例外）。任务号从 A13 起，沿用 `docs/approved-implementation-plan.md`（A1–A12）的编号；你给的剩余清单项在本文写作"清单 A-1…A-10、B-1…B-3、C、D"。
