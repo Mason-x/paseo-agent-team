@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## [0.6.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.6.0) (2026-11-08)
+
+### Features
+
+- Run Engine, opt-in and off by default (start the daemon with `PASEO_AGENT_TEAM_RUN_ENGINE=1` and
+  switch it on in a Team's **Run 引擎** block). One Run is one ledger file; every message to a member
+  goes through an outbox (written first, sent once, an unknown result is checked against the member's
+  timeline and never sent twice). Reports are taken in with bounded format repair, evidence the gate
+  refuses is asked for again on the same delivery, review and smoke gates need an independent seat, and
+  file claims are serialized across Runs. A host read that failed is read again and, once it works, the
+  Run goes on by itself. Ledger schema v2 (this version reads v1 and v2).
+- Runs page controls, shown only when the Run offers them: re-plan, retry, cancel a task, kick, pause,
+  resume, add turns to a seat and cancel the whole Run (waits for running turns to end; sends nothing,
+  archives nothing). Every waiting task, decision and alert says why, who clears it and what happens
+  next, and the history says why each event happened.
+- Turn budgets: per seat (add turns from the page) and for the coordinator (plan requests and
+  re-plans). A failed-task limit stops new tasks from starting once too many have failed; work already
+  in progress finishes.
+- Team editor: edit the Run Engine block (seats, tiers, duties, channels, policy numbers) with the
+  launch gate's blockers and warnings shown live, including a Codex Profile that is not full-access.
+  Unknown fields in the block are kept.
+- Long Runs: old events are folded into a summary and the Run stops starting new work near a ledger
+  limit instead of overfilling.
+
+### Bug Fixes
+
+- A Run whose launch was interrupted while members were being created is closed with a critical alert
+  listing the Agents already recorded; nothing is archived for you.
+- The Runs list no longer shows an active blocked Run or a cancelled Run as finished.
+- Control requests use a real UUID as request id, and "no answer" is shown as "the server may have
+  acted" rather than "not delivered".
+- Two processes contending for a ledger lock no longer report a lock that is still being written as
+  corrupt.
+
+### Notes
+
+- Needs Paseo 0.12.0 or newer. The Engine stays off unless you turn it on.
+- Do not roll back to 0.5.0 while an Engine Run is live: 0.5.0 has no Engine launch path and does not
+  read schema v2.
+- Known limits: closing or archiving a member mid-turn leaves its task waiting; if the host loses a
+  running turn on restart, read re-checks run out and cancelling the Run keeps waiting until the member
+  answers once more (README explains the way out). Not verified on a real host: the evidence
+  supplement template with a real model.
+
 ## [0.5.0](https://github.com/Mason-x/paseo-agent-team/releases/tag/paseo-agent-team-v0.5.0) (2026-11-05)
 
 ### Features
