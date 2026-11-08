@@ -45,8 +45,12 @@
 | A16 验收缺口补测 II | 已做（七组全部提交） | c271e12（测试）+ 计划第 61 点 | 3319 | AC01、09、10、14、16、17、20 的引擎级补测，只加测试；AC01、AC09、AC16 升为已覆盖，AC10、AC20 为已知限制现状测试；变异 27 次运行，21 被抓，6 存活（5 项首次选错或只破坏单层，改后被抓；1 项有意冗余） |
 | A14 协调者回合预算（修正版 A11） | 已做 | a23ae38（代码）+ 计划第 62 点 | 3346 | `policy.run.strategicTurns` 做成协调者的回合预算：计划请求与重新规划各扣一回合（`budgets.entries` 里 `coordinator` 条目），计划格式重发不计、不退还，耗尽时重新规划被拒并告警，`run.budget` 可追加；`strategicTurns < 1` 时启动被阻断；无 schema/RPC/模板变化；变异 15 个点全部被抓；回滚演练通过 |
 | A17 UI 接线与渲染测试 | 已做 | 9508aed（代码+测试）+ 计划第 63 点 | 3358 | 把 `TeamEditor` 给 `RunEngineEditor` 的 Profile 接线抽成 `RunEngineSection`（行为不变），挂载测试覆盖 Codex 警告与不猜的行；`LaunchDialog` 渲染测试覆盖 Engine 阻断/警告、kickoff-pending、失败；变异 12 项全抓到 |
+| A18 文档对账 | 已做 | 583a55d（README 与事实测试）+ 计划第 64 点 | 3361 | 验收表按证据对账（AC07、AC19、AC21 升为已覆盖，AC21 带范围声明），README 补 A13/A14 语义、高级字段、不要关闭或归档成员的警告并刷新“未做”列表，`readme-facts.test.ts` 新增 3 例；变异 6 项全抓到 |
+| A19 发布材料 | 已做（只备材料） | A19_SHA + 计划第 65 点 | 3361 | `docs/release-handoff.md`：范围摘要、预期版本、PR 与发布说明草稿、合并前检查清单（命令已运行）、合并方式、R2 准入条件、残余风险；没有改版本文件、CHANGELOG，没有合并、推送、打标签、建 PR |
 
 ## 待批准
+
+B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批准、推迟或关闭，推迟项写明了重新评估的触发条件）；下面是当初的提案原文，保留作记录。本阶段新发现、必须改合同的需求见本文件的“待批准（第二轮）”。
 
 （每条：编号｜标题｜为什么需要批准｜没批准时现状｜最小形状｜影响的验收项｜建议。第 3 节的 B1–B12 在这里展开；我在做的过程中新发现的从 B13 起编号。）
 
@@ -293,6 +297,10 @@
 - **版本与发布**：走 release-please（`release-please-config.json`），按新功能给 minor，`CHANGELOG` 由发布机制生成，不手改。发布说明写明回滚注意：回滚到不认识 v2 的版本会阻断所有 Run 的新资源授予（第 34 点）；回滚到 A3 与 A5 之间的版本会让已请求取消的 Run 被续办；压缩掉的历史不可恢复。
 - **要你决定的事**：B9 本身；要不要"取消在途任务"（会归档该成员的 Agent，这个 Run 里该席位不能再用，除非另做 resume-seat）；`assign-seat`；B7 何时重议；B8 值不值得做；`failedTasks` 的语义（R3）；DEV 验收用多少模型额度。
 
+## 待批准（第二轮）
+
+（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
+
 ## 我自己做的判断
 
 - **T5c 新建 Run 引擎配置的默认值**（`shared/domain/run-engine/team-config-edit.ts` 的 `DEFAULT_ENGINE_LIMITS` 与 `defaultEngineBlock`）：并发 2；每任务 报告重发 2、证据退回 3、每层返工 2、实现尝试 6；每 Run 允许失败 3 个任务、协调者 12 回合；每个席位 12 个回合的预算（没有预算条目的席位会被判"预算缺失"而永远派发不出去，所以必须有）；证据目录 `auto`；DEV 目标留空；渠道留空让人填，不从 Profile 猜。这些数字是我按夹具和合同范围定的，只在人点开关新建配置时才会写进去，默认关闭。想改默认值：改 `DEFAULT_ENGINE_LIMITS`，测试里只有 `seatTurnBudget` 被断言。
@@ -320,13 +328,16 @@
 - **T7a 归档式取消**：A5 已实现不打断、不归档的延迟取消与 RPC，等在途回合确实结束后才释放占用。原计划的在途成员归档式取消仍推迟，见 B4 裁决。
 - **第 5 节 DEV 真实验证**：没做。需要 DEV daemon、Profile、探针仓库、真实模型额度，规则要求"时间和额度还够才做"，我没有把握，不勉强。可验证项（补证模板是否被遵守、`replan` 的 v4 提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查）都在验收表的"DEV 记录"栏里记为没有。
 - **T5c 待补缺口**：Profile 警告只在 Team 规划返回后、且每个席位恰有一行已选 Profile 时才出现，候选、未解析或与编辑器席位号对不上的行被跳过而不是猜；`TeamEditor` 本身无法挂载测试（A17 已把接线抽成 `RunEngineSection` 并挂载测试，`TeamEditor` 只剩源码扫描保护）。策略中预算、DEV 目标、evidenceRoot 等保持原值，当前界面没有编辑入口。
-- **成员回合中被关闭或归档（AC10 的“Agent 失联”）和用户直接发给成员的消息（AC20）**：A16 只写了现状测试（名字带 known limitation）。引擎对 `agent.closed`/`agent.archived` 没有反应，若宿主在关闭运行中的 Agent 时不发 `turn_ended`，任务和 Run 的取消会一直等；用户发给成员的消息被静默忽略，不报警。按 `docs/next-phase-plan.md` 2.12 不修，README 警告由 A18 补，A12 探针取证。
-- **新界面没有真实浏览器检查**：只有源码层的保护和渲染测试（`react-test-renderer`），窄屏、折行、断线重连都没有真实看过。
+- **成员回合中被关闭或归档（AC10 的“Agent 失联”）和用户直接发给成员的消息（AC20）**：A16 只写了现状测试（名字带 known limitation）。引擎对 `agent.closed`/`agent.archived` 没有反应，若宿主在关闭运行中的 Agent 时不发 `turn_ended`，任务和 Run 的取消会一直等；用户发给成员的消息被静默忽略，不报警。按 `docs/next-phase-plan.md` 2.12 不修；README 警告已由 A18 补（“Do not close or archive a member's Agent while a Run is live”，`readme-facts.test.ts` 核对），A12 探针取证。
+- **新界面没有真实浏览器检查**：只有源码层的保护和渲染测试（`react-test-renderer`，A17 又补了 Team 编辑器的 Run Engine 区与 `LaunchDialog` 的挂载渲染），窄屏、折行、断线重连都没有真实看过；`TeamEditor` 本身仍未挂载。
+- **A13–A19 之后仍然推迟或关闭的事项**（裁决与重新评估的触发条件见 `docs/next-phase-plan.md` 第 2 节和附录，残余风险见 5.2）：B13 完整续办、在途成员的归档式取消、`run.approve`、`run.reconcile`、`run.export`、`reject`、`assign-seat`、派发后自动重试（B7）、推送式失效（B8）、`nextAttemptAt`/`waitingCode`、补报清理加固、成员回合中被关闭或归档的恢复、AC20 的异常记录、默认开启 Engine 与发布（`docs/release-handoff.md` 只备材料）。
+- **A12 DEV 真实验证**：仍未做（可选，必须最后，且要先过独立评审）。验收表中 AC12、AC15、AC22 因此仍为部分，其余已覆盖项的“DEV 记录”栏仍多为“无”。
 - **`LaunchDialog` 的渲染测试**（已由 A17 补上，`tests/run-view/launch-dialog.test.ts`）：此前它调用 `launch-job-copy.ts` 的接线只靠类型检查。
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
 
+- **A18**：只改文档与 `readme-facts.test.ts`（新增 3 例）。验收表：AC07、AC19、AC21 升为已覆盖（AC07 的缺口只剩 DEV，已放在“DEV 记录”栏；AC19 的“M1 对账查询”改写为“不提供，由 kick 代替”；AC21 带范围声明），其余各行证据已是阶段 1、2 的结果，状态不变——AC02（没有页面端到端）、AC11（早于关键记录只验证两种）、AC06、AC10、AC13、AC14、AC17、AC18、AC20 的缺口句未被整句关闭，保持“部分”；AC12、AC15、AC22 保持需 DEV。与计划 5.3 的目标不同之处：AC02、AC11 没有升为已覆盖，因为各自仍有未被证据关闭的缺口。README：A13/A14 语义（失败任务上限闸、协调者回合预算）此前已在 A13/A14 写入，本次补“未做”列表（无审批、无在途任务取消、无改派、无派发后自动重试、不能续办中断的启动）、“Do not close or archive a member's Agent while a Run is live”警告、“Advanced fields”一段。`devTargets`（`serverId`、`host`、`home` 三个字段，至多 16 项，`host` 要显式端口且不是 6767、不带凭据）和 `evidenceRoot`（`auto` 或绝对路径、在仓库之外）的形状逐条对照了 `RunDevTargetSchema`、`RunPolicySnapshotSchema`、`gates.ts` 的 `devEndpoint`、`dag-admission.ts` 的 `dev-target-missing`、`repo.ts` 的 `ensureEvidenceRoot`，`readme-facts.test.ts` 把示例 JSON 用 `RunDevTargetSchema` 解析，并核对字段名、`auto` 常量、16 项上限和默认值 3、12。变异 6 项（`a18.json`）全部被抓到：失败任务默认值写错、示例里 devTargets 键名写错、删掉关闭警告、devTargets 上限写错、evidenceRoot 示例不是 auto、验收表引用的用例名改掉；README 与验收表经 `cmp` 逐字节还原。门禁见 A18 提交前的完整运行。
 - **A17**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 200 个文件 3358 通过（3 todo，A14 后 3346 加 12：`run-engine-section.test.ts` 4 项、`launch-dialog.test.ts` 7 项、`seat-profile-facts.test.ts` 1 项；文件数 198 加 2）、verify:package 通过；`version-flow` 并行时一次 Windows `EBUSY`，单独重跑 23 项通过。第一次尝试就通过全部定向用例。变异（`a17.json`，12 项）全部被抓到：容器不把 `seatProfiles` 交给编辑器、容器不算 Profile、多塞一个不在规划行里的席位、`TeamEditor` 不渲染容器、`TeamEditor` 不交规划行、启动对话框丢掉 kickoff-pending 文案、丢掉未确认完成的提示、不显示失败、丢掉复制启动消息按钮、阻断时启动按钮仍开着、预览不显示阻断、预览不显示警告；5 个源码文件经 `cmp` 逐字节还原。与计划文字的差异：(1) 原有源码扫描用例不能原样保留（它扫的字符串随接线搬进了新文件），改成扫 `RunEngineSection.tsx` 并另加一例确认 `TeamEditor` 把规划行交给该组件、自己不再直接渲染 `RunEngineEditor`、不再算 Profile 事实；(2) 对话框测试不 mock `@tanstack/react-query`，用真实的 `QueryClientProvider` 和 `useQuery`，只 mock 插件的 `useRpc`、`Modal`、`useToast`、`copyText` 和目标上下文 hook，Engine 阻断与警告文案来自真实的启动计划器（`buildLaunchPlan`）。`TeamEditor` 本身仍没有挂载（它引入整个宿主）。没有真实浏览器检查。
 
 - **A14**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 198 个文件 3346 通过（3 todo，A16 后 3319 加 27）、verify:package 通过。第一次实现就通过全部定向用例，没有走到第二次尝试。先写失败测试再实现：新增的 `coordinator-budget.test.ts`、`control.test.ts`、`start.test.ts`、`team-config.test.ts`、`team-config-edit.test.ts` 用例在实现前分别因缺模块或断言不成立而变红。变异（`a14.json`，15 个点）：启动不扣、重新规划不扣、已付的回合不识别、旧 Run 条目从 0 起、耗尽不拒绝、`run.budget` 不先建协调者条目、启动门不看（Team 编辑器与预检各一项）、计划格式重发也扣、耗尽时每次问都写告警、追加预算改了冻结策略、协调者告警写成席位口吻、条目限额为 0、懒建时不数已 `failed` 的计划请求、拒绝码没有中文，全部被抓到。首轮 3 项存活，原因都在我的测试编排而不是缺用例：对 `coordinator` 追加预算的集成用例里条目已被前一次被拒的重新规划建好（补了“旧 Run 没有条目”一例）；前缀特判那项和 `control.test.ts` 一起跑时 `-t turn.budget` 把纯函数用例过滤掉了（单跑 `coordinator-budget.test.ts` 即被抓）；缺中文那项跑错了测试文件（穷举在 `tests/run-view/controls.test.ts`）。源码经 `cmp` 逐字节还原（每轮脚本输出 ALL RESTORED）。回滚演练：`git show`/`git archive` 取 `f1f1e48` 的整个 `shared/` 到仓库外临时目录，旧版 `RunRecordSchema` 读一份带 `coordinator` 条目（`reserved: 2`）的 v2 记录解析通过且条目保留，旧版 `checkLedgerInvariants` 通过；临时目录里的 `node_modules` 是指向主工作区的 junction，用后先 `rmdir` 摘掉再删目录，主工作区的 `node_modules` 完好。与计划文字的差异：(1) `budget.ts` 的前缀函数对字面量 `coordinator` 做了特判（计划要求前缀对协调者给出“协调者的回合预算已用完”，而 `budget.ts` 不能导入 `dag-admission`），这是计划“不碰 `budget.ts`”一句里“循环依赖迫使最小改动”的那种例外，`coordinator-budget.test.ts` 把两处写法绑在一起；(2) 重新规划遇到 `already-counted`（同键或同消息号已在 outbox）按重放处理，返回 `replayed`，正常路径到不了；(3) `support/plan-fixtures.ts`（测试辅助，不是共享夹具 `base.ts`）的 `prepared()` 多一个 `schemaVersion` 选项，让纯函数用例能跑 v1 与 v2。DEV 未验证。

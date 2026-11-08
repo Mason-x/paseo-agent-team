@@ -9,7 +9,7 @@
 - **未覆盖**：没有测试。
 - **需 DEV**：离线测试之外，还需要在专用 DEV daemon 上用真实模型和真实 Paseo 观察。所有项目的这一步目前都没有做完，见"DEV 记录"栏。
 
-证据一律写成 `- 测试文件 :: 用例名`，用例名与测试文件里的标题逐字一致；`paseo-agent-team/tests/run-engine/acceptance-doc.test.ts` 会读这份文档，检查每一条引用的文件存在、用例名确实出现在该文件里，所以引用不会随重命名悄悄失效。标题由 `test.each` 模板生成的，在说明里写"模板"，不参与逐字检查。"待批准"一栏的编号 B1–B13 指 `docs/autonomous-notes.md` 的待批准清单（本轮无人值守会话的笔记）。
+证据一律写成 `- 测试文件 :: 用例名`，用例名与测试文件里的标题逐字一致；`paseo-agent-team/tests/run-engine/acceptance-doc.test.ts` 会读这份文档，检查每一条引用的文件存在、用例名确实出现在该文件里，所以引用不会随重命名悄悄失效。标题由 `test.each` 模板生成的，在说明里写"模板"，不参与逐字检查。"待批准"一栏的编号 B1–B13 指 `docs/autonomous-notes.md` 的待批准清单（本轮无人值守会话的笔记）；其中每一项的裁决（批准、推迟、关闭）见 `docs/next-phase-plan.md` 第 2 节，推迟的项在那里写明了重新评估的触发条件。
 
 ## 总表
 
@@ -21,7 +21,7 @@
 | AC04 | 恢复后执行该意图或按合同终止，不漏记也不额外派一份 | 已覆盖 | "意图提交后、调用前"的中断用抛错和新实例模拟，不是真实进程被杀 | — | 无 |
 | AC05 | 先核对实际消息和 turn；无法证明时冻结，不盲目重发 | 已覆盖 | 证明只靠用户消息回显（messageId）；没有宿主证明"消息确实没到"的用例 | — | 无 |
 | AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | "已创建但响应丢失"与"不误归档无关 Agent"现已有用例（A15）；去重靠同一个幂等键，没有按运行关联列举查证；创建中崩溃后安全关闭并告警，未登记的 Agent 仍需人工查找，不能完整续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
-| AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，已有用例（A15）；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
+| AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 已覆盖 | —（协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，已有用例，A15；DEV 没跑过成员报告补报，见 DEV 记录栏） | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 已覆盖 | —（A16：两个 Run 的引擎级用例，别名拼写的文件路径被挡并在冲突里点名该文件，第一方完成放占用后另一方下一遍派发） | — | 无 |
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理 | — | 无 |
@@ -33,9 +33,9 @@
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器，假时钟 24 小时空闲 Run 零宿主读写零计时器（A16）；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
-| AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖，且现已断言不写入、文件字节不变（A15）；查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言；M1 对账查询没有处理器可测 | B4 | 第 33 点（未在 DEV 验证） |
+| AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 已覆盖 | —（列表、详情、历史、刷新已断言不写入、文件字节不变，A15；查询函数不持有宿主，"不派发"是结构性的；M1 对账查询不提供，由 kick 代替，见 `docs/next-phase-plan.md` 2.3） | — | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源（不做，理由见 `docs/next-phase-plan.md` 2.12/A16：人直接和成员对话是正当用法，没有批准的异常语义）；对有 assignment 的成员发用户消息已有现状测试（A16）；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
-| AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 部分 | 只有宿主读取重查这一个定时器；没有别的截止条件可测 | B7 | 第 35 点（没有 DEV） |
+| AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 已覆盖（范围声明：现有唯一的截止条件是宿主读取重查，B7 的派发后退避已推迟，所以没有别的可测对象） | —（范围声明见左） | B7（已推迟） | 第 35 点（没有 DEV） |
 | AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；没有真实浏览器与小屏检查，重连只测了纯会话规则；其余原因码靠源码扫描而非端到端比对 | B8、B10（剩余字段） | 无 |
 
 没有 DEV 记录的项目都需要在专用 DEV daemon 上再看一遍（本轮的第 5 节 DEV 验证没有做）。
@@ -122,7 +122,7 @@
 - tests/run-engine/control.test.ts :: with no re-send to ask for, the first unusable reply is already the decision
 - tests/run-core/reducer.test.ts :: incomplete evidence stays in progress and increments evidenceReturns
 
-缺口：DEV 没跑过成员报告补报。协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，成员的提交与最近回复保持原样，已有用例（A15）。
+缺口：无（DEV 没跑过成员报告补报，见“DEV 记录”栏）。协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，成员的提交与最近回复保持原样，已有用例（A15）。
 
 ### AC08 超长、多块、未知版本、错任务/attempt/nonce/发送者
 - tests/run-engine/protocol.test.ts :: fixture cases: each defect is rejected for its own named reason, none is accepted
@@ -308,7 +308,7 @@
 - tests/run-engine/control.test.ts :: nothing the controls return holds a nonce, a prompt or an outbox argument
 - tests/run-engine-contracts.test.ts :: run.get returns unchanged or a redacted view with no nonce/prompt fields
 
-缺口：查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言（A15 改为断言 `create`/`update` 零调用、文件字节和目录不变、待发消息仍为 prepared）；M1 对账查询只有 schema 形状，没有处理器（B4）。
+缺口：无（查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言，A15 改为断言 `create`/`update` 零调用、文件字节和目录不变、待发消息仍为 prepared；M1 对账查询不提供，由 kick 代替，见 `docs/next-phase-plan.md` 2.3，`run.reconcile` 不批准）。
 
 ### AC20 用户绕过 Engine 发消息，或观察到无 assignment 的活动
 - tests/run-engine/observer.test.ts :: with no live run nothing could claim an agent, so its events are ignored, not buffered
@@ -329,7 +329,7 @@
 - tests/run-engine/read-retry.test.ts :: a clock that jumped forward gives every due item one try, not several
 - tests/run-engine/read-retry.test.ts :: a try cut off by a restart is used: it waits for the next one, or is used up on the third
 
-缺口：这只覆盖了唯一的定时器（宿主读取重查）；派发退避、预算窗口等别的截止条件不存在，所以没有可测的对象（B7）。
+缺口：无（范围声明：现有唯一的截止条件是宿主读取重查，上面的用例覆盖了它；派发后的退避、预算窗口等别的截止条件不存在，B7 已推迟，所以没有别的可测对象。DEV 没有做）。
 
 ### AC22 Runs 详情、历史翻页、`unchanged`、断线重连、小屏布局
 - tests/run-engine/get-session.test.ts :: unchanged for the held revision keeps the same session object, so nothing flashes empty
@@ -365,4 +365,5 @@
 ## 这份表之外还没做的
 
 - 第 5 节的 DEV 真实验证没有做：补证模板是否被真实模型遵守、`replan` 的提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查。
+- 已裁决推迟或不做的事项（完整续办、在途成员的归档式取消、`assign-seat`、派发后的自动重试、推送式失效、补报清理加固、成员回合中被关闭的恢复、默认开启）及其残余风险见 `docs/next-phase-plan.md` 第 2 节与 5.2；它们是已接受的残余风险；与某一项直接相关的，已在那一项的缺口栏里写明。
 - 缺口栏沿用 B1–B13 编号；其中部分已裁决或实施，具体范围与仍推迟的内容见 `docs/autonomous-notes.md` 的裁决与进度。
