@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { AUTO_EVIDENCE_ROOT } from "../../server/run-engine/repo";
 import { RUN_ENGINE_ENV } from "../../server/run-engine/runtime";
+import { LOST_TURN_HINT } from "../../shared/domain/run-engine/read-retry";
 import { DEFAULT_ENGINE_LIMITS } from "../../shared/domain/run-engine/team-config-edit";
 import {
   RUN_SCHEMA_VERSION,
@@ -133,5 +134,15 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(runEngineZh.list.title).toBe("Engine 运行");
     expect(section).toContain("Run 引擎");
     expect(runEngineZh.teamEditor.title).toBe("Run 引擎");
+  });
+
+  test("the way out of a turn the host lost is told in the README and in the alert the same way", () => {
+    expect(section).toContain("incomplete:dispatch-not-found");
+    expect(section).toContain("asks only for a reply\n  of OK");
+    for (const word of ["立即检查并推进", "只要求回复 OK", "Paseo 里空闲"]) {
+      expect(LOST_TURN_HINT).toContain(word);
+    }
+    expect(section).toContain("**立即检查并推进**");
+    expect(section).toContain("cancelling the whole Run keeps waiting");
   });
 });

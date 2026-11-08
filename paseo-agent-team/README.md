@@ -281,6 +281,15 @@ you to try once more. A request is never applied twice.
   its claims and a decision is opened that offers only 取消任务 (there is no Retry, because a retry
   would throw the delivery away). Look at the member's conversation, then cancel the task or leave
   it frozen; re-assigning is not in the page yet.
+- A host restart loses the turn a member was in the middle of. The Engine reads the member's reply
+  three times, then leaves a warning that says the tries are used up (`incomplete:dispatch-not-found`)
+  and the Run does not move on: the task stays in review or assigned, a kick sends nothing and writes
+  nothing, and cancelling the whole Run keeps waiting for a turn end the host never reports. The way
+  out is yours: wait until the member is idle in Paseo, send it one message that asks only for a reply
+  of OK, wait for its answer, then press **立即检查并推进**. The member's own turn then reaches the
+  Engine as the host's record and lets the cancellation finish; it is not certain to recover the Run.
+  **继续** (resume) is no way out, and the Engine never asks the member again by itself; if the member
+  does not answer, cancel and start the Run again.
 - Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
   Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.
