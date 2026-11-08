@@ -25,3 +25,5 @@
 Before every daemon or plugin lifecycle command, re-read it and confirm `--home`/`--host` still points at `.paseo-dev`.
 
 Use `PASEO_HOME` as well as `--home`: a shell may already export it for the real daemon.
+
+Merges and releases: follow ../docs/release-process.md (PR + CI only, no direct push to main).

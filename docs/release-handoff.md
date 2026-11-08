@@ -1,5 +1,27 @@
 # 发布材料：Run Engine 收尾分支（只备材料）
 
+## 发布结果（2026-11-09 补记）
+
+本节记录两次实际发布。以下第 0–8 节是合并前的材料（统计基准 `5209eea`），保留作记录，数字不再更新。
+
+| 版本 | 日期 | 发布方式 | 结果 |
+| --- | --- | --- | --- |
+| 0.6.0 | 2026-11-08 | 提交 `1de0a2c` 手工直推 `main` 后发版（提交时间 2026-11-09 00:03 +0800） | 标签 `paseo-agent-team-v0.6.0` 指向 `1de0a2c`；没有经过 PR，也没有 CI |
+| 0.6.1 | 2026-11-08 | 发布 PR #14 | PR 的 CI 没有运行；用管理员绕过合并，合并提交 `0787c6c`（标签 `paseo-agent-team-v0.6.1` 指向它）；合并后 `main` 的 CI 成功 |
+
+`paseo-agent-team-v0.5.0..paseo-agent-team-v0.6.0` 的实际统计（2026-11-09 重算）：
+
+```text
+$ git rev-list --count paseo-agent-team-v0.5.0..paseo-agent-team-v0.6.0
+141
+$ git log --format=%s paseo-agent-team-v0.5.0..paseo-agent-team-v0.6.0 | grep -c '^feat'
+51
+$ git log --format=%s paseo-agent-team-v0.5.0..paseo-agent-team-v0.6.0 | grep -c '^fix'
+12
+```
+
+即 141 个提交，其中 51 个 `feat`、12 个 `fix`。两次发布都绕过了正常门禁，属于个例；以后的流程见 `docs/release-process.md`，不再重复。
+
 编写：2026-11-08（阶段 3，A19）。依据：`docs/next-phase-plan.md` 2.7 与任务 A19。
 这份文档只备材料。合并、推送、打标签、发布、改版本号、改 `CHANGELOG.md`、创建 PR **都没有做**，也不由实施会话做；这些由用户决定并执行。下文的数字都用命令实际统计，统计基准是 `5209eea`（处理独立评审发现的最后一个代码提交，本文的文档提交之前；`git rev-parse --short` 可核对）；之后每多一个提交数字都会再变，合并前请按第 5 节在最终 HEAD 上重新跑一遍。
 
@@ -139,7 +161,7 @@ Rollback notes
 
 合同不变量的命令与结果：`grep -n "RUN_SCHEMA_VERSION =\|RUN_SUPPORTED_SCHEMA_VERSIONS" paseo-agent-team/shared/schemas/run-engine/ledger.ts` 得 `2` 与 `[1, 2]`；`git diff f1f1e48..HEAD --stat -- paseo-agent-team/shared/domain/run-engine/prompt-template.ts paseo-agent-team/shared/domain/run-engine/engine-prompts.ts paseo-agent-team/shared/domain/prompt-compiler.ts paseo-agent-team/server/designer/prompt.ts paseo-agent-team/server/templates` 为空（退出码 0，无输出）；`paseo-agent-team/tests/server-entry.test.ts` 断言 28 个 RPC，通过。
 
-CI 在 `.github/workflows/ci.yml`，对本插件跑 `npm run check`、`typecheck`、`test`、`test:coverage`、`verify:package`，并且有名为 `CI sentinel` 的汇总作业（分支规则要求它）。本机尚未在 CI 环境运行过，Windows 上 `version-flow` 与 `ledger-real-fs` 并行时偶发 `EBUSY`，单独重跑通过，Linux CI 上不应出现。
+CI 在 `.github/workflows/ci.yml`，对本插件跑 `npm run check`、`typecheck`、`test`、`test:coverage`、`verify:package`，并且有名为 `CI sentinel` 的汇总作业（分支规则要求它）。当时本机尚未在 CI 环境运行过；这两次发布是否经过 CI，见开头的“发布结果”（v0.6.1 合并后 `main` 的 CI 成功）。Windows 上 `version-flow` 与 `ledger-real-fs` 并行时偶发 `EBUSY`，单独重跑通过，Linux CI 上不应出现。
 
 ## 6. 合并方式建议
 
