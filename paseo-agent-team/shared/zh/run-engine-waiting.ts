@@ -14,6 +14,17 @@
 
 export type WaitingText = { why: string; who: string; next: string };
 
+/** Why a decision was opened. Unknown and `other` kinds fall back to the category. */
+export const DECISION_KIND_WHY_ZH: Readonly<Record<string, string>> = {
+  "quality-d3": "质量阶梯已经用完，任务失败",
+  "quality-d4": "实现尝试次数已到上限，任务被冻结",
+  "stuck-producer": "生产者报告阻塞或失败，任务已冻结",
+  "stuck-judge": "判官报告阻塞或失败，任务已冻结",
+  "limbo-producer": "生产者的回合已结束，但没有可用报告，补报次数已用完",
+  "evidence-stuck": "补证请求被阻塞或失败，任务已冻结",
+  cancel: "任务取消正在等待所需的结束证明",
+};
+
 const ENGINE = "Engine 自动";
 const YOU = "你";
 const KICK = "处理好之后点“立即检查并推进”";

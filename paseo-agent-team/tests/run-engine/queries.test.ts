@@ -6,7 +6,11 @@ import { historyPage, projectDetail } from "../../server/run-engine/projection";
 import { createRunQueries } from "../../server/run-engine/queries";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { RunGetOutputSchema, RunListOutputSchema } from "../../shared/schemas/run-engine/rpc";
+import {
+  RunDecisionViewSchema,
+  RunGetOutputSchema,
+  RunListOutputSchema,
+} from "../../shared/schemas/run-engine/rpc";
 import { assignmentsForRun, noncesForRun, withLedger } from "../fixtures/run-engine/base";
 
 const homes: string[] = [];
@@ -141,6 +145,35 @@ describe("run.get", () => {
 });
 
 describe("projection", () => {
+  test("a decision kind survives the new projection and older clients can strip it", () => {
+    const record = ledger("run-qry010-a1");
+    record.decisions = [
+      {
+        decisionId: "11111111-1111-4111-8111-111111111111",
+        category: "D1",
+        controlNonceDigest: "a".repeat(64),
+        state: "open",
+        dedupeKey: "stuck:assignment-t1-r1",
+        cancelIntents: null,
+        subjectId: "t1",
+        summary: "Reviewer stopped",
+        createdAt: "2026-11-06T10:00:00.000Z",
+        answeredAt: null,
+        answer: null,
+        resolution: null,
+      },
+    ];
+    const projected = projectDetail(record);
+    if (!projected.ok) throw new Error("projection failed");
+    const view = projected.view.decisions[0];
+    expect(view?.kind).toBe("stuck-judge");
+    const oldSchema = RunDecisionViewSchema.omit({ kind: true });
+    const oldView = oldSchema.parse(view);
+    expect(Object.hasOwn(oldView, "kind")).toBe(false);
+    expect(RunDecisionViewSchema.parse({ ...view, kind: "future-kind" }).kind).toBe("future-kind");
+    expect(RunDecisionViewSchema.parse(oldView).kind).toBeUndefined();
+  });
+
   test("a pending task names its first unfinished dependency as the reason it waits", () => {
     const record = ledger("run-qry010-a1");
     const dependent = record.tasks.find((task) => task.spec.deps.length > 0);

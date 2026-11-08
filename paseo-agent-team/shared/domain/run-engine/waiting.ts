@@ -1,5 +1,6 @@
 import type { RunDetailView, RunTaskView } from "../../schemas/run-engine/rpc";
 import {
+  DECISION_KIND_WHY_ZH,
   DISPATCH_BLOCKED_ZH,
   DISPATCH_FAMILIES_ZH,
   EVIDENCE_GATE_WAITING,
@@ -103,7 +104,7 @@ type DecisionView = RunDetailView["decisions"][number];
 
 /** A decision: what stopped, who answers, and whether this page can. */
 export function explainDecision(
-  decision: Pick<DecisionView, "category" | "state" | "actions">,
+  decision: Pick<DecisionView, "category" | "state" | "actions" | "kind">,
 ): TaskExplanation {
   const pending = isDecisionPending(decision);
   const canRetry = pending && decision.actions?.includes("retry") === true;
@@ -114,7 +115,9 @@ export function explainDecision(
     D4: "任务的实现尝试次数到了上限，任务已冻结",
   };
   const base =
-    own(why, decision.category) ?? `需要人回应的决策（${displayText(decision.category, 8)}）`;
+    (decision.kind === undefined ? undefined : own(DECISION_KIND_WHY_ZH, decision.kind)) ??
+    own(why, decision.category) ??
+    `需要人回应的决策（${displayText(decision.category, 8)}）`;
   if (!pending) {
     return { why: base, who: "已有结果", next: "这个决策已经处理，不需要再做什么" };
   }
@@ -122,14 +125,19 @@ export function explainDecision(
     return {
       why: base,
       who: "你",
-      next: "在上方“控制”里确认重试（一次只会再给任务一次尝试），或取消这个任务",
+      next: canCancel
+        ? "在上方“控制”里确认重试（一次只会再给任务一次尝试），或取消这个任务"
+        : "在上方“控制”里确认重试（一次只会再给任务一次尝试）",
     };
   }
   if (canCancel) {
     return {
       why: base,
       who: "你",
-      next: "这个任务只能取消（重试会丢掉已有的交付）；在上方“控制”里确认，依赖它的任务会一起取消",
+      next:
+        decision.kind === "evidence-stuck"
+          ? "这个任务只能取消（重试会丢掉已有的交付）；在上方“控制”里确认，依赖它的任务会一起取消"
+          : "当前只能取消；在上方“控制”里确认，依赖它的任务会一起取消",
     };
   }
   return {

@@ -302,6 +302,27 @@ describe("explainTask", () => {
 });
 
 describe("explainDecision", () => {
+  test("explains a known decision kind and falls back for old or future servers", () => {
+    const base = decision({ category: "D1" });
+    expect(explainDecision({ ...base, kind: "stuck-producer" }).why).toContain("生产者");
+    expect(explainDecision({ ...base, kind: "quality-d3" }).why).toContain("质量");
+    expect(explainDecision({ ...base, kind: "quality-d4" }).why).toContain("尝试");
+    expect(explainDecision({ ...base, kind: "cancel" }).why).toContain("取消");
+    expect(explainDecision({ ...base, kind: "other" })).toEqual(explainDecision(base));
+    expect(explainDecision({ ...base, kind: "stuck-judge" }).why).toContain("判官");
+    expect(explainDecision({ ...base, kind: "limbo-producer" }).why).toContain("报告");
+    expect(explainDecision({ ...base, kind: "evidence-stuck", actions: ["cancel"] }).why).toContain(
+      "补证",
+    );
+    expect(explainDecision({ ...base, kind: "future-kind" })).toEqual(explainDecision(base));
+    expect(explainDecision({ ...base, kind: "constructor" })).toEqual(explainDecision(base));
+    expect(explainDecision({ ...base, actions: ["retry"] }).next).not.toContain("取消");
+    expect(explainDecision({ ...base, actions: ["cancel"] }).next).not.toContain("丢掉");
+    expect(
+      explainDecision({ ...base, kind: "evidence-stuck", actions: ["cancel"] }).next,
+    ).toContain("丢掉");
+  });
+
   test("a pending decision with a retry says you can retry it here", () => {
     for (const category of ["D1", "D3", "D4"]) {
       const said = explainDecision(decision({ category }));

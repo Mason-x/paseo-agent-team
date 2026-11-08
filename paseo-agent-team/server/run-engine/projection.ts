@@ -1,5 +1,5 @@
 import { cancelPending } from "../../shared/domain/run-engine/cancel-request";
-import { answerableActions } from "../../shared/domain/run-engine/decision-answer";
+import { answerableActions, decisionKindOf } from "../../shared/domain/run-engine/decision-answer";
 import { occupiesExecutionSlot } from "../../shared/domain/run-engine/invariants";
 import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
 import {
@@ -241,6 +241,7 @@ export function projectDetail(record: RunRecord): ProjectedDetail {
     decisions: record.decisions.map((decision) => ({
       decisionId: decision.decisionId,
       category: decision.category,
+      kind: decisionKindOf(record, decision),
       state: decision.state,
       subjectId: decision.subjectId,
       summary: decision.summary,

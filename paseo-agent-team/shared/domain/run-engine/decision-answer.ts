@@ -102,6 +102,38 @@ export function classifyDecision(decision: Decision): AnswerableKind | null {
   return null;
 }
 
+export type DecisionKind =
+  | "quality-d3"
+  | "quality-d4"
+  | "stuck-producer"
+  | "stuck-judge"
+  | "limbo-producer"
+  | "evidence-stuck"
+  | "cancel"
+  | "other";
+
+/** A redacted display kind derived from existing facts, without changing what can be answered. */
+export function decisionKindOf(
+  record: Pick<RunRecord, "assignments">,
+  decision: Decision,
+): DecisionKind {
+  if (
+    decision.category === "D1" &&
+    decision.subjectId !== null &&
+    decision.dedupeKey === `cancel:${decision.subjectId}`
+  )
+    return "cancel";
+  const kind = classifyDecision(decision);
+  if (kind === null) return "other";
+  if (kind.kind === "quality") return kind.level === "D3" ? "quality-d3" : "quality-d4";
+  if (kind.kind === "evidence-stuck") return "evidence-stuck";
+  const assignment = record.assignments.find((entry) => entry.assignmentId === kind.assignmentId);
+  if (!assignment || assignment.taskId !== decision.subjectId) return "other";
+  if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") return "stuck-judge";
+  if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return "other";
+  return limboEvidence(decision) === null ? "stuck-producer" : "limbo-producer";
+}
+
 /** What each kind of decision can be answered with; a supplement stopped by a member has no retry. */
 function actionsOfKind(kind: AnswerableKind): DecisionAction[] {
   return kind.kind === "evidence-stuck" ? ["cancel"] : ["retry", "cancel"];

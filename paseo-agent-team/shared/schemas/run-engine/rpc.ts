@@ -196,6 +196,8 @@ export const RunBudgetViewSchema = z.object({
 export const RunDecisionViewSchema = z.object({
   decisionId: z.string().uuid(),
   category: Text(2),
+  /** Open string: newer servers may introduce kinds that older clients can still display. */
+  kind: Text(32).optional(),
   state: z.enum(["open", "answered", "waiting-human", "superseded"]),
   subjectId: RunIdRefSchema.nullable(),
   summary: Text(4096),

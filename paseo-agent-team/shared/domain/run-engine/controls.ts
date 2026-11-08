@@ -92,7 +92,7 @@ export function controlsOf(
               ? null
               : displayText(titleOf.get(decision.subjectId) ?? decision.subjectId, 120),
           summary: displayText(decision.summary, 400, "—"),
-          explain: retryExplanation(decision.category),
+          explain: retryExplanation(decision.category, decision.kind),
           reason: zh.controls.retry.reason(displayText(decision.category, 8)),
         }))
     : [];
@@ -181,8 +181,10 @@ function downstreamTitles(
     .map((node) => displayText(titleOf.get(node.taskId) ?? node.title, 120));
 }
 
-/** What a retry does depends on what stopped the task; the category tells which of the three it was. */
-export function retryExplanation(category: string): string {
+/** What a retry does depends on the server's kind; older servers fall back to the category. */
+export function retryExplanation(category: string, kind?: string): string {
+  const kinds = zh.controls.retry.explainByKind;
+  if (kind !== undefined && Object.hasOwn(kinds, kind)) return kinds[kind] as string;
   const table = zh.controls.retry.explain;
   return Object.hasOwn(table, category)
     ? (table[category] as string)

@@ -246,11 +246,29 @@ describe("controlsOf: only what the server named is offered", () => {
 
 describe("what a retry will do is said per kind of decision", () => {
   test("D1, D3 and D4 each have their own sentence, and anything else a general one", () => {
-    const sentences = ["D1", "D3", "D4"].map(retryExplanation);
+    const sentences = ["D1", "D3", "D4"].map((category) => retryExplanation(category));
     expect(new Set(sentences).size).toBe(3);
     for (const sentence of sentences) expect(sentence.length).toBeGreaterThan(30);
     expect(retryExplanation("D9")).toBe(zh.controls.retry.explainOther);
     expect(retryExplanation("constructor")).toBe(zh.controls.retry.explainOther);
+  });
+
+  test("the server's decision kind distinguishes the retry and unknown kinds fall back", () => {
+    const producer = retryExplanation("D1", "stuck-producer");
+    const judge = retryExplanation("D1", "stuck-judge");
+    const missing = retryExplanation("D1", "limbo-producer");
+    expect(producer).toContain("生产者");
+    expect(retryExplanation("D3", "quality-d3")).toContain("返工");
+    expect(retryExplanation("D4", "quality-d4")).toContain("返工");
+    expect(judge).toContain("判官");
+    expect(missing).toContain("报告");
+    expect(new Set([producer, judge, missing]).size).toBe(3);
+    expect(retryExplanation("D1", "future-kind")).toBe(retryExplanation("D1"));
+    expect(retryExplanation("D1", "constructor")).toBe(retryExplanation("D1"));
+    const view = controlsOf(
+      run({ decisions: [decision({ category: "D1", kind: "stuck-judge" })] }),
+    );
+    expect(view.retries[0]?.explain).toBe(judge);
   });
 
   test("the explanation is attached to the offer, and so is the reason sent with the request", () => {

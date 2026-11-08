@@ -4,10 +4,12 @@ import {
   answerableActions,
   answerDecision,
   classifyDecision,
+  decisionKindOf,
   openStuckDecision,
   stoppedTasksWithoutDecision,
 } from "../../shared/domain/run-engine/decision-answer";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import { assignmentsForRun } from "../fixtures/run-engine/base";
 import { bootstrapRun } from "./support/bootstrap-run";
 
 /**
@@ -126,6 +128,57 @@ describe("classifyDecision", () => {
     ] as const) {
       expect(answerableActions({ lifecycle }, decision())).toEqual([]);
     }
+  });
+});
+
+describe("decisionKindOf", () => {
+  test("classifies quality, stopped actors, missing reports and cancellations without exposing ledger details", () => {
+    const record = withDecision();
+    record.assignments = assignmentsForRun(record.runId);
+    const producer = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-a1");
+    const judge = record.assignments.find((entry) => entry.assignmentId === "assignment-t1-r1");
+    if (!producer || !judge) throw new Error("fixture lost its producer or reviewer");
+    expect(decisionKindOf(record, decision())).toBe("quality-d4");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D3", dedupeKey: "quality:assignment-t1-a1:D3" }),
+      ),
+    ).toBe("quality-d3");
+    const stoppedProducer = decision({
+      category: "D1",
+      dedupeKey: `stuck:${producer.assignmentId}`,
+    });
+    const stoppedJudge = decision({ category: "D1", dedupeKey: `stuck:${judge.assignmentId}` });
+    expect(decisionKindOf(record, stoppedProducer)).toBe("stuck-producer");
+    expect(decisionKindOf(record, stoppedJudge)).toBe("stuck-judge");
+    judge.purpose = "smoker";
+    expect(decisionKindOf(record, stoppedJudge)).toBe("stuck-judge");
+    producer.acceptedProof = null;
+    expect(
+      decisionKindOf(record, {
+        ...stoppedProducer,
+        limbo: { turnId: "turn-1", endedEventKey: "ended-1" },
+      }),
+    ).toBe("limbo-producer");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D1", dedupeKey: `evidence-stuck:${producer.assignmentId}` }),
+      ),
+    ).toBe("evidence-stuck");
+    expect(
+      decisionKindOf(
+        record,
+        decision({ category: "D1", dedupeKey: "cancel:t1", cancelIntents: [] }),
+      ),
+    ).toBe("cancel");
+    expect(decisionKindOf(record, decision({ category: "D2", dedupeKey: "other:1" }))).toBe(
+      "other",
+    );
+    expect(decisionKindOf(record, decision({ category: "D1", dedupeKey: "stuck:missing" }))).toBe(
+      "other",
+    );
   });
 });
 
