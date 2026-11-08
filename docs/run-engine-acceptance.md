@@ -306,6 +306,9 @@
 - tests/run-view/control-runner.test.ts :: uses random bytes for a version 4 UUID when randomUUID is unavailable
 - tests/run-view/control-runner.test.ts :: uses a version 4 UUID even when the platform has no crypto
 - tests/run-view/controls.test.ts :: a request that never got an answer does not ask for a refresh
+- tests/run-view/waiting.test.ts :: dispatch-blocked: every builder refusal has words, including dynamically chosen budget codes
+- tests/run-view/waiting.test.ts :: replan and cancellation events do not claim unproved sends or released claims
+- tests/run-view/engine-view.test.ts :: shows an alert's summary and states when the responsible party is unknown
 
 缺口：没有真实浏览器与窄屏检查，只有对源码的静态保护（无固定宽度、按钮最小高度、可换行、单个滚动条）；断线重连只测了纯会话规则；"原因与台账一致"靠源码扫描，没有端到端比对；服务端推送式失效没有做（B8）。需 DEV。
 
