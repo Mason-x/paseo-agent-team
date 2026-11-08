@@ -16,16 +16,16 @@
 | ID | 必须观察到的结果 | 状态 | 缺口（一句话） | 待批准 | DEV 记录 |
 | --- | --- | --- | --- | --- | --- |
 | AC01 | T2 不派发；T1 仍需满足其声明的审查和冒烟 | 部分 | 没有"带冒烟的 T1 + 依赖它的 T2"的引擎级用例 | — | 第 20、21 点（正常路径，非注入） |
-| AC02 | 不能过完成门；显示具体拒绝原因 | 部分 | 旧 `reviewedRef`、自审、错 DEV 目标只断言被拒，没断言原因；没有页面端到端 | — | 无 |
-| AC03 | 一次生效；assignment、预算、下一阶段不重复增加 | 已覆盖 | 没有把"重放报告 hook"与预算、assignment 计数放在同一用例里断言 | — | 无 |
+| AC02 | 不能过完成门；显示具体拒绝原因 | 部分 | 旧 `reviewedRef`、自审、错 DEV 目标现已断言具体原因码（A15）；没有页面端到端 | — | 无 |
+| AC03 | 一次生效；assignment、预算、下一阶段不重复增加 | 已覆盖 | —（A15 已把重放 hook 与 assignment、预算、outbox、修订号的计数放进同一用例） | — | 无 |
 | AC04 | 恢复后执行该意图或按合同终止，不漏记也不额外派一份 | 已覆盖 | "意图提交后、调用前"的中断用抛错和新实例模拟，不是真实进程被杀 | — | 无 |
 | AC05 | 先核对实际消息和 turn；无法证明时冻结，不盲目重发 | 已覆盖 | 证明只靠用户消息回显（messageId）；没有宿主证明"消息确实没到"的用例 | — | 无 |
-| AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | 假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；创建中崩溃后安全关闭并告警，未登记的 Agent 仍需人工查找，不能完整续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
-| AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 没有断言协议失败不改变 `qualityFailures`、`reworkCount`；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
+| AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | "已创建但响应丢失"与"不误归档无关 Agent"现已有用例（A15）；去重靠同一个幂等键，没有按运行关联列举查证；创建中崩溃后安全关闭并告警，未登记的 Agent 仍需人工查找，不能完整续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
+| AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，已有用例（A15）；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
-| AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
+| AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"现已在记录层断言不变（A15，只涉及 `turn_ended`）；"早于关键记录"只验证了 store 未就绪和无归属（绑定席位后恰好交付一次已补）；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；启动中断已安全关闭但不能续办；"暂停扣住的从未发出的派发"没有 store 级用例；没有 DEV | B13 | 无 |
@@ -33,7 +33,7 @@
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
-| AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖；M1 对账查询没有处理器可测；"不派发"是结构性的，没有用 `host.sent` 断言 | B4 | 第 33 点（未在 DEV 验证） |
+| AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖，且现已断言不写入、文件字节不变（A15）；查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言；M1 对账查询没有处理器可测 | B4 | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
 | AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 部分 | 只有宿主读取重查这一个定时器；没有别的截止条件可测 | B7 | 第 35 点（没有 DEV） |
 | AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；没有真实浏览器与小屏检查，重连只测了纯会话规则；其余原因码靠源码扫描而非端到端比对 | B8、B10（剩余字段） | 无 |
@@ -52,15 +52,16 @@
 缺口：冒烟未结束的情形只在 reducer 与服务层演示；没有引擎级的"T1 带冒烟、T2 依赖它"用例。
 
 ### AC02 普通文字称完成、自审、旧 `reviewedRef`、错 DEV 目标
-- tests/run-core/gates.test.ts :: stale D and source-bound self reviewer cannot pass — 只断言 `ok:false`
-- tests/run-core/gates.test.ts :: registered DEV passes, default target fails — 只断言 `ok:false`
+- tests/run-core/gates.test.ts :: stale D and source-bound self reviewer cannot pass — 断言原因码 `no-valid-review`（A15）
+- tests/run-core/gates.test.ts :: a review of an older reviewedRef does not count for the current delivery — 旧 `reviewedRef` 的原因码 `no-valid-review`（A15）
+- tests/run-core/gates.test.ts :: registered DEV passes, default target fails — 断言原因码 `failed-smoke`（A15）
 - tests/run-core/gates.test.ts :: evidence single defect: $reason — 模板；断言每个证据缺陷各给出对应原因
 - tests/run-core/reducer.test.ts :: a smoke report must come from the registered target and an independent smoker — 断言原因是 `invalid-smoke`
 - tests/run-engine/intake.test.ts :: a reply with no report only records why the task is not moving, once — 普通文字称完成：原因 `report-missing`
 - tests/run-engine/intake.test.ts :: a report that fails the evidence gate is kept out of review and the reason is shown
 - tests/run-view/waiting.test.ts :: every reason a refused evidence gate can leave — 每个证据门原因都有中文说明
 
-缺口：旧 `reviewedRef`、自审、网关层错 DEV 目标只断言被拒绝，没断言原因；没有端到端的页面显示。
+缺口：没有端到端的页面显示（旧 `reviewedRef`、自审、网关层错 DEV 目标的具体原因码已断言，A15）。
 
 ### AC03 同一 hook、报告或人的决定重复到达
 - tests/run-engine/observer.test.ts :: records one receipt for an owned agent and treats redelivery as a duplicate
@@ -70,8 +71,9 @@
 - tests/run-engine/driver.test.ts :: the same hook again, or a kick, does not ask twice
 - tests/run-engine/control.test.ts :: the answer survives a restart: asked again afterwards it is the same answer and sends nothing
 - tests/run-core/budget.test.ts :: the same intent/message is counted once without a draft
+- tests/run-engine/driver.test.ts :: a report's turn_ended hook replayed three times and two kicks after it count nothing twice: assignments, budgets, outbox, revision and sends stay as the first ingestion left them
 
-缺口：没有把"重放报告 hook"与预算、assignment 的计数放在同一个用例里一起断言。
+缺口：无（A15 已把重放报告 hook 与 assignment、预算、outbox、回执、修订号的计数放进同一个用例）。变异记录：回执去重在观察器与 reducer 的三处同时去掉才变红，单层去掉仍不变（有意冗余，见计划第 60 点）。
 
 ### AC04 写入意图后、外部调用前中断
 - tests/run-engine/effects.test.ts :: AC04: a crash after `sending` was committed does not send again
@@ -98,24 +100,27 @@
 
 ### AC06 成员创建成功但调用响应丢失
 - tests/run-engine/start.test.ts :: an unknown create result is re-asked with the same key and creates no second agent
+- tests/run-engine/start.test.ts :: an agent made and remembered under its key whose answer was lost is the one the next ask returns: one agent per seat, none extra
+- tests/run-engine/start.test.ts :: a failed launch archives only the agents this launch created, not another agent the host holds
 - tests/run-engine/start.test.ts :: a create that fails twice with a transient error succeeds on the third try with the same key
 - tests/run-engine/start.test.ts :: when a member cannot be created, what was created is archived if the preference says so
 - tests/run-engine/start-recovery.test.ts :: names the coordinator as the possible unregistered agent when its creation was interrupted
 - tests/run-engine/start-recovery.test.ts :: names the agents on the record and the next seat that has none
 - tests/run-engine/runtime.test.ts :: a duplicate start finishing does not expose another start still creating agents to recovery
 
-缺口：假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；去重靠同一个幂等键，没有按运行关联列举查证；没有"不误删无关 Agent"的用例；启动中断会安全关闭并告警，不能完整续办，未登记的 Agent 只能靠提示人工查找（B13）。
+缺口：去重靠同一个幂等键，没有按运行关联列举查证（设计选择）；启动中断会安全关闭并告警，不能完整续办，未登记的 Agent 只能靠提示人工查找（B13）。"已创建但响应丢失"与"不误归档无关 Agent"已有用例（A15）。
 
 ### AC07 实现已完成但报告 JSON 错误；修复再次失败
 - tests/run-engine/driver.test.ts :: a refused report gets one repair request, and the repaired report settles the task
 - tests/run-engine/driver.test.ts :: the budget is the policy's protocolResends, then the task waits as before
 - tests/run-engine/driver.test.ts :: a reply with no block is asked for again as missing
 - tests/run-engine/driver.test.ts :: a turn that did not end on its own is not asked again
+- tests/run-engine/driver.test.ts :: every refused report is a protocol failure and never a quality failure or a rework, and what the member delivered is left as it is
 - tests/run-engine/report-repair.test.ts :: stops at the policy's protocolResends
 - tests/run-engine/control.test.ts :: with no re-send to ask for, the first unusable reply is already the decision
 - tests/run-core/reducer.test.ts :: incomplete evidence stays in progress and increments evidenceReturns
 
-缺口：没有断言协议失败不改变 `qualityFailures`、`reworkCount`；"保留产物"没有直接断言；DEV 没跑过成员报告补报。
+缺口：DEV 没跑过成员报告补报。协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，成员的提交与最近回复保持原样，已有用例（A15）。
 
 ### AC08 超长、多块、未知版本、错任务/attempt/nonce/发送者
 - tests/run-engine/protocol.test.ts :: fixture cases: each defect is rejected for its own named reason, none is accepted
@@ -160,10 +165,12 @@
 - tests/run-engine/observer.test.ts :: overflow and age both drop hooks and flag that hooks alone are no longer enough
 - tests/run-engine/intake.test.ts :: a report is not accepted before the host's turn_ended is recorded, and is once it is
 - tests/run-engine/driver.test.ts :: a report that arrived while nothing listened is settled on recovery
+- tests/run-engine/driver.test.ts :: a turn_ended hook that comes after recovery already took the report in changes nothing in the record
+- tests/run-engine/observer.test.ts :: a hook that came before its seat was bound is delivered exactly once after the binding, however often the buffer is flushed
 - tests/run-engine/driver.test.ts :: the repeat of a hook whose settling failed is the retry
 - tests/run-engine/runtime.test.ts :: a coordinator reply whose hook was lost is picked up on the first sight of a Paseo handle
 
-缺口："整份报告之后才来的 hook 且计数不变"没有单独用例；"早于关键记录"只验证了 store 未就绪和无归属两种。
+缺口："早于关键记录"只验证了 store 未就绪和无归属两种（绑定席位后恰好交付一次已补，A15）；晚到的 hook 在记录层不变，只验证了 `turn_ended` 一种。
 
 ### AC12 权限等待、人的决定重复提交、等待期间重启
 - tests/run-engine/service.test.ts :: a seat waiting on a permission or reporting an error is not used
@@ -269,10 +276,11 @@
 ### AC19 列表、详情、历史、刷新、M1 对账查询
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
 - tests/run-engine/queries.test.ts :: event payloads never reach the page, only the kind and a task id
+- tests/run-engine/queries.test.ts :: the list, the detail and every history page leave a Run with a message waiting to go out byte for byte as it was, and write nothing
 - tests/run-engine/control.test.ts :: nothing the controls return holds a nonce, a prompt or an outbox argument
 - tests/run-engine-contracts.test.ts :: run.get returns unchanged or a redacted view with no nonce/prompt fields
 
-缺口：查询不接触宿主，"不派发"是结构性的，没有用 `host.sent` 断言；M1 对账查询只有 schema 形状，没有处理器（B4）。
+缺口：查询函数不持有宿主，"不派发"是结构性的，没有 `host.sent` 可断言（A15 改为断言 `create`/`update` 零调用、文件字节和目录不变、待发消息仍为 prepared）；M1 对账查询只有 schema 形状，没有处理器（B4）。
 
 ### AC20 用户绕过 Engine 发消息，或观察到无 assignment 的活动
 - tests/run-engine/observer.test.ts :: with no live run nothing could claim an agent, so its events are ignored, not buffered
