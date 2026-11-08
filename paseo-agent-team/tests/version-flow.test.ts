@@ -19,8 +19,11 @@ import { createVersionService } from "../server/version/service";
 import { createStore, storeRoot } from "../server/version/store";
 import { VERSION_PROCESS_TIMEOUT_MS } from "./setup/load-timeouts";
 
-const HOME = path.join("C:\\", "paseo-dev");
-const PLUGIN = path.join("C:\\", "repo", "paseo-agent-team");
+const ROOT =
+  process.platform === "win32" ? "C:\\" : path.join(tmpdir(), "agent-team-version-fixture");
+const HOME = path.join(ROOT, "paseo-dev");
+const REPOSITORY = path.join(ROOT, "repo");
+const PLUGIN = path.join(REPOSITORY, "paseo-agent-team");
 const OLD = "a".repeat(40);
 const TARGET = "b".repeat(40);
 const roots: string[] = [];
@@ -63,7 +66,7 @@ function directoryGit(extra: Record<string, ExecResult> = {}) {
       for (const [needle, value] of Object.entries(extra)) {
         if (joined.includes(needle)) return value;
       }
-      if (joined.includes("show-toplevel")) return ok("C:\\repo");
+      if (joined.includes("show-toplevel")) return ok(REPOSITORY);
       if (joined === "rev-parse HEAD") return ok(OLD);
       if (joined.includes("@{upstream}")) return ok("origin/trunk");
       if (joined.includes("--abbrev-ref HEAD")) return ok("trunk");
@@ -112,7 +115,7 @@ function serviceDeps(files: ReturnType<typeof filesFrom>, git = directoryGit()) 
       text: async () => JSON.stringify({ name: "@mason-x/paseo-agent-team", version: "0.3.0" }),
     }),
     bootId: "77777777-7777-4777-8777-777777777777",
-    platform: "win32" as const,
+    platform: process.platform,
     pathExists: () => true,
     cliExists: async (candidate: string) => files.data.has(candidate),
     runnerSource: path.join(PLUGIN, "server", "version", "runner.mjs"),
@@ -146,7 +149,8 @@ describe("version flow", () => {
     const versions = createVersionService(serviceDeps(seededFiles()));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
     expect(checked.ok).toBe(true);
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.updateAvailable).toBe(true);
     expect(checked.job.result.canUpdate).toBe(true);
     expect(checked.job.result.remote.installTarget?.kind).toBe("release-tag");
@@ -165,27 +169,34 @@ describe("version flow", () => {
     });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.installTarget?.kind).toBe("default-branch");
     expect(checked.job.result.remote.installTarget?.ref).toBe("refs/heads/trunk");
 
     expect(checked.job.result.canUpdate).toBe(true);
   });
 
-  test("a Windows path origin is checked instead of reported as a network error", async () => {
-    const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
-    const versions = createVersionService(serviceDeps(seededFiles(), git));
-    const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
-    expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
-    expect(checked.job.result.canUpdate).toBe(true);
-  });
+  // A drive-letter origin is only a path on Windows; elsewhere it is not a local directory at all.
+  test.skipIf(process.platform !== "win32")(
+    "a Windows path origin is checked instead of reported as a network error",
+    async () => {
+      const git = directoryGit({ "get-url": ok("C:\\mirrors\\upstream.git") });
+      const versions = createVersionService(serviceDeps(seededFiles(), git));
+      const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
+      if (!checked.ok || !checked.job.result)
+        throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
+      expect(checked.job.result.remote.error?.code ?? null).not.toBe("network_error");
+      expect(checked.job.result.canUpdate).toBe(true);
+    },
+  );
 
   test("an option-like origin is an unsupported remote, not a network failure", async () => {
     const git = directoryGit({ "get-url": ok("--upload-pack=calc") });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.error?.code).toBe("unsupported_remote");
     expect(checked.job.result.canUpdate).toBe(false);
   });
@@ -194,7 +205,8 @@ describe("version flow", () => {
     const git = directoryGit({ "--symbolic-full-name": ok("origin/drill-badlock") });
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.remote.installTarget?.kind).toBe("release-tag");
     expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
     expect(checked.job.result.canUpdate).toBe(false);
@@ -210,7 +222,8 @@ describe("version flow", () => {
     };
     const versions = createVersionService(serviceDeps(seededFiles(), git));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     expect(checked.job.result.blockers.map((item) => item.code)).toContain("branch_mismatch");
     expect(
       checked.job.result.blockers.find((item) => item.code === "branch_mismatch")?.detail,
@@ -276,7 +289,8 @@ describe("version flow", () => {
       spawnRunner: undefined,
     });
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     await files.remove(path.join(directory, "big.txt"));
     const started = await versions.startUpdate(
       paseo,
@@ -679,11 +693,19 @@ describe("version flow", () => {
       platform: "win32",
     });
     expect(resolved.ok && resolved.cli).toBe(cli);
-    expect(
-      (await npmCandidates(process.execPath, { PATH: "" }, "linux")).some((candidate) =>
-        candidate.includes(`${path.sep}lib${path.sep}`),
+    // With every file "existing", an empty PATH still adds nothing: the only candidate left is the
+    // one beside Node itself, whatever this machine has installed there.
+    expect(await npmCandidates(process.execPath, { PATH: "" }, "linux", async () => true)).toEqual([
+      path.resolve(
+        path.dirname(process.execPath),
+        "..",
+        "lib",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
       ),
-    ).toBe(false);
+    ]);
     const missing = await resolveNpmCli({
       exec: {
         async run() {
@@ -745,7 +767,8 @@ describe("version flow", () => {
     files.data.delete(path.join(PLUGIN, "server", "version", "runner.mjs"));
     const versions = createVersionService(serviceDeps(files));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",
@@ -768,7 +791,8 @@ describe("version flow", () => {
     );
     const versions = createVersionService(serviceDeps(files));
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",
@@ -822,7 +846,8 @@ describe("version flow", () => {
     );
     const versions = createVersionService(deps);
     const checked = await versions.check(paseo, "11111111-1111-4111-8111-111111111111");
-    if (!checked.ok || !checked.job.result?.checkId) throw new Error("check failed");
+    if (!checked.ok || !checked.job.result?.checkId)
+      throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
     const started = await versions.startUpdate(
       paseo,
       "12345678-1234-4234-8234-123456789abc",

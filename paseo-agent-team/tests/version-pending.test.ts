@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { gitOk } from "../server/version/git";
@@ -12,9 +13,11 @@ import { createVersionService } from "../server/version/service";
 import { storeRoot } from "../server/version/store";
 import type { RemoteTarget, VersionInfo } from "../shared/version";
 
-const HOME = path.join("C:\\", "paseo-dev");
-const PLUGIN = path.join("C:\\", "repo", "paseo-agent-team");
-const REPOSITORY = path.join("C:\\", "repo");
+const ROOT =
+  process.platform === "win32" ? "C:\\" : path.join(tmpdir(), "agent-team-version-fixture");
+const HOME = path.join(ROOT, "paseo-dev");
+const PLUGIN = path.join(ROOT, "repo", "paseo-agent-team");
+const REPOSITORY = path.join(ROOT, "repo");
 const REMOTE = "https://github.com/Mason-x/paseo-agent-team.git";
 const OLD = "a".repeat(40);
 const TARGET = "b".repeat(40);
@@ -192,7 +195,7 @@ function serviceDeps(files: MemoryFiles, git: GitHarness, options: ServiceOption
       text: async () => JSON.stringify({ name: "@mason-x/paseo-agent-team", version: "0.3.0" }),
     }),
     bootId: "77777777-7777-4777-8777-777777777777",
-    platform: "win32" as const,
+    platform: process.platform,
     pathExists: () => true,
     cliExists: async (candidate: string) => files.data.has(candidate),
     now: options.now,
@@ -214,7 +217,8 @@ async function checkWith(
 ): Promise<{ info: VersionInfo; state: string }> {
   const versions = createVersionService(serviceDeps(files, git, options));
   const checked = await versions.check(paseo, options.request ?? REQUEST);
-  if (!checked.ok || !checked.job.result) throw new Error("check failed");
+  if (!checked.ok || !checked.job.result)
+    throw new Error(`check failed: ${JSON.stringify(checked).slice(0, 600)}`);
   return { info: checked.job.result, state: checked.job.state };
 }
 

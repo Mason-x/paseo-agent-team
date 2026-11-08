@@ -43,7 +43,10 @@ export function resolveExplicitHome(
       blocker: blocker("home_unavailable", "verify_host", "PASEO_HOME is not a path"),
     };
   }
-  if (!path.isAbsolute(raw)) {
+  // The path rules of the platform being asked about, not of the machine this code runs on. They
+  // are the same in production, where the platform is the host's own.
+  const rules = platform === "win32" ? path.win32 : path.posix;
+  if (!rules.isAbsolute(raw)) {
     return {
       ok: false,
       blocker: blocker("home_unavailable", "verify_host", "PASEO_HOME is not absolute"),
@@ -55,7 +58,7 @@ export function resolveExplicitHome(
       blocker: blocker("home_unavailable", "verify_host", "PASEO_HOME is not absolute"),
     };
   }
-  return { ok: true, home: path.resolve(raw) };
+  return { ok: true, home: rules.resolve(raw) };
 }
 
 export type ConfigPlugin = { source?: string; path?: string; enabled?: boolean };
