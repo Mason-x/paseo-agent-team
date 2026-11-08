@@ -27,7 +27,7 @@
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
-| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
+| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；启动中断已安全关闭但不能续办；"暂停扣住的从未发出的派发"没有 store 级用例；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
@@ -185,8 +185,13 @@
 - tests/run-engine/control.test.ts :: [%s] a task held back for want of turns is said so once, and goes out once after the seat is given more
 - tests/run-engine/control.test.ts :: the refusals: stale revision, unknown seat, no budget, over the ceiling, a Run being cancelled
 - tests/run-engine/budget-control.test.ts :: the limit has a ceiling: exactly the maximum is allowed, one more is not
+- tests/run-engine/failure-limit.test.ts :: counts only tasks that are failed now
+- tests/run-engine/failure-limit.test.ts :: exactly at the limit is not over it; one more is
+- tests/run-engine/failure-limit-driver.test.ts :: a Run at its limit still hands out work, and says nothing about failures
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing
+- tests/run-engine/failure-limit-driver.test.ts :: cancelling failed tasks until the count is back within the limit reopens dispatch and takes the alert down, once
 
-缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；计划请求、重新规划、重发不预扣预算（B2）；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。
+缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；计划请求、重新规划、重发不预扣预算（B2）；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。失败的任务数超过 `policy.run.failedTasks` 后不再开始新的派发（A13）：用例用直接加入 `failed` 任务造出失败数，A4 的 `cancel` 答复以任务变为 `cancelled` 代替，没有对 D3 的 `retry` 做端到端。
 
 ### AC14 暂停、续办、取消时 Agent 仍有在途执行
 - tests/run-engine/effects.test.ts :: the pause that lands after the caller read the ledger still stops the send
@@ -251,6 +256,7 @@
 - tests/run-engine/observer.test.ts :: an event storm of repeats and reorderings leaves one receipt per distinct fact
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
 - tests/run-engine/driver.test.ts :: idle kicks and repeated or unowned events write nothing and never wake the coordinator
+- tests/run-engine/failure-limit-driver.test.ts :: a Run with failures over the limit and nothing left to start is left alone
 
 缺口：新用例喂入 5 轮重复事件并 kick，断言修订号不变、没有发送和重查计时器；没有让真实时间长时间过去，也没有断言所有只读宿主调用为零。唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
 
@@ -307,6 +313,7 @@
 - tests/run-view/control-runner.test.ts :: uses a version 4 UUID even when the platform has no crypto
 - tests/run-view/controls.test.ts :: a request that never got an answer does not ask for a refresh
 - tests/run-view/waiting.test.ts :: dispatch-blocked: every builder refusal has words, including dynamically chosen budget codes
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing
 - tests/run-view/waiting.test.ts :: replan and cancellation events do not claim unproved sends or released claims
 - tests/run-view/engine-view.test.ts :: shows an alert's summary and states when the responsible party is unknown
 - tests/run-view/run-engine-editor.test.ts :: the planned Profiles of the seats let the editor warn about a Codex seat that is not full-access
