@@ -227,6 +227,8 @@
 - tests/run-engine/compaction.test.ts :: never touches the arrays that are the state, nor tasks, claims, budgets or decisions
 - tests/run-engine/compaction-store.test.ts :: at a limit nothing new starts, with a critical alert written once
 - tests/run-engine/compaction-store.test.ts :: a pass compacts first, once, and a Run with little history is left alone
+- tests/ledger-primitives.test.ts :: a %s being written is re-read without stealing it or reporting corruption — 模板；覆盖主锁与回收 guard
+- tests/ledger-primitives.test.ts :: a permanently malformed lock is still refused after bounded re-reads
 
 缺口：回执（`eventReceipts`）与 nonce（`nonceRegistry`）是状态而不是历史，不能压缩，达到 6144 只告警、达到 7680 停止新的派发；没有在 DEV 验证（压缩要上千条事件）。
 
