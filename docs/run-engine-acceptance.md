@@ -27,7 +27,7 @@
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"现已在记录层断言不变（A15，只涉及 `turn_ended`）；"早于关键记录"只验证了 store 未就绪和无归属（绑定席位后恰好交付一次已补）；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
-| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口；协调者的回合预算已有（计划请求与重新规划各扣一回合，计划格式重发不计，不退还，耗尽时重新规划被拒并告警，追加预算后继续，A14） | A7 | 无 |
+| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始尚未开始的任务，已在进行的评审、冒烟、补证请求与返工照常（A13，评审后修正，有端到端用例）；没有分组预算的入口；协调者的回合预算已有（计划请求与重新规划各扣一回合，计划格式重发不计，不退还，耗尽时重新规划被拒并告警，追加预算后继续，A14） | A7 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
@@ -202,8 +202,13 @@
 - tests/run-engine/failure-limit.test.ts :: counts only tasks that are failed now
 - tests/run-engine/failure-limit.test.ts :: exactly at the limit is not over it; one more is
 - tests/run-engine/failure-limit-driver.test.ts :: a Run at its limit still hands out work, and says nothing about failures
-- tests/run-engine/failure-limit-driver.test.ts :: [%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] over the limit the review of a started task goes out, and the task that waited behind it is then held back: one critical alert, the reason on the task, nothing sent, later passes write nothing
 - tests/run-engine/failure-limit-driver.test.ts :: cancelling failed tasks until the count is back within the limit reopens dispatch and takes the alert down, once
+- tests/run-engine/failure-limit-driver.test.ts :: what is already in flight is still taken in, a report that must be repaired is still asked for again, and the repaired delivery goes to its reviewer
+- tests/run-engine/failure-limit-driver.test.ts :: a task that has not started is held back without hiding the review of a started one behind it
+- tests/run-engine/failure-limit-driver.test.ts :: a review that sends a started task back for rework is followed by the producer although the limit is exceeded (not-started task alongside: %s)
+- tests/run-engine/failure-limit-driver.test.ts :: [v2] a request to add missing evidence to a delivery is sent although the limit is exceeded, and the supplement goes on to review
+- tests/run-engine/failure-limit-driver.test.ts :: a smoke of a started task is sent although the limit is exceeded, and t2 after it is held back
 - tests/run-engine/coordinator-budget.test.ts :: the plan request is the first turn: the entry takes the policy's limit, one reserved, and nothing else changes — 模板（v1、v2 各一遍）：新 Run 的计划请求扣第一回合，冻结的策略不被写（A14）
 - tests/run-engine/coordinator-budget.test.ts :: a re-plan is the next turn: one more reserved, the Run still passes its invariants — 模板（v1、v2）（A14）
 - tests/run-engine/coordinator-budget.test.ts :: with no turns left a re-plan is refused as budget-exhausted, and the Run is not touched — 模板（v1、v2）（A14）
@@ -217,7 +222,7 @@
 - tests/run-engine/team-config.test.ts :: a coordinator turn budget under 1 blocks the launch: the plan request would have no turn to be sent in — A14 新增
 - tests/run-engine/team-config-edit.test.ts :: a coordinator turn budget of 0 is a blocker the moment it is typed, and 1 clears it — A14 新增
 
-缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；协调者的回合预算只计计划请求与重新规划（A14）：计划格式重发不计、不退还，`reserved` 对旧 Run 只是下界；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。失败的任务数超过 `policy.run.failedTasks` 后不再开始新的派发（A13）：用例用直接加入 `failed` 任务造出失败数，A4 的 `cancel` 答复以任务变为 `cancelled` 代替，没有对 D3 的 `retry` 做端到端。
+缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；协调者的回合预算只计计划请求与重新规划（A14）：计划格式重发不计、不退还，`reserved` 对旧 Run 只是下界；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。失败的任务数超过 `policy.run.failedTasks` 后不再开始尚未开始的任务，已在进行的评审、冒烟、补证请求与返工照常（A13）：用例用直接加入 `failed` 任务造出失败数，A4 的 `cancel` 答复以任务变为 `cancelled` 代替，没有对 D3 的 `retry` 做端到端。
 
 ### AC14 暂停、续办、取消时 Agent 仍有在途执行
 - tests/run-engine/effects.test.ts :: the pause that lands after the caller read the ledger still stops the send
@@ -350,7 +355,7 @@
 - tests/run-view/control-runner.test.ts :: uses a version 4 UUID even when the platform has no crypto
 - tests/run-view/controls.test.ts :: a request that never got an answer does not ask for a refresh
 - tests/run-view/waiting.test.ts :: dispatch-blocked: every builder refusal has words, including dynamically chosen budget codes
-- tests/run-engine/failure-limit-driver.test.ts :: [%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] over the limit the review of a started task goes out, and the task that waited behind it is then held back: one critical alert, the reason on the task, nothing sent, later passes write nothing
 - tests/run-view/waiting.test.ts :: replan and cancellation events do not claim unproved sends or released claims
 - tests/run-view/engine-view.test.ts :: shows an alert's summary and states when the responsible party is unknown
 - tests/run-view/run-engine-editor.test.ts :: the planned Profiles of the seats let the editor warn about a Codex seat that is not full-access

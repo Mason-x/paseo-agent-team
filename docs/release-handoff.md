@@ -1,24 +1,24 @@
 # 发布材料：Run Engine 收尾分支（只备材料）
 
 编写：2026-11-08（阶段 3，A19）。依据：`docs/next-phase-plan.md` 2.7 与任务 A19。
-这份文档只备材料。合并、推送、打标签、发布、改版本号、改 `CHANGELOG.md`、创建 PR **都没有做**，也不由实施会话做；这些由用户决定并执行。下文的数字都用命令实际统计，统计时的 HEAD 是 `5f08529`（本文所在提交之前）；合并前请按第 5 节重新跑一遍。
+这份文档只备材料。合并、推送、打标签、发布、改版本号、改 `CHANGELOG.md`、创建 PR **都没有做**，也不由实施会话做；这些由用户决定并执行。下文的数字都用命令实际统计，统计基准是 `5209eea`（处理独立评审发现的最后一个代码提交，本文的文档提交之前；`git rev-parse --short` 可核对）；之后每多一个提交数字都会再变，合并前请按第 5 节在最终 HEAD 上重新跑一遍。
 
 ## 0. 先读这一条：这次发布装的不止这个分支
 
 `main` 当前就是 `5533722`（`git merge-base main HEAD` 等于它），而最近一次发布 `paseo-agent-team-v0.5.0`（提交 `9a04413`）与 `5533722` 之间还隔着 60 个提交（33 feat、4 fix、23 docs），那是 P01–P05 期间已经合入 `main` 但没有发布的部分：Engine 的启动、派发、补报、台账 schema v2 都在其中。v0.5.0 时台账 schema 是 v1，服务端 RPC 是 19 个；现在是 schema v2、28 个。
 
-所以 release-please 生成的下一个版本会一次性包含 `v0.5.0..HEAD` 的 130 个提交（50 feat、10 fix、5 test、65 docs，没有破坏性标记），而不是只含本分支的 70 个。下面第 1 节两个口径都给出。这也是第 4 节“回滚注意”比计划原文更重的原因：相对 v0.5.0，回滚会回到一个既没有 Engine 启动路径、也不认识 schema v2 的版本。
+所以 release-please 生成的下一个版本会一次性包含 `v0.5.0..HEAD` 的 133 个提交（50 feat、11 fix、5 test、67 docs，没有破坏性标记），而不是只含本分支的 73 个。下面第 1 节两个口径都给出。这也是第 4 节“回滚注意”比计划原文更重的原因：相对 v0.5.0，回滚会回到一个既没有 Engine 启动路径、也不认识 schema v2 的版本。
 
 ## 1. 范围摘要
 
-统计命令与结果（HEAD `5f08529`）：
+统计命令与结果（HEAD `5209eea`）：
 
 | 口径 | 命令 | 提交数 | feat | fix | test | docs |
 | --- | --- | --- | --- | --- | --- | --- |
-| 本分支 | `git log --format=%s 5533722..HEAD` | 70 | 17 | 6 | 5 | 42 |
-| 自上次发布 | `git log --format=%s paseo-agent-team-v0.5.0..HEAD` | 130 | 50 | 10 | 5 | 65 |
+| 本分支 | `git rev-list --count 5533722..HEAD`；`git log --format=%s 5533722..HEAD` 按类型分类 | 73 | 17 | 7 | 5 | 44 |
+| 自上次发布 | `git rev-list --count paseo-agent-team-v0.5.0..HEAD`；`git log --format=%s paseo-agent-team-v0.5.0..HEAD` 按类型分类 | 133 | 50 | 11 | 5 | 67 |
 
-破坏性标记（提交标题里的 `!:` 或正文里的 `BREAKING CHANGE`）：两个口径都是 0。本分支改动的文件：106 个，新增 18037 行、删除 181 行，其中测试 46 个文件；生产代码（`shared/`、`server/`、`client/`）52 个文件，新增 5649 行、删除 117 行。
+破坏性标记（提交标题里的 `!:` 或正文里的 `BREAKING CHANGE`）：两个口径都是 0。本分支改动的文件（`git diff --shortstat 5533722..HEAD`）：109 个，新增 18677 行、删除 187 行，其中测试（`paseo-agent-team/tests`）48 个文件、新增 10860 行、删除 59 行；生产代码（`shared/`、`server/`、`client/`）52 个文件，新增 5684 行、删除 123 行。
 
 **Engine 仍默认关闭。** 开关是守护进程环境变量 `PASEO_AGENT_TEAM_RUN_ENGINE=1`（`server/run-engine/runtime.ts`），没设置时，启用了 Engine 的 Team 在启动时被明确拒绝，不会悄悄改走协调者链路；Team 的 `runEngine` 块也只有在编辑器里点开关才会写入。不设开关、不点开关的用户看不到行为变化，只多出若干页面入口（Runs 页的 Engine 运行列表和 Team 编辑器的“Run 引擎”区）。
 
@@ -34,7 +34,7 @@
 - 宿主读取失败后的重查扩面，读取恢复后引擎自动继续，前 3 次（A7）。
 - 决策带 `kind` 字段，区分质量、成员、判官、无报告与补证（A10）。
 - 事件压缩进检查点，台账接近上限时不再开始新工作（A1）。
-- 失败的任务多于策略上限时不再开始新的派发，一条 critical 告警，回落后自动撤下（A13）。
+- 失败的任务多于策略上限时不再开始尚未开始的任务（已在进行的评审、冒烟、补证请求与返工照常），一条 critical 告警，回落后自动撤下（A13；评审后修正了闸的范围）。
 - 协调者的回合预算：计划请求与重新规划各扣一回合，耗尽时重新规划被拒并告警，可在预算区追加；`strategicTurns` 小于 1 时启动被阻断（A14）。
 
 **fix**
@@ -84,7 +84,7 @@ Contract
 - Ledger schema stays v2 (reads v1 and v2); no prompt template changed since f1f1e48; 28 RPCs.
 
 Verification
-- biome (2 existing warnings), tsc, vitest 200 files / 3361 passed (3 todo), verify:package and
+- biome (2 existing warnings), tsc, vitest 201 files / 3370 passed (3 todo), verify:package and
   test:coverage pass. Acceptance status per scenario: docs/run-engine-acceptance.md.
 - Not done: a run against a real DEV daemon with real models and a real browser. Merge with a merge
   commit (not squash) so the feat and fix commits reach the changelog.
@@ -123,13 +123,13 @@ Rollback notes
 
 下面每条命令都已在统计时运行，结果是当时的真实输出；合并前请在最终 HEAD 上重跑。
 
-| 检查 | 命令（在 `paseo-agent-team/` 下，除非另注） | 结果（HEAD `5f08529`） |
+| 检查 | 命令（在 `paseo-agent-team/` 下，除非另注） | 结果（HEAD `5209eea`） |
 | --- | --- | --- |
 | 格式与 lint | `npx biome check .` | 通过，仅 `tests/run-core/r01g-core.test.ts` 的 2 条既有警告 |
 | 类型 | `npx tsc --noEmit -p .` | 通过 |
-| 测试 | `npm test` | 200 个文件，3361 通过，3 todo |
+| 测试 | `npm test` | 201 个文件，3370 通过，3 todo |
 | 包内容 | `npm run verify:package` | 通过 |
-| 覆盖率（CI 也跑） | `npm run test:coverage` | 通过，行 91.84%（门槛 90）、函数 90.5%（门槛 85） |
+| 覆盖率（CI 也跑） | `npm run test:coverage` | 通过，行 91.85%（门槛 90）、函数 90.52%（门槛 85） |
 | A3 在待合并范围内 | `git merge-base --is-ancestor a456eb0 HEAD`（仓库根） | 退出码 0（是祖先） |
 | A5 在待合并范围内 | `git merge-base --is-ancestor 940fca6 HEAD`（仓库根） | 退出码 0（是祖先） |
 | 工作树干净 | `git status --short`（仓库根） | 无输出 |
@@ -143,7 +143,7 @@ CI 在 `.github/workflows/ci.yml`，对本插件跑 `npm run check`、`typecheck
 
 ## 6. 合并方式建议
 
-用 **merge commit，不用 squash，不 cherry-pick，不分批**：整分支一次合并，A3 与 A5 自然同版本；本分支的 17 条 feat 和 6 条 fix（连同 `main` 上已有的）才能分别进入变更日志。若一定要 squash，标题必须以 `feat(run-engine):` 开头（第 3 节标题即是），否则 release-please 不会算出 minor 版本，并且所有 feat/fix 细节都会从变更日志里消失。合并后由 release-please 开发布 PR，用户检查它生成的版本（预期 0.6.0）和 `CHANGELOG.md` 后自行合并。
+用 **merge commit，不用 squash，不 cherry-pick，不分批**：整分支一次合并，A3 与 A5 自然同版本；本分支的 17 条 feat 和 7 条 fix（连同 `main` 上已有的）才能分别进入变更日志。若一定要 squash，标题必须以 `feat(run-engine):` 开头（第 3 节标题即是），否则 release-please 不会算出 minor 版本，并且所有 feat/fix 细节都会从变更日志里消失。合并后由 release-please 开发布 PR，用户检查它生成的版本（预期 0.6.0）和 `CHANGELOG.md` 后自行合并。
 
 ## 7. R2（默认开启）的准入条件与一行改动
 

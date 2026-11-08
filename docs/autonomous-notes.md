@@ -47,6 +47,7 @@
 | A17 UI 接线与渲染测试 | 已做 | 9508aed（代码+测试）+ 计划第 63 点 | 3358 | 把 `TeamEditor` 给 `RunEngineEditor` 的 Profile 接线抽成 `RunEngineSection`（行为不变），挂载测试覆盖 Codex 警告与不猜的行；`LaunchDialog` 渲染测试覆盖 Engine 阻断/警告、kickoff-pending、失败；变异 12 项全抓到 |
 | A18 文档对账 | 已做 | 583a55d（README 与事实测试）+ 计划第 64 点 | 3361 | 验收表按证据对账（AC07、AC19、AC21 升为已覆盖，AC21 带范围声明），README 补 A13/A14 语义、高级字段、不要关闭或归档成员的警告并刷新“未做”列表，`readme-facts.test.ts` 新增 3 例；变异 6 项全抓到 |
 | A19 发布材料 | 已做（只备材料） | 619c5c7 + 计划第 65 点 | 3361 | `docs/release-handoff.md`：范围摘要、预期版本、PR 与发布说明草稿、合并前检查清单（命令已运行）、合并方式、R2 准入条件、残余风险；没有改版本文件、CHANGELOG，没有合并、推送、打标签、建 PR |
+| 评审发现处理（阶段 4） | 已做 | 5209eea（代码+测试）+ 计划第 66 点 | 3370 | 失败任务闸只拦尚未开始（`ready`）的任务，在途的评审、冒烟、补证请求、返工照常；告警摘要不再写失败数；`replan.ts` 注释更正；Runs 页与启动对话框测试改为轮询等待；发布材料统计重算；3 条发现登记为已知限制；变异 24 项全抓到 |
 
 ## 待批准
 
@@ -299,7 +300,7 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 
 ## 待批准（第二轮）
 
-（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
+（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。阶段 4（处理独立评审的发现）同样没有新的合同需求。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷（阶段 4 已把 `settle` 与 Runs 页的固定等待改成轮询等待，见“每项的检查结果”）；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
 
 ## 我自己做的判断
 
@@ -335,6 +336,10 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 - **`LaunchDialog` 的渲染测试**（已由 A17 补上，`tests/run-view/launch-dialog.test.ts`）：此前它调用 `launch-job-copy.ts` 的接线只靠类型检查。
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
+- **评审发现 3：告警被 acknowledged 后下次派发会被重新打开**（阶段 4 登记，不修）：`raiseAlert` 只把 `open` 的同编号告警当作已存在，`acknowledged` 的会被重新打开；查过 `server`、`client`、`shared/domain`，目前没有任何入口把告警置为 `acknowledged`（只有 schema 枚举和 `run-alert.ts` 的注释），所以现在不可达。将来加“确认告警”的入口时，失败任务闸与容量告警都要一并考虑。
+- **评审发现 4：闸的告警清除只在 `lifecycle` 为 `active` 时运行**（阶段 4 登记，不修）：`dispatchNextUnlocked` 对非 `active` 的 Run 在清除之前就返回 idle，所以 Run 暂停期间即使失败数已回到上限以内（例如人在暂停时取消了失败任务），旧的 critical 告警会留到恢复后第一次派发才撤下。恢复后会自己撤，不影响正确性，只是暂停期间页面还显示旧告警。
+- **评审发现 6：`addPlanRequest` 的错误文案不准**（阶段 4 登记，不修）：`run-record.ts` 的 `addPlanRequest` 在预留协调者回合得到 `already-counted` 时也抛“the coordinator has no turn left for the plan request”，文案说的是没有回合；正常路径够不到这一分支（前面已用 `wake` 与 `dagControl` 挡住重复准备），所以不改。
+
 ## 每项的检查结果
 
 - **A19**：只写文档 `docs/release-handoff.md`。用命令统计（HEAD `5f08529`）：`5533722..HEAD` 70 个提交（17 feat、6 fix、5 test、42 docs），`paseo-agent-team-v0.5.0..HEAD` 130 个（50 feat、10 fix、5 test、65 docs），破坏性标记 0；`git merge-base --is-ancestor a456eb0 HEAD` 与 `git merge-base --is-ancestor 940fca6 HEAD` 退出码均为 0；`git diff 5533722..HEAD` 对 `package.json`、`paseo-plugin.json`、`CHANGELOG.md`、`.release-please-manifest.json` 为空；`npm run test:coverage` 通过（行 91.84%、函数 90.5%），`coverage/` 用后删除。计划没预料到的发现：`main` 就是基线，而 v0.5.0 之后已有 60 个未发布提交（含 Engine 启动路径与 schema v2），所以发布会一次装 130 个提交，已在文档第 0 节与回滚注意里说明。没有改版本文件和变更日志，没有合并、推送、打标签、建 PR。
@@ -348,6 +353,7 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 - **A15**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 196 个文件 3306 通过（3 todo，A13 后 3298 加 8）、verify:package 通过。六组各自定向通过，没有撤回。变异（`a15.json`，25 次运行）：第 1 组 3 项全被抓（原因码改名、评审不比较 `reviewedRef`、冒烟原因码改名）；第 3 组 3 项全被抓（幂等键每次不同、归档多一个无关 Agent、只归档第一个）；第 4 组 3 项全被抓（协议失败计入质量失败、返工、尝试次数）；第 6 组 2 项全被抓（详情读取写入、列表读取写入）；第 5 组 5 项中 3 项被抓（已投递的暂存 hook 仍留在缓冲、观察器与 reducer 回执去重三处同时去掉的两种用例）；第 2 组 9 项中只有回执去重三处同时去掉的一项被抓。存活的 10 项都在第 2、5 组，原因是重放被多层各自独立地挡住：回执去重（观察器、reducer 的 switch 分支、reducer 的重放守卫三层，去掉观察器一层或加 switch 一层仍不变）、入账的守卫（“等报告”守卫外层、内层、归属重复判断，加上 reducer 的相同证明短路和 nonce 重放守卫全去掉仍不变）、重复评审派发（`nextWork` 的已绑定判断、构建器的重复派发和预算已计数判断、调度的席位负载判断全去掉仍不变，可能还有未逐一定位的更外层守卫）。这些都是有意冗余，不为它们再加用例；用例的价值在于固定可观察结果。源码文件经 `cmp` 逐字节还原。AC19 的“host.sent 为空”无法断言：查询函数不持有宿主，改为断言 `create`/`update` 零调用与文件字节不变，如实写入缺口。
 
 - **A13**：定向 54 项（两个新文件加 `waiting.test.ts`）；完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 196 个文件 3298 通过（3 todo，基线 3283 加 15）、verify:package 通过。变异 12 项（`a13.json`）全部被抓到：去掉闸、`>` 改 `>=`、把 `cancelled` 也计入、不数 `failed`、每遍换告警编号、闸同时挡住入账与补报、读 `strategicTurns`、回落后不撤告警、不超限时每遍写入、告警降为 warning、中文表缺该原因码、没有活要派时也写告警（A13-09 首次因格式化后锚点变化未应用，改锚点后单独重跑被抓）；4 个源码文件经 `cmp` 逐字节还原。与计划文字的差异：任务的状态字段在代码里是 `state`（计划写 `status`）；告警编号取自固定前缀，所以失败数从 4 变 5 不会再写第二条，代价是摘要里的“现有 N 个”只反映第一次写入时的数；失败数用直接往台账加 `failed` 任务造出，A4 `cancel` 以任务变 `cancelled` 代替，没有对 D3 的 `retry` 做端到端（真实 D3 需要顶层席位用完质量次数，夹具太重）。DEV 未验证。
+- **评审发现处理（阶段 4）**：定向 `failure-limit` 两个文件 21 项、`tests/run-view` 13 个文件 269 项通过。完整门禁（代码提交 5209eea 前）：biome 仅 2 条既有警告、tsc 通过、vitest 201 个文件 3370 通过（3 todo，A19 后 3361 加 9）、verify:package 通过；`npm run test:coverage` 也跑过，行 91.85%、函数 90.52%，跑完删掉了被忽略的 `coverage/`。变异 24 项（`p4-mut.json`、`p4-mut-f7.json`）全部被抓到：F1 12 项、F2 3 项、F7 9 项，其中 F7-01 到 F7-06 证明条件永不成立时是在 2 秒后失败而不是挂住；`service.ts`、`failure-limit.ts`、`runs-tab.test.ts`、`launch-dialog.test.ts`、`wait-until.ts` 经 `cmp` 逐字节还原。闸现在的精确语义：超限（失败数大于 `policy.run.failedTasks`）时，状态为 `ready` 的任务不开始，其余在途工作（报告入账与补报、`assigned`/`in_progress` 的补证请求、`review` 的评审与冒烟、`rework` 的返工）照常；只剩 `ready` 任务可做时返回 `failed-task-limit` 并把原因写在被拦任务上；告警只在确有 `ready` 任务被拦时写一条，回落后撤下。与计划 2.9 的差异：计划写“不再开始任何新的派发（含审查、冒烟、补证请求）”，评审指出这与告警和中文文案的“进行中的工作继续收尾”矛盾，按后者改，计划原文保持不动。需要知道的一点：人在决策点选“重新开始”（`fresh`、`abandon`）送回起点的失败任务状态也是 `ready`，所以失败数仍超限时它的重新派发仍会被拦，这与计划 2.9 的风险说明一致。
 
 - **README 恢复说明更正**：只改文档。读取恢复后「自动继续前 3 次（`READ_RETRY_AUTO_CONTINUE_GENERATIONS`）、之后留下请 kick 的提示」与「启动中断的 Run 被关闭并告警、需要人去找已创建的 Agent 并重新启动」两处，按代码和 A7、A8 的实际行为改写；`readme-facts.test.ts` 不断言这两句，所以改动不依赖该测试。没有 DEV 验证。
 
