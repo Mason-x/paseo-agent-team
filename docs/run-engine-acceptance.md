@@ -1,6 +1,6 @@
 # Run Engine 验收表（AC01–AC22）
 
-编写：2026-11-08（无人值守会话）。矩阵来源：`docs/run-engine-iteration-plan.md` 第 7 节。实施记录：同文件第 8 节 P04 行的第 1–43 点。
+编写：2026-11-08（无人值守会话）。矩阵来源：`docs/run-engine-iteration-plan.md` 第 7 节。实施记录：同文件第 8 节 P04 行。
 
 这份表如实记录每一项验收**现在**有什么证据、缺什么。它不是"全部通过"的声明：
 
@@ -36,7 +36,7 @@
 | AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖；M1 对账查询没有处理器可测；"不派发"是结构性的，没有用 `host.sent` 断言 | B4 | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
 | AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 部分 | 只有宿主读取重查这一个定时器；没有别的截止条件可测 | B7 | 第 35 点（没有 DEV） |
-| AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 没有真实浏览器与小屏检查，重连只测了纯会话规则；"原因与台账一致"靠源码扫描而非端到端比对 | B8、B10 | 无 |
+| AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；没有真实浏览器与小屏检查，重连只测了纯会话规则；其余原因码靠源码扫描而非端到端比对 | B8、B10（剩余字段） | 无 |
 
 没有 DEV 记录的项目都需要在专用 DEV daemon 上再看一遍（本轮的第 5 节 DEV 验证没有做）。
 
@@ -297,10 +297,14 @@
 - tests/run-view/engine-view.test.ts :: unchanged is a W01 handoff and renders neither a fake ready nor a failure card
 - tests/run-view/layout-guard.test.ts :: every pressable control has a touch-sized minimum height
 - tests/run-view/waiting.test.ts :: every event kind the reducer and the counters write has words
+- tests/run-engine/decision-answer.test.ts :: classifies quality, stopped actors, missing reports and cancellations without exposing ledger details
+- tests/run-engine/queries.test.ts :: a decision kind survives the new projection and older clients can strip it
+- tests/run-view/controls.test.ts :: the server's decision kind distinguishes the retry and unknown kinds fall back
+- tests/run-view/waiting.test.ts :: explains a known decision kind and falls back for old or future servers
 
 缺口：没有真实浏览器与窄屏检查，只有对源码的静态保护（无固定宽度、按钮最小高度、可换行、单个滚动条）；断线重连只测了纯会话规则；"原因与台账一致"靠源码扫描，没有端到端比对；服务端推送式失效没有做（B8）。需 DEV。
 
 ## 这份表之外还没做的
 
 - 第 5 节的 DEV 真实验证没有做：补证模板是否被真实模型遵守、`replan` 的提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查。
-- 缺口栏指向的 B1–B13 都是需要用户批准的改动；没有批准之前它们不在主线上。
+- 缺口栏沿用 B1–B13 编号；其中部分已裁决或实施，具体范围与仍推迟的内容见 `docs/autonomous-notes.md` 的裁决与进度。
