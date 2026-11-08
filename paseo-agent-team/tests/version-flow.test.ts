@@ -693,11 +693,19 @@ describe("version flow", () => {
       platform: "win32",
     });
     expect(resolved.ok && resolved.cli).toBe(cli);
-    expect(
-      (await npmCandidates(process.execPath, { PATH: "" }, "linux")).some((candidate) =>
-        candidate.includes(`${path.sep}lib${path.sep}`),
+    // With every file "existing", an empty PATH still adds nothing: the only candidate left is the
+    // one beside Node itself, whatever this machine has installed there.
+    expect(await npmCandidates(process.execPath, { PATH: "" }, "linux", async () => true)).toEqual([
+      path.resolve(
+        path.dirname(process.execPath),
+        "..",
+        "lib",
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
       ),
-    ).toBe(false);
+    ]);
     const missing = await resolveNpmCli({
       exec: {
         async run() {
