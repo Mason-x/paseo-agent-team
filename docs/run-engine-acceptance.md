@@ -26,12 +26,12 @@
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
-| AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
+| AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；启动中断已安全关闭但不能续办；"暂停扣住的从未发出的派发"没有 store 级用例；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
-| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 取消整个 Run 从请求到完成宿主没有任何 send 与 archive；仍没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | A9 | 无 |
+| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
 | AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖；M1 对账查询没有处理器可测；"不派发"是结构性的，没有用 `host.sent` 断言 | B4 | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
@@ -168,9 +168,13 @@
 ### AC12 权限等待、人的决定重复提交、等待期间重启
 - tests/run-engine/service.test.ts :: a seat waiting on a permission or reporting an error is not used
 - tests/run-engine/observer.test.ts :: an event storm of repeats and reorderings leaves one receipt per distinct fact — 重复的 `permission_requested` 只记一次
-- tests/run-view/waiting.test.ts :: a permission wait names the owner and says the Engine never answers — 只是文案
+- tests/run-view/waiting.test.ts :: a permission wait names the owner and says the Engine never answers — 文案
+- tests/run-engine/permission-wait.test.ts :: the Engine port and server have no permission-answering method
+- tests/run-engine/service.test.ts :: an idle eligible seat is used while another eligible seat waits for permission
+- tests/run-engine/driver.test.ts :: a permission request records the wait without running the dispatcher
+- tests/run-engine/driver.test.ts :: a permission wait survives recovery; resolution and the eventual report are each handled once
 
-缺口：引擎端口 `PaseoEnginePort` 没有答权限的方法，"从不代答"是结构性的，没有测试；决定 RPC 只接受 `retry`，没有权限类决定可重复提交；没有"等待权限期间重启后只继续剩余阶段"的用例；`driver.onHook` 里 `permission_resolved` 的踢一下分支没有直接测试。待批准 B5。
+缺口：测试用假宿主脚本模拟人的权限回应；没有真实宿主权限对话或人重复操作的 DEV 验证。Engine 不提供权限决定 RPC。
 
 ### AC13 临时失败、退避未到期/已到期、预算耗尽
 - tests/run-engine/read-retry-server.test.ts :: it is written down, a timer is set for the first try, and nothing is read before it is due
@@ -244,8 +248,9 @@
 - tests/run-engine/control.test.ts :: two kicks at once cost one pass: the second joins the first instead of reading the host again
 - tests/run-engine/observer.test.ts :: an event storm of repeats and reorderings leaves one receipt per distinct fact
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
+- tests/run-engine/driver.test.ts :: idle kicks and repeated or unowned events write nothing and never wake the coordinator
 
-缺口：没有让一段空闲时间过去、或喂入 N 条普通事件，同时断言宿主调用与模型调用为零、修订号不变的用例；唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
+缺口：新用例喂入 5 轮重复事件并 kick，断言修订号不变、没有发送和重查计时器；没有让真实时间长时间过去，也没有断言所有只读宿主调用为零。唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
 
 ### AC18 战略协调者规划后，N 个成员事件正常流转
 - tests/run-engine/driver.test.ts :: two tasks, one after the other: nothing starts until what it waits for has passed every gate — 之后只有给成员的消息，四条，没有重复，没有发给协调者
