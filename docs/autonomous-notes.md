@@ -318,6 +318,8 @@
 
 ## 每项的检查结果
 
+- **README 恢复说明更正**：只改文档。读取恢复后「自动继续前 3 次（`READ_RETRY_AUTO_CONTINUE_GENERATIONS`）、之后留下请 kick 的提示」与「启动中断的 Run 被关闭并告警、需要人去找已创建的 Agent 并重新启动」两处，按代码和 A7、A8 的实际行为改写；`readme-facts.test.ts` 不断言这两句，所以改动不依赖该测试。没有 DEV 验证。
+
 - **T5c 补正（Profile 警告接线）**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 194 个文件 3283 通过（3 todo）、verify:package 通过。变异 7 项（席位号不符不排除、候选不排除、多行不排除、编辑器忽略 seatProfiles、未选 Profile 也算、TeamEditor 不传 prop、TeamEditor 不计算）均被抓到；源码经 `cmp` 逐字节还原。注意：变异过程中曾误用 `git checkout` 还原 TeamEditor，一度丢掉未提交接线，已从备份恢复并重跑验证。
 
 - **T5b 补正（告警、预算原因、事件文案）**：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 193 个文件 3278 通过（3 todo）、verify:package 通过。变异：预算缺失映射改名、重新规划文案改回「发了」、告警责任人改写死、告警下一步行删除，均被抓到；源码经 `cmp` 逐字节还原。告警 DTO 没有结构化类型，故只显示摘要并明确「需根据告警内容判断」，没有为告警文字做解析。

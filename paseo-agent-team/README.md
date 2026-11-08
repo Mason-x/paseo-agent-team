@@ -174,7 +174,9 @@ identity: members commit their work there, and the evidence is written outside t
 intent is written first, sent once, and a result that is not known is checked against the member's
 timeline and never sent twice. A report that is missing or malformed is asked for again a bounded
 number of times; evidence the gate refuses is asked for again on the same delivery; a host read
-that failed is read again 1, 2 and 4 seconds later and only a note is left. A paused, finished or
+that failed is read again 1, 2 and 4 seconds later; once the read works again the Engine takes in
+what it missed and goes on by itself, for each source at most 3 times, after which a note asks you to
+press 立即检查并推进. A paused, finished or
 cancelled Run sends nothing new.
 
 **What it does not do.** It never answers a permission request for an agent: a task whose agent
@@ -225,7 +227,11 @@ you to try once more. A request is never applied twice.
 **Recover and roll back.**
 
 - After a restart the daemon recovers every live Run from its ledger and works out again which
-  reads and sends are due. Nothing needs to be restarted by hand.
+  reads and sends are due. One case needs a person: a Run whose launch was interrupted while its
+  members were being created cannot be resumed. It is closed with a critical alert that lists the
+  Agents already recorded for it (it may be missing ones that were created but not recorded, the
+  coordinator is created first). Look for those Agents in Paseo, archive them if you do not want
+  them, and start the Run again; nothing is archived for you.
 - New Runs are written as ledger schema v2; this version reads v1 and v2. A Run written as v1 is
   not migrated and is not given evidence supplements. An older plugin version cannot read a v2
   Run: it keeps the file untouched, and because it then cannot see which files that Run holds it
