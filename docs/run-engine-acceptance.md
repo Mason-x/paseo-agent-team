@@ -27,7 +27,7 @@
 | AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"现已在记录层断言不变（A15，只涉及 `turn_ended`）；"早于关键记录"只验证了 store 未就绪和无归属（绑定席位后恰好交付一次已补）；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话和人的重复操作未在 DEV 验证 | — | 无 |
-| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
+| AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始新的派发（A13，有端到端用例）；没有分组预算的入口；协调者的回合预算已有（计划请求与重新规划各扣一回合，计划格式重发不计，不退还，耗尽时重新规划被拒并告警，追加预算后继续，A14） | A7 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
@@ -204,8 +204,20 @@
 - tests/run-engine/failure-limit-driver.test.ts :: a Run at its limit still hands out work, and says nothing about failures
 - tests/run-engine/failure-limit-driver.test.ts :: [%s] one failed task over the limit shuts dispatch: one critical alert, the reason on the task, nothing sent, and every later pass writes nothing
 - tests/run-engine/failure-limit-driver.test.ts :: cancelling failed tasks until the count is back within the limit reopens dispatch and takes the alert down, once
+- tests/run-engine/coordinator-budget.test.ts :: the plan request is the first turn: the entry takes the policy's limit, one reserved, and nothing else changes — 模板（v1、v2 各一遍）：新 Run 的计划请求扣第一回合，冻结的策略不被写（A14）
+- tests/run-engine/coordinator-budget.test.ts :: a re-plan is the next turn: one more reserved, the Run still passes its invariants — 模板（v1、v2）（A14）
+- tests/run-engine/coordinator-budget.test.ts :: with no turns left a re-plan is refused as budget-exhausted, and the Run is not touched — 模板（v1、v2）（A14）
+- tests/run-engine/coordinator-budget.test.ts :: a Run with no entry gets one on first use, counting every plan request it holds, failed ones included — 模板（v1、v2）：旧 Run 懒建条目，`reserved` 是 outbox 里计划请求的个数（下界），再看一次得到同一对象（A14）
+- tests/run-engine/coordinator-budget.test.ts :: a format re-send of the plan is not a turn of the budget — 模板（v1、v2）（A14）
+- tests/run-engine/coordinator-budget.test.ts :: the coordinator's row is raised like a seat's: the new limit is in the entry, the policy and the alert are not touched — 模板（v1、v2）（A14）
+- tests/run-engine/control.test.ts :: [%s] a re-plan with no turns left is refused with one warning and nothing sent; turns added from the page take the warning down and the re-plan goes out once — 真实 store 与 driver：额度 1 时重新规划被拒、恰好一条 open 警告、宿主零发送，再问一次不写；对 `coordinator` 追加预算后警告 `resolved`，再重新规划成功，协调者恰好收到一条，同一请求再来 `replayed` 且不再扣（A14）
+- tests/run-engine/control.test.ts :: turns added to a coordinator that never asked for a re-plan build its row first, from the plan request the Run already used — 旧 Run 没有条目时 `run.budget` 先建条目再追加（A14）
+- tests/run-engine/start.test.ts :: the plan request is the coordinator's first turn: its budget entry takes the policy's limit with one reserved, and the policy is not written — A14 新增
+- tests/run-engine/start.test.ts :: a coordinator turn budget of 0 stops the launch before anything exists: there is no turn to send the plan request in — A14 新增
+- tests/run-engine/team-config.test.ts :: a coordinator turn budget under 1 blocks the launch: the plan request would have no turn to be sent in — A14 新增
+- tests/run-engine/team-config-edit.test.ts :: a coordinator turn budget of 0 is a blocker the moment it is typed, and 1 clears it — A14 新增
 
-缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；计划请求、重新规划、重发不预扣预算（B2）；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。失败的任务数超过 `policy.run.failedTasks` 后不再开始新的派发（A13）：用例用直接加入 `failed` 任务造出失败数，A4 的 `cancel` 答复以任务变为 `cancelled` 代替，没有对 D3 的 `retry` 做端到端。
+缺口：退避只存在于宿主读取失败的重查（1、2、4 秒、三次）；派发之后的临时失败没有自动重试（B7）；报告重发只有次数没有截止时间；协调者的回合预算只计计划请求与重新规划（A14）：计划格式重发不计、不退还，`reserved` 对旧 Run 只是下界；预算耗尽不开决策，由告警和追加预算的 RPC 代替（A6）；没有分组预算的入口（只有席位）。失败的任务数超过 `policy.run.failedTasks` 后不再开始新的派发（A13）：用例用直接加入 `failed` 任务造出失败数，A4 的 `cancel` 答复以任务变为 `cancelled` 代替，没有对 D3 的 `retry` 做端到端。
 
 ### AC14 暂停、续办、取消时 Agent 仍有在途执行
 - tests/run-engine/effects.test.ts :: the pause that lands after the caller read the ledger still stops the send
@@ -275,6 +287,7 @@
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
 - tests/run-engine/driver.test.ts :: idle kicks and repeated or unowned events write nothing and never wake the coordinator
 - tests/run-engine/failure-limit-driver.test.ts :: a Run with failures over the limit and nothing left to start is left alone
+- tests/run-engine/coordinator-budget.test.ts :: asking again with the same request id is the same request: it answers replayed and counts nothing — 模板（v1、v2）：同一个重新规划请求重放不再扣协调者的回合（A14）
 - tests/run-engine/driver.test.ts :: an idle Run, 24 hours later, has made no call to the host, written nothing and left no timer behind — 假计时器前进 24 小时：宿主的读（时间线与席位状态）与归档调用数不变、发送数不变、账本修订号/告警/回执不变，`vi.getTimerCount()` 前后均为 0（A16）
 
 缺口：新用例喂入 5 轮重复事件并 kick，断言修订号不变、没有发送和重查计时器；假时钟 24 小时已证明零宿主读写与零计时器（A16）；没有真实时间长跑，也没有 DEV 验证。唯一的定时器是宿主读取重查；战略协调者的决策唤醒规则（`classifyWake`）只被测试使用，服务端不发送。
@@ -282,8 +295,9 @@
 ### AC18 战略协调者规划后，N 个成员事件正常流转
 - tests/run-engine/driver.test.ts :: two tasks, one after the other: nothing starts until what it waits for has passed every gate — 之后只有给成员的消息，四条，没有重复，没有发给协调者
 - tests/run-core/wake.test.ts :: new open decisions wake once with a stable key; ordinary progress does not
+- tests/run-engine/control.test.ts :: [%s] a re-plan with no turns left is refused with one warning and nothing sent; turns added from the page take the warning down and the re-plan goes out once — 协调者的调用（计划请求与重新规划）现在有记账，一个请求恰好扣一回合（A14）
 
-缺口：对协调者"不发消息"只是间接观察；相同决定的去重只在纯分类器里演示。
+缺口：对协调者"不发消息"只是间接观察；相同决定的去重只在纯分类器里演示；服务端本就不向协调者发决策唤醒。协调者的调用有记账（A14），耗尽时重新规划被拒。
 
 ### AC19 列表、详情、历史、刷新、M1 对账查询
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
