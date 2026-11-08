@@ -107,6 +107,8 @@ function fakeHost() {
   const flags = { newer: false };
   // Reads of the host that throw: the timeline (a reply) and the live agent state (a seat).
   const unreadable = { timeline: false, agent: false };
+  const runningAgents = new Set<string>();
+  const permissionAgents = new Set<string>();
   let seq = 0;
   const entries = (agentId: string) => {
     let list = timelines.get(agentId);
@@ -151,10 +153,20 @@ function fakeHost() {
             return page(agentId);
           },
         },
-        current: () => ({ status: "idle", activeTurn: null }),
+        current: () => ({
+          status: runningAgents.has(agentId) ? "running" : "idle",
+          activeTurn: runningAgents.has(agentId) ? { id: turns.get(agentId) } : null,
+          pendingPermissions: permissionAgents.has(agentId) ? [{ id: "permission-1" }] : [],
+        }),
         refresh: async () => {
           if (unreadable.agent) throw new Error("the agent cannot be read");
-          return { agent: { status: "idle", activeTurn: null } };
+          return {
+            agent: {
+              status: runningAgents.has(agentId) ? "running" : "idle",
+              activeTurn: runningAgents.has(agentId) ? { id: turns.get(agentId) } : null,
+              pendingPermissions: permissionAgents.has(agentId) ? [{ id: "permission-1" }] : [],
+            },
+          };
         },
       }),
     },
@@ -162,6 +174,8 @@ function fakeHost() {
   return {
     port,
     sent,
+    runningAgents,
+    permissionAgents,
     /** Pages say there is more after them: a turn that no later turn proves over is still open. */
     hasNewerPages: (value: boolean) => {
       flags.newer = value;
@@ -717,6 +731,122 @@ describe("recovery and the hook handler", () => {
       status: "recorded",
     });
     expect(log).toHaveBeenCalled();
+  });
+});
+
+describe("permission waiting and idle events", () => {
+  test("a permission request records the wait without running the dispatcher", async () => {
+    const dispatchNext = vi.fn(async () => ({ status: "idle" as const }));
+    const host = fakeHost();
+    const { driver } = build(host, { service: { dispatchNext } });
+    const requested = {
+      name: "agent.permission_requested" as const,
+      agentId: COORDINATOR_AGENT,
+      requestId: "permission-1",
+    };
+    expect((await driver.onHook(requested)).status).toBe("recorded");
+    expect(dispatchNext).not.toHaveBeenCalled();
+    await driver.onHook({ ...requested, name: "agent.permission_resolved" });
+    expect(dispatchNext).toHaveBeenCalledTimes(1);
+    expect(host.sent).toEqual([]);
+  });
+
+  test("a permission wait survives recovery; resolution and the eventual report are each handled once", async () => {
+    const host = fakeHost();
+    const first = build(host, {
+      reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    });
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, first.driver, COORDINATOR_AGENT);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+
+    host.runningAgents.add("agent-b1");
+    host.permissionAgents.add("agent-b1");
+    const requested = {
+      name: "agent.permission_requested" as const,
+      agentId: "agent-b1",
+      requestId: "permission-1",
+    };
+    expect((await first.driver.onHook(requested)).status).toBe("recorded");
+    expect((await first.driver.onHook(requested)).status).toBe("duplicate");
+    const waiting = projectDetail(await stored());
+    expect(waiting.ok).toBe(true);
+    if (!waiting.ok) throw new Error("detail projection failed");
+    expect(waiting.view.tasks.find((task) => task.taskId === "t1")?.blockedBy).toEqual({
+      kind: "permission",
+      ref: "agent-b1",
+    });
+
+    const restarted = build(host, {
+      reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    });
+    await restarted.driver.recover();
+    await restarted.driver.kick(RUN_ID);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    expect(states(await stored())).toEqual({ t1: "assigned", t2: "pending" });
+
+    host.permissionAgents.delete("agent-b1");
+    const resolved = { ...requested, name: "agent.permission_resolved" as const };
+    expect((await restarted.driver.onHook(resolved)).status).toBe("recorded");
+    expect((await restarted.driver.onHook(resolved)).status).toBe("duplicate");
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1"]);
+    produce(host, "agent-b1");
+    host.runningAgents.delete("agent-b1");
+    await hook(host, restarted.driver, "agent-b1");
+    const after = await stored();
+    expect(states(after)).toEqual({ t1: "review", t2: "pending" });
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
+    expect(after.eventReceipts.filter((item) => item.kind === "permission_requested")).toHaveLength(
+      1,
+    );
+    expect(after.eventReceipts.filter((item) => item.kind === "permission_resolved")).toHaveLength(
+      1,
+    );
+    expect(
+      after.assignments.filter((item) => item.taskId === "t1" && item.purpose === "member"),
+    ).toHaveLength(1);
+    await hook(host, restarted.driver, "agent-b1");
+    expect((await stored()).revision).toBe(after.revision);
+    expect(host.sent.map((entry) => entry.agentId)).toEqual(["agent-b1", "agent-b2"]);
+  });
+
+  test("idle kicks and repeated or unowned events write nothing and never wake the coordinator", async () => {
+    const host = fakeHost();
+    const { driver } = build(host);
+    const started = {
+      name: "agent.turn_started" as const,
+      agentId: COORDINATOR_AGENT,
+      turnId: "turn-idle",
+    };
+    expect((await driver.onHook(started)).status).toBe("recorded");
+    const baseline = await stored();
+    for (let i = 0; i < 5; i += 1) {
+      expect((await driver.onHook(started)).status).toBe("duplicate");
+      await driver.onHook({
+        name: "agent.permission_requested",
+        agentId: "unowned-agent",
+        requestId: "unowned-permission",
+      });
+      await driver.kick(RUN_ID);
+    }
+    expect((await stored()).revision).toBe(baseline.revision);
+    expect(host.sent).toEqual([]);
+    const retry = createReadRetry({
+      store,
+      readReply: async () => {
+        throw new Error("unexpected read");
+      },
+      readSeat: async () => {
+        throw new Error("unexpected read");
+      },
+    });
+    try {
+      await retry.start();
+      expect(retry.armed).toBe(false);
+    } finally {
+      await retry.dispose();
+    }
   });
 });
 
