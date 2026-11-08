@@ -32,8 +32,7 @@ import { MEMBER_CREATION_OPTIONS, type MemberCreation } from "../shared/team-mod
 import type { PluginLayout, PluginTheme } from "../shared/theme";
 import { MemberEditor } from "./MemberEditor";
 import { ModelRow } from "./ModelRow";
-import { RunEngineEditor } from "./RunEngineEditor";
-import { seatProfileFactsFromPlan } from "./seat-profile-facts";
+import { RunEngineSection } from "./RunEngineSection";
 import {
   buildMemberCreationField,
   duplicateMemberPair,
@@ -185,10 +184,6 @@ export function TeamEditor({
     }
     return grouped;
   }, [modelRows]);
-  const seatProfiles = useMemo(
-    () => (planResult ? seatProfileFactsFromPlan(members, planResult.rows) : undefined),
-    [planResult, members],
-  );
   const planIssues = useMemo(() => {
     if (!planResult || planResult.effectiveMode === null) return [];
     return buildTeamPlanIssues(planResult);
@@ -579,12 +574,12 @@ export function TeamEditor({
                 {zh.addMember}
               </Text>
             </Pressable>
-            <RunEngineEditor
+            <RunEngineSection
               theme={theme}
               members={members}
+              planRows={planResult?.rows}
               value={runEngine}
               revision={formSeed}
-              seatProfiles={seatProfiles}
               onChange={(next) => {
                 setRunEngine(next);
                 setRunEngineTouched(true);

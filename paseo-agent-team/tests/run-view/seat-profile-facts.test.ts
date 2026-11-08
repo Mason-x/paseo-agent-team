@@ -65,13 +65,21 @@ describe("seatProfileFactsFromPlan", () => {
 });
 
 describe("the Team editor hands the planned Profiles to the Run Engine editor", () => {
-  // TeamEditor is not mounted in tests (it needs the whole host); this guards the wiring in its source.
+  // TeamEditor is not mounted in tests (it needs the whole host). The wiring it delegates to,
+  // `RunEngineSection`, is mounted in run-engine-section.test.ts; this guards the source on both sides.
+  const source = (file: string) =>
+    readFileSync(path.resolve(__dirname, "../../client/teams", file), "utf8");
+
   test("the plan rows become seatProfiles and reach RunEngineEditor", () => {
-    const source = readFileSync(
-      path.resolve(__dirname, "../../client/teams/TeamEditor.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("seatProfileFactsFromPlan(members, planResult.rows)");
-    expect(source).toMatch(/<RunEngineEditor[^>]*seatProfiles=\{seatProfiles\}/su);
+    const section = source("RunEngineSection.tsx");
+    expect(section).toContain("seatProfileFactsFromPlan(members, planRows)");
+    expect(section).toMatch(/<RunEngineEditor[^>]*seatProfiles=\{seatProfiles\}/su);
+  });
+
+  test("TeamEditor hands the plan's rows to the section and does not build the facts itself", () => {
+    const editor = source("TeamEditor.tsx");
+    expect(editor).toMatch(/<RunEngineSection[^>]*planRows=\{planResult\?\.rows\}/su);
+    expect(editor).not.toContain("<RunEngineEditor");
+    expect(editor).not.toContain("seatProfileFactsFromPlan");
   });
 });
