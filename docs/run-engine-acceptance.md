@@ -24,11 +24,11 @@
 | AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 已覆盖 | —（协议失败不改变 `qualityFailures`、`reworkCount`、尝试次数，已有用例，A15；DEV 没跑过成员报告补报，见 DEV 记录栏） | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 已覆盖 | —（A16：两个 Run 的引擎级用例，别名拼写的文件路径被挡并在冲突里点名该文件，第一方完成放占用后另一方下一遍派发） | — | 无 |
-| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理 | — | Run 4（N=1）：daemon 在 reviewer 回合中重启，回复丢失，恢复重查 3 次用尽后任务停在 review；取消停在 paused、`waiting.turns=1`，与已知限制一致 |
+| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用在同 Run 内和跨 Run 都已有引擎级用例（A16）；"Agent 失联"只有现状测试（已知限制）：宿主若在成员回合中关闭它而不发 `turn_ended`，任务与 Run 取消会一直等，引擎不会处理；A21 起告警给出出路（成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”），离线用例证明该出路能让取消完成，DEV 未验 | — | Run 4（N=1）：daemon 在 reviewer 回合中重启，回复丢失，恢复重查 3 次用尽后任务停在 review；取消停在 paused、`waiting.turns=1`，与已知限制一致 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"现已在记录层断言不变（A15，只涉及 `turn_ended`）；"早于关键记录"只验证了 store 未就绪和无归属（绑定席位后恰好交付一次已补）；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话只观察到一次（引擎不代答），人的重复操作仍未测 | — | Run 2（N=1）：审查者回 blocked `PERMISSION_REQUIRED`，引擎只开 `stuck-judge` 的重试/取消，未代答、未归档；重试是决策重试，不是权限回应 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始尚未开始的任务，已在进行的评审、冒烟、补证请求与返工照常（A13，评审后修正，有端到端用例）；没有分组预算的入口；协调者的回合预算已有（计划请求与重新规划各扣一回合，计划格式重发不计，不退还，耗尽时重新规划被拒并告警，追加预算后继续，A14） | A7 | 无 |
-| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；真实宿主上取消能完成，但重启丢失在途回复后会一直等 | B13 | Run 1（N=1）阻塞取消完成、占用释放、告警 resolved；Run 4（N=1）重启丢失 reviewer 回合后取消停在 paused、`waiting.turns=1`，不释放 |
+| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；真实宿主上取消能完成，但重启丢失在途回复后会一直等；A21 起有出路（成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，离线用例覆盖，DEV 未验），引擎不自行结算（B14） | B13 | Run 1（N=1）阻塞取消完成、占用释放、告警 resolved；Run 4（N=1）重启丢失 reviewer 回合后取消停在 paused、`waiting.turns=1`，不释放 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 未做（A12 没有构造损坏台账、未知版本或容量上限） |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器，假时钟 24 小时空闲 Run 零宿主读写零计时器（A16）；没有真实时间长跑或 DEV 验证；决策唤醒协调者的逻辑只在纯分类器里 | — | 无 |
@@ -36,7 +36,7 @@
 | AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 已覆盖 | —（列表、详情、历史、刷新已断言不写入、文件字节不变，A15；查询函数不持有宿主，"不派发"是结构性的；M1 对账查询不提供，由 kick 代替，见 `docs/next-phase-plan.md` 2.3） | — | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源（不做，理由见 `docs/next-phase-plan.md` 2.12/A16：人直接和成员对话是正当用法，没有批准的异常语义）；对有 assignment 的成员发用户消息已有现状测试（A16）；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
 | AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 已覆盖（范围声明：现有唯一的截止条件是宿主读取重查，B7 的派发后退避已推迟，所以没有别的可测对象） | —（范围声明见左） | B7（已推迟） | 第 35 点（没有 DEV） |
-| AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；真实浏览器、窄屏与重连已看过一次；列表状态与台账不符的缺陷已在客户端修复并有离线测试（v1/v2 记录各一遍，计划第 73 点），尚未在真实 DEV 重验；其余原因码仍靠源码扫描 | B8、B10（剩余字段） | Run 1–3（N=1）：1280x900 与 390x844 无横向溢出、按钮可点；停 daemon 显示不可用而非空进度，同端口重启自动重连；列表把 active 阻塞与 cancelled 的 Run 显示为已完成并计入已结束（缺陷，已修：`tests/run-view/runs-tab.test.ts`「a Run in both lists is described by the ledger…」、`tests/run-list.test.ts`「Engine lifecycle over agent state」） |
+| AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；真实浏览器、窄屏与重连已看过一次；列表状态与台账不符的缺陷已在客户端修复并有离线测试（v1/v2 记录各一遍，计划第 73 点），尚未在真实 DEV 重验；其余原因码仍靠源码扫描；重查用尽告警在丢失回合时带出路提示（A21，文案离线断言，页面上未在 DEV 看过） | B8、B10（剩余字段） | Run 1–3（N=1）：1280x900 与 390x844 无横向溢出、按钮可点；停 daemon 显示不可用而非空进度，同端口重启自动重连；列表把 active 阻塞与 cancelled 的 Run 显示为已完成并计入已结束（缺陷，已修：`tests/run-view/runs-tab.test.ts`「a Run in both lists is described by the ledger…」、`tests/run-list.test.ts`「Engine lifecycle over agent state」） |
 
 没有 DEV 记录的项目仍需要在专用 DEV daemon 上再看一遍；A12 只覆盖了 AC12、AC14、AC22 的少数真实场景，AC15 是零样本（见各自的 DEV 记录）。
 
@@ -163,8 +163,11 @@
 - tests/run-engine/driver.test.ts :: another Run's frozen task keeps this Run waiting until that task is cancelled; then the next pass sends — 跨 Run：A 的 `blocked` 任务冻结占用，B 一直等；A 的人答复 `cancel` 后占用清空，B 下一遍派发（A4 笔记里记着当时没写的用例，A16 补上）
 - tests/run-engine/driver.test.ts :: another Run's task whose delivery is not known keeps its claims, and this Run waits — 跨 Run：A 的补证请求送达不明（`outcome-unknown`）使占用冻结，B 被挡且宿主零发送
 - tests/run-engine/driver.test.ts :: known limitation: a member closed in the middle of its turn is not noticed; the task stays assigned with its claims, and a cancellation of the Run keeps waiting for a turn end; the host is sent nothing — 现状测试（known limitation）：成员回合中只收到 `agent.closed`，任务仍 `assigned`、占用保留、不选别的成员、宿主零 send/archive；Run 取消返回 `waiting.turns >= 1` 并继续等，Run 停在 `paused`
+- tests/run-engine/lost-turn.test.ts :: known limitation: the reads of the lost reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end — 现状测试（A21，v1/v2）：重启丢回合后重查用尽，kick 不写台账、宿主零发送，取消 `waiting.turns=1`、占用保留
+- tests/run-engine/lost-turn.test.ts :: the way out: the member is asked in Paseo for a plain OK, its own turn start and end come in, and the cancellation finishes once — 出路（A21）：成员自己的 turn_started/turn_ended 回执加宿主 idle，一次取消完成、占用释放、零发送、零归档
+- tests/run-engine/lost-turn.test.ts :: signals that are not proof keep the cancellation waiting and the claims held — 他人的回执、早于 assignment 创建的回执、其后又有 turn_started、宿主非 idle、送达不明的派发都继续等，也没有 stuck 告警
 
-缺口："Agent 失联"仍是已知限制，引擎对 `closed`/`archived` 没有反应，现状测试只是把它固定下来；宿主是否发 `turn_ended` 仍没有直接证据，但 A12 在真实宿主上重启 daemon 后看到：在途回复丢失、重查用尽、没有决策、取消一直等（Run 4），与限制一致（见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
+缺口：A21 起，重启丢失在途回合有出路（告警与 README 都写明：成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，成员自己的回执让取消的现有结算条件满足；离线用例覆盖，DEV 未验），引擎不自行结算（B14，须新批准）。"Agent 失联"仍是已知限制，引擎对 `closed`/`archived` 没有反应，现状测试只是把它固定下来；宿主是否发 `turn_ended` 仍没有直接证据，但 A12 在真实宿主上重启 daemon 后看到：在途回复丢失、重查用尽、没有决策、取消一直等（Run 4），与限制一致（见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
 
 ### AC11 收到报告后 hook 才到，或 hook 早于初始化/关键记录
 - tests/run-engine/observer.test.ts :: a turn end the hooks missed is recovered from the host, and a late hook is then a duplicate
@@ -248,8 +251,9 @@
 - tests/run-engine/start-recovery.test.ts :: a second look finds nothing and writes nothing
 - tests/run-engine/start-recovery.test.ts :: a failed interrupted launch no longer keeps a read retry timer
 - tests/run-engine/driver.test.ts :: a dispatch that was committed and never sent is withdrawn locally when the Run is cancelled: the Run is the cause, its claims go, and the host is sent nothing — 真实 store：派发已提交（`prepared`）但进程停在发送之前，Run 取消后该意图 `failed`、`localCancellation` 为 `{ reason: cancel-before-send, cause: run-cancelled }`，占用清空、nonce 以 `cancel-before-send` 作废，宿主零发送（A16）
+- tests/run-engine/lost-turn.test.ts :: the way out: the member is asked in Paseo for a plain OK, its own turn start and end come in, and the cancellation finishes once — 重启丢失在途回合后的出路（A21，v1/v2）：取消在成员自己的回执加宿主 idle 后完成并释放占用；其余信号继续等
 
-缺口：暂停、续办与取消都已是 RPC 并有页面入口。真实宿主上 Run 1 的阻塞取消完成并释放；Run 4 在重启丢失在途回复后取消停在 paused、`waiting.turns=1`，释放不了（2.12 的已知限制）。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。归档式取消（不等回合结束）推迟，见 `docs/next-phase-plan.md` 2.3。取消的 RPC 与决策答复见 A4、A5。
+缺口：暂停、续办与取消都已是 RPC 并有页面入口。真实宿主上 Run 1 的阻塞取消完成并释放；Run 4 在重启丢失在途回复后取消停在 paused、`waiting.turns=1`，释放不了（2.12 的已知限制）；A21 起告警与 README 给出出路并有离线用例，DEV 未验。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。归档式取消（不等回合结束）推迟，见 `docs/next-phase-plan.md` 2.3。取消的 RPC 与决策答复见 A4、A5。
 
 ### AC15 台账损坏、未知版本、CAS 冲突、超过硬上限
 - tests/run-engine/store.test.ts :: corrupt bytes are preserved, quarantined with a diagnostic, and refuse updates
@@ -364,8 +368,9 @@
 - tests/run-view/seat-profile-facts.test.ts :: TeamEditor hands the plan's rows to the section and does not build the facts itself — 源码扫描：`TeamEditor` 把规划行交给该区（A17）
 - tests/run-view/launch-dialog.test.ts :: kickoff-pending: the plan request is submitted, it takes minutes, do not start again — 挂载 `LaunchDialog`：运行中文案（A17）
 - tests/run-view/launch-dialog.test.ts :: a failed launch shows the error, its detail and the kickoff message to copy — 挂载 `LaunchDialog`：失败的启动显示错误与详情，可复制启动消息（A17）
+- tests/run-engine/lost-turn.test.ts :: a lost dispatch is told the way out: wait for the member to be at rest, ask it for a plain OK, then check and push on — 重查用尽告警在丢失回合时带出路提示，其他原因码不带；旧摘要告警仍被新代码识别并解除（A21）
 
-缺口：真实浏览器、窄屏与断线重连已由 A12 在 DEV 看过一次（1280x900 与 390x844 无横向溢出、按钮可点、停 daemon 显示不可用而非空进度、同端口重启自动重连）；但 Runs 列表把 active 阻塞与 cancelled 的 Run 显示为"已完成"并计入"已结束"，与台账 lifecycle 和同页顶部摘要不一致（缺陷）。"原因与台账一致"仍缺端到端逐项比对；服务端推送式失效没有做（B8）。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。
+缺口：真实浏览器、窄屏与断线重连已由 A12 在 DEV 看过一次（1280x900 与 390x844 无横向溢出、按钮可点、停 daemon 显示不可用而非空进度、同端口重启自动重连）；但 Runs 列表把 active 阻塞与 cancelled 的 Run 显示为"已完成"并计入"已结束"，与台账 lifecycle 和同页顶部摘要不一致（缺陷）。"原因与台账一致"仍缺端到端逐项比对；服务端推送式失效没有做（B8）。重查用尽告警的出路提示（A21）只有离线文案断言，没有在 DEV 页面上看过。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。
 
 ## 这份表之外还没做的
 

@@ -38,6 +38,7 @@
 | A11 协调者回合预算 | 未完成，已撤回（可选）；已由 A14 以修正后的形状完成 | — | — | 三次检查仍未通过，按规则撤回未提交改动；见“没做或没做完”和 A14 |
 | A12 DEV 真实验证 | 已做（第一轮，部分目标） | 本节之后的文档提交 + 计划第 67–72 点 | 3370 | 4 个 Run（haiku 5.5 生产、luna/codex 审查）；replan v4、判官重派、重启后 kick、S1 重查、真实浏览器/窄屏/重连各有 N=1 证据；补证模板未触发；发现 Runs 列表状态与台账不符、重启丢在途回复后取消一直等 |
 | A12 发现 1 修复（Runs 列表状态） | 已做（DEV 未重验） | 78ff83f（代码）+ 计划第 73 点 | 3386 | 客户端按台账 lifecycle 覆盖 Engine Run 的列表阶段；新增“已取消”；未知 lifecycle 不声称完成；变异 13 项全抓到 |
+| A12 发现 2 出路（A21） | 已做（DEV 未验） | 36b9fb1（代码+测试+README）+ 计划第 74 点 | 3407 | 重查用尽且原因为 `incomplete:dispatch-not-found` 的告警追加固定出路提示（成员空闲后发只要求回复 OK 的消息，等回复，点“立即检查并推进”），旧摘要告警仍被识别、不重复开；README 补恢复说明；`lost-turn.test.ts`（v1/v2）固定现状、出路与各类“继续等”情形；变异 11 项全抓到；不放宽静止证明，引擎自结算登记为 B14 |
 | 文件锁并发读取加固 | 已做 | aed012c（代码）+ 计划第 54 点 | 3268 | 竞争时对未写完的锁或 guard 有界复读；永久损坏仍拒绝，真实双进程复测 10 次通过 |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 | 下一阶段计划 | 已做（只裁决，不实施） | effb948 | 3283 | `docs/next-phase-plan.md`：剩余清单的裁决与任务 A13–A19、A12；阶段 1 基线复核 194 文件 3283 通过（3 todo），biome 两条既有警告、tsc 与 verify:package 通过 |
@@ -301,7 +302,18 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 
 ## 待批准（第二轮）
 
-（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。阶段 4（处理独立评审的发现）同样没有新的合同需求。A12 DEV 验证也没有发现新的合同类需求：两条发现分别是页面投影的状态判定（缺陷，不改合同）和 2.12 已登记的“重启丢在途回复、没有 turn_ended”限制（不修）；补证模板未触发不是需求变化。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷（阶段 4 已把 `settle` 与 Runs 页的固定等待改成轮询等待，见“每项的检查结果”）；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
+（编号从 B14 起，格式同上。）
+
+### B14｜引擎自己结算丢失的回合（推迟，登记）
+
+- **为什么需要批准**：由引擎写带 `outcome: "host-lost"` 的 `turn_ended` 回执，改变了回执的含义（它不再只是宿主的报告），属于 reducer/台账事件词汇与合同的变化；放占用仍须人授权。
+- **没批准时现状**：宿主重启丢掉在途回合后，读取重查用尽（`incomplete:dispatch-not-found`），Run 不前进，整个 Run 的取消一直等；出路是 A21 的告警提示与 README：成员空闲后发只要求回复 OK 的消息，等回复，点“立即检查并推进”。“继续”没有出路，只能取消重开。
+- **最小形状**：`observer.reconcile` 在同时满足“间隔不少于 30 秒的两次 `dispatch-not-found`、`requireIdle` 为真且宿主读到 idle、派发已 confirmed、曾记 `turn_started` 且其后没有新回合”时，写一条带 `outcome: "host-lost"` 的 `turn_ended` 回执，之后走现有的 limbo/stuck 决策；放占用仍须人授权（决策答复 `cancel`），引擎不向成员补发请求。
+- **触发条件**：A21 的出路在 DEV 上失败，或在真实环境里再现该限制，或宿主给出重启/孤儿回合的信号。
+- **影响的验收项**：AC10、AC14。
+- **建议**：低优先级，等触发条件。须新批准。
+
+（以下是 A13–A19 阶段写下的说明。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。阶段 4（处理独立评审的发现）同样没有新的合同需求。A12 DEV 验证也没有发现新的合同类需求：两条发现分别是页面投影的状态判定（缺陷，不改合同）和 2.12 已登记的“重启丢在途回复、没有 turn_ended”限制（不修）；补证模板未触发不是需求变化。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷（阶段 4 已把 `settle` 与 Runs 页的固定等待改成轮询等待，见“每项的检查结果”）；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
 
 ## 我自己做的判断
 
@@ -380,6 +392,7 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
   - **已修（78ff83f，计划第 73 点）**：根因在客户端。Engine Run 的 Agent 也带 agent-team 标签，按标签推断的列表也收录了它，只按空闲协调者判成“已完成”；Engine 列表本身按 lifecycle 是对的。`buildRunRows` 现在对 Engine 列表点名的 Run 以台账 lifecycle 为准（`finished` 才是已完成；`cancelled` 显示“已取消”并归入已结束；`active` 且 `needsAttention`、`paused` 为“等你处理”；未知 lifecycle 不显示“已完成”）。没有改服务端 DTO，没有登记待批准项。检查结果：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 201 个文件 3386 通过（3 todo，3370 加 16）、verify:package 通过；变异 13 项（`a12f1.json`）全部被抓到：active 忽略 needsAttention、cancelled 读成 done、未知 lifecycle 声称 done、未知 lifecycle 保留 Agent 的 done、paused 读成 running、cancelled 计入进行中、已取消的时间标签写成“结束”、已取消的成员计数列出未开始、列表不读 Engine 列表、展开卡片沿用 Agent 阶段、卡片不传阶段、已取消文案写成“已完成”、徽章表把已取消显示为已结束；6 个源码文件经 `cmp` 逐字节还原。没有在真实 DEV 上重验；Engine 列表第一次返回之前（最多一个轮询周期）列表仍可能按 Agent 状态显示。
 
 - **A12 发现 2：重启丢失在途回复后，取消一直等**。复现：Run 4 的 reviewer 回合进行中 `daemon stop --home <DEV>` 再 `daemon start`，恢复读取重查 3 次后写 `读取重试已用尽（incomplete:dispatch-not-found）` 告警，任务保持 `review`；`run.kick` 返回 idle、零发送；`run.cancel` 返回 `applied` 但 `lifecycle` 变 `paused`、`waiting.turns` 为 1，之后再 kick 返回 `not-active`，Run 既不完成也不取消，只能删 DEV 台账文件（探针环境）收场。这与 `docs/next-phase-plan.md` 2.12 的已知限制一致，但现在有真实宿主复现；A12 按规则不修。
+  - **出路（A21，计划第 74 点）**：不批准把“宿主读到 idle”当静止证据，`planCancelFinish`、reducer、`isNormalEnded` 不动，引擎也不向丢了上下文的成员补发请求。只改了告警文字与文档：用尽告警（原因 `incomplete:dispatch-not-found`）追加固定提示——待该成员在 Paseo 里空闲后，向它发一条只要求回复 OK 的消息，等它回复后点“立即检查并推进”；README 恢复部分同样说明，并写明“继续”没有出路，成员不回只能取消重开。机制是成员这条新消息会开自己的回合，宿主为它发 `turn_started`/`turn_ended` 回执，回执晚于 assignment 创建、其后无新回合、宿主读到 idle，取消的现有结算条件就满足；离线用例 `tests/run-engine/lost-turn.test.ts` 覆盖这一过程和各类继续等的情形。旧台账里旧摘要的告警仍能被新代码解除，不会同一条目开两条。检查结果：完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 202 个文件 3407 通过（3 todo，3386 加 21）、verify:package 通过；变异 11 项（`a21.json`）全部被抓到，细节见计划第 74 点。没有在真实 DEV 上验证出路；DEV 上若失败、真实再现或宿主给出重启/孤儿回合信号，转 B14。
 
 - **A12 意外行为（正面）**：协调者在 4 个 Run 里 3 次收到“故意提交非法 DAG”的角色资料或用户任务文字（缺依赖、不存在的 t-prep、不可逆的远端删标签），都没有照做：前两次直接给出合法 DAG，第三次用纯文字说明不可逆障碍而不编造计划。这说明规划提示词对资料里的“测试要求”有抵抗力，也解释了补证模板的偏差要求为什么没有生效。
 
