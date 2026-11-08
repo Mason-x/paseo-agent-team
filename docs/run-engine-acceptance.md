@@ -20,7 +20,7 @@
 | AC03 | 一次生效；assignment、预算、下一阶段不重复增加 | 已覆盖 | 没有把"重放报告 hook"与预算、assignment 计数放在同一用例里断言 | — | 无 |
 | AC04 | 恢复后执行该意图或按合同终止，不漏记也不额外派一份 | 已覆盖 | "意图提交后、调用前"的中断用抛错和新实例模拟，不是真实进程被杀 | — | 无 |
 | AC05 | 先核对实际消息和 turn；无法证明时冻结，不盲目重发 | 已覆盖 | 证明只靠用户消息回显（messageId）；没有宿主证明"消息确实没到"的用例 | — | 无 |
-| AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | 假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；`creating` 阶段崩溃后无人续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
+| AC06 | 按运行关联查证；不重复创建、不误删无关 Agent | 部分 | 假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；创建中崩溃后安全关闭并告警，未登记的 Agent 仍需人工查找，不能完整续办 | B13 | 第 21、30 点（只记录了 Windows `EPERM` 重试，没有重复创建的证据） |
 | AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 没有断言协议失败不改变 `qualityFailures`、`reworkCount`；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
@@ -28,7 +28,7 @@
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属；宿主读不全的回复现在会被重查并在恢复后自动继续 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；没有分组预算的入口、协调者没有回合预算 | A7、A11 | 无 |
-| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单个任务的取消、整个 Run 的延迟取消都有 RPC 与页面入口（回合证明结束才释放，送达不明则等，重启后可完成，并发只生效一次）；"暂停扣住的从未发出的派发"没有 store 级用例；`creating` 崩溃后无人续办；没有 DEV | A8 | 无 |
+| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；启动中断已安全关闭但不能续办；"暂停扣住的从未发出的派发"没有 store 级用例；没有 DEV | B13 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 取消整个 Run 从请求到完成宿主没有任何 send 与 archive；仍没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | A9 | 无 |
@@ -100,8 +100,11 @@
 - tests/run-engine/start.test.ts :: an unknown create result is re-asked with the same key and creates no second agent
 - tests/run-engine/start.test.ts :: a create that fails twice with a transient error succeeds on the third try with the same key
 - tests/run-engine/start.test.ts :: when a member cannot be created, what was created is archived if the preference says so
+- tests/run-engine/start-recovery.test.ts :: names the coordinator as the possible unregistered agent when its creation was interrupted
+- tests/run-engine/start-recovery.test.ts :: names the agents on the record and the next seat that has none
+- tests/run-engine/runtime.test.ts :: a duplicate start finishing does not expose another start still creating agents to recovery
 
-缺口：假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；去重靠同一个幂等键，没有按运行关联列举查证；没有"不误删无关 Agent"的用例；`creating` 阶段崩溃后没有续办（B13）。
+缺口：假适配器在创建前就抛错，没有模拟"已创建但响应丢失"；去重靠同一个幂等键，没有按运行关联列举查证；没有"不误删无关 Agent"的用例；启动中断会安全关闭并告警，不能完整续办，未登记的 Agent 只能靠提示人工查找（B13）。
 
 ### AC07 实现已完成但报告 JSON 错误；修复再次失败
 - tests/run-engine/driver.test.ts :: a refused report gets one repair request, and the repaired report settles the task
@@ -202,8 +205,10 @@
 - tests/run-core/reducer.test.ts :: cancel releases only after explicit authorization and the quiescence check
 - tests/spec/run-core-reducer.spec.test.ts :: quiescence rejects a stale observation and a refresh before the end
 - tests/spec/run-core-reducer.spec.test.ts :: an answered cancel decision plus idle refresh releases the frozen claim
+- tests/run-engine/start-recovery.test.ts :: a second look finds nothing and writes nothing
+- tests/run-engine/start-recovery.test.ts :: a failed interrupted launch no longer keeps a read retry timer
 
-缺口：暂停、续办与取消都已经是 RPC 并有页面入口，但没有在 DEV 验证；"暂停扣住的从未发出的派发被本地撤回"没有 store 级用例；取消只有 reducer 层的状态机与夹具，没有引擎代码（取消请求、取静止证据、释放）、没有 RPC；`creating` 阶段崩溃后无人续办（B13，A8）。取消的 RPC 与决策答复见 A4、A5。
+缺口：暂停、续办与取消都已是 RPC 并有页面入口，但没有在 DEV 验证；"暂停扣住的从未发出的派发被本地撤回"没有 store 级用例。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。取消的 RPC 与决策答复见 A4、A5。
 
 ### AC15 台账损坏、未知版本、CAS 冲突、超过硬上限
 - tests/run-engine/store.test.ts :: corrupt bytes are preserved, quarantined with a diagnostic, and refuse updates
