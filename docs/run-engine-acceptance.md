@@ -24,14 +24,14 @@
 | AC07 | 只尝试有界补报；保留产物；协议失败与质量返工分开 | 部分 | 没有断言协议失败不改变 `qualityFailures`、`reworkCount`；DEV 没跑过成员报告补报 | — | 第 25、26、32 点 |
 | AC08 | 严格拒收；不推进任务、不放宽身份校验 | 已覆盖 | 经入账路径只演练了 nonce 不符；错任务、错 attempt、未知版本、发送者只在解析与归属层 | — | 第 25、28 点 |
 | AC09 | 仅一方获写占用；另一方等待并给出原因 | 部分 | 别名只在锁函数层测过；双 Run 派发用例用整仓 `hot` 占用，不是带别名的文件路径；没有"先放开后另一方继续" | — | 无 |
-| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用现在有页面出路（取消任务，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | A5 | 无 |
+| AC10 | 保留相关冻结占用；冲突任务不能趁机开始 | 部分 | 冻结占用有页面出路（取消任务或取消 Run，经授权才释放）；"Agent 失联"没有用例；没有"冲突任务在派发处被冻结占用挡住"的引擎级用例，也没有跨 Run 的释放用例 | — | 无 |
 | AC11 | 按证据补对账并去重；不丢结果，不重复统计 | 部分 | "整份报告之后才来的 hook"只验证了 `turn_ended`；"早于关键记录"只验证了 store 未就绪和无归属 | — | 无 |
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 没有"引擎从不答权限"的测试（端口里没有这个方法，结构性保证未被测）；没有重启时权限等待的用例 | B5 | 无 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查；派发之后的临时失败没有自动重试；预算耗尽不开决策 | B2、B3、B7 | 无 |
-| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停与续办有 RPC 和页面按钮；单个任务的取消有决策答复（`cancel`，证明停下才释放，级联下游）；整个 Run 的取消还没有；`creating` 崩溃后无人续办；没有 DEV | A5、A8 | 无 |
+| AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单个任务的取消、整个 Run 的延迟取消都有 RPC 与页面入口（回合证明结束才释放，送达不明则等，重启后可完成，并发只生效一次）；"暂停扣住的从未发出的派发"没有 store 级用例；`creating` 崩溃后无人续办；没有 DEV | A8 | 无 |
 | AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 无 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 部分 | 没有"引擎关闭时 Runs 页同时显示旧链路 Run 与 Engine Run"的用例，也没有已有 Run 的配置损坏的用例 | — | 无 |
-| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | B2 | 无 |
+| AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 取消整个 Run 从请求到完成宿主没有任何 send 与 archive；仍没有"长时间空闲或重复普通事件时宿主与模型调用为零、修订号不变"的用例；决策唤醒协调者的逻辑只在纯分类器里，服务端从不发送 | A9 | 无 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
 | AC19 | 不触发派发；DTO 不泄漏 nonce、完整提示、Outbox 参数 | 部分 | 列表、详情、历史、刷新已覆盖；M1 对账查询没有处理器可测；"不派发"是结构性的，没有用 `host.sent` 断言 | B4 | 第 33 点（未在 DEV 验证） |
 | AC20 | 不冒认成有效交付；记录异常并核对受影响资源 | 部分 | 无归属的活动被静默忽略，不写异常、不核对资源；夹具 `EXTERNAL_ACTIVITY_CASE` 没有测试使用 | B4、B12 | 无 |
@@ -188,6 +188,11 @@
 - tests/run-engine/lifecycle.test.ts :: a paused Run becomes active and the driver is asked to push it, as after a write
 - tests/run-engine/control-lifecycle.test.ts :: the same request again is the same request: replayed, nothing written
 - tests/run-engine/control.test.ts :: a paused Run answers nothing: the decision offers no action and the answer is refused
+- tests/run-engine/control.test.ts :: [%s] a running turn is waited for, its report is taken in, and then the whole Run is cancelled without a single message
+- tests/run-engine/control.test.ts :: a delivery whose result is not known keeps the cancellation waiting until its echo settles it
+- tests/run-engine/control.test.ts :: a request that was written and not finished is finished by the recovery of a new process, once
+- tests/run-engine/control.test.ts :: two finishers at once commit one cancellation
+- tests/run-engine/cancel-request.test.ts :: a turn that started after the receipt is a turn still running
 - tests/run-engine/control-lifecycle.test.ts :: a repeat is found before the revision is checked, so a Run that moved on still answers replayed
 - tests/run-engine/control-lifecycle.test.ts :: a paused Run becomes active and the driver is asked to push it on, as after a write
 - tests/run-engine/driver.test.ts :: pause and resume as RPCs: nothing goes out while paused, the held work goes out once after the resume answer
@@ -195,7 +200,7 @@
 - tests/spec/run-core-reducer.spec.test.ts :: quiescence rejects a stale observation and a refresh before the end
 - tests/spec/run-core-reducer.spec.test.ts :: an answered cancel decision plus idle refresh releases the frozen claim
 
-缺口：暂停与续办已经是 RPC（`agent-team.run.pause` / `resume`）并有页面按钮，但没有在 DEV 验证；取消只有 reducer 层的状态机与夹具，没有引擎代码（取消请求、取静止证据、释放）、没有 RPC；`creating` 阶段崩溃后无人续办（B13，A8）。取消的 RPC 与决策答复见 A4、A5。
+缺口：暂停、续办与取消都已经是 RPC 并有页面入口，但没有在 DEV 验证；"暂停扣住的从未发出的派发被本地撤回"没有 store 级用例；取消只有 reducer 层的状态机与夹具，没有引擎代码（取消请求、取静止证据、释放）、没有 RPC；`creating` 阶段崩溃后无人续办（B13，A8）。取消的 RPC 与决策答复见 A4、A5。
 
 ### AC15 台账损坏、未知版本、CAS 冲突、超过硬上限
 - tests/run-engine/store.test.ts :: corrupt bytes are preserved, quarantined with a diagnostic, and refuse updates

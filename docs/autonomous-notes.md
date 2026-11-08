@@ -29,6 +29,7 @@
 | A2 取消后释放被冻结任务的占用 | 已做 | 786caba（代码）+ 计划第 45 点 | 3107 | 只改 `applyCancellation`；答复 `cancel` 才释放，绑定 `releaseDecisionId`；变异 4 项全抓到 |
 | A3 暂停与续办 RPC | 已做 | a456eb0（代码）+ 计划第 46 点 | 3140 | RPC 24 到 26；先重复、再修订号、再生命周期；变异 9 项全抓到；必须与 A5 同一版本发布 |
 | A4 决策答复 `cancel` | 已做 | 36d82e9（代码）+ 计划第 47 点 | 3155 | 级联下游；补证冻结用 `evidence-stuck:` 只给 `cancel`；暂停中不给任何答复；变异 11 项全抓到；D3 与跨 Run 用例没写（见第 47 点） |
+| A5 延迟取消整个 Run | 已做 | 940fca6（代码）+ 计划第 48 点 | 3196 | RPC 26 到 27；`cancelRequest` 透传块；从请求到完成宿主无 send/archive；变异 15 项全抓到；必须与 A3 同一版本发布 |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 
 ## 待批准
@@ -304,6 +305,8 @@
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
 ## 每项的检查结果
+
+- **A5**：biome 仅 2 条既有警告；tsc 通过；vitest 190 个文件 3196 通过（3 todo，A4 后 3155 加 41）；verify:package 通过。变异检查 15 项（`a5.json`）全部被抓到。
 
 - **A4**：biome 仅 2 条既有警告；tsc 通过；vitest 189 个文件 3155 通过（3 todo，A3 后 3140 加 15）；verify:package 通过。变异检查 11 项（`a4.json`）全部被抓到。
 
