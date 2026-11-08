@@ -1,6 +1,6 @@
 {
   "name": "@mason-x/paseo-agent-team",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "Define reusable Roles, compose Teams, and launch cross-harness agent crews in Paseo.",
   "license": "MIT",
