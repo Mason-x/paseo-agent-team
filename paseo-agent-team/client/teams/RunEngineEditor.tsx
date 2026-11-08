@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Pressable, Switch, Text, View } from "react-native";
+import type { SeatProfileFacts } from "../../shared/domain/run-engine/team-config";
 import {
   addMissingSeats,
   ENGINE_DUTIES,
@@ -91,6 +92,7 @@ export function RunEngineEditor({
   value,
   revision,
   onChange,
+  seatProfiles,
 }: {
   theme: PluginTheme;
   members: readonly TeamMember[];
@@ -98,10 +100,15 @@ export function RunEngineEditor({
   value: unknown;
   revision: string | number;
   onChange: (next: unknown) => void;
+  /** The Profile each seat is planned to use; absent until the Team plan has answered. */
+  seatProfiles?: readonly SeatProfileFacts[];
 }) {
   const seatIds = useMemo(() => logicalSeatIdsOf(members), [members]);
   const state = useMemo(() => readEngineEdit(value, seatIds), [value, seatIds]);
-  const evaluation = useMemo(() => evaluateEngineBlock(value, { seatIds }), [value, seatIds]);
+  const evaluation = useMemo(
+    () => evaluateEngineBlock(value, { seatIds, seatProfiles }),
+    [value, seatIds, seatProfiles],
+  );
   const color = theme.colors;
   const muted = { color: color.foregroundMuted, fontSize: 12 } as const;
 

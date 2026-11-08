@@ -47,12 +47,12 @@ const members: TeamMember[] = [
   { roleId: "architect", enabled: true, seatId: "seat-a" },
 ];
 
-async function mount(value: unknown) {
+async function mount(value: unknown, extra: Record<string, unknown> = {}) {
   const onChange = vi.fn();
   let view!: { root: Node; unmount(): void };
   await renderer.act(async () => {
     view = renderer.create(
-      h(RunEngineEditor, { theme, members, value, revision: 0, onChange } as never),
+      h(RunEngineEditor, { theme, members, value, revision: 0, onChange, ...extra } as never),
     );
   });
   return { view, onChange };
@@ -140,6 +140,17 @@ describe("RunEngineEditor", () => {
     const text = texts(view.root);
     expect(text).toContain(zh.warnings);
     expect(text).not.toContain(zh.ready);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("the planned Profiles of the seats let the editor warn about a Codex seat that is not full-access", async () => {
+    const without = await mount(filled());
+    expect(texts(without.view.root).join("\n")).not.toContain("full-access");
+    await renderer.act(async () => without.view.unmount());
+    const { view } = await mount(filled(), {
+      seatProfiles: [{ seatId: "seat-d", provider: "codex", modeId: "auto" }],
+    });
+    expect(texts(view.root).join("\n")).toContain("full-access");
     await renderer.act(async () => view.unmount());
   });
 
