@@ -24,7 +24,7 @@
 | T6d 计划状态与收尾 | 已做 | 1881354 | 3069 | 第 8 节 P05–P08 行改为实施中并指向相应的点；第 9 节没动；仓库里没有临时产物 |
 | T7a 取消的内部能力 | 范围调整（延迟取消已做） | 940fca6（A5） | 3196 | A5 不归档、不打断，等待在途回合结束后取消；原计划的归档式取消仍推迟 |
 | T7b 暂停的内部能力 | 已做 | 22d98a2（代码）+ 计划第 43 点 | 3064 | `lifecycle.ts` 的 pause/resume，不注册 RPC |
-| 第 5 节 DEV 验证 | 未做（可选） | — | — | 见"没做或没做完" |
+| 第 5 节 DEV 验证 | 已做（A12 第一轮，部分目标） | 本节之后的文档提交 + 计划第 67–72 点 | — | 见 A12 一行与"没做或没做完" |
 | A1 事件压缩与容量保护（Sonnet 实施 Opus 裁决项） | 已做 | caf8a26（代码）+ 计划第 44 点 | 3095 | 压缩进现有 checkpoint，不升版本；容量门 `ledger-capacity`；历史页 `compactedThroughSeq`；变异 10 项全抓到 |
 | A2 取消后释放被冻结任务的占用 | 已做 | 786caba（代码）+ 计划第 45 点 | 3107 | 只改 `applyCancellation`；答复 `cancel` 才释放，绑定 `releaseDecisionId`；变异 4 项全抓到 |
 | A3 暂停与续办 RPC | 已做 | a456eb0（代码）+ 计划第 46 点 | 3140 | RPC 24 到 26；先重复、再修订号、再生命周期；变异 9 项全抓到；必须与 A5 同一版本发布 |
@@ -36,7 +36,7 @@
 | A9 权限等待与空闲零调用 | 已做 | a328b19（测试）+ 计划第 52 点 | 3261 | 等权限重启、解除与重复回执；空闲重复事件无发送；端口和源码无代答方法；变异 3 项全抓到 |
 | A10 决策的 `kind` 字段 | 已做 | 5983700（代码）+ 计划第 53 点 | 3265 | 投影输出可选开放字符串，区分质量、成员、判官、无报告与补证；旧客户端和未知类型回退；变异 7 项全抓到 |
 | A11 协调者回合预算 | 未完成，已撤回（可选）；已由 A14 以修正后的形状完成 | — | — | 三次检查仍未通过，按规则撤回未提交改动；见“没做或没做完”和 A14 |
-| A12 DEV 真实验证 | 未做（可选） | — | — | 最后评估，仍须遵守专用 DEV 隔离 |
+| A12 DEV 真实验证 | 已做（第一轮，部分目标） | 本节之后的文档提交 + 计划第 67–72 点 | 3370 | 4 个 Run（haiku 5.5 生产、luna/codex 审查）；replan v4、判官重派、重启后 kick、S1 重查、真实浏览器/窄屏/重连各有 N=1 证据；补证模板未触发；发现 Runs 列表状态与台账不符、重启丢在途回复后取消一直等 |
 | 文件锁并发读取加固 | 已做 | aed012c（代码）+ 计划第 54 点 | 3268 | 竞争时对未写完的锁或 guard 有界复读；永久损坏仍拒绝，真实双进程复测 10 次通过 |
 | B1–B13 裁决 | 已做（只裁决，不实施） | 本节之后的文档提交 | — | 见"裁决"；实施清单 `docs/approved-implementation-plan.md`（A1–A12），没有改任何源码 |
 | 下一阶段计划 | 已做（只裁决，不实施） | effb948 | 3283 | `docs/next-phase-plan.md`：剩余清单的裁决与任务 A13–A19、A12；阶段 1 基线复核 194 文件 3283 通过（3 todo），biome 两条既有警告、tsc 与 verify:package 通过 |
@@ -300,7 +300,7 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 
 ## 待批准（第二轮）
 
-（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。阶段 4（处理独立评审的发现）同样没有新的合同需求。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷（阶段 4 已把 `settle` 与 Runs 页的固定等待改成轮询等待，见“每项的检查结果”）；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
+（编号从 B14 起，格式同上。）A13–A19 的实施中**没有发现新的、必须改合同的需求**：没有改 schema、reducer 词汇、台账字段、RPC、提示词模板、默认开启或版本号，所以这里暂无条目。已推迟或关闭的事项不是新发现，它们的触发条件见 `docs/next-phase-plan.md` 附录。阶段 4（处理独立评审的发现）同样没有新的合同需求。A12 DEV 验证也没有发现新的合同类需求：两条发现分别是页面投影的状态判定（缺陷，不改合同）和 2.12 已登记的“重启丢在途回复、没有 turn_ended”限制（不修）；补证模板未触发不是需求变化。实施中发现的两条观察，不改合同、仅作记录：(1) `LaunchDialog` 的预览在 `useQuery` 之后才显示，挂载测试要等几轮微任务（`settle`），这是测试写法而非缺陷（阶段 4 已把 `settle` 与 Runs 页的固定等待改成轮询等待，见“每项的检查结果”）；(2) `version-flow` 与 `ledger-real-fs` 并行时的 Windows `EBUSY` 仍偶发，单独重跑通过，沿用计划 4.1 第 5 条。
 
 ## 我自己做的判断
 
@@ -327,12 +327,12 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 - **A11 协调者预算**（后来已由 A14 以修正后的形状完成，下面是当时的记录）：三次检查均未通过，已按计划撤回 A11 在本 worktree 的未提交改动。首次 149 项中有 1 项旧测试仍要求协调者没有预算；第一次更换为 `seat-s1` 后发现该席位原本也有预算；再次在夹具中提前移除它的预算，又使原有 DAG 派发夹具无法运行。独立只读复核还发现 `budget-control.test.ts` 的另一条旧断言也需更新。尚未跑 A11 的完整门禁或变异检查，不能视为完成；代码试验的补丁与两个新增文件副本留在系统临时目录 `aw/a11-attempt.patch`、`aw/a11-seat-ids.ts`、`aw/a11-coordinator-budget.test.ts`，不属于分支提交。旧 Run 补建预算只能计入仍在 outbox 的消息，已清理历史无法精确回算；对已预扣但未发送便作废的意图是否退还额度也需明确。
 - **T4 `creating` 阶段崩溃后的完整续办**：重建 `CreateMemberInput` 需要的信息仍未冻结，完整续办推迟。A8 已实现重启后安全关闭并告警，不创建、不发送、不归档；创建成功但还没登记的 Agent 只能靠席位提示人工查找。
 - **T7a 归档式取消**：A5 已实现不打断、不归档的延迟取消与 RPC，等在途回合确实结束后才释放占用。原计划的在途成员归档式取消仍推迟，见 B4 裁决。
-- **第 5 节 DEV 真实验证**：没做。需要 DEV daemon、Profile、探针仓库、真实模型额度，规则要求"时间和额度还够才做"，我没有把握，不勉强。可验证项（补证模板是否被遵守、`replan` 的 v4 提示词、判官重派、重启后 `kick`、S1 在真实宿主上的重查、新界面的真实浏览器检查）都在验收表的"DEV 记录"栏里记为没有。
+- **第 5 节 DEV 真实验证**：已由 A12 做了第一轮（见下一条与计划第 67–72 点），不再记为“没做”。仍未覆盖的是补证模板、V2′、F 和 AC15 的损坏/容量场景。
 - **T5c 待补缺口**：Profile 警告只在 Team 规划返回后、且每个席位恰有一行已选 Profile 时才出现，候选、未解析或与编辑器席位号对不上的行被跳过而不是猜；`TeamEditor` 本身无法挂载测试（A17 已把接线抽成 `RunEngineSection` 并挂载测试，`TeamEditor` 只剩源码扫描保护）。策略中预算、DEV 目标、evidenceRoot 等保持原值，当前界面没有编辑入口。
 - **成员回合中被关闭或归档（AC10 的“Agent 失联”）和用户直接发给成员的消息（AC20）**：A16 只写了现状测试（名字带 known limitation）。引擎对 `agent.closed`/`agent.archived` 没有反应，若宿主在关闭运行中的 Agent 时不发 `turn_ended`，任务和 Run 的取消会一直等；用户发给成员的消息被静默忽略，不报警。按 `docs/next-phase-plan.md` 2.12 不修；README 警告已由 A18 补（“Do not close or archive a member's Agent while a Run is live”，`readme-facts.test.ts` 核对），A12 探针取证。
-- **新界面没有真实浏览器检查**：只有源码层的保护和渲染测试（`react-test-renderer`，A17 又补了 Team 编辑器的 Run Engine 区与 `LaunchDialog` 的挂载渲染），窄屏、折行、断线重连都没有真实看过；`TeamEditor` 本身仍未挂载。
+- **新界面的真实浏览器检查**：A12 已在真实 Chrome 上看过 Runs 页的宽屏与 390 像素窄屏、断线重连（计划第 72 点），并因此发现列表状态与台账不符的缺陷；`TeamEditor` 本身仍未挂载，其余页面组合没有逐一走查。
 - **A13–A19 之后仍然推迟或关闭的事项**（裁决与重新评估的触发条件见 `docs/next-phase-plan.md` 第 2 节和附录，残余风险见 5.2）：B13 完整续办、在途成员的归档式取消、`run.approve`、`run.reconcile`、`run.export`、`reject`、`assign-seat`、派发后自动重试（B7）、推送式失效（B8）、`nextAttemptAt`/`waitingCode`、补报清理加固、成员回合中被关闭或归档的恢复、AC20 的异常记录、默认开启 Engine 与发布（`docs/release-handoff.md` 只备材料）。
-- **A12 DEV 真实验证**：仍未做（可选，必须最后，且要先过独立评审）。验收表中 AC12、AC15、AC22 因此仍为部分，其余已覆盖项的“DEV 记录”栏仍多为“无”。
+- **A12 DEV 真实验证（第一轮已做，仍有残余）**：2026-11-08 在 worktree 自建的 `.paseo-dev` 上做了 4 个 Run，生产用 claude haiku 5.5（bypassPermissions），审查/冒烟用 codex gpt-6-luna（full-access），所有 Run 串行在同一个探针仓库。结果：`replan` v4、判官重派、重启后 `kick`、S1 真实宿主重查、真实浏览器/窄屏/重连各有 N=1 证据（计划第 68–72 点）；补证模板没有触发（计划第 67 点），所以“真实模型是否遵守补证模板”仍无证据；可选探针 V2′（同键跨 daemon 重启）、F（失败回合样本）以及 2.12 的“回合中归档成员看宿主发哪些 hook”探针都没有做（没有额外 Run 额度，也没有廉价办法制造失败回合）。DEV 还发现两条缺陷/已知限制，见“每项的检查结果”末尾。清理：20 个 DEV Agent 全部归档、探针仓库与临时目录删除、evidence 与 run 文件删除、端口还原、daemon 停止。
 - **`LaunchDialog` 的渲染测试**（已由 A17 补上，`tests/run-view/launch-dialog.test.ts`）：此前它调用 `launch-job-copy.ts` 的接线只靠类型检查。
 - **`decision-answer.abandonAttempt` 的清理与"unknown 的补报先按回显确认再放锁"**（可达性复核 4.2、4.5）：计划第 37 点已写，没做；它需要在 `settleRepairs` 之前做宿主读取，是另一项加固。
 
@@ -372,6 +372,15 @@ B1–B13 与之后的剩余清单已由 `docs/next-phase-plan.md` 裁决（批�
 - **A8**：定向测试 34 项通过；完整门禁 biome 仅 2 条既有警告、tsc 通过、vitest 192 个文件 3256 通过（3 todo）、verify:package 通过。9 项变异全部被抓：移除正在启动保护、误关 kickoff-pending、恢复时归档、重复失败、误认协调者、截断警告、并发启动保护失效、提交时不查生命周期、记错失败原因；源码备份经 `cmp` 逐字节确认还原。告警列表按长度截断且保留清理提示；已创建但未登记的 Agent 需人工查找。DEV 未验证。
 
 - **A7**：biome 仅 2 条既有警告；tsc 通过；vitest 191 个文件 3236 通过（3 todo，A6 后 3224 加 12）；verify:package 通过。变异检查 8 项（`a7.json`）全部被抓到，A7-06 首次存活后补了直接测 reconcile 的用例。
+
+- **A12 DEV（第一轮，2026-11-08）**：在 worktree 自建的 `.paseo-dev` 上新建了 3 个 Profile（claude 的 `a12-claude-haiku` = `remote-magpie/auto/claude-haiku-5-5`、bypassPermissions；codex 的 `a12-codex-luna` 与 `a12-codex-luna-full` = `remote-magpie/auto/gpt-6-luna`，auto-review / full-access）、7 个 Role、3 个 Team，用仓库外的探针仓库（一个 add() 减法 bug 和 `npm run check`）跑了 4 个 Run。六项结果：补证模板未触发（N=0，生产者的首份报告都被证据门直接接受，`evidenceReturns` 为 0；角色资料里的相对路径要求被模型主动忽略，Run 2 生产者在回复开头复述了这条要求却仍按派发事实用绝对路径）；`replan` v4 通过（N=1，Run 4 首份计划无块 → awaiting-dag → 重规划 epoch 2，新 nonce 的 DAG 被接纳，协调者预算 1→2，旧告警 resolved）；判官重派通过（N=1，Run 2 静默审查者首回 OK → OUTCOME_UNKNOWN → stuck-judge → 页面确认重试 → 同一 Agent 补交 review-report，任务 done）；重启后 kick 通过（N=1，Run 1 修订 32→37、idle、零发送、冻结与决策保留；Run 4 修订 35→36、idle）；S1 重查通过（N=1，Run 4 在 reviewer 回合中停起 daemon，1/2/4 秒重查 3 次用尽，warning 点名 Agent 与 assignment 并提示 kick，任务不误推进、零发送）；真实浏览器/窄屏/重连通过（N=1，Chrome 1280x900 与 390x844 无横向溢出、按钮可点；停 daemon 显示插件不可用而非空进度，同端口重启自动重连）。Run 1 的审查者在 auto-review 模式下触发真实权限请求并回 blocked `PERMISSION_REQUIRED`，引擎只开 stuck-judge 的重试/取消，没有代答、没有归档（AC12 的唯一真实样本）。命令与投影输出只在本会话里，探针与 DEV run 文件已按规则清理；补证模板、V2′、F 与 AC15 的损坏/容量场景没有证据。
+
+- **A12 发现 1：Runs 列表状态与台账不一致**。复现：让一个 Run 处于 `active` 且任务 `blocked`、有 open 决策（Run 1 在 reviewer 权限等待时就是这样），打开 `http://DEV_HOST/` 的 Agent Team → 运行页；列表卡片显示“已完成”、筛选“已结束”把它计入，而同页顶部摘要显示“运行中 需关注 / 阻塞 1”。直接读台账 `lifecycle` 为 `active`、任务为 `blocked`、`endedAt` 不存在。对一个已 `cancelled` 的 Run（Run 2 之后的 Run 1）列表也显示“已完成”。原因未查（A12 不改源码）；验收表 AC22 的缺口已记这一条。
+
+- **A12 发现 2：重启丢失在途回复后，取消一直等**。复现：Run 4 的 reviewer 回合进行中 `daemon stop --home <DEV>` 再 `daemon start`，恢复读取重查 3 次后写 `读取重试已用尽（incomplete:dispatch-not-found）` 告警，任务保持 `review`；`run.kick` 返回 idle、零发送；`run.cancel` 返回 `applied` 但 `lifecycle` 变 `paused`、`waiting.turns` 为 1，之后再 kick 返回 `not-active`，Run 既不完成也不取消，只能删 DEV 台账文件（探针环境）收场。这与 `docs/next-phase-plan.md` 2.12 的已知限制一致，但现在有真实宿主复现；A12 按规则不修。
+
+- **A12 意外行为（正面）**：协调者在 4 个 Run 里 3 次收到“故意提交非法 DAG”的角色资料或用户任务文字（缺依赖、不存在的 t-prep、不可逆的远端删标签），都没有照做：前两次直接给出合法 DAG，第三次用纯文字说明不可逆障碍而不编造计划。这说明规划提示词对资料里的“测试要求”有抵抗力，也解释了补证模板的偏差要求为什么没有生效。
+
 
 - **A6**：biome 仅 2 条既有警告；tsc 通过；vitest 191 个文件 3224 通过（3 todo，A5 后 3196 加 28；`ledger-real-fs` 一次 EBUSY，单独重跑通过）；verify:package 通过。变异检查 10 项（`a6.json`）全部被抓到。
 
