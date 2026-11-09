@@ -5,6 +5,13 @@
 
 const ZERO_WIDTH = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0xfeff]);
 
+/**
+ * The most of an alert's text the page shows: what the wire format (`RunAlertViewSchema`) and the ledger
+ * allow for one. The longest text the server writes (a used-up re-check of a lost turn) is over 300
+ * characters, and a lower cut stopped its sentence about what to do in the middle.
+ */
+export const ALERT_DISPLAY_MAX = 1000;
+
 /** Strip controls, bidi/zero-width marks, fold whitespace, cut by code point. */
 export function displayText(value: unknown, max: number, fallback = ""): string {
   if (typeof value !== "string") return fallback;

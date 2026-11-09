@@ -8,7 +8,7 @@ import {
 } from "../../schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../zh/run-engine";
 import { isDecisionPending } from "./decision-state";
-import { displayText } from "./display-text";
+import { ALERT_DISPLAY_MAX, displayText } from "./display-text";
 import { eventCause } from "./timeline";
 import { explainAlert, explainDecision, explainTask, type TaskExplanation } from "./waiting";
 
@@ -470,7 +470,7 @@ export function alertRows(alerts: RunDetailView["alerts"]): AlertRowView[] {
       critical: alert.severity === "critical",
       stateLabel: zh.alerts.state[alert.state] ?? textOf(alert.state, 16),
       open: alert.state === "open",
-      summary: displayText(alert.summary, 300, "—"),
+      summary: displayText(alert.summary, ALERT_DISPLAY_MAX, "—"),
       explain: explainAlert(alert),
       createdAt: shortTime(alert.createdAt),
       rank: SEVERITY_RANK[alert.severity] ?? 3,

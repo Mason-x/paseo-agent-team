@@ -13,7 +13,7 @@ import {
   type WaitingText,
 } from "../../zh/run-engine-waiting";
 import { isDecisionPending } from "./decision-state";
-import { displayText } from "./display-text";
+import { ALERT_DISPLAY_MAX, displayText } from "./display-text";
 
 /**
  * Why a task or a decision is waiting, who can clear it, and what happens next. Pure and table
@@ -105,7 +105,7 @@ export function explainAlert(
   alert: Pick<RunDetailView["alerts"][number], "state" | "summary">,
 ): TaskExplanation {
   return {
-    why: displayText(alert.summary, 300, "—"),
+    why: displayText(alert.summary, ALERT_DISPLAY_MAX, "—"),
     who: alert.state === "resolved" ? "—" : "需根据告警内容判断",
     next: alert.state === "resolved" ? "告警已解除" : "查看并按告警内容处理；之后重新查看状态",
   };

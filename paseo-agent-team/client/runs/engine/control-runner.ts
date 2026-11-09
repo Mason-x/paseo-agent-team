@@ -58,6 +58,12 @@ export type ControlKey =
 export type ControlState = {
   pending: ControlKey | null;
   notice: ActionNotice | null;
+  /**
+   * The control whose answer `notice` is, so the page can say it next to that control's button: the
+   * controls are a long column and a sentence at the end of it is below the screen for the person who
+   * pressed a button near the top. Absent until a control has been pressed.
+   */
+  noticeFrom?: ControlKey;
 };
 
 export type ControlDeps = {
@@ -110,7 +116,7 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
     } catch {
       notice = transportNotice();
     }
-    set({ pending: null, notice });
+    set({ pending: null, notice, noticeFrom: key });
     if (notice.refresh) {
       try {
         await deps.refresh();
@@ -254,7 +260,7 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
     },
 
     dismiss(): void {
-      if (state.notice !== null) set({ ...state, notice: null });
+      if (state.notice !== null) set({ pending: state.pending, notice: null });
     },
   };
 }
