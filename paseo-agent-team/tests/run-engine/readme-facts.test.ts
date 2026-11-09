@@ -224,8 +224,10 @@ describe("the Run Engine section of the README agrees with the code", () => {
       "gets `host-lost` (retry or cancel)\n  whatever closed receipts there are",
     );
     expect(section).toContain(
-      "A host-lost decision is cut to cancel only when the member is archived",
+      "A host-lost decision is cut to cancel only when the\n  member is archived",
     );
+    expect(section).toContain("or the\n  read says closed now, and no decision otherwise");
+    expect(section).toContain("before you retry, make sure the member was not archived");
     expect(section).not.toContain("when a closed or archived receipt of the member came after the");
   });
 });
