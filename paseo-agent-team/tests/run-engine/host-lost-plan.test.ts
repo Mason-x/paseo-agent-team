@@ -546,3 +546,26 @@ describe("the decision for a lost turn: retry or cancel, until the member is clo
     expect(opened.changed).toBe(false);
   });
 });
+
+describe("a turn id that was used before the assignment", () => {
+  test("the end of the earlier turn that shares its id does not hide the turn the member lost", () => {
+    const earlierEnd = receipt("turn_ended", 500, {
+      eventKey: `turn_ended:${AGENT}:turn-1`,
+      dedupeKey: `turn_ended:${AGENT}:turn-1`,
+    });
+    const newStart = receipt("turn_started", 1000, {
+      eventKey: `turn_started:${AGENT}:turn-1#2`,
+      dedupeKey: `turn_started:${AGENT}:turn-1#2`,
+    });
+    const lost = record({ receipts: [earlierEnd, newStart] });
+    expect(lostTurnCandidates(lost, at(AFTER))).toHaveLength(1);
+    // Its own end, of the same appearance, is a turn that ended: nothing was lost.
+    const ownEnd = receipt("turn_ended", 2000, {
+      eventKey: `turn_ended:${AGENT}:turn-1#2`,
+      dedupeKey: `turn_ended:${AGENT}:turn-1#2`,
+    });
+    expect(
+      lostTurnCandidates(record({ receipts: [earlierEnd, newStart, ownEnd] }), at(AFTER)),
+    ).toEqual([]);
+  });
+});

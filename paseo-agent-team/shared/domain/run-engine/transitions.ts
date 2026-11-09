@@ -20,6 +20,7 @@ import type {
   RunTaskDagBlock,
   RunTaskReportBlock,
 } from "../../schemas/run-engine/protocol";
+import { sameTurnOccurrence } from "./turn-occurrence";
 
 export type Binding = RunDecisionBinding;
 export type ArchiveIntent = Extract<RunEffectIntent, { kind: "archive" }>;
@@ -241,6 +242,20 @@ export function isNormalEnded(record: RunRecord, assignment: RunAssignment): boo
   );
 }
 
+function newestAssignmentAt(record: RunRecord, other: RunAssignment, at: string): boolean {
+  const limit = Date.parse(at);
+  const made = Date.parse(other.createdAt);
+  return (
+    made <= limit &&
+    !record.assignments.some(
+      (third) =>
+        third.agentId === other.agentId &&
+        Date.parse(third.createdAt) > made &&
+        Date.parse(third.createdAt) <= limit,
+    )
+  );
+}
+
 function dispatchIntents(record: RunRecord, assignmentId: string): RunEffectIntent[] {
   return record.outbox.filter(
     (intent) => intent.kind === "dispatch" && intent.assignmentId === assignmentId,
@@ -284,7 +299,10 @@ function hasTurnFacts(record: RunRecord, assignment: RunAssignment): boolean {
             other.assignmentId !== assignment.assignmentId &&
             other.agentId === receipt.agentId &&
             other.turnId !== null &&
-            other.turnId === receipt.turnId,
+            other.turnId === receipt.turnId &&
+            // A turn id can come back after a restart: the receipt is another assignment's only when
+            // that assignment was the agent's newest one when the receipt came in.
+            newestAssignmentAt(record, other, receipt.receivedAt),
         ),
     )
   );
@@ -569,7 +587,9 @@ export function isComplete167(record: RunRecord, assignment: RunAssignment): boo
         receipt.seq > ended.seq &&
         receipt.seq <= through &&
         receipt.kind === "turn_started" &&
-        receipt.agentId === assignment.agentId,
+        receipt.agentId === assignment.agentId &&
+        // A start of the very turn that ended (the hooks came out of order) is not a new turn.
+        !sameTurnOccurrence(receipt, ended),
     )
   );
 }

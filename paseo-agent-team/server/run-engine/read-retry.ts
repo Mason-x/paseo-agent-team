@@ -11,6 +11,7 @@ import {
   sweepReadRetries,
   type TryOutcome,
 } from "../../shared/domain/run-engine/read-retry";
+import { anchorSince, ownTurn } from "../../shared/domain/run-engine/turn-occurrence";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { alertIdFor, sha256Hex } from "./digest";
 import type { ReplyWindow } from "./protocol";
@@ -169,12 +170,15 @@ export function createReadRetry(options: ReadRetryOptions) {
           if (!outcome.ok || outcome.turnId === undefined) return outcome;
           const item = started.find((entry) => entry.key === outcome.key);
           const agentId = item?.target.agentId;
-          const receipt = current.eventReceipts.find(
-            (entry) =>
-              entry.kind === "turn_ended" &&
-              entry.agentId === agentId &&
-              entry.turnId === outcome.turnId,
-          );
+          // The end of the turn the read message itself ran in, not of a later turn that reused its id.
+          const receipt =
+            agentId === undefined || item === undefined || item.target.type !== "reply"
+              ? undefined
+              : ownTurn(current, {
+                  agentId,
+                  turnId: outcome.turnId,
+                  since: anchorSince(current, item.target.anchorMessageId, null),
+                })?.ended;
           return receipt ? { ...outcome, receiptKey: receipt.eventKey } : outcome;
         });
         const result = finishTries(current, withReceipts, clock.now(), alertIdFor);

@@ -14,6 +14,7 @@ import { latestSentWake, requestPlanRepair } from "../../shared/domain/run-engin
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { DAG_ALERT_PREFIX } from "../../shared/domain/run-engine/replan";
 import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
+import { anchorSince, ownTurn } from "../../shared/domain/run-engine/turn-occurrence";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunTaskDagBlock } from "../../shared/schemas/run-engine/protocol";
 import { alertIdFor, sha256Hex } from "./digest";
@@ -208,12 +209,11 @@ export function createDagIntake(options: DagIntakeOptions) {
       return { status: "unverifiable", reason: extracted.reason };
     }
     if (
-      !record.eventReceipts.some(
-        (receipt) =>
-          receipt.kind === "turn_ended" &&
-          receipt.agentId === agentId &&
-          receipt.turnId === window.turnId,
-      )
+      ownTurn(record, {
+        agentId,
+        turnId: window.turnId,
+        since: anchorSince(record, request.messageId, null),
+      })?.ended === undefined
     ) {
       return { status: "turn-not-ended" };
     }

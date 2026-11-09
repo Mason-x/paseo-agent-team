@@ -65,6 +65,7 @@ import {
   taskById,
   validCancellationObservation,
 } from "./transitions";
+import { sameTurnOccurrence } from "./turn-occurrence";
 
 export type RunEffect = { kind: string; payload: Record<string, unknown> };
 
@@ -1429,7 +1430,15 @@ function applyEvent(
         return null;
       next.eventReceipts.push({ ...event.receipt, seq: next.counters.observationSeq + 1 });
       next.counters.observationSeq += 1;
-      if (event.receipt.kind === "turn_started") {
+      // The start of a turn whose end is already on record (the hooks came out of order) is not the
+      // member starting again.
+      if (
+        event.receipt.kind === "turn_started" &&
+        !next.eventReceipts.some(
+          (entry) =>
+            entry.kind === "turn_ended" && sameTurnOccurrence(entry, event.receipt as typeof entry),
+        )
+      ) {
         for (const assignment of next.assignments) {
           const task = taskOf(next, assignment.taskId);
           if (
