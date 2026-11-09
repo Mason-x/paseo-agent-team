@@ -326,6 +326,8 @@ export const zh = {
   outcomeDone: "完成",
   outcomeEnded: "结束",
   outcomeCancelled: "取消",
+  /** What a Run that the Engine list has not answered for yet shows instead of how it ended. */
+  outcomeLastActive: "有活动",
   agoOutcome: (span: string, outcome: string) => `${span}前${outcome}`,
   justNowOutcome: (outcome: string) => `刚刚${outcome}`,
   noTaskRecorded: "（旧版本启动的运行，没有记录任务）",
@@ -347,6 +349,8 @@ export const zh = {
   phaseDone: "已完成",
   phaseIdle: "已结束",
   phaseCancelled: "已取消",
+  /** The Engine list has not answered yet: a Run that looks finished by its agents is not called finished. */
+  phaseLoading: "读取中",
   memberNotStarted: "待分配",
   memberWorking: "工作中",
   memberDelivered: "已交付",

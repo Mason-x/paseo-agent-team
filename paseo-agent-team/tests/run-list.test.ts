@@ -316,3 +316,65 @@ describe("member counts on a run header", () => {
     expect(counts("done")).toEqual(["delivered", "closed"]);
   });
 });
+
+/**
+ * The first paint of the Runs page: the Engine list has not answered yet, so no Run is known to be an
+ * Engine Run, and a Run whose agents look finished would be shown as completed until the answer
+ * arrives (a blocked or cancelled Run for a moment as a success). Failure modes: that claim of success
+ * on the first paint, a loading mark that never goes away, one that hides a failed query.
+ */
+describe("a Run that looks finished before the Engine list has answered", () => {
+  const looksDone = () => run("run-e", "done", 2 * HOUR);
+  const running = () => run("run-r", "running", HOUR);
+  const needsYou = () => run("run-n", "attention", HOUR);
+  const standing = (lifecycle: string, needsAttention = false) => [
+    { runId: "run-e", lifecycle, needsAttention },
+  ];
+  const phases = (rows: ReturnType<typeof buildRunRows>) =>
+    Object.fromEntries(rows.map((row) => [row.run.runId, row.progress.phase]));
+
+  test("pending (no data, no error): shown as reading, not completed; every other reading is untouched", () => {
+    const rows = buildRunRows([looksDone(), running(), needsYou()], [], "pending");
+    expect(phases(rows)).toEqual({ "run-e": "loading", "run-r": "running", "run-n": "needs-you" });
+    expect(zh.phaseLoading).toBe("读取中");
+    expect(zh.phaseLoading).not.toBe(zh.phaseDone);
+    // Nothing is claimed about how it ended: ended bucket as before, no follow-up, no "completed" in its age.
+    expect(bucketOf("loading")).toBe("ended");
+    expect(isLive("loading")).toBe(false);
+    const label = runTimeLabel(
+      rows.find((row) => row.run.runId === "run-e")?.run ?? looksDone(),
+      "loading",
+      NOW,
+    );
+    expect(label).toBe("2 小时前有活动");
+    expect(label).not.toContain("完成");
+    expect(label).not.toContain("结束");
+    expect(filterCounts(rows)).toEqual({ all: 3, attention: 1, active: 1, ended: 1 });
+  });
+
+  test("pending with the other readings that already are not 'completed': nothing is changed", () => {
+    expect(phases(buildRunRows([run("run-c", "closed")], [], "pending"))).toEqual({
+      "run-c": "idle",
+    });
+  });
+
+  test("answered (ready): the ledger's lifecycle decides, and a Run the list does not name keeps its reading", () => {
+    expect(phases(buildRunRows([looksDone()], standing("active", true), "ready"))).toEqual({
+      "run-e": "needs-you",
+    });
+    expect(phases(buildRunRows([looksDone()], standing("cancelled"), "ready"))).toEqual({
+      "run-e": "cancelled",
+    });
+    // A Run only the agents know about, once the Engine has answered, is what its agents say: done.
+    expect(phases(buildRunRows([looksDone()], [], "ready"))).toEqual({ "run-e": "done" });
+    // The default is "answered": callers that never pass a status see the reading they always did.
+    expect(phases(buildRunRows([looksDone()]))).toEqual({ "run-e": "done" });
+  });
+
+  test("failed (the query gave an error): back to the agents' reading, not loading for ever", () => {
+    expect(phases(buildRunRows([looksDone(), running()], [], "error"))).toEqual({
+      "run-e": "done",
+      "run-r": "running",
+    });
+  });
+});

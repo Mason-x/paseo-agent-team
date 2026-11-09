@@ -27,6 +27,8 @@ const BUCKET_BY_PHASE: Record<RunPhase, Bucket> = {
   done: "ended",
   idle: "ended",
   cancelled: "ended",
+  // Where a Run that looks finished sits until the Engine list says more: where "done" would have put it.
+  loading: "ended",
 };
 
 const BUCKET_ORDER: Record<Bucket, number> = { attention: 0, active: 1, ended: 2 };
@@ -50,6 +52,12 @@ export function showsFollowUp(
 
 /** What the Engine's run list says about one Run; the ledger's word on where it stands. */
 export type EngineRunStanding = { runId: string; lifecycle: string; needsAttention: boolean };
+
+/**
+ * Where the Engine run list stands: `pending` before its first answer (no data, no error), `ready` once it
+ * has answered (a later failed poll keeps the data it has), `error` when it failed and has nothing.
+ */
+export type EngineListStatus = "pending" | "ready" | "error";
 
 /**
  * The phase a ledger lifecycle stands for, or null for one this client does not know. Only
@@ -80,11 +88,22 @@ export function enginePhase(lifecycle: string, needsAttention: boolean): RunPhas
  * coordinator, reads it as done. The ledger's lifecycle replaces that reading for any Run the
  * Engine list names. For a lifecycle this client does not know, the agent reading stands except
  * that "done" becomes the general "ended": success is never claimed for a state we cannot read.
+ * Before the Engine list has answered no Run is known to be an Engine Run, so a reading of "done"
+ * is shown as "loading" instead: it may be a blocked or cancelled Run. A failed list query does not
+ * keep it there: the agents' reading stands, as it did before the list existed.
  */
-function progressFor(run: TeamRun, engine: ReadonlyMap<string, EngineRunStanding>): RunProgress {
+function progressFor(
+  run: TeamRun,
+  engine: ReadonlyMap<string, EngineRunStanding>,
+  status: EngineListStatus,
+): RunProgress {
   const progress = runProgress(run);
   const standing = engine.get(run.runId);
-  if (!standing) return progress;
+  if (!standing) {
+    return status === "pending" && progress.phase === "done"
+      ? { ...progress, phase: "loading" }
+      : progress;
+  }
   const phase = enginePhase(standing.lifecycle, standing.needsAttention);
   if (phase) return { ...progress, phase };
   return progress.phase === "done" ? { ...progress, phase: "idle" } : progress;
@@ -94,10 +113,11 @@ function progressFor(run: TeamRun, engine: ReadonlyMap<string, EngineRunStanding
 export function buildRunRows(
   runs: readonly TeamRun[],
   engineRuns: readonly EngineRunStanding[] = [],
+  engineStatus: EngineListStatus = "ready",
 ): RunRow[] {
   const engine = new Map(engineRuns.map((entry) => [entry.runId, entry]));
   return runs
-    .map((run) => ({ run, progress: progressFor(run, engine) }))
+    .map((run) => ({ run, progress: progressFor(run, engine, engineStatus) }))
     .sort((left, right) => {
       const byBucket =
         BUCKET_ORDER[bucketOf(left.progress.phase)] - BUCKET_ORDER[bucketOf(right.progress.phase)];
@@ -163,11 +183,14 @@ export function runTimeLabel(run: TeamRun, phase: RunPhase, now: number): string
   }
   const since = Number.isFinite(lastActive) ? lastActive : started;
   const ago = Number.isFinite(since) ? span(Math.max(0, now - since)) : null;
+  // A Run still being read is not said to have ended or completed: only when it was last active.
   const outcome =
     phase === "done"
       ? zh.outcomeDone
       : phase === "cancelled"
         ? zh.outcomeCancelled
-        : zh.outcomeEnded;
+        : phase === "loading"
+          ? zh.outcomeLastActive
+          : zh.outcomeEnded;
   return ago ? zh.agoOutcome(ago, outcome) : zh.justNowOutcome(outcome);
 }
