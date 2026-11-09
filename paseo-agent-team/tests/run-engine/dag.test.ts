@@ -12,6 +12,8 @@ import { REPO_ALIAS, readDagControl } from "../../shared/domain/run-engine/dag-a
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
 import { compilePlanRepair } from "../../shared/domain/run-engine/engine-prompts";
 import { planRepairWakes } from "../../shared/domain/run-engine/plan-repair";
+import { emptyReadRetries } from "../../shared/domain/run-engine/read-retry";
+import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import {
   bootstrapRun,
@@ -569,5 +571,227 @@ describe("a plan the strict parser refuses is asked for again, once", () => {
     const [wake] = repairs(record);
     expect(wake?.state).toBe("prepared");
     expect(wake && compilePlanRepair(wake, record)).not.toBeNull();
+  });
+});
+
+// --- a plan reply the host lost when it restarted under the planning turn (T9e) -------------------
+
+/**
+ * The host stopped while the coordinator planned: it ended the turn (a `turn_ended` hook) and, after the
+ * restart, the plan request is no longer in the coordinator's history. Before T9e the read said only
+ * `unverifiable` and wrote nothing, so the Run sat in bootstrapping with no word on it. Now that one case
+ * (the request not found, the host's own end of a turn after the request, no turn begun since) leaves a
+ * warning and waits for a person's re-plan; every other way of not reading a plan still writes nothing.
+ * Run on a v1 and on a v2 ledger.
+ */
+const LOST_ALERT = "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划";
+const NOT_FOUND: ReplyWindow = { complete: false, reason: "dispatch-not-found" };
+
+describe.each([1, 2] as const)("a plan reply the host lost (ledger v%i)", (version) => {
+  beforeEach(async () => {
+    await store.close();
+    await rm(path.join(home, "paseo"), { recursive: true, force: true, maxRetries: 10 });
+    await mkdir(path.join(home, "paseo"));
+    store = createRunStore({ home: path.join(home, "paseo"), lock: { acquireTimeoutMs: 300 } });
+    await store.initialize();
+    const record = bootstrapRun({ runId: RUN_ID, planRequest: true });
+    record.schemaVersion = version;
+    if (version === 2) (record as Record<string, unknown>).readRetries = emptyReadRetries();
+    await store.create(record);
+  });
+
+  /** A receipt of the host (or of the Engine, with `settledBy`) at a time the test chooses. */
+  async function plant(
+    kind: "turn_started" | "turn_ended",
+    turnId: string,
+    receivedAt: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    await store.update(RUN_ID, (current) => {
+      const key = `${kind}:${COORDINATOR_AGENT}:${turnId}`;
+      const reduced = reduceRun(
+        current,
+        {
+          kind: "observation-recorded",
+          receipt: {
+            eventKey: key,
+            kind,
+            agentId: COORDINATOR_AGENT,
+            turnId,
+            dedupeKey: key,
+            disposition: "observed",
+            seq: 0,
+            receivedAt,
+            ...extra,
+          } as never,
+        },
+        { now: receivedAt, newId: () => `planted-${key}` },
+      );
+      if (!reduced.ok) throw new Error(`could not plant ${key}: ${reduced.code}`);
+      return reduced.next;
+    });
+  }
+
+  const hostEndedTurn = (h: Harness, turnId = TURN) =>
+    h.observer.ingest({ name: "agent.turn_ended", agentId: COORDINATOR_AGENT, turnId });
+
+  test("the turn ended and the request is gone: one warning, the Run waits for a re-plan, nothing is sent", async () => {
+    const sent = vi.fn(async () => undefined);
+    const h = harness(() => NOT_FOUND, { repair: { send: sent } });
+    await hostEndedTurn(h);
+    const before = await stored();
+
+    expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "refused", reasons: LOST_ALERT },
+    ]);
+    const after = await stored();
+    expect(after.lifecycle).toBe("awaiting-dag");
+    expect(after.alerts).toHaveLength(1);
+    expect(after.alerts[0]).toMatchObject({
+      state: "open",
+      severity: "warning",
+      summary: LOST_ALERT,
+    });
+    expect(after.tasks).toEqual([]);
+    expect(readDagControl(after)?.acceptedAt).toBeNull();
+    // No format re-send, no other message, the plan request itself untouched.
+    expect(sent).not.toHaveBeenCalled();
+    expect(after.outbox).toEqual(before.outbox);
+    expect(h.onAdmitted).not.toHaveBeenCalled();
+
+    // A repeated hook or recovery reads again and writes nothing.
+    await hostEndedTurn(h);
+    expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "refused", reasons: LOST_ALERT },
+    ]);
+    expect((await stored()).revision).toBe(after.revision);
+    expect((await stored()).alerts).toHaveLength(1);
+  });
+
+  test("the Run is awaiting-dag, so a person can ask for a re-plan", async () => {
+    const h = harness(() => NOT_FOUND);
+    await hostEndedTurn(h);
+    await h.intake.settleCoordinator(COORDINATOR_AGENT);
+    const waiting = await stored();
+    // The same state a refused plan leaves, which is where a re-plan is allowed from.
+    expect(waiting.lifecycle).toBe("awaiting-dag");
+    expect(
+      waiting.alerts.filter((a) => a.state === "open" && a.summary.startsWith("DAG ")),
+    ).toHaveLength(1);
+  });
+
+  test("a turn that has not ended, or an end that came before the request, says nothing", async () => {
+    const open = harness(() => NOT_FOUND);
+    const before = await stored();
+    expect(await open.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "unverifiable", reason: "dispatch-not-found" },
+    ]);
+    // A turn that began and is still going.
+    await open.observer.ingest({
+      name: "agent.turn_started",
+      agentId: COORDINATOR_AGENT,
+      turnId: TURN,
+    });
+    await open.intake.settleCoordinator(COORDINATOR_AGENT);
+    // An end of an earlier turn, before the request was made.
+    await plant("turn_ended", "turn-before", "2026-10-27T11:00:00.000Z");
+    expect(await open.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "unverifiable", reason: "dispatch-not-found" },
+    ]);
+    const after = await stored();
+    expect(after.lifecycle).toBe("bootstrapping");
+    expect(after.alerts).toEqual([]);
+    expect(after.revision).toBeGreaterThanOrEqual(before.revision);
+    expect(after.events.some((event) => event.kind === "alert-raised")).toBe(false);
+  });
+
+  test("a turn the coordinator began after the end means it may still answer: nothing is written", async () => {
+    const h = harness(() => NOT_FOUND);
+    await hostEndedTurn(h);
+    await plant("turn_started", "turn-again", new Date(Date.now() + 60_000).toISOString());
+    const before = await stored();
+    expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "unverifiable", reason: "dispatch-not-found" },
+    ]);
+    const after = await stored();
+    expect(after.revision).toBe(before.revision);
+    expect(after.lifecycle).toBe("bootstrapping");
+    expect(after.alerts).toEqual([]);
+  });
+
+  test("an end the Engine wrote itself is not the host's", async () => {
+    const h = harness(() => NOT_FOUND);
+    await plant("turn_ended", "turn-engine", new Date(Date.now() + 1000).toISOString(), {
+      settledBy: "engine",
+    });
+    const before = await stored();
+    expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "unverifiable", reason: "dispatch-not-found" },
+    ]);
+    expect((await stored()).revision).toBe(before.revision);
+  });
+
+  test.each([
+    "too-many-pages",
+    "epoch-changed",
+    "timeline-discontinuity",
+    "reply-too-large",
+    "turn-open",
+    "turn-unknown",
+  ] as const)(
+    "any other incomplete read (%s) writes nothing, even after the turn ended",
+    async (reason) => {
+      const h = harness(() => ({ complete: false, reason }));
+      await hostEndedTurn(h);
+      const before = await stored();
+      expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+        { status: "unverifiable", reason },
+      ]);
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(after.lifecycle).toBe("bootstrapping");
+      expect(after.alerts).toEqual([]);
+    },
+  );
+
+  test("a host that cannot be read, or a reply that is too large, writes nothing", async () => {
+    const broken = harness(() => {
+      throw new Error("host down");
+    });
+    await hostEndedTurn(broken);
+    const before = await stored();
+    expect(await broken.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+      { status: "host-error" },
+    ]);
+    const huge = "x".repeat(300_000);
+    const large = harness(() => window(huge));
+    const [result] = await large.intake.settleCoordinator(COORDINATOR_AGENT);
+    expect(result?.status).toBe("unverifiable");
+    const after = await stored();
+    expect(after.revision).toBe(before.revision);
+    expect(after.lifecycle).toBe("bootstrapping");
+    expect(after.alerts).toEqual([]);
+  });
+
+  test("a plan that is in the history is read as before, whatever the ledger says of turns", async () => {
+    const h = harness(() => window(plan()));
+    await hostEndedTurn(h);
+    expect((await h.intake.settleCoordinator(COORDINATOR_AGENT))[0]).toEqual({
+      status: "admitted",
+      tasks: 2,
+    });
+  });
+
+  test("the warning is taken down when the next plan is admitted", async () => {
+    let reply: ReplyWindow = NOT_FOUND;
+    const h = harness(() => reply);
+    await hostEndedTurn(h);
+    await h.intake.settleCoordinator(COORDINATOR_AGENT);
+    expect((await stored()).alerts[0]).toMatchObject({ state: "open" });
+    reply = window(plan());
+    expect((await h.intake.settleCoordinator(COORDINATOR_AGENT))[0]?.status).toBe("admitted");
+    const after = await stored();
+    expect(after.lifecycle).toBe("active");
+    expect(after.alerts[0]).toMatchObject({ state: "resolved" });
   });
 });

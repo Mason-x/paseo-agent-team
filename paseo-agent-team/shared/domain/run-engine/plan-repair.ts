@@ -1,6 +1,8 @@
 import type { RunEffectIntent, RunRecord } from "../../schemas/run-engine/ledger";
 import { COORDINATOR_SEAT_ID, readDagControl } from "./dag-admission";
+import { isEngineSettled } from "./lost-turn";
 import { type RepairIssue, trimIssues } from "./report-repair";
+import { latestEndedTurn } from "./turn-proof";
 
 /**
  * Asking the coordinator to send its plan again (plan 11.5, decision 5; P05).
@@ -70,6 +72,21 @@ export function latestSentWake(
       (intent.id === plan.id ||
         (isPlanRepairWake(intent) && intent.semanticArgs.planIntentId === plan.id)),
   );
+}
+
+/**
+ * Whether the reply to the plan request is lost for good, judged from the ledger alone (T9e). It is only
+ * asked after a read of that reply found the request missing from the coordinator's history
+ * (`incomplete:dispatch-not-found`). Then the plan was lost when the host restarted under the coordinator's
+ * planning turn, if the host itself ended a turn of the coordinator after the request was made
+ * (a `turn_ended` it sent, not one the Engine wrote) and the coordinator began no turn after that. A
+ * turn that has not ended, or a later turn, is a coordinator that may still answer: not lost.
+ */
+export function planReplyLost(record: RunRecord, agentId: string): boolean {
+  const request = latestSentWake(record, agentId);
+  if (request === undefined) return false;
+  const ended = latestEndedTurn(record, { agentId, turnId: null, createdAt: request.createdAt });
+  return ended !== undefined && !isEngineSettled(ended);
 }
 
 /**
