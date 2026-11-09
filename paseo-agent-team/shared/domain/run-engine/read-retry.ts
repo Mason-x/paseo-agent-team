@@ -193,12 +193,16 @@ export const LOST_TURN_SETTLE_DELAY_MS = 30_000;
  * not say whose turn it was, so the text says for which turns the Engine settles and what to do for the
  * others: for a member's own task turn whose start the Engine recorded, a look at least this long after
  * the tries were used up, with the member idle in Paseo, lets the Engine record the turn as lost by the
- * host and open the decision a person answers; a judge's, smoke tester's, supplement's or re-report's
- * turn, a turn the Engine never saw begin, and a turn with a later turn start or turn end of the member
- * are not settled, and a plain OK sent to the member is the way out (A21). The Engine sends the member
- * nothing by itself.
+ * host and open the decision a person answers; when the host has already said the turn ended (T9b), the
+ * same look with the member idle, closed or archived opens the decision without a receipt of the Engine's;
+ * a judge's, smoke tester's, supplement's or re-report's turn, a turn the Engine saw neither begin nor
+ * end, and a turn with a later turn start of the member are not settled, and a plain OK sent to the member
+ * is the way out (A21). The Engine sends the member nothing by itself.
  */
-export const LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算；引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
+export const LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；如果宿主已经报告这一回合结束、回复却读不到，而成员空闲、已关闭或已归档，同样至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会开出决策（成员已关闭或归档时只能取消）；判官、冒烟、补证或补报回合不会被引擎结算（成员已关闭或归档时除外）；引擎没见到回合开始、或该成员之后又有更晚的回合记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
+
+/** The hint the T4b version wrote (before the host's own turn end was settled, T9b); its alerts are still found. */
+const T4B_LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算；引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
 
 /** The hint of the version that asked a person to send the member a plain OK (A21); its alerts are still found. */
 const EARLIER_LOST_TURN_HINT =
@@ -223,7 +227,7 @@ export function readRetryAlertSummary(item: ReadRetryItem): string {
 function earlierSummariesOf(item: ReadRetryItem): string[] {
   const base = earlierAlertSummary(item);
   return item.state === "held" && item.lastCode === LOST_TURN_CODE
-    ? [base, `${base}${EARLIER_LOST_TURN_HINT}`]
+    ? [base, `${base}${EARLIER_LOST_TURN_HINT}`, `${base}${T4B_LOST_TURN_HINT}`]
     : [];
 }
 

@@ -750,6 +750,12 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
     expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
+    // T9b: the host said the turn ended and the reply cannot be read: idle, closed or archived, then a decision.
+    expect(summary).toContain(
+      "如果宿主已经报告这一回合结束、回复却读不到，而成员空闲、已关闭或已归档",
+    );
+    expect(summary).toContain("成员已关闭或归档时只能取消");
+    expect(summary).not.toBe(earlierT4b(LOST_CODE));
     // The turns it does not settle, and the way out for them: a plain OK, then the button again.
     expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
     expect(summary).toContain(
@@ -780,10 +786,15 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(open(healed.next)[0]?.summary).not.toContain("OK");
   });
 
-  /** The two wordings earlier versions wrote for the used-up item of a lost dispatch: the plain one and A21's. */
+  /** The summary as 0.7.0 (T4b) wrote it: before the host's own end of a turn was settled too (T9b). */
+  const earlierT4b = (code: string) =>
+    `${earlier(code)}。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 30 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算；引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
+
+  /** The wordings earlier versions wrote for the used-up item of a lost dispatch: the plain one, A21's and T4b's. */
   const earlierWordings = [
     { name: "before A21", text: earlier },
     { name: "A21 (the plain OK hint)", text: earlierWithHint },
+    { name: "T4b (0.7.0, before T9b)", text: earlierT4b },
   ];
 
   for (const wording of earlierWordings) {
