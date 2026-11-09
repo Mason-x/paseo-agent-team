@@ -6,12 +6,13 @@ import type { RunHealthEntrySchema, RunSummaryView } from "../../../shared/schem
 import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
 import { EngineView } from "./EngineView";
+import { useReasonDrafts } from "./reason-drafts";
 import { useEngineControls } from "./use-engine-controls";
 import { useEngineRun, type useEngineRuns } from "./use-engine-run";
 
 type Health = z.output<typeof RunHealthEntrySchema>;
 
-function RunDetailPane({
+export function RunDetailPane({
   theme,
   layout,
   hostId,
@@ -23,7 +24,9 @@ function RunDetailPane({
   runId: string;
 }) {
   const { session, error, loadingOlder, refresh, loadOlder } = useEngineRun(hostId, runId, true);
-  const { state: controlState, runner } = useEngineControls(runId, refresh);
+  // The pane stays mounted while a poll cannot show the Run, so the words a person typed live here.
+  const drafts = useReasonDrafts(runId);
+  const { state: controlState, runner } = useEngineControls(runId, refresh, drafts.clear);
   return (
     <View>
       <EngineView
@@ -35,6 +38,7 @@ function RunDetailPane({
         embedded
         controls={{
           state: controlState,
+          drafts,
           onReplan: (reason) => {
             const held = session.state;
             if (held?.kind === "ready") void runner.replan(reason, held.run.revision);

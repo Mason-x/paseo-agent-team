@@ -68,6 +68,11 @@ export type ControlDeps = {
   resume(input: RunLifecycleInput): Promise<RunLifecycleOutput>;
   /** Reads the Run again. A failure here is the page's own error, not the control's. */
   refresh(): Promise<void>;
+  /**
+   * The server took a reason a person wrote (applied, or the same request answered again), so the page
+   * may drop its draft. A refusal or a transport error is not this: the words are kept for another try.
+   */
+  accepted?(field: "replan" | "cancel-run"): void;
   newId(): string;
 };
 
@@ -122,17 +127,17 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
       const text = reason.trim();
       if (text === "") return Promise.resolve(false);
       const signature = `replan:${expectedRevision}:${text}`;
-      return run("replan", signature, async () =>
-        replanNotice(
-          await deps.replan({
-            runContractVersion: RUN_CONTRACT_VERSION,
-            runId: deps.runId,
-            requestId: requestIdFor(signature),
-            expectedRevision,
-            reason: text.slice(0, 600),
-          }),
-        ),
-      );
+      return run("replan", signature, async () => {
+        const output = await deps.replan({
+          runContractVersion: RUN_CONTRACT_VERSION,
+          runId: deps.runId,
+          requestId: requestIdFor(signature),
+          expectedRevision,
+          reason: text.slice(0, 600),
+        });
+        if (output.status !== "rejected") deps.accepted?.("replan");
+        return replanNotice(output);
+      });
     },
 
     retry(offer: RetryOffer, expectedRevision: number): Promise<boolean> {
@@ -190,17 +195,17 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
       const text = reason.trim();
       if (text === "") return Promise.resolve(false);
       const signature = `cancel-run:${expectedRevision}:${text}`;
-      return run("cancel", signature, async () =>
-        cancelRunNotice(
-          await deps.cancel({
-            runContractVersion: RUN_CONTRACT_VERSION,
-            runId: deps.runId,
-            requestId: requestIdFor(signature),
-            expectedRevision,
-            reason: text.slice(0, 600),
-          }),
-        ),
-      );
+      return run("cancel", signature, async () => {
+        const output = await deps.cancel({
+          runContractVersion: RUN_CONTRACT_VERSION,
+          runId: deps.runId,
+          requestId: requestIdFor(signature),
+          expectedRevision,
+          reason: text.slice(0, 600),
+        });
+        if (output.status !== "rejected") deps.accepted?.("cancel-run");
+        return cancelRunNotice(output);
+      });
     },
 
     /** More turns for one seat; the reason is written by the page. */

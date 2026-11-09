@@ -36,6 +36,7 @@ export type EngineViewProps = {
   controls?: Pick<
     EngineControlsProps,
     | "state"
+    | "drafts"
     | "onReplan"
     | "onRetry"
     | "onCancelTask"
