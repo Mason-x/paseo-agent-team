@@ -9,6 +9,7 @@ import {
   targetStillWaited,
 } from "./read-retry";
 import { replyAnchor } from "./report-repair";
+import { ENGINE_SETTLER, receiptOccurrence, sameTurnOccurrence } from "./turn-occurrence";
 
 /**
  * A member's turn that Paseo cut off because the person closed or archived the member's Agent (T4a).
@@ -42,7 +43,7 @@ export const MEMBER_LOST_CODE = "member-lost";
 export const SEAT_ARCHIVED_CODE = "seat-archived";
 /** `outcome` of the receipt the Engine writes for a turn the host closed under the member. */
 export const AGENT_CLOSED_OUTCOME = "agent-closed";
-export const ENGINE_SETTLER = "engine";
+export { ENGINE_SETTLER };
 /** The reason code of the decision, and the `outcome` of the receipt, for a turn the host lost (T4b). */
 export const HOST_LOST_CODE = "host-lost";
 export const HOST_LOST_OUTCOME = "host-lost";
@@ -62,6 +63,8 @@ export type ClosedTurn = {
   taskId: string;
   agentId: string;
   turnId: string;
+  /** Which appearance of the turn id this is (see turn-occurrence.ts): the end settled for it carries it. */
+  occurrence: number;
   basis: ClosedTurnBasis;
 };
 
@@ -99,9 +102,12 @@ export function engineSettledEnd(
       isEngineSettled(receipt) &&
       receipt.agentId === assignment.agentId &&
       receipt.turnId !== null &&
+      // A turn id can come back after a restart: the end must also have been written after the
+      // assignment, or it is an older assignment's.
       (assignment.turnId === null
         ? Date.parse(receipt.receivedAt) > Date.parse(assignment.createdAt)
-        : receipt.turnId === assignment.turnId),
+        : receipt.turnId === assignment.turnId &&
+          Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt)),
   );
 }
 
@@ -146,10 +152,7 @@ export function closedTurnCandidates(record: RunRecord): ClosedTurnCandidate[] {
     if (started === undefined) continue;
     if (assignment.turnId !== null && started.turnId !== assignment.turnId) continue;
     const ended = record.eventReceipts.some(
-      (receipt) =>
-        receipt.kind === "turn_ended" &&
-        receipt.agentId === assignment.agentId &&
-        receipt.turnId === started.turnId,
+      (receipt) => receipt.kind === "turn_ended" && sameTurnOccurrence(receipt, started),
     );
     if (ended) continue;
     const closed =
@@ -199,6 +202,7 @@ export function findClosedTurns(
       taskId: assignment.taskId,
       agentId: assignment.agentId,
       turnId: started.turnId,
+      occurrence: receiptOccurrence(started),
       basis,
     });
   }
@@ -213,15 +217,20 @@ export function closedSince(
   record: Pick<RunRecord, "eventReceipts">,
   agentId: string,
   turnId: string,
+  occurrence?: number,
 ): boolean {
-  const started = record.eventReceipts.find(
-    (receipt) =>
-      receipt.kind === "turn_started" && receipt.agentId === agentId && receipt.turnId === turnId,
-  );
-  const ended = record.eventReceipts.find(
-    (receipt) =>
-      receipt.kind === "turn_ended" && receipt.agentId === agentId && receipt.turnId === turnId,
-  );
+  // One appearance of the turn id: the one asked for, else the newest.
+  const mine = (kind: string) => {
+    const same = record.eventReceipts.filter(
+      (receipt) =>
+        receipt.kind === kind && receipt.agentId === agentId && receipt.turnId === turnId,
+    );
+    return occurrence === undefined
+      ? same.sort((a, b) => receiptOccurrence(b) - receiptOccurrence(a) || b.seq - a.seq)[0]
+      : same.find((receipt) => receiptOccurrence(receipt) === occurrence);
+  };
+  const started = mine("turn_started");
+  const ended = mine("turn_ended");
   const since = started?.seq ?? ended?.seq ?? 0;
   return record.eventReceipts.some(
     (receipt) =>
@@ -251,6 +260,8 @@ export type LostTurn = {
   taskId: string;
   agentId: string;
   turnId: string;
+  /** Which appearance of the turn id this is (see turn-occurrence.ts). */
+  occurrence: number;
   basis: HostLostBasis;
   /** The used-up re-check of the reply, whose alert is taken down with the settlement. */
   item: ReadRetryItem;
@@ -347,11 +358,14 @@ export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCand
       (receipt) =>
         receipt.kind === "turn_ended" &&
         receipt.agentId === assignment.agentId &&
-        (receipt.seq > started.seq || receipt.turnId === started.turnId),
+        (receipt.seq > started.seq || sameTurnOccurrence(receipt, started)),
     );
     if (later) continue;
     // A member the host closed or archived after the turn began is a closed turn (T4a), not a lost one.
-    if (started.turnId !== null && closedSince(record, assignment.agentId, started.turnId))
+    if (
+      started.turnId !== null &&
+      closedSince(record, assignment.agentId, started.turnId, receiptOccurrence(started))
+    )
       continue;
     found.push({ assignment, started, item, anchorMessageId: item.target.anchorMessageId, heldAt });
   }
@@ -385,6 +399,7 @@ export function findLostTurns(
       taskId: assignment.taskId,
       agentId: assignment.agentId,
       turnId: started.turnId,
+      occurrence: receiptOccurrence(started),
       basis: { firstNotFoundAt: heldAt, secondNotFoundAt: read.at, seatStatus: seat.status },
       item,
     });

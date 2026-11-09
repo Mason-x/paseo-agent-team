@@ -16,6 +16,7 @@ import {
 } from "../../shared/domain/run-engine/lost-turn";
 import { resolveItemAlerts } from "../../shared/domain/run-engine/read-retry";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
+import { turnKey } from "../../shared/domain/run-engine/turn-occurrence";
 import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { alertIdFor, sha256Hex } from "./digest";
 import { appendObservation } from "./observer";
@@ -104,7 +105,9 @@ export function createMemberLostSettler(options: MemberLostOptions) {
     let turns = 0;
     const cancelling = cancelPending(current);
     for (const turn of findClosedTurns(current, seats)) {
-      const key = `turn_ended:${turn.agentId}:${turn.turnId}`;
+      const key =
+        turnKey("turn_ended", turn.agentId, turn.turnId, turn.occurrence) ??
+        `turn_ended:${turn.agentId}:${turn.turnId}`;
       const receipt = {
         eventKey: key,
         kind: "turn_ended",
@@ -128,6 +131,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         assignmentId: turn.assignmentId,
         reason: MEMBER_LOST_CODE,
         turnId: turn.turnId,
+        endedEventKey: key,
         decisionId: uuid(),
         controlNonceDigest: sha256Hex(uuid()),
         now,
@@ -142,7 +146,9 @@ export function createMemberLostSettler(options: MemberLostOptions) {
     // A turn the host lost, on the record the closed turns left: one that was just settled has its
     // receipt now and is not found again.
     for (const turn of findLostTurns(next, seats, reads, now)) {
-      const key = `turn_ended:${turn.agentId}:${turn.turnId}`;
+      const key =
+        turnKey("turn_ended", turn.agentId, turn.turnId, turn.occurrence) ??
+        `turn_ended:${turn.agentId}:${turn.turnId}`;
       const receipt = {
         eventKey: key,
         kind: "turn_ended",
@@ -171,6 +177,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         assignmentId: turn.assignmentId,
         reason: HOST_LOST_CODE,
         turnId: turn.turnId,
+        endedEventKey: key,
         decisionId: uuid(),
         controlNonceDigest: sha256Hex(uuid()),
         now,
