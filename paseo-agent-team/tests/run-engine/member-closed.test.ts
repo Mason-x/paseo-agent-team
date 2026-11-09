@@ -199,8 +199,25 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
+/**
+ * One clock for every part of the wiring, moving forward a second each time it is read. The Engine only
+ * settles a turn whose `turn_started` receipt is strictly later than the assignment it belongs to
+ * (`lost-turn.ts`); with the real clock that was true only because the machine took a few milliseconds
+ * in between, so a fast one could put both in the same millisecond. Here "later" is a fact of the test.
+ */
+function steppedClock(): { now(): string } {
+  let at = Date.parse("2026-11-05T12:00:00.000Z");
+  return {
+    now: () => {
+      at += 1000;
+      return new Date(at).toISOString();
+    },
+  };
+}
+
 /** The wiring as production makes it: the settler first, the cancellation finisher after it. */
 function build(host: Host) {
+  const clock = steppedClock();
   const failures: ReadFailure[] = [];
   const onReadFailure = (_runId: string, failure: ReadFailure) => {
     failures.push(failure);
@@ -224,13 +241,14 @@ function build(host: Host) {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const observer = createRunObserver({ store: observerStore, onReadFailure });
+  const observer = createRunObserver({ store: observerStore, onReadFailure, clock });
   const effects = createEffects({
     store,
     port: host.port,
     compile: compileEngineIntent,
     resolveWorkspace: () => ({ workspaceId: "ws-start", directory: repoDir }),
     onReadFailure,
+    clock,
   });
   const profile = (family: string, id: string) => ({
     id,
@@ -260,12 +278,14 @@ function build(host: Host) {
     resolveWorkspace,
     compile: compileDispatch,
     onReadFailure,
+    clock,
   });
   const intake = createIntake({
     store,
     observer,
     host: observerHost,
     onReadFailure,
+    clock,
     repair: { send: (runId) => effects.runOutbox(runId) },
   });
   const dagIntake = createDagIntake({
@@ -273,6 +293,7 @@ function build(host: Host) {
     host: observerHost,
     seatFamily: () => null,
     resolveWorkspace,
+    clock,
     repair: { send: (runId) => effects.runOutbox(runId) },
   });
   const driver = createEngineDriver({
@@ -282,11 +303,12 @@ function build(host: Host) {
     intake,
     dagIntake,
     service,
-    memberLost: createMemberLostSettler({ store, readSeat, onReadFailure }),
-    cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure }),
+    clock,
+    memberLost: createMemberLostSettler({ store, readSeat, onReadFailure, clock }),
+    cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure, clock }),
     reconcileHost: createObserverHost(host.port, { requireIdle: true }),
   });
-  const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+  const control = createRunControl({ store, ensureReady: async () => undefined, driver, clock });
   return { driver, control, failures, seatReads, gate };
 }
 
@@ -652,35 +674,46 @@ for (const schema of [1, 2] as const) {
       }
     }
 
-    test("R-flush: a closed hook that was held back is recorded by the recovery before it settles, so the receipt is what shows it", async () => {
-      const host = fakeHost();
-      const built = build(host);
-      await reachWorking(host, built);
-      // The close is reported while the observer's store is not ready: the observer holds the hook.
-      built.gate.ready = false;
-      const held = await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
-      expect(held.status).toBe("buffered");
-      built.gate.ready = true;
-      expect(engineReceipts(await stored())).toHaveLength(0);
-      // The host reads the member as having no turn, but not as closed: only the held hook shows the close.
-      host.runningAgents.delete(MEMBER);
+    // Both ways of looking flush what the observer held back before they settle, so the held `agent.closed`
+    // is in the ledger and the settler's receipt can name it. Without the flush on the button's path the host
+    // read that follows would record the member's idle turn as one the host ended, and the report in it
+    // would be taken in.
+    for (const via of ["recover", "kick"] as const) {
+      test(`R-flush: a closed hook that was held back is recorded by the ${via} before it settles, so the receipt is what shows it`, async () => {
+        const host = fakeHost();
+        const built = build(host);
+        await reachWorking(host, built);
+        // The close is reported while the observer's store is not ready: the observer holds the hook.
+        built.gate.ready = false;
+        const held = await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+        expect(held.status).toBe("buffered");
+        built.gate.ready = true;
+        expect(engineReceipts(await stored())).toHaveLength(0);
+        // The host reads the member as having no turn, but not as closed: only the held hook shows the close.
+        host.runningAgents.delete(MEMBER);
 
-      await built.driver.recover();
-      await built.control.idle();
+        await recoverWithoutHook(built, via);
 
-      const settled = await stored();
-      const receipts = engineReceipts(settled);
-      expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toMatchObject({
-        outcome: "agent-closed",
-        settledBy: "engine",
-        basis: { closedBy: "receipt" },
+        const settled = await stored();
+        const receipts = engineReceipts(settled);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]).toMatchObject({
+          outcome: "agent-closed",
+          settledBy: "engine",
+          basis: { closedBy: "receipt" },
+        });
+        expect(openDecisions(settled)).toHaveLength(1);
+        expect(answerableActions(settled, openDecisions(settled)[0] as never)).toEqual(["cancel"]);
+        expect(settled.assignments.every((entry) => entry.acceptedProof === null)).toBe(true);
+        // No turn the host ended: the only end the ledger has for this turn is the Engine's own.
+        expect(
+          settled.eventReceipts.filter(
+            (r) => r.kind === "turn_ended" && r.turnId === host.turnOf(MEMBER),
+          ),
+        ).toHaveLength(1);
+        expect(host.calls.archives).toBe(0);
       });
-      expect(openDecisions(settled)).toHaveLength(1);
-      expect(answerableActions(settled, openDecisions(settled)[0] as never)).toEqual(["cancel"]);
-      expect(settled.assignments.every((entry) => entry.acceptedProof === null)).toBe(true);
-      expect(host.calls.archives).toBe(0);
-    });
+    }
 
     test("R-idle: a Run whose member is working and whose host reads nothing closed: looking by recovery or by the button writes nothing", async () => {
       const host = fakeHost();

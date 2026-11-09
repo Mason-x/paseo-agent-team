@@ -7,6 +7,7 @@ import {
   EMPTY_SESSION,
   type EngineSession,
 } from "../../../shared/domain/run-engine/get-session";
+import type { EngineListStatus } from "../../../shared/domain/run-list";
 import { runGetRpc, runListRpc } from "../../../shared/rpc/run-engine";
 import {
   RUN_CONTRACT_VERSION,
@@ -137,7 +138,11 @@ export function useEngineRuns(hostId: string) {
     return () => poller.stop();
   }, [visible, refresh]);
 
+  const answered = data?.host === hostId;
+  const status: EngineListStatus = answered ? "ready" : error === null ? "pending" : "error";
   return {
+    /** No data and no error yet: the first answer has not come (a failed query is `error`). */
+    status,
     runs: data?.host === hostId ? data.value.runs : [],
     health: data?.host === hostId ? data.value.health : [],
     capabilities: data?.host === hostId ? data.value.capabilities : null,
