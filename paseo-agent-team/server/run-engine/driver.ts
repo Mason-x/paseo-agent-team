@@ -315,6 +315,10 @@ export function createEngineDriver(options: DriverOptions) {
         reason: null,
       };
     }
+    // Before the host is read for turns whose hook was lost: that read takes a closed Agent for one with
+    // no turn and would record the cut-off turn as ended by the host. The settler writes the receipt the
+    // read would have (same key), so the read finds it already recorded.
+    await options.memberLost?.settle(runId);
     await options.observer.reconcile(options.reconcileHost ?? options.host, { runId });
     const fresh = await options.store.get(runId);
     await settleWaiting(runId, fresh.status === "ok" ? fresh.record : read.record);
@@ -394,6 +398,15 @@ export function createEngineDriver(options: DriverOptions) {
      */
     async recover(): Promise<{ runs: number }> {
       await options.observer.flush();
+      if (options.memberLost) {
+        // Flush, then settle, then reconcile: the flush records a buffered `agent.closed`, so the settler
+        // can use it; the settle comes before the reconcile for the reason given in `retryNow`. A Run with
+        // no turn that may have been cut off costs no host read and writes nothing.
+        for (const entry of (await options.store.list()).entries) {
+          if (entry.lifecycle === "finished" || entry.lifecycle === "cancelled") continue;
+          await options.memberLost.settle(entry.runId);
+        }
+      }
       await options.observer.reconcile(options.reconcileHost ?? options.host);
       const listed = await options.store.list();
       let runs = 0;

@@ -202,8 +202,10 @@ itself. The task then waits for you at a decision that can only be answered with
 not asked again, whatever the cut-off turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
-member's seat takes no more work in this Run. **Do not archive the coordinator while a Run is live:
-archiving it archives the members it created.** Going back to 0.6.x: a member-lost decision that
+member's seat takes no more work in this Run, so a task that needs that seat can only wait or be
+cancelled with the whole Run (one task cannot be cancelled alone yet).
+**Do not archive the coordinator while a Run is live: archiving it archives the members it created.**
+Going back to 0.6.x: a member-lost decision that
 nobody answered shows a retry there; do not pick it. While the Agent stays closed the seat refuses
 the new attempt and nothing is sent (for a reviewer's decision the retry is refused outright), but
 it is misleading; cancel instead.

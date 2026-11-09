@@ -81,7 +81,7 @@ export function engineSettledEnd(
       receipt.agentId === assignment.agentId &&
       receipt.turnId !== null &&
       (assignment.turnId === null
-        ? Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt)
+        ? Date.parse(receipt.receivedAt) > Date.parse(assignment.createdAt)
         : receipt.turnId === assignment.turnId),
   );
 }
@@ -121,7 +121,7 @@ export function closedTurnCandidates(record: RunRecord): ClosedTurnCandidate[] {
           receipt.kind === "turn_started" &&
           receipt.agentId === assignment.agentId &&
           receipt.turnId !== null &&
-          Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt),
+          Date.parse(receipt.receivedAt) > Date.parse(assignment.createdAt),
       )
       .sort((a, b) => b.seq - a.seq)[0];
     if (started === undefined) continue;

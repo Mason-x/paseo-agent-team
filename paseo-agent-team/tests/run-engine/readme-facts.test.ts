@@ -129,6 +129,9 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("Closing or archiving a member's Agent while a Run is live");
     expect(section).toContain("decision that can only be answered with cancel");
     expect(section).toContain("An archived\nmember's seat takes no more work in this Run");
+    expect(section).toContain(
+      "a task that needs that seat can only wait or be\ncancelled with the whole Run",
+    );
     expect(section).toContain("Do not archive the coordinator while a Run is live");
     expect(section).toContain("archiving it archives the members it created");
     expect(section).toContain("Going back to 0.6.x");

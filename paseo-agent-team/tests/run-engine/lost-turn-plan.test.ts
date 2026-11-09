@@ -249,6 +249,26 @@ describe("the helpers around it", () => {
     expect(engineSettledEnd(record([receipt("turn_ended", 2)]), assignment())).toBeUndefined();
   });
 
+  test("a receipt in the same millisecond the assignment was created is not later than it", () => {
+    seq = 0;
+    // The turn that began at the very moment of the assignment is not taken as this assignment's turn.
+    const sameMs = record([receipt("turn_started", 0), receipt("closed", 1)]);
+    expect(closedTurnCandidates(sameMs)).toEqual([]);
+    expect(findClosedTurns(sameMs, closedSeat)).toEqual([]);
+    // One millisecond later it is.
+    const later = record([receipt("turn_started", 0, { receivedAt: "2026-11-09T10:00:00.001Z" })]);
+    expect(findClosedTurns(later, closedSeat)).toHaveLength(1);
+    // Nor is an Engine end written in that same millisecond this assignment's own (turn not yet known).
+    const ended = receipt("turn_ended", 0, { settledBy: "engine", outcome: "agent-closed" });
+    expect(engineSettledEnd(record([ended]), assignment())).toBeUndefined();
+    expect(
+      engineSettledEnd(
+        record([{ ...ended, receivedAt: "2026-11-09T10:00:00.001Z" }]),
+        assignment(),
+      ),
+    ).toBeDefined();
+  });
+
   test("an archived receipt marks the seat's agent as archived, and only that agent", () => {
     seq = 0;
     const base = record([receipt("archived", 1)]);
