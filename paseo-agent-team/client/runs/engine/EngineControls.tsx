@@ -433,7 +433,7 @@ export function EngineControls(props: EngineControlsProps) {
           {zh.controls.pending}
         </Text>
       ) : null}
-      {state.notice && state.noticeFrom !== "kick" ? (
+      {state.notice && (state.noticeFrom !== "kick" || !view.kick) ? (
         <Notice theme={theme} notice={state.notice} onDismiss={onDismiss} />
       ) : null}
 

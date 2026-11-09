@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
   LOST_TURN_CODE,
-  LOST_TURN_HINT,
   type ReadRetryItem,
   readRetryAlertSummary,
 } from "../../shared/domain/run-engine/read-retry";
@@ -52,7 +51,8 @@ describe("the text of an alert on the Runs page", () => {
     // Guards the premise: if the wording is ever shortened below 300 this test says the cut no longer matters.
     expect(written.length).toBeGreaterThan(300);
     expect(written.endsWith("等它回复后再点“立即检查并推进”")).toBe(true);
-    expect(written).toContain(LOST_TURN_HINT);
+    // what the old cut took away is the way out, not a trailing detail
+    expect(written.slice(300)).toContain("请向该成员发一条只要求回复 OK 的消息");
   });
 
   test("is shown whole, so the sentence about what to do is not cut in the middle", () => {

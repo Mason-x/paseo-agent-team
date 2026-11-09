@@ -1,4 +1,4 @@
-import { createElement as h } from "react";
+import { createElement as h, useState } from "react";
 // @ts-expect-error react-test-renderer ships no types here; TestRenderer below is the subset used.
 import * as reactTestRenderer from "react-test-renderer";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -8,6 +8,8 @@ const shared = vi.hoisted(() => ({
   rpc: new Map<string, ReturnType<typeof vi.fn>>(),
   answers: new Map<string, unknown>(),
   refresh: vi.fn(async () => undefined),
+  /** What the next read of the Run changes (the Run moves on); null leaves it as it is. */
+  advance: null as (() => void) | null,
 }));
 
 vi.mock("react-native", () => {
@@ -46,13 +48,21 @@ vi.mock("@getpaseo/plugin/client/react-native", () => {
   };
 });
 vi.mock("../../client/runs/engine/use-engine-run", () => ({
-  useEngineRun: (_hostId: string, runId: string) => ({
-    session: shared.sessions.get(runId) ?? { state: null, older: [] },
-    error: null,
-    loadingOlder: false,
-    refresh: shared.refresh,
-    loadOlder: async () => undefined,
-  }),
+  useEngineRun: (_hostId: string, runId: string) => {
+    // As the real hook: a read that gives a new state draws the pane again.
+    const [, redraw] = useState(0);
+    return {
+      session: shared.sessions.get(runId) ?? { state: null, older: [] },
+      error: null,
+      loadingOlder: false,
+      refresh: async () => {
+        await shared.refresh();
+        shared.advance?.();
+        redraw((count) => count + 1);
+      },
+      loadOlder: async () => undefined,
+    };
+  },
 }));
 
 import { RunDetailPane } from "../../client/runs/engine/EngineRunsSection";
@@ -78,14 +88,14 @@ const renderer = reactTestRenderer as unknown as TestRenderer;
 const theme = new Proxy({ colors: new Proxy({}, { get: () => "#000" }) }, {}) as never;
 const RUN = "run-kick-111";
 
-function readyState(controls: string[]) {
+function readyState(controls: string[], revision = 30, lifecycle = "active") {
   const state = engineGetState({
     runContractVersion: 1,
     status: "ready",
     run: {
       runId: RUN,
-      revision: 30,
-      lifecycle: "active",
+      revision,
+      lifecycle: lifecycle as never,
       team: { id: "team", name: "Team", rawMode: "economy", modeContract: 2, plannerVersion: 2 },
       dagRevision: 1,
       dag: { revision: 1, tasks: [] },
@@ -130,6 +140,7 @@ beforeEach(() => {
   shared.rpc.clear();
   shared.answers.clear();
   shared.refresh.mockClear();
+  shared.advance = null;
 });
 
 const IDLE_TEXT = "已检查：没有需要推进的事";
@@ -220,6 +231,39 @@ describe("the notice after pressing the check button", () => {
     expect(contains(groupOf(pressable(view.root, zh.controls.pause.button)), paused[0])).toBe(
       false,
     );
+    await renderer.act(async () => view.unmount());
+  });
+});
+
+describe("the answer of a kick that finishes the Run", () => {
+  const FINISHED_OUTPUT = { ...KICK_OUTPUT, outcome: "finished", revision: 31 };
+
+  // The kick group is only there while the server offers a kick. A kick that finishes the Run takes the
+  // offer away with the next read, and the group goes with it: the answer must not go with it.
+  test("is still said, once, after the read that takes the kick away", async () => {
+    shared.answers.set(runKickRpc.name, FINISHED_OUTPUT);
+    shared.advance = () => {
+      shared.sessions.set(RUN, { state: readyState([], 31, "finished"), older: [] });
+    };
+    const view = await mount(["kick", "pause"]);
+    expect(pressable(view.root, zh.controls.kick.button)).toBeDefined();
+    await press(view.root, zh.controls.kick.button);
+
+    expect(pressable(view.root, zh.controls.kick.button)).toBeUndefined();
+    expect(noticeNodes(view.root, zh.controls.result.kick.finished)).toHaveLength(1);
+    await renderer.act(async () => view.unmount());
+  });
+
+  test("is said once, in the kick group, when the read leaves the kick on offer", async () => {
+    shared.answers.set(runKickRpc.name, KICK_OUTPUT);
+    shared.advance = () => {
+      shared.sessions.set(RUN, { state: readyState(["kick", "pause"], 31), older: [] });
+    };
+    const view = await mount(["kick", "pause"]);
+    await press(view.root, zh.controls.kick.button);
+    const notices = noticeNodes(view.root, IDLE_TEXT);
+    expect(notices).toHaveLength(1);
+    expect(contains(groupOf(pressable(view.root, zh.controls.kick.button)), notices[0])).toBe(true);
     await renderer.act(async () => view.unmount());
   });
 });
