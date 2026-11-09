@@ -756,6 +756,114 @@ describe("the failed-task gate", () => {
     expect((await stored()).revision).toBe(paused.revision);
   });
 
+  // --- the alert of a Run that is paused while the failed tasks are cleared (T6a) ---------------
+
+  /** The gate is shut (five failed over three, t2 held back, the alert open); then `cancelled` of them are cancelled. */
+  async function gateShutThenCancelled(cancelled: number): Promise<{ host: Host; driver: Driver }> {
+    const { host, driver } = await admitted();
+    await addFailed(5);
+    produce(host, "agent-b1");
+    await hook(host, driver, "agent-b1");
+    judge(host, "agent-b2");
+    await hook(host, driver, "agent-b2");
+    const shut = await stored();
+    expect(states(shut)).toMatchObject({ t1: "done", t2: "ready" });
+    expect(gateAlerts(shut)).toHaveLength(1);
+    expect(gateAlerts(shut)[0]).toMatchObject({ state: "open" });
+    for (const taskId of ["f5", "f4", "f3"].slice(0, cancelled)) await cancelFailed(taskId);
+    return { host, driver };
+  }
+
+  const setLifecycle = (lifecycle: RunRecord["lifecycle"]) =>
+    store.update(RUN_ID, (current) => ({ ...structuredClone(current), lifecycle }));
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] a paused Run whose failed tasks were cancelled back within the limit has the alert taken down once, and neither resumes nor sends",
+    async (version) => {
+      const { host, driver } = await gateShutThenCancelled(2);
+      await setLifecycle("paused");
+      const sentBefore = [...sentTo(host)];
+      const before = await stored();
+      expect(before.alerts.filter((alert) => alert.state !== "resolved")).toHaveLength(1);
+
+      const kicked = await driver.kick(RUN_ID);
+      expect(kicked.last.status).toBe("idle");
+      const after = await stored();
+      const alerts = gateAlerts(after);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({ state: "resolved" });
+      expect(alerts[0]?.resolvedAt).not.toBeNull();
+      expect(resolvedEvents(after)).toHaveLength(1);
+      // The Run is as paused as it was: the held task is not started, nothing is sent.
+      expect(after.lifecycle).toBe("paused");
+      expect(states(after)).toMatchObject({ t1: "done", t2: "ready" });
+      expect(sentTo(host)).toEqual(sentBefore);
+      expect(after.schemaVersion).toBe(version === "v1" ? 1 : 2);
+      expect(checkLedgerInvariants(after)).toEqual({ ok: true });
+
+      // Once is once: asking again (a kick, a hook) writes nothing more.
+      for (let round = 0; round < 3; round += 1) await driver.kick(RUN_ID);
+      await hook(host, driver, "agent-b2");
+      const quiet = await stored();
+      expect(quiet.revision).toBe(after.revision);
+      expect(resolvedEvents(quiet)).toHaveLength(1);
+      expect(quiet.lifecycle).toBe("paused");
+      expect(sentTo(host)).toEqual(sentBefore);
+    },
+  );
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] a paused Run still over the failed-task limit keeps its alert open, and later passes write nothing",
+    async () => {
+      const { host, driver } = await gateShutThenCancelled(1);
+      await setLifecycle("paused");
+      const before = await stored();
+      for (let round = 0; round < 3; round += 1) await driver.kick(RUN_ID);
+      const after = await stored();
+      expect(gateAlerts(after)).toHaveLength(1);
+      expect(gateAlerts(after)[0]).toMatchObject({ state: "open" });
+      expect(resolvedEvents(after)).toHaveLength(0);
+      expect(after.revision).toBe(before.revision);
+      expect(sentTo(host)).toEqual(["agent-b1", "agent-b2"]);
+    },
+  );
+
+  test.each(["v1", "v2"] as const)(
+    "[%s] an idle paused Run, one that never had the alert, is not written to",
+    async () => {
+      const { driver } = await admitted();
+      await setLifecycle("paused");
+      const before = await stored();
+      expect(before.alerts).toEqual([]);
+      for (let round = 0; round < 4; round += 1) await driver.kick(RUN_ID);
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(after.alerts).toEqual([]);
+      expect(after.lifecycle).toBe("paused");
+    },
+  );
+
+  test.each([
+    ["v1", "finished"],
+    ["v1", "cancelled"],
+    ["v2", "finished"],
+    ["v2", "cancelled"],
+  ] as const)(
+    "[%s] a %s Run is not touched: its open failed-task alert stays as it was",
+    async (_version, lifecycle) => {
+      const { driver } = await gateShutThenCancelled(2);
+      await setLifecycle(lifecycle);
+      const before = await stored();
+      for (let round = 0; round < 3; round += 1) await driver.kick(RUN_ID);
+      const after = await stored();
+      expect(after.lifecycle).toBe(lifecycle);
+      expect(gateAlerts(after)).toHaveLength(1);
+      expect(gateAlerts(after)[0]).toMatchObject({ state: "open" });
+      expect(resolvedEvents(after)).toHaveLength(0);
+      expect(after.revision).toBe(before.revision);
+    },
+  );
+
   test("a Run still waiting for its plan is not touched by the gate", async () => {
     const host = fakeHost();
     const driver = build(host);

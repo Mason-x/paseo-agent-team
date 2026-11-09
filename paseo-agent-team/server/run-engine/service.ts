@@ -798,6 +798,12 @@ export function createEngineService(options: EngineServiceOptions) {
     }
   }
 
+  function hasOpenFailedLimitAlert(record: RunRecord): boolean {
+    return record.alerts.some(
+      (alert) => alert.state !== "resolved" && alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
+    );
+  }
+
   async function clearFailedLimit(runId: string): Promise<void> {
     try {
       await options.store.update(runId, (current) => {
@@ -817,8 +823,20 @@ export function createEngineService(options: EngineServiceOptions) {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
     // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
-    // its DAG, have nothing to send.
-    if (read.record.lifecycle !== "active") return { status: "idle" };
+    // its DAG, have nothing to send. A paused Run is the one exception to "nothing to do": a person may
+    // cancel failed tasks while it is paused, and then the failed-task alert is no longer true, so it is
+    // taken down here (and only here: nothing is sent and the Run is not resumed). A Run that has no such
+    // alert, or is still over the limit, is not written to.
+    if (read.record.lifecycle !== "active") {
+      if (
+        read.record.lifecycle === "paused" &&
+        !failedTaskLimit(read.record).exceeded &&
+        hasOpenFailedLimitAlert(read.record)
+      ) {
+        await clearFailedLimit(runId);
+      }
+      return { status: "idle" };
+    }
     // Near a ledger limit nothing new starts, so what is in flight can still be taken in and finished.
     const capacity = capacityIssue(read.record, {
       bytesHigh: read.needsCompaction,
@@ -826,13 +844,7 @@ export function createEngineService(options: EngineServiceOptions) {
     });
     if (capacity !== null) await noteCapacity(runId, capacity.level);
     const failures = failedTaskLimit(read.record);
-    if (
-      !failures.exceeded &&
-      read.record.alerts.some(
-        (alert) =>
-          alert.state !== "resolved" && alert.summary.startsWith(FAILED_LIMIT_ALERT_PREFIX),
-      )
-    ) {
+    if (!failures.exceeded && hasOpenFailedLimitAlert(read.record)) {
       await clearFailedLimit(runId);
     }
     const first = nextWork(read.record);
