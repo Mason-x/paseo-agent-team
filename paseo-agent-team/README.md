@@ -357,6 +357,23 @@ daemon restart.
   decision may still send the member a message if the reply stays unreadable, and 0.7.0 has no gate that
   holds back a reply that becomes readable later, so if one does, it is taken in and the retry on the
   decision no longer does anything. Do not roll back while a Run is live (see above).
+- **A host restart while the coordinator is planning.** The plan is the coordinator's reply to the
+  plan request, and a restart can lose it. When the coordinator's plan request is no longer in its history
+  (`incomplete:dispatch-not-found`), the host reported the end of a turn of the coordinator after the
+  request, and the coordinator began no turn since, the Run used to stay in 启动中 with nothing said. Now
+  the first read after the restart (the recovery, or a hook, or **立即检查并推进**) leaves one warning,
+  「DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划」, and the Run moves to 等待任务图
+  like one whose plan was refused: press **重新规划**. That sends the coordinator one new request (it
+  costs one of its turns) and the plan it answers with is read as usual; the warning comes down when it
+  is admitted or when you ask again. Nothing is sent by the Engine itself and the plan is not asked for
+  again in the same words. Apart from this case, a reply that cannot be read still writes nothing: a failed
+  read, a reply that is too large, any other incomplete read, a turn that has not ended or that was followed
+  by a new one, an end from before the request, and a message to the coordinator that is still being sent
+  or of unknown fate (a re-plan is refused then, so the warning would never come down). A failed read is
+  not tried again on the spot; the next recovery, hook or **立即检查并推进** reads once more. A Run that
+  stays in 启动中 with no warning has not matched this case: cancel it and start it again. One limit: if a
+  plan was read and refused and the host then loses the history too, the warning above is added and the
+  real reason of the earlier refusal is no longer the one a re-plan shows the coordinator.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The

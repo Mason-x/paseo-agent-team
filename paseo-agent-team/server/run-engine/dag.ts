@@ -10,7 +10,11 @@ import {
   compilePlanRepair,
   PLAN_REPAIR_VERSION,
 } from "../../shared/domain/run-engine/engine-prompts";
-import { latestSentWake, requestPlanRepair } from "../../shared/domain/run-engine/plan-repair";
+import {
+  latestSentWake,
+  planReplyLost,
+  requestPlanRepair,
+} from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { DAG_ALERT_PREFIX } from "../../shared/domain/run-engine/replan";
 import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
@@ -65,6 +69,13 @@ export type DagIntakeOptions = {
   repair?: { send(runId: string): Promise<unknown> };
   log?: (message: string, detail?: unknown) => void;
 };
+
+/**
+ * The alert for a plan reply the host lost. It starts with `DAG ` like every refusal, so a re-plan or an
+ * admitted DAG takes it down with the rest and the re-plan shows it to the coordinator as the last refusal.
+ */
+export const PLAN_REPLY_LOST_REASON =
+  "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划";
 
 /** The block the strict parser refused, and the message whose reply held it. */
 type Repairable = { anchor: string; reason: string; issues: readonly ProtocolIssue[] };
@@ -202,7 +213,15 @@ export function createDagIntake(options: DagIntakeOptions) {
       log(`cannot read the plan reply of ${agentId}`, error);
       return { status: "host-error" };
     }
-    if (!window.complete) return { status: "unverifiable", reason: window.reason };
+    if (!window.complete) {
+      // The request is not in the coordinator's history and the host ended its turn: the host restarted
+      // while it planned and the reply is gone. Say so, so a person can ask for a re-plan (T9e). Any other
+      // way of not being able to read the reply, or a turn that may still answer, writes nothing.
+      if (window.reason === "dispatch-not-found" && planReplyLost(record, agentId)) {
+        return refuseRead(PLAN_REPLY_LOST_REASON);
+      }
+      return { status: "unverifiable", reason: window.reason };
+    }
 
     const extracted = extractProtocolBlock(window.text, { expected: "task-dag" });
     if (extracted.status === "unverifiable") {
