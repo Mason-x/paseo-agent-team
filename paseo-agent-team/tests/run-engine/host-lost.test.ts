@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createCancelFinisher } from "../../server/run-engine/cancel";
+import { createCompactor } from "../../server/run-engine/compact";
 import { createRunControl } from "../../server/run-engine/control";
 import { createDagIntake } from "../../server/run-engine/dag";
 import { alertIdFor } from "../../server/run-engine/digest";
@@ -14,9 +15,11 @@ import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
 import { createMemberLostSettler } from "../../server/run-engine/member-lost";
 import { createRunObserver } from "../../server/run-engine/observer";
+import { projectDetail, projectSummary } from "../../server/run-engine/projection";
 import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
+import type { CompactionLimits } from "../../shared/domain/run-engine/compaction";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { answerableActions, decisionKindOf } from "../../shared/domain/run-engine/decision-answer";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
@@ -34,6 +37,7 @@ import {
   readRetryAlertSummary,
 } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
+import { replyAnchor } from "../../shared/domain/run-engine/report-repair";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
@@ -205,6 +209,34 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
+/**
+ * The same host whose timelines read as empty: what a look that is made while the host has lost the
+ * history sees. Used for the reads of the settler only, so the rest of the Engine can see what the host
+ * still holds.
+ */
+function emptyTimelines(port: PaseoEnginePort): PaseoEnginePort {
+  const empty = {
+    entries: [],
+    epoch: "e1",
+    startCursor: null,
+    hasOlder: false,
+    hasNewer: false,
+    gap: false,
+    staleCursor: false,
+    reset: false,
+  };
+  return {
+    ...port,
+    agents: {
+      ...port.agents,
+      ref: (agentId) => {
+        const handle = port.agents.ref(agentId);
+        return { ...handle, timeline: { ...handle.timeline, refetch: async () => empty } };
+      },
+    },
+  };
+}
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
@@ -212,7 +244,15 @@ const iso = (ms: number) => new Date(ms).toISOString();
  * millisecond with each reading (so what happens later is later) and the test moves it by whole seconds.
  * Nothing here waits for real time.
  */
-function build(host: Host) {
+function build(
+  host: Host,
+  options: {
+    /** What the settler reads the reply through, when it is not the host itself. */
+    settleHost?: PaseoEnginePort;
+    /** Fold the history into the checkpoint at every pass, as far as the rules allow. */
+    compaction?: Partial<CompactionLimits>;
+  } = {},
+) {
   const clock = { at: Date.now() };
   const clk = {
     now: () => {
@@ -221,6 +261,8 @@ function build(host: Host) {
     },
   };
   const readHost = createObserverHost(host.port);
+  const settleHost =
+    options.settleHost === undefined ? readHost : createObserverHost(options.settleHost);
   const retry = createReadRetry({
     store,
     clock: clk,
@@ -294,6 +336,13 @@ function build(host: Host) {
     repair: { send: (runId) => effects.runOutbox(runId) },
     clock: clk,
   });
+  const settler = createMemberLostSettler({
+    store,
+    readSeat,
+    readReply: (agentId, messageId) => settleHost.replyWindow(agentId, messageId),
+    onReadFailure,
+    clock: clk,
+  });
   const driver = createEngineDriver({
     store,
     observer,
@@ -303,13 +352,10 @@ function build(host: Host) {
     service,
     clock: clk,
     onPassed: (runId) => retry.sweep(runId),
-    memberLost: createMemberLostSettler({
-      store,
-      readSeat,
-      readReply: (agentId, messageId) => readHost.replyWindow(agentId, messageId),
-      onReadFailure,
-      clock: clk,
-    }),
+    ...(options.compaction === undefined
+      ? {}
+      : { compactor: createCompactor({ store, clock: clk, limits: options.compaction }) }),
+    memberLost: settler,
     cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure, clock: clk }),
     reconcileHost: createObserverHost(host.port, { requireIdle: true }),
   });
@@ -319,7 +365,7 @@ function build(host: Host) {
     driver,
     clock: clk,
   });
-  return { driver, retry, clock, control };
+  return { driver, retry, clock, control, settler };
 }
 
 type Built = ReturnType<typeof build>;
@@ -930,7 +976,7 @@ for (const schema of [1, 2] as const) {
     // --- the three ways of looking ------------------------------------------------------------------
 
     for (const via of ["kick", "recover", "hook"] as const) {
-      test(`a look by ${via} settles it, before the host is reconciled, and writes nothing the second time`, async () => {
+      test(`a look by ${via} settles it once and writes nothing the second time (that it comes before the host is reconciled is shown by the tests of the order further down)`, async () => {
         const host = fakeHost();
         const built = build(host);
         const heldAt = await reachExhausted(host, built);
@@ -939,14 +985,222 @@ for (const schema of [1, 2] as const) {
         const settled = await stored();
         const receipts = engineReceipts(settled);
         expect(receipts).toHaveLength(schema === 2 ? 1 : 0);
-        // The reconcile that follows finds the receipt there: one turn end for the lost turn, the Engine's.
+        // One turn end for the lost turn, the Engine's.
         expect(endsOf(settled)).toHaveLength(schema === 2 ? 1 : 0);
         await lookAgain(built, via);
         expect((await stored()).revision).toBe(settled.revision);
       });
     }
+
+    // --- the whole Run is cancelled while the lost turn waits ----------------------------------------
+
+    test("the settlement alone, with the whole Run being cancelled, writes the receipt and takes the used-up alert down in the same commit, and opens no decision", async () => {
+      const host = fakeHost();
+      const built = build(host);
+      const heldAt = await reachExhausted(host, built);
+      await askForCancel(built);
+      const asked = await stored();
+      expect(asked.lifecycle).toBe("paused");
+      built.clock.at = heldAt + 31_000;
+      // Only the settler: nothing that sweeps alerts or finishes the cancellation runs after it.
+      const out = await built.settler.settle(RUN_ID);
+      const after = await stored();
+      if (schema === 1) {
+        expect(out.settled).toBe(0);
+        expect(after.revision).toBe(asked.revision);
+        return;
+      }
+      expect(out.settled).toBe(1);
+      expect(after.revision).toBe(asked.revision + 1);
+      expect(engineReceipts(after)).toHaveLength(1);
+      expect(openDecisions(after)).toEqual([]);
+      expect(after.decisions.filter((decision) => decision.dedupeKey.startsWith("stuck:"))).toEqual(
+        [],
+      );
+      // The alert of the used-up re-check went with the receipt (the cancel-pending alert is the other one).
+      const used = asked.alerts.filter((alert) =>
+        alert.summary.includes("incomplete:dispatch-not-found"),
+      );
+      expect(used).toHaveLength(1);
+      expect(
+        after.alerts
+          .filter((alert) => alert.summary.includes("incomplete:dispatch-not-found"))
+          .map((alert) => alert.state),
+      ).toEqual(["resolved"]);
+      // The Run is still being cancelled: the finish is the cancellation's own step.
+      expect(after.lifecycle).toBe("paused");
+    });
+
+    test("the whole Run is being cancelled: a look after 30 seconds records the lost turn so the cancellation finishes, and opens no decision that nobody could answer", async () => {
+      const host = fakeHost();
+      const built = build(host);
+      const heldAt = await reachExhausted(host, built);
+      await askForCancel(built);
+      const sentBefore = host.sent.length;
+      built.clock.at = heldAt + 31_000;
+      await kick(built);
+      await built.control.idle();
+      const done = await stored();
+      expect(host.sent).toHaveLength(sentBefore);
+      expect(host.calls.archives).toBe(0);
+      if (schema === 1) {
+        // A v1 Run has no re-check to be used up: nothing is settled and the cancellation keeps waiting.
+        expect(engineReceipts(done)).toEqual([]);
+        expect(done.lifecycle).toBe("paused");
+        return;
+      }
+      expect(done.lifecycle).toBe("cancelled");
+      // The receipt that let the cancellation finish is the Engine's own.
+      expect(engineReceipts(done)).toHaveLength(1);
+      expect(engineReceipts(done)[0]).toMatchObject({
+        outcome: HOST_LOST_OUTCOME,
+        settledBy: "engine",
+      });
+      expect(states(done)).toEqual({ t1: "cancelled", t2: "cancelled" });
+      expect(done.resources).toEqual([]);
+      // No decision was left on a Run that is cancelled, and the alert of the used-up re-check is down.
+      expect(openDecisions(done)).toEqual([]);
+      expect(done.decisions.filter((decision) => decision.dedupeKey.startsWith("stuck:"))).toEqual(
+        [],
+      );
+      expect(done.alerts.filter((alert) => alert.state !== "resolved")).toEqual([]);
+      const view = projectDetail(done);
+      if (!view.ok) throw new Error("projection failed");
+      expect(view.view.decisions.filter((entry) => entry.state === "open")).toEqual([]);
+      // The list counts what needs a person: nothing here does.
+      expect(projectSummary(done)?.needsAttention).toBe(false);
+      expect(checkLedgerInvariants(done).ok).toBe(true);
+      // Looking again writes nothing.
+      const revision = done.revision;
+      await kick(built);
+      await built.driver.recover();
+      expect((await stored()).revision).toBe(revision);
+    });
   });
 }
+
+// --- the order of a look, the late real receipt and compaction (a v2 Run: a v1 Run settles nothing) ---
+
+/** The host holds the lost turn's history after all: the dispatch is back, with the member's reply. */
+async function historyComesBack(host: Host, turnId = "turn-host-visible"): Promise<void> {
+  const record = await stored();
+  const assignment = record.assignments.find((entry) => entry.taskId === "t1");
+  if (assignment === undefined) throw new Error("no assignment");
+  host.addUserMessage(MEMBER, turnId, replyAnchor(record, assignment));
+  host.reply(MEMBER, "I did the work.");
+}
+
+describe("what the look does first, a receipt that comes late, and a compacted history [v2]", () => {
+  beforeEach(async () => {
+    version = 2;
+    await setup();
+  });
+
+  // The settler reads the host through a view in which the history is gone (the look that finds the
+  // dispatch missing), while the reconcile reads a host that still holds the turn: a reconcile that
+  // ran first would record the host's own `turn_ended` and the settlement would never happen.
+  for (const via of ["kick", "recover"] as const) {
+    test(`a look by ${via} settles the lost turn before the host is reconciled: the Engine's receipt is there and comes first, though a reconcile run first would have recorded the host's`, async () => {
+      const host = fakeHost();
+      const built = build(host, { settleHost: emptyTimelines(host.port) });
+      const heldAt = await reachExhausted(host, built);
+      await historyComesBack(host);
+      built.clock.at = heldAt + 31_000;
+      await lookAgain(built, via);
+      const settled = await stored();
+      const [engine] = engineReceipts(settled);
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engine).toMatchObject({
+        kind: "turn_ended",
+        turnId: LOST_TURN,
+        outcome: HOST_LOST_OUTCOME,
+        settledBy: "engine",
+      });
+      // The reconcile did read the history that is back (so the fixture can tell the orders apart),
+      // and what it wrote came after the Engine's receipt.
+      const hostEnd = settled.eventReceipts.find(
+        (receipt) => receipt.kind === "turn_ended" && receipt.turnId === "turn-host-visible",
+      );
+      expect(hostEnd).toBeDefined();
+      expect(engine?.seq).toBeLessThan(hostEnd?.seq ?? 0);
+      const [decision] = openDecisions(settled).filter((entry) => entry.subjectId === "t1");
+      if (decision === undefined) throw new Error("no decision");
+      expect(decisionKindOf(settled, decision)).toBe("host-lost");
+    });
+  }
+
+  test("a look by a hook settles the lost turn before the cancellation is finished: the one look cancels the Run", async () => {
+    const host = fakeHost();
+    const built = build(host);
+    const heldAt = await reachExhausted(host, built);
+    await askForCancel(built);
+    expect((await stored()).lifecycle).toBe("paused");
+    built.clock.at = heldAt + 31_000;
+    await lookAgain(built, "hook");
+    const done = await stored();
+    expect(engineReceipts(done)).toHaveLength(1);
+    expect(done.lifecycle).toBe("cancelled");
+    expect(openDecisions(done)).toEqual([]);
+  });
+
+  test("after the Engine recorded the loss, the member's own turn end for that turn, with a valid report, is a duplicate: the report is not taken in and the decision does not change", async () => {
+    const host = fakeHost();
+    const built = build(host);
+    const heldAt = await reachExhausted(host, built);
+    built.clock.at = heldAt + 31_000;
+    await kick(built);
+    const settled = await stored();
+    expect(engineReceipts(settled)).toHaveLength(1);
+    const decisionsBefore = openDecisions(settled).map((decision) => decision.decisionId);
+    expect(decisionsBefore).toHaveLength(1);
+
+    // The member was alive after all and ends that very turn with a valid report.
+    host.addUserMessage(
+      MEMBER,
+      LOST_TURN,
+      replyAnchor(settled, settled.assignments.find((entry) => entry.taskId === "t1") as never),
+    );
+    produce(host, MEMBER);
+    const ingested = await built.driver.onHook({
+      name: "agent.turn_ended",
+      agentId: MEMBER,
+      turnId: LOST_TURN,
+    });
+    expect(ingested.status).toBe("duplicate");
+    await built.control.idle();
+    await kick(built);
+    await built.driver.recover();
+    const late = await stored();
+    expect(endsOf(late)).toHaveLength(1);
+    expect(endsOf(late)[0]).toMatchObject({ settledBy: "engine", outcome: HOST_LOST_OUTCOME });
+    expect(late.assignments.every((entry) => entry.acceptedProof === null)).toBe(true);
+    expect(states(late)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(openDecisions(late).map((decision) => decision.decisionId)).toEqual(decisionsBefore);
+    expect(late.resources).toEqual(settled.resources);
+    expect(host.sentTo(MEMBER)).toBe(1);
+    expect(checkLedgerInvariants(late).ok).toBe(true);
+  });
+
+  test("a history that is folded into its checkpoint keeps the event that says when the re-checks were used up: the look still settles the lost turn", async () => {
+    const host = fakeHost();
+    // Every pass folds as much as the rules allow.
+    const built = build(host, { compaction: { compactAt: 1, keepNewest: 0 } });
+    const heldAt = await reachExhausted(host, built);
+    const lost = await stored();
+    expect(Number.isNaN(heldAt)).toBe(false);
+    built.clock.at = heldAt + 31_000;
+    await built.driver.kick(RUN_ID);
+    const settled = await stored();
+    // Something was folded (the checkpoint moved), and what says when the re-checks were used up is
+    // still there, so the turn is settled.
+    expect(settled.checkpoint?.throughSeq ?? 0).toBeGreaterThan(0);
+    expect(heldAtOf(settled)).toBe(heldAt);
+    expect(heldAtOf(lost)).toBe(heldAt);
+    expect(engineReceipts(settled)).toHaveLength(1);
+    expect(openDecisions(settled)).toHaveLength(1);
+    expect(checkLedgerInvariants(settled).ok).toBe(true);
+  });
+});
 
 describe("the alert of a used-up re-check says what a look after 30 seconds does", () => {
   test("the number in the alert is the one the code uses", () => {
@@ -970,8 +1224,10 @@ describe("the alert of a used-up re-check says what a look after 30 seconds does
     };
     const summary = readRetryAlertSummary(item);
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
-    expect(summary).toContain("如果该成员在 Paseo 里空闲");
+    expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
     expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
+    expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
+    expect(summary).toContain("只要求回复 OK 的消息");
     expect(alertIdFor(summary)).toBeTruthy();
   });
 });

@@ -156,9 +156,12 @@ describe("the Run Engine section of the README agrees with the code", () => {
     for (const word of [
       "立即检查并推进",
       `至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒`,
-      "如果该成员在 Paseo 里空闲",
+      "如果这是成员（生产者）的实现回合",
+      "且该成员在 Paseo 里空闲",
       "宿主丢失",
       "重试或取消",
+      "判官、冒烟、补证或补报回合不会被引擎结算",
+      "只要求回复 OK 的消息",
     ]) {
       expect(LOST_TURN_HINT).toContain(word);
     }
@@ -170,7 +173,12 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("make sure it has\n  stopped before you answer");
     // What is not settled, and the way out that stays for it.
     expect(section).toContain("a Run written as v1");
+    // The alert and the README say the same: only a producer's own task turn is settled.
+    expect(section).toContain("settles only the turn of a producer");
+    expect(section).toContain("a judge, a smoke tester, a supplement or a re-report");
     expect(section).toContain("asks only for a reply of OK");
+    // A Run cancelled while a settled turn waits is left with no decision nobody can answer.
+    expect(section).toContain("no decision is opened");
     expect(section).toContain("cancelling the whole Run keeps waiting");
     expect(section).toContain("a host-lost decision is an ordinary");
   });

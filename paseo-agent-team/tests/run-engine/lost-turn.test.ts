@@ -359,6 +359,16 @@ async function reachLostTurn(
   }
 }
 
+/** When the re-check of the lost reply was used up, from the audit event of the ledger (ms); null if none. */
+function heldAtOf(record: RunRecord): number | null {
+  const held = record.events.filter(
+    (event) =>
+      event.kind === "read-retry-changed" && (event.payload as { state?: string }).state === "held",
+  );
+  const last = held.at(-1);
+  return last === undefined ? null : Date.parse(last.at);
+}
+
 async function askForCancel(built: ReturnType<typeof build>, requestId = "cancel-1") {
   const before = await stored();
   const out = await built.control.cancel({
@@ -422,8 +432,10 @@ for (const schema of [1, 2] as const) {
       const host = fakeHost();
       const built = build(host);
       await reachLostTurn(host, built, { turnStarted: true, idle: 0 });
-      const heldAt = built.clock.at;
       const lost = await stored();
+      // When the tries were used up is what the ledger's own event says, not the clock the test last
+      // set (a v1 Run has no such event and no re-check: the clock stands in for it).
+      const heldAt = heldAtOf(lost) ?? built.clock.at;
       expect(states(lost)).toEqual({ t1: "assigned", t2: "pending" });
       if (schema === 2) {
         expect((await items())[0]).toMatchObject({ state: "held", lastCode: LOST_CODE });
@@ -435,8 +447,9 @@ for (const schema of [1, 2] as const) {
       expect(await askForCancel(built)).toMatchObject({ lifecycle: "paused" });
       const asked = await stored();
 
-      // 29 seconds after the tries were used up: a kick finds nothing to do.
-      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS - 1000;
+      // Just short of 30 seconds after the tries were used up (counted from the event's own time, 0.1
+      // second short; the exact second is the pure test's, which holds `now` itself): a kick finds nothing to do.
+      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS - 100;
       const report = await built.driver.kick(RUN_ID);
       expect(JSON.stringify(report)).toContain("idle");
       await built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
@@ -446,8 +459,8 @@ for (const schema of [1, 2] as const) {
       expect(early.lifecycle).toBe("paused");
       expect(host.sent).toHaveLength(sentBefore);
 
-      // 31 seconds after: a kick settles the turn once (v2), and the cancellation finishes with it.
-      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS + 1000;
+      // Just past 30 seconds (0.1 second): a kick settles the turn once (v2), and the cancellation finishes with it.
+      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS + 100;
       await built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
       await built.control.idle();
       const late = await stored();
@@ -458,6 +471,8 @@ for (const schema of [1, 2] as const) {
         expect(settled).toHaveLength(1);
         expect(settled[0]).toMatchObject({ outcome: "host-lost", settledBy: "engine" });
         expect(late.alerts.filter((alert) => alert.state !== "resolved")).toEqual([]);
+        // The Run is cancelled and no decision nobody could answer is left on it.
+        expect(late.decisions.filter((decision) => decision.state === "open")).toEqual([]);
         expect(late.lifecycle).toBe("cancelled");
         expect(states(late)).toEqual({ t1: "cancelled", t2: "cancelled" });
         expect(late.resources).toEqual([]);
@@ -720,7 +735,7 @@ describe("the alert for a lost turn says the way out and still matches the wordi
 
   const open = (record: RunRecord) => record.alerts.filter((alert) => alert.state === "open");
 
-  test("a lost dispatch is told what a check after 30 seconds does: wait, press the button, and the Engine records the lost turn and opens a decision if the member is idle", () => {
+  test("a lost dispatch is told which turns a check after 30 seconds settles and what to do for the others, without promising more than the Engine does", () => {
     const record = used(LOST_CODE);
     const summary = open(record)[0]?.summary ?? "";
     expect(open(record)).toHaveLength(1);
@@ -728,11 +743,17 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(summary.startsWith(earlier(LOST_CODE))).toBe(true);
     expect(summary.length).toBeGreaterThan(earlier(LOST_CODE).length);
     expect(summary).toContain("宿主可能丢失了进行中的回合");
+    // A producer's own task turn: wait, press the button, the Engine records the loss and opens a decision.
+    expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
-    expect(summary).toContain("如果该成员在 Paseo 里空闲");
     expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
-    // The wording that asked for a plain OK is gone.
-    expect(summary).not.toContain("只要求回复 OK");
+    // The turns it does not settle, and the way out for them: a plain OK, then the button again.
+    expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
+    expect(summary).toContain(
+      "请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”",
+    );
+    // The text does not say the Engine settles every lost turn.
+    expect(summary).not.toContain("不保证一定恢复");
     expect(summary).toBe(readRetryAlertSummary(heldItem(record)));
     expect(summary.length).toBeLessThanOrEqual(1000);
   });

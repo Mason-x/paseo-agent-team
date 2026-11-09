@@ -441,6 +441,27 @@ describe("findLostTurns: what proves a turn was lost by the host", () => {
     ).toEqual([]);
   });
 
+  test("a supplement (an evidence request to the producer) is not a candidate: the host is not read for a turn whose decision could not be opened", () => {
+    const supplement = assignment({
+      evidenceRepair: {
+        version: 1,
+        predecessorAssignmentId: "a0",
+        rootAssignmentId: "a0",
+        ordinal: 1,
+      },
+    } as never);
+    const supplemented = record({ assignments: [supplement] });
+    expect(lostTurnCandidates(supplemented, at(AFTER))).toEqual([]);
+    expect(findLostTurns(supplemented, idle, found(AFTER), at(AFTER))).toEqual([]);
+    // The same assignment without the request is the ordinary producer turn, found.
+    expect(lostTurnCandidates(record(), at(AFTER))).toHaveLength(1);
+    // A v1 record reads no such request (an unrelated field of that name is not one), so it stays
+    // what it was: with no re-check record there is no candidate either way.
+    expect(
+      lostTurnCandidates(record({ assignments: [supplement], schemaVersion: 1 }), at(AFTER)),
+    ).toEqual([]);
+  });
+
   test("an item for another message than the one the assignment waits on is not its item", () => {
     const moved = record({ assignments: [assignment({ messageId: "m-other" })] });
     expect(findLostTurns(moved, idle, found(AFTER), at(AFTER))).toEqual([]);

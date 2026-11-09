@@ -189,12 +189,14 @@ export const LOST_TURN_CODE = "incomplete:dispatch-not-found";
 export const LOST_TURN_SETTLE_DELAY_MS = 30_000;
 
 /**
- * Said after the fixed text when the host lost the turn (a restart in the middle of it): a look at
- * least this long after the tries were used up, with the member idle in Paseo, lets the Engine record
- * the turn as lost by the host and open the decision a person answers. The Engine sends the member
- * nothing and never asks it again by itself.
+ * Said after the fixed text when the host lost the turn (a restart in the middle of it). The item does
+ * not say whose turn it was, so the text says for which turns the Engine settles and what to do for the
+ * others: for a member's own task turn, a look at least this long after the tries were used up, with the
+ * member idle in Paseo, lets the Engine record the turn as lost by the host and open the decision a
+ * person answers; a judge's, smoke tester's, supplement's or re-report's turn is not settled, and a
+ * plain OK sent to the member is the way out (A21). The Engine sends the member nothing by itself.
  */
-export const LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”：如果该成员在 Paseo 里空闲，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）`;
+export const LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
 
 /** The hint of the version that asked a person to send the member a plain OK (A21); its alerts are still found. */
 const EARLIER_LOST_TURN_HINT =

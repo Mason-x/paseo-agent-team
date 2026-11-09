@@ -1,4 +1,5 @@
 import type { RunAssignment, RunEventReceipt, RunRecord } from "../../schemas/run-engine/ledger";
+import { evidenceRepairOf } from "./evidence-repair";
 import {
   LOST_TURN_CODE,
   LOST_TURN_SETTLE_DELAY_MS,
@@ -303,7 +304,11 @@ function deliveryUnsettled(record: RunRecord, assignment: RunAssignment): boolea
  *  d. one turn of the agent began after the assignment was made (its own, when the assignment has one),
  *     and nothing of the agent came after it: no later `turn_started`, no `turn_ended` of any turn;
  *  f. no message for the task or to the agent is still on its way, or of unknown fate.
- * Judges and supplements are not found: the decision for them has no way to try again.
+ * Only a producer's own task turn is found. A judge's or smoke tester's turn is left out by its purpose;
+ * a supplement (an evidence request: purpose `member`, with an `evidenceRepair`) is left out here too,
+ * because the decision for it has no way to try again and `openLimboDecision` would refuse it, so the
+ * host would be read for nothing. Those turns, and a re-report turn (the agent began a second turn after
+ * the assignment, which condition d rules out), stay with the way out of A21.
  */
 export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCandidate[] {
   const block = readReadRetries(record);
@@ -312,6 +317,7 @@ export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCand
   for (const assignment of record.assignments) {
     if (!OPEN.includes(assignment.state) || assignment.acceptedProof !== null) continue;
     if (!PRODUCER_PURPOSES.includes(assignment.purpose)) continue;
+    if (evidenceRepairOf(record, assignment) !== null) continue;
     if (!dispatchConfirmed(record, assignment)) continue;
     if (deliveryUnsettled(record, assignment)) continue;
     const item = block.items.find(

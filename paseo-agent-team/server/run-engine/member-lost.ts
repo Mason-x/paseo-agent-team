@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cancelPending } from "../../shared/domain/run-engine/cancel-request";
 import { openLimboDecision } from "../../shared/domain/run-engine/decision-answer";
 import {
   AGENT_CLOSED_OUTCOME,
@@ -41,6 +42,10 @@ import type { RunStore } from "./store";
  * `outcome: "host-lost"`, opens the ordinary limbo decision (reason `host-lost`, retry or cancel) and takes
  * down the alert of the used-up re-checks, in the same commit. It runs at the same place as the closed
  * turns, before the host is reconciled, so the receipt is the Engine's own and not an inference.
+ *
+ * While the whole Run is being cancelled (A5) both kinds are recorded as ended but open no decision: the
+ * receipt is what lets the cancellation finish, and a decision would outlive the Run with nobody able
+ * to answer it.
  *
  * Reads the host, never writes to it: no message, no archive. A pass that finds nothing to settle
  * writes nothing, and asks the host nothing unless a turn might have been cut off or lost.
@@ -97,6 +102,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
   ): { next: RunRecord; turns: number } | null {
     let next = current;
     let turns = 0;
+    const cancelling = cancelPending(current);
     for (const turn of findClosedTurns(current, seats)) {
       const key = `turn_ended:${turn.agentId}:${turn.turnId}`;
       const receipt = {
@@ -114,6 +120,9 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       if (appended.status !== "appended") continue;
       next = appended.next;
       turns += 1;
+      // The whole Run is being cancelled: the receipt is what lets the cancellation finish, and no
+      // decision is opened, for none could be answered once the Run is cancelled.
+      if (cancelling) continue;
       const opened = openLimboDecision(next, {
         taskId: turn.taskId,
         assignmentId: turn.assignmentId,
@@ -147,6 +156,14 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       } as Omit<RunEventReceipt, "seq" | "receivedAt">;
       const appended = appendObservation(next, receipt, now, uuid);
       if (appended.status !== "appended") continue;
+      if (cancelling) {
+        // The whole Run is being cancelled: the receipt lets the cancellation finish (A5 waits for
+        // it) and the alert of the used-up re-check goes, but no decision is opened for a Run that
+        // is about to be cancelled, for it could never be answered.
+        next = resolveItemAlerts(appended.next, turn.item, now, alertIdFor);
+        turns += 1;
+        continue;
+      }
       // The receipt and the decision go together or not at all: a turn that cannot be given a decision
       // (its task moved on) is left as it is.
       const opened = openLimboDecision(appended.next, {
