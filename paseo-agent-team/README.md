@@ -198,7 +198,10 @@ decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
 **Closing or archiving a member's Agent while a Run is live.** If Paseo closes or archives a member's
 Agent in the middle of its turn, the host may never report that the turn ended. The Engine notices
 (it saw the Agent closed, or reads it as closed with no turn running) and records the turn as ended
-itself. The task then waits for you at a decision that can only be answered with cancel: the member is
+itself. (When the host did report the turn's end first, as DEV saw for a forced archive, for archiving
+the coordinator and for stopping the daemon, the reply is lost instead and the decision comes from the
+lost-reply paragraph under *Recover and roll back*; it is the same cancel-only decision.) The task then
+waits for you at a decision that can only be answered with cancel: the member is
 not asked again, whatever the cut-off turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
@@ -302,7 +305,7 @@ you to try once more. A request is never applied twice.
   arrives or when the daemon recovers, and the Engine sends the member nothing by itself. After a host
   restart the member's provider process may still be running (on Windows too): make sure it has
   stopped before you answer. A member the host reads as closed is the closed-or-archived case above.
-  The Engine settles only the turn of a producer (the member that does the task). It does not settle
+  Where the host never reported the turn's end, the Engine settles only the turn of a producer (the member that does the task). It does not settle
   the turn of a judge, a smoke tester, a supplement or a re-report, or a turn it never saw begin (no
   turn start on record): for those the warning is still shown, the Run does not move on, a kick
   sends nothing and writes nothing, and cancelling the whole Run keeps waiting for a turn end the
@@ -315,9 +318,35 @@ you to try once more. A request is never applied twice.
   does not answer, cancel and start the Run again. If you cancel the whole Run while a settled turn
   waits, the turn is still recorded (that lets the cancellation finish) but no decision is opened:
   the Run is cancelled and nothing is left to answer.
+  **A reply the host lost after it said the turn ended.** The host often reports the turn's end first and
+  loses the turn afterwards: closing or archiving the member (also with `--force`, or by archiving its
+  coordinator) and stopping the daemon each sent a turn end before the turn was lost, in all three DEV
+  tries. The reply then cannot be read, the warning of the used-up tries shows, and there is no turn end
+  left for the Engine to write. After the same 30 seconds, pressing **立即检查并推进** (or a hook, or a
+  recovery) opens the decision when all of this holds: the task still waits for its report and its
+  dispatch was delivered, and no message to the member or for the task is on its way or of unknown fate;
+  the host's own record says the turn ended (the newest turn end of the member after the task was sent,
+  the task's own turn when it has one, and no turn started after it) and Paseo shows the member idle,
+  closed or archived with no turn running, which is the proof the cancellation of a Run takes too; the
+  tries were used up with exactly `incomplete:dispatch-not-found` and one more look, made at least 30
+  seconds after the last failure, still finds the dispatch missing. Nothing is written but the decision
+  and the warning coming down: no receipt, no release, no message. The decision is `member-lost` (cancel
+  only) when the member was closed or archived after the task was sent or reads as closed now, otherwise
+  `host-lost` (retry or cancel); it says that the reply is lost, that the member may have done part of
+  the work, and asks you to look at its branch and to make sure its process has stopped first (a turn end
+  does not prove that: on DEV the member's process kept writing for about 20 seconds after a graceful
+  stop). Once the decision is open, the reply of this attempt is never taken in, even if it can be read
+  later. Any other reason (a reply that is too large, a failed read, an unreadable window, another
+  incomplete reading), a member that is still running, a turn started after the end, or a delivery that is
+  not settled opens nothing and leaves the warning. A judge, a smoke tester or a supplement only ever gets
+  `member-lost`. While the whole Run is being cancelled nothing is opened: the cancellation takes the
+  host's own end as it is.
   Going back to 0.6.x: a host-lost decision is an ordinary retry-or-cancel decision there, and the
   Engine's turn end reads as the host's. The settlement itself sends nothing; answering retry sends
-  the member one message there as it does now.
+  the member one message there as it does now. Going back to 0.7.0: a decision opened for a lost reply
+  that nobody answered is shown there with its retry, but 0.7.0 does not know the reply was lost and
+  does not hold back a reply that becomes readable later; if one does, it is taken in and the retry
+  shown on the decision no longer does anything. Do not roll back while a Run is live (see above).
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The
