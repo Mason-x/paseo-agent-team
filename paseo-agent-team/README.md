@@ -275,7 +275,10 @@ only when the Run offers them:
   cancelled yet; one that has no task yet is cancelled at once.
 
 A refusal is shown in words; if the Run changed since you looked, the page reads it again and asks
-you to try once more. A request is never applied twice.
+you to try once more. A request is never applied twice. What you type into a reason box (and the
+number in 追加预算, and an open confirmation) stays while the page keeps polling; stopping the
+daemon unloads the whole panel and reloading the page clears them, so a draft does not survive a
+daemon restart.
 
 **Recover and roll back.**
 
