@@ -366,10 +366,14 @@ daemon restart.
   like one whose plan was refused: press **重新规划**. That sends the coordinator one new request (it
   costs one of its turns) and the plan it answers with is read as usual; the warning comes down when it
   is admitted or when you ask again. Nothing is sent by the Engine itself and the plan is not asked for
-  again in the same words. Any other way the reply cannot be read (a failed read, a reply that is too
-  large, a read that is not complete, a turn that has not ended or that was followed by a new one) writes
-  nothing, as before. The read is not repeated after a failure; a Run that stays in 启动中 with no
-  warning has not matched this case: cancel it and start it again.
+  again in the same words. Apart from this case, a reply that cannot be read still writes nothing: a failed
+  read, a reply that is too large, any other incomplete read, a turn that has not ended or that was followed
+  by a new one, an end from before the request, and a message to the coordinator that is still being sent
+  or of unknown fate (a re-plan is refused then, so the warning would never come down). A failed read is
+  not tried again on the spot; the next recovery, hook or **立即检查并推进** reads once more. A Run that
+  stays in 启动中 with no warning has not matched this case: cancel it and start it again. One limit: if a
+  plan was read and refused and the host then loses the history too, the warning above is added and the
+  real reason of the earlier refusal is no longer the one a re-plan shows the coordinator.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The
