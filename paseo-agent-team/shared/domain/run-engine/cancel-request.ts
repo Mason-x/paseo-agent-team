@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { type RunRecord, RunTimeSchema } from "../../schemas/run-engine/ledger";
 import { canCancelLocally } from "./transitions";
-import { startedAfterEnded } from "./turn-occurrence";
+import { provenEndedTurn, type SeatView } from "./turn-proof";
 
 /**
  * Cancelling a whole Run (A5): a request is written first, new dispatches stop, and the Run is cancelled
@@ -63,11 +63,7 @@ export function withCancelRequest(record: RunRecord, value: CancelRequest): RunR
   return next;
 }
 
-/**
- * What the host says of an agent right now. `unreadable`: asking failed, which proves nothing.
- * `absent`: the host answered and has no such agent (it was deleted), so it has no turn running.
- */
-export type SeatView = { status: string; activeTurn: boolean } | "unreadable" | "absent";
+export type { SeatView };
 
 export type EndedTurn = { assignmentId: string; turnId: string; endedEventKey: string };
 
@@ -117,28 +113,13 @@ export function planCancelFinish(
   let turns = 0;
   const close: EndedTurn[] = [];
   for (const assignment of waitedOn(record)) {
-    const ended = record.eventReceipts
-      .filter(
-        (receipt) =>
-          receipt.kind === "turn_ended" &&
-          receipt.agentId === assignment.agentId &&
-          receipt.turnId !== null &&
-          Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt) &&
-          (assignment.turnId === null || receipt.turnId === assignment.turnId),
-      )
-      .sort((a, b) => b.seq - a.seq)[0];
-    const restarted = ended !== undefined && startedAfterEnded(record, ended);
     const seat =
       seats === "assume-idle"
         ? { status: "idle", activeTurn: false }
         : seats.get(assignment.agentId);
-    const idle =
-      seat === "absent" ||
-      (seat !== undefined &&
-        seat !== "unreadable" &&
-        (seat.status === "idle" || seat.status === "closed") &&
-        !seat.activeTurn);
-    if (ended === undefined || ended.turnId === null || restarted || !idle) {
+    // The same proof the settlement of a lost reply uses (turn-proof.ts).
+    const ended = provenEndedTurn(record, assignment, seat);
+    if (ended === undefined) {
       turns += 1;
       continue;
     }

@@ -6,10 +6,13 @@ import {
   agentsToCheck,
   ENGINE_SETTLER,
   findClosedTurns,
+  findLostReplies,
   findLostTurns,
   HOST_LOST_CODE,
   HOST_LOST_OUTCOME,
   type LostReplyRead,
+  lostReplyCandidates,
+  lostReplyKind,
   lostTurnCandidates,
   MEMBER_LOST_CODE,
   type SeatRead,
@@ -43,6 +46,11 @@ import type { RunStore } from "./store";
  * `outcome: "host-lost"`, opens the ordinary limbo decision (reason `host-lost`, retry or cancel) and takes
  * down the alert of the used-up re-checks, in the same commit. It runs at the same place as the closed
  * turns, before the host is reconciled, so the receipt is the Engine's own and not an inference.
+ *
+ * A third kind (T9b) is a reply the host lost after it had reported the turn's end (a forced archive, the
+ * cascade of archiving the coordinator, a daemon stop): there is no receipt to write, only the decision
+ * (`member-lost` when the member was closed or archived, else `host-lost`) and the alert coming down
+ * (`findLostReplies`); the reply of that attempt is never taken in afterwards (the intake's gate).
  *
  * While the whole Run is being cancelled (A5) both kinds are recorded as ended but open no decision: the
  * receipt is what lets the cancellation finish, and a decision would outlive the Run with nobody able
@@ -191,6 +199,33 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       });
       if (noted.ok && noted.changed) next = noted.next;
     }
+    // A reply the host lost after it had said the turn ended (T9b): no receipt (the host's own end is on
+    // the ledger), only the decision and the alert coming down. While the whole Run is being cancelled
+    // nothing is opened: the cancellation takes the host's end as it is.
+    if (!cancelling) {
+      for (const lost of findLostReplies(next, seats, reads, now)) {
+        const opened = openLimboDecision(next, {
+          taskId: lost.taskId,
+          assignmentId: lost.assignmentId,
+          reason: lost.kind,
+          turnId: lost.turnId,
+          endedEventKey: lost.endedEventKey,
+          replyLost: true,
+          decisionId: uuid(),
+          controlNonceDigest: sha256Hex(uuid()),
+          now,
+        });
+        // A turn that cannot be given a decision (its task moved on) is left as it is, alert included.
+        if (!opened.changed) continue;
+        next = resolveItemAlerts(opened.next, lost.item, now, alertIdFor);
+        turns += 1;
+        const noted = noteTask(next, lost.taskId, lost.kind, {
+          now,
+          detail: { assignmentId: lost.assignmentId },
+        });
+        if (noted.ok && noted.changed) next = noted.next;
+      }
+    }
     return turns === 0 ? null : { next, turns };
   }
 
@@ -204,10 +239,18 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         if (lifecycle === "finished" || lifecycle === "cancelled") return { settled: 0 };
         const lostCandidates =
           options.readReply === undefined ? [] : lostTurnCandidates(read.record, clock.now());
+        // Replies lost after the host said the turn ended (T9b). Not while the Run is being cancelled: this
+        // check only saves the host reads; the check inside the update below is the one that decides, and
+        // it also covers a cancellation asked for between these reads and the commit.
+        const replyCandidates =
+          options.readReply === undefined || cancelPending(read.record)
+            ? []
+            : lostReplyCandidates(read.record, clock.now());
         const agents = [
           ...new Set([
             ...agentsToCheck(read.record),
             ...lostCandidates.map((candidate) => candidate.assignment.agentId),
+            ...replyCandidates.map((candidate) => candidate.assignment.agentId),
           ]),
         ].sort();
         if (agents.length === 0) return { settled: 0 };
@@ -218,6 +261,25 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         for (const candidate of lostCandidates) {
           const seat = seats.get(candidate.assignment.agentId);
           if (seat === undefined || typeof seat !== "object" || seat.status !== "idle") continue;
+          try {
+            const window = await options.readReply?.(
+              candidate.assignment.agentId,
+              candidate.anchorMessageId,
+            );
+            if (window === undefined) continue;
+            reads.set(candidate.assignment.assignmentId, {
+              dispatchNotFound: !window.complete && window.reason === "dispatch-not-found",
+              at: clock.now(),
+            });
+          } catch (error) {
+            log(`could not read the reply of ${candidate.assignment.agentId} again`, error);
+          }
+        }
+        // The same for a lost reply: a member that is idle or closed, and only when a decision could be
+        // opened for it on this read.
+        for (const candidate of replyCandidates) {
+          const seat = seats.get(candidate.assignment.agentId);
+          if (lostReplyKind(read.record, candidate.assignment, seat) === null) continue;
           try {
             const window = await options.readReply?.(
               candidate.assignment.agentId,

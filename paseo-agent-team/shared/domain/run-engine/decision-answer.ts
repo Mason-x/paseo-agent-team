@@ -304,7 +304,17 @@ export function openStuckDecision(
 }
 
 /** What a person is told at a limbo decision, for the reason it was opened with. */
-function limboSummary(reason: string): string {
+function limboSummary(reason: string, replyLost = false): string {
+  if (replyLost && (reason === MEMBER_LOST_CODE || reason === HOST_LOST_CODE)) {
+    // The host said the turn ended, but its reply cannot be found any more (T9b).
+    return (
+      "成员的回合已结束，但它的回复已丢失（派发消息已不在成员的历史里），没有报告。" +
+      "成员可能已做完一部分：请先看它的分支，并确认它的进程已经停了。" +
+      (reason === MEMBER_LOST_CODE
+        ? "成员已被关闭或归档，只能取消这个任务。"
+        : "可放弃这次尝试后重试，或取消这个任务。")
+    );
+  }
   if (reason === MEMBER_LOST_CODE) {
     return (
       "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告。只能取消这个任务：" +
@@ -332,6 +342,11 @@ export type LimboOpening = {
   turnId: string;
   /** The turn-ended receipt the Engine just wrote for this turn, when it is known (T4a, T4b). */
   endedEventKey?: string;
+  /**
+   * The host's own end of the turn is on the ledger but the reply is lost (T9b): only the text a person
+   * reads changes, not the decision, its key or what can be answered.
+   */
+  replyLost?: boolean;
   decisionId: string;
   controlNonceDigest: string;
   now: string;
@@ -428,7 +443,7 @@ export function openLimboDecision(
     dedupeKey,
     cancelIntents: null,
     subjectId: input.taskId,
-    summary: limboSummary(input.reason),
+    summary: limboSummary(input.reason, input.replyLost === true),
     createdAt: input.now,
     answeredAt: null,
     answer: null,

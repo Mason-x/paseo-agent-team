@@ -10,6 +10,7 @@ import {
 } from "./read-retry";
 import { replyAnchor } from "./report-repair";
 import { ENGINE_SETTLER, receiptOccurrence, sameTurnOccurrence } from "./turn-occurrence";
+import { latestEndedTurn, provenEndedTurn } from "./turn-proof";
 
 /**
  * A member's turn that Paseo cut off because the person closed or archived the member's Agent (T4a).
@@ -298,6 +299,23 @@ function heldAtOf(record: RunRecord, item: ReadRetryItem): string | null {
   return found?.at ?? null;
 }
 
+/** The used-up re-check of the reply of `assignment` whose last failure was `incomplete:dispatch-not-found`. */
+function heldLostItem(
+  record: RunRecord,
+  items: readonly ReadRetryItem[],
+  assignment: RunAssignment,
+): ReadRetryItem | undefined {
+  return items.find(
+    (entry) =>
+      entry.state === "held" &&
+      entry.lastCode === LOST_TURN_CODE &&
+      entry.target.type === "reply" &&
+      entry.target.assignmentId === assignment.assignmentId &&
+      entry.target.anchorMessageId === replyAnchor(record, assignment) &&
+      targetStillWaited(record, entry.target),
+  );
+}
+
 function deliveryUnsettled(record: RunRecord, assignment: RunAssignment): boolean {
   return record.outbox.some(
     (intent) =>
@@ -331,15 +349,7 @@ export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCand
     if (evidenceRepairOf(record, assignment) !== null) continue;
     if (!dispatchConfirmed(record, assignment)) continue;
     if (deliveryUnsettled(record, assignment)) continue;
-    const item = block.items.find(
-      (entry) =>
-        entry.state === "held" &&
-        entry.lastCode === LOST_TURN_CODE &&
-        entry.target.type === "reply" &&
-        entry.target.assignmentId === assignment.assignmentId &&
-        entry.target.anchorMessageId === replyAnchor(record, assignment) &&
-        targetStillWaited(record, entry.target),
-    );
+    const item = heldLostItem(record, block.items, assignment);
     if (item === undefined || item.target.type !== "reply") continue;
     const heldAt = heldAtOf(record, item);
     if (heldAt === null) continue;
@@ -405,4 +415,150 @@ export function findLostTurns(
     });
   }
   return turns;
+}
+
+// --- a reply the host lost after the turn had ended (T9b) ---------------------------------------
+
+/**
+ * The host does not always say nothing when it cuts a turn off: closing, archiving or stopping the
+ * daemon sends a `turn_ended` first (DEV, plan point 82). The reply of such a turn is read as the end of
+ * a normal turn, and cannot be found, so the Engine would only keep the warning of the used-up re-checks.
+ * `findLostReplies` says which of those turns are lost. It adds no receipt (the host's own `turn_ended` is
+ * on the ledger) and uses only the decision kinds and the delay of T4a and T4b:
+ *  1. the assignment waits for a report, its dispatch was confirmed delivered, and no message for its task
+ *     or to its agent is still on its way (`sending`) or of unknown fate (`outcome-unknown`);
+ *  2. the turn is over, by the very proof the cancellation of a Run takes (`provenEndedTurn`: the agent's
+ *     newest `turn_ended` after the assignment, its own turn when it has one, no `turn_started` after it,
+ *     the member idle or closed with no turn running on this read), and the end is the host's, not one the
+ *     Engine wrote itself;
+ *  3. the reply is lost: the re-checks of it are used up with exactly `incomplete:dispatch-not-found`, a
+ *     look now still finds the dispatch missing, and `LOST_TURN_SETTLE_DELAY_MS` have gone by since the
+ *     last failure. Any other reason (too large, a failed read, unreadable, another incomplete) is not it.
+ * The decision is `member-lost` (cancel only) when the host closed or archived the agent after the
+ * assignment was made, or reads it as closed now; `host-lost` (retry or cancel) otherwise.
+ */
+
+export type LostReplyKind = typeof MEMBER_LOST_CODE | typeof HOST_LOST_CODE;
+
+export type LostReplyCandidate = {
+  assignment: RunAssignment;
+  /** The host's own end of the turn: the evidence the decision carries. */
+  ended: RunEventReceipt & { turnId: string };
+  item: ReadRetryItem;
+  /** The message whose reply is read again. */
+  anchorMessageId: string;
+  /** When the item was used up (the last failure). */
+  heldAt: string;
+};
+
+export type LostReply = {
+  assignmentId: string;
+  taskId: string;
+  agentId: string;
+  turnId: string;
+  endedEventKey: string;
+  kind: LostReplyKind;
+  /** The used-up re-check of the reply, whose alert is taken down with the decision. */
+  item: ReadRetryItem;
+};
+
+/** A message for the task or to the agent that may still start a turn: on its way, or of unknown fate. */
+function sendUnsettled(record: RunRecord, assignment: RunAssignment): boolean {
+  return record.outbox.some(
+    (intent) =>
+      (intent.state === "sending" || intent.state === "outcome-unknown") &&
+      (intent.taskId === assignment.taskId || intent.recipient === assignment.agentId),
+  );
+}
+
+/** Whether the host closed or archived the agent after the assignment was made. */
+function closedAfterAssignment(record: RunRecord, assignment: RunAssignment): boolean {
+  return record.eventReceipts.some(
+    (receipt) =>
+      (receipt.kind === "closed" || receipt.kind === "archived") &&
+      receipt.agentId === assignment.agentId &&
+      Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt),
+  );
+}
+
+/**
+ * The turns whose reply may have been lost, judged from the ledger alone: conditions 1 and 2 (the turn
+ * is over, as far as the ledger says; the live state of the member is asked later) and the used-up
+ * re-check that is at least `LOST_TURN_SETTLE_DELAY_MS` old at `now`.
+ */
+export function lostReplyCandidates(record: RunRecord, now: string): LostReplyCandidate[] {
+  const block = readReadRetries(record);
+  if (block.kind !== "valid") return [];
+  const found: LostReplyCandidate[] = [];
+  for (const assignment of record.assignments) {
+    if (!OPEN.includes(assignment.state) || assignment.acceptedProof !== null) continue;
+    if (!REPORT_PURPOSES.includes(assignment.purpose)) continue;
+    if (!dispatchConfirmed(record, assignment)) continue;
+    if (sendUnsettled(record, assignment)) continue;
+    // A turn the Engine settled itself already has its decision.
+    if (engineSettledEnd(record, assignment) !== undefined) continue;
+    const ended = latestEndedTurn(record, assignment);
+    if (ended === undefined || isEngineSettled(ended)) continue;
+    const item = heldLostItem(record, block.items, assignment);
+    if (item === undefined || item.target.type !== "reply") continue;
+    const heldAt = heldAtOf(record, item);
+    if (heldAt === null) continue;
+    if (Date.parse(now) - Date.parse(heldAt) < LOST_TURN_SETTLE_DELAY_MS) continue;
+    found.push({ assignment, ended, item, anchorMessageId: item.target.anchorMessageId, heldAt });
+  }
+  return found;
+}
+
+/**
+ * Which decision a lost reply gets on this read of the member, or null when none: the member must be at
+ * rest and the host must have answered (idle or closed, no turn running). `member-lost` when it was closed
+ * or archived after the assignment (or reads as closed); otherwise `host-lost`, which only a producer's
+ * own task turn gets (as for T4b: the decision of a judge or a supplement has no way to try again).
+ */
+export function lostReplyKind(
+  record: RunRecord,
+  assignment: RunAssignment,
+  seat: SeatRead | undefined,
+): LostReplyKind | null {
+  if (seat === undefined || typeof seat !== "object") return null;
+  if ((seat.status !== "idle" && seat.status !== "closed") || seat.activeTurn) return null;
+  if (seat.status === "closed" || closedAfterAssignment(record, assignment))
+    return MEMBER_LOST_CODE;
+  if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return null;
+  return evidenceRepairOf(record, assignment) === null ? HOST_LOST_CODE : null;
+}
+
+/**
+ * The replies the host lost, and what showed it. Writes nothing. On top of `lostReplyCandidates`: the turn
+ * is proved over on this read of the member (`provenEndedTurn`), and a look at the host (`reads`, by
+ * assignment) still finds the dispatch missing at least `LOST_TURN_SETTLE_DELAY_MS` after the re-checks
+ * were used up.
+ */
+export function findLostReplies(
+  record: RunRecord,
+  seats: ReadonlyMap<string, SeatRead>,
+  reads: ReadonlyMap<string, LostReplyRead>,
+  now: string,
+): LostReply[] {
+  const found: LostReply[] = [];
+  for (const { assignment, item, heldAt } of lostReplyCandidates(record, now)) {
+    const seat = seats.get(assignment.agentId);
+    const ended = provenEndedTurn(record, assignment, seat);
+    if (ended === undefined || isEngineSettled(ended)) continue;
+    const kind = lostReplyKind(record, assignment, seat);
+    if (kind === null) continue;
+    const read = reads.get(assignment.assignmentId);
+    if (read === undefined || !read.dispatchNotFound) continue;
+    if (Date.parse(read.at) - Date.parse(heldAt) < LOST_TURN_SETTLE_DELAY_MS) continue;
+    found.push({
+      assignmentId: assignment.assignmentId,
+      taskId: assignment.taskId,
+      agentId: assignment.agentId,
+      turnId: ended.turnId,
+      endedEventKey: ended.eventKey,
+      kind,
+      item,
+    });
+  }
+  return found;
 }

@@ -169,8 +169,16 @@ describe("the Run Engine section of the README agrees with the code", () => {
     }
     // The way out applies to a turn the Engine never saw begin, not only to the other purposes.
     expect(LOST_TURN_HINT).toContain(
-      "引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息",
+      "引擎没见到回合开始、或该成员之后又有更晚的回合记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息",
     );
+    // T9b: the host said the turn ended and the reply cannot be read; the member may be idle, closed or archived.
+    for (const word of [
+      "如果宿主已经报告这一回合结束、回复却读不到",
+      "成员空闲、已关闭或已归档",
+      "成员已关闭或归档时只能取消",
+    ]) {
+      expect(LOST_TURN_HINT).toContain(word);
+    }
     expect(section).toContain("**立即检查并推进**");
     expect(section).toContain("the Engine records the turn as lost by the host");
     expect(section).toContain("`host-lost`");
@@ -192,5 +200,19 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("no decision is opened");
     expect(section).toContain("cancelling the whole Run keeps waiting");
     expect(section).toContain("a host-lost decision is an ordinary");
+    // T9b: the host said the turn ended and then lost the reply.
+    expect(section).toContain("**A reply the host lost after it said the turn ended.**");
+    expect(section).toContain("shows it idle or closed with no turn running");
+    expect(section).toContain(
+      "the cancellation also counts a member the host says\n  it has no Agent for as quiet",
+    );
+    expect(section).toContain("no receipt, no release, no message");
+    expect(section).toContain("(not rehearsed; from its\n  source)");
+    expect(section).toContain("is never taken in, even if it can be read\n  later");
+    expect(section).toContain(
+      "A judge, a smoke tester or a supplement only ever gets\n  `member-lost`",
+    );
+    expect(section).toContain("Going back to 0.7.0");
+    expect(section).toContain("no longer does anything");
   });
 });

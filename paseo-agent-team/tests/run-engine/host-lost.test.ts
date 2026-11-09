@@ -855,13 +855,29 @@ for (const schema of [1, 2] as const) {
         await stays(host, built, heldAt);
       });
 
-      test("a turn end the host reported for the member is its own end, not a loss", async () => {
+      test("a turn end the host reported for the member is not a loss of the turn (T4b writes no receipt); since T9b it is the proof for a decision about the lost reply", async () => {
         const host = fakeHost();
         const built = build(host);
         const heldAt = await reachExhausted(host, built);
         const created = Date.parse(await createdOf());
         await plantReceipt("turn_ended", MEMBER, "turn-else", iso(created + 5000));
-        await stays(host, built, heldAt);
+        const sent = host.sent.length;
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        const after = await stored();
+        // No receipt of the Engine's, as before.
+        expect(engineReceipts(after)).toEqual([]);
+        expect(host.sent).toHaveLength(sent);
+        // T9b: the host's own end is on the ledger and the reply is lost, so the decision opens on that end.
+        const decisions = openDecisions(after);
+        expect(decisions).toHaveLength(schema === 2 ? 1 : 0);
+        if (schema === 2) {
+          expect(decisions[0]?.limbo).toMatchObject({
+            reason: HOST_LOST_CODE,
+            turnId: "turn-else",
+            endedEventKey: `turn_ended:${MEMBER}:turn-else`,
+          });
+        }
       });
 
       test("a member the host reports as working is not at rest; once it is idle the same look settles", async () => {
