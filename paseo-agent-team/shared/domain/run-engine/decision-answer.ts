@@ -10,8 +10,9 @@ import { producerHead, resolveD } from "./delivery-binding";
 import { evidenceRepairOf } from "./evidence-repair";
 import { closedSince, HOST_LOST_CODE, MEMBER_LOST_CODE } from "./lost-turn";
 import { reduceRun } from "./reducer";
-import { settleRepairs } from "./report-repair";
+import { replyAnchor, settleRepairs } from "./report-repair";
 import { hasUnsettledEffects, isNormalEnded, outstandingAssignments } from "./transitions";
+import { anchorSince, ownTurn, receiptOccurrence } from "./turn-occurrence";
 
 /**
  * Answering a decision a person is asked about (P06). A decision "waits for a person" when a task
@@ -171,7 +172,12 @@ function turnWasCut(record: AnswerContext, decision: Decision, kind: AnswerableK
       receipt.turnId === evidence.turnId,
   );
   if (ended?.agentId === undefined || ended.agentId === null) return false;
-  return closedSince({ eventReceipts: record.eventReceipts }, ended.agentId, evidence.turnId);
+  return closedSince(
+    { eventReceipts: record.eventReceipts },
+    ended.agentId,
+    evidence.turnId,
+    receiptOccurrence(ended),
+  );
 }
 
 function actionsFor(
@@ -324,10 +330,33 @@ export type LimboOpening = {
   reason: string;
   /** The turn whose reply was read, and the host's receipt that it ended. */
   turnId: string;
+  /** The turn-ended receipt the Engine just wrote for this turn, when it is known (T4a, T4b). */
+  endedEventKey?: string;
   decisionId: string;
   controlNonceDigest: string;
   now: string;
 };
+
+/**
+ * Whether the attempt has an unanswered decision of the kind `openLimboDecision` opens (the producer's
+ * turn ended with no usable report, or the member or its turn was lost). While one is open, a reply
+ * read for the attempt is not taken in: a person answers the decision. Cancellation decisions are
+ * a different thing and never block a report (A5).
+ */
+export function hasUnansweredLimbo(
+  record: Pick<RunRecord, "decisions">,
+  assignmentId: string,
+): boolean {
+  return record.decisions.some((decision) => {
+    if (!isDecisionPending(decision) || limboEvidence(decision) === null) return false;
+    const kind = classifyDecision(decision);
+    return (
+      kind !== null &&
+      (kind.kind === "stuck" || kind.kind === "evidence-stuck") &&
+      kind.assignmentId === assignmentId
+    );
+  });
+}
 
 /**
  * Opens the decision for a producer whose turn ended with no report the Engine can use and no re-send
@@ -363,12 +392,22 @@ export function openLimboDecision(
   ) {
     return { changed: false };
   }
-  const ended = record.eventReceipts.find(
-    (receipt) =>
-      receipt.kind === "turn_ended" &&
-      receipt.agentId === assignment.agentId &&
-      receipt.turnId === input.turnId,
-  );
+  // The end that belongs to this attempt's own turn: the one the Engine just wrote, or else the earliest
+  // appearance of the turn id after the message the reply answers.
+  const ended =
+    input.endedEventKey !== undefined
+      ? record.eventReceipts.find(
+          (receipt) =>
+            receipt.eventKey === input.endedEventKey &&
+            receipt.kind === "turn_ended" &&
+            receipt.agentId === assignment.agentId &&
+            receipt.turnId === input.turnId,
+        )
+      : ownTurn(record, {
+          agentId: assignment.agentId,
+          turnId: input.turnId,
+          since: anchorSince(record, replyAnchor(record, assignment), assignment),
+        })?.ended;
   if (ended === undefined) return { changed: false };
   const dedupeKey = `${supplement ? EVIDENCE_STUCK_KEY_PREFIX : STUCK_KEY_PREFIX}${input.assignmentId}`;
   if (

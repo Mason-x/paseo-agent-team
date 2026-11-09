@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { openLimboDecision } from "../../shared/domain/run-engine/decision-answer";
+import {
+  hasUnansweredLimbo,
+  openLimboDecision,
+} from "../../shared/domain/run-engine/decision-answer";
 import { transitionIntent } from "../../shared/domain/run-engine/effect-state";
 import {
   compileRepairRequest,
@@ -17,6 +20,7 @@ import {
 } from "../../shared/domain/run-engine/report-repair";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import { hasUnsettledEffects } from "../../shared/domain/run-engine/transitions";
+import { anchorSince, ownTurn } from "../../shared/domain/run-engine/turn-occurrence";
 import type { RunAssignment, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type { RunProtocolBlock } from "../../shared/schemas/run-engine/protocol";
 import { sha256Hex } from "./digest";
@@ -192,12 +196,12 @@ export function createIntake(options: IntakeOptions) {
       }
       const window = await options.host.replyWindow(assignment.agentId, wake.messageId);
       if (!window.complete) return { ok: false, reason: window.reason };
-      const ended = record.eventReceipts.find(
-        (entry) =>
-          entry.kind === "turn_ended" &&
-          entry.agentId === assignment.agentId &&
-          entry.turnId === window.turnId,
-      );
+      // The turn this repair request itself ran in: the earliest appearance of its id after it was made.
+      const ended = ownTurn(record, {
+        agentId: assignment.agentId,
+        turnId: window.turnId,
+        since: anchorSince(record, wake.messageId, assignment),
+      })?.ended;
       if (!ended) return { ok: false, reason: "turn-open" };
       witnesses.push({
         id: wake.id,
@@ -240,12 +244,11 @@ export function createIntake(options: IntakeOptions) {
       if (repairable !== undefined && options.repair !== undefined) {
         // Only a turn that ended on its own can be asked again; a turn that failed or was
         // interrupted is a host problem, and a repair would not fix it.
-        const ended = current.eventReceipts.find(
-          (receipt) =>
-            receipt.kind === "turn_ended" &&
-            receipt.agentId === assignment.agentId &&
-            receipt.turnId === repairable.turnId,
-        );
+        const ended = ownTurn(current, {
+          agentId: assignment.agentId,
+          turnId: repairable.turnId,
+          since: anchorSince(current, repairable.anchor, assignment),
+        })?.ended;
         if (ended === undefined) {
           // The reply being read belongs to a turn that is still running (a repeated hook for the
           // previous turn reads the newest repair's window): nothing to judge, nothing to note.
@@ -411,6 +414,13 @@ export function createIntake(options: IntakeOptions) {
         holder.result = { status: "stale" };
         return null;
       }
+      // A decision about this attempt is waiting for a person (its turn ended with nothing usable, or the
+      // member or its turn was lost): a reply that shows up later, e.g. a later turn that reused the turn
+      // id and was read into the same window, is not taken in. Cancellation decisions do not count.
+      if (hasUnansweredLimbo(current, assignmentId)) {
+        holder.result = { status: "no-assignment" };
+        return null;
+      }
       if (witnesses !== null) {
         const currentWakes = repairWakes(current, assignmentId);
         if (
@@ -472,10 +482,11 @@ export function createIntake(options: IntakeOptions) {
         if (confirmed.ok) working = confirmed.next;
       }
 
-      const ended = working.eventReceipts.find(
-        (receipt) =>
-          receipt.kind === "turn_ended" && receipt.agentId === agentId && receipt.turnId === turnId,
-      );
+      const ended = ownTurn(working, {
+        agentId,
+        turnId,
+        since: anchorSince(working, anchor, assignment),
+      })?.ended;
       if (!ended) {
         holder.result = { status: "turn-not-ended" };
         return null;

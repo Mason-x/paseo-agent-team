@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type RunRecord, RunTimeSchema } from "../../schemas/run-engine/ledger";
 import { canCancelLocally } from "./transitions";
+import { startedAfterEnded } from "./turn-occurrence";
 
 /**
  * Cancelling a whole Run (A5): a request is written first, new dispatches stop, and the Run is cancelled
@@ -126,14 +127,7 @@ export function planCancelFinish(
           (assignment.turnId === null || receipt.turnId === assignment.turnId),
       )
       .sort((a, b) => b.seq - a.seq)[0];
-    const restarted =
-      ended !== undefined &&
-      record.eventReceipts.some(
-        (receipt) =>
-          receipt.kind === "turn_started" &&
-          receipt.agentId === assignment.agentId &&
-          receipt.seq > ended.seq,
-      );
+    const restarted = ended !== undefined && startedAfterEnded(record, ended);
     const seat =
       seats === "assume-idle"
         ? { status: "idle", activeTurn: false }

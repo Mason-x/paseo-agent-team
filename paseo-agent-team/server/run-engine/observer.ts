@@ -1,6 +1,12 @@
 import { latestSentWake } from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { REPORT_KINDS_BY_PURPOSE, replyAnchor } from "../../shared/domain/run-engine/report-repair";
+import {
+  anchorSince,
+  resolveHookOccurrence,
+  resolveReconcileOccurrence,
+  turnKey,
+} from "../../shared/domain/run-engine/turn-occurrence";
 import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
 import type {
   RunProtocolBlock,
@@ -107,6 +113,17 @@ type Buffered = { event: ObserverHookEvent; at: number };
 
 type Normalized = {
   receipt: Omit<RunEventReceipt, "seq" | "receivedAt">;
+  /**
+   * A turn receipt's key carries which appearance of the turn id it is (see turn-occurrence.ts). That is
+   * decided against the ledger inside the store update, so `receipt` holds the first appearance's key.
+   * `since` is set for a reconcile read: the creation time of the message the reply answers.
+   */
+  turn?: {
+    kind: "turn_started" | "turn_ended";
+    agentId: string;
+    turnId: string;
+    since?: string | null;
+  };
 };
 
 function normalize(event: ObserverHookEvent): Normalized | { skip: "no-turn-id" } {
@@ -134,6 +151,16 @@ function normalize(event: ObserverHookEvent): Normalized | { skip: "no-turn-id" 
   };
   if (event.name === "agent.turn_ended" && event.outcome) {
     (receipt as Record<string, unknown>).outcome = event.outcome.kind;
+  }
+  if (event.name === "agent.turn_started" || event.name === "agent.turn_ended") {
+    return {
+      receipt,
+      turn: {
+        kind: RECEIPT_KIND[event.name],
+        agentId: event.agentId,
+        turnId: event.turnId as string,
+      },
+    };
   }
   return { receipt };
 }
@@ -183,6 +210,9 @@ export function createRunObserver(options: ObserverOptions) {
   const log = options.log ?? (() => undefined);
   const bufferLimit = options.bufferLimit ?? 256;
   const bufferTtlMs = options.bufferTtlMs ?? 10 * 60 * 1000;
+  // Receipts written since this plugin process began are what it has already seen: the host does not
+  // re-deliver a hook to a new process, so an older receipt of the same turn id is an earlier turn.
+  const processStart = clock.now();
   let buffer: Buffered[] = [];
   let lost = false;
 
@@ -194,6 +224,24 @@ export function createRunObserver(options: ObserverOptions) {
     }
   }
 
+  /** The receipt with its turn appearance resolved against `current`, inside the serialized update. */
+  function keyed(current: RunRecord, normalized: Normalized): Normalized["receipt"] {
+    const turn = normalized.turn;
+    if (turn === undefined) return normalized.receipt;
+    const occurrence =
+      turn.since === undefined
+        ? resolveHookOccurrence(current, { ...turn, processStart })
+        : resolveReconcileOccurrence(current, { ...turn, since: turn.since });
+    const key = turnKey(turn.kind, turn.agentId, turn.turnId, occurrence);
+    if (key === null) {
+      log(
+        `turn ${turn.turnId} of ${turn.agentId} cannot take a new appearance key; kept the old key`,
+      );
+      return normalized.receipt;
+    }
+    return { ...normalized.receipt, eventKey: key, dedupeKey: key };
+  }
+
   async function record(
     runId: string,
     normalized: Normalized,
@@ -201,7 +249,8 @@ export function createRunObserver(options: ObserverOptions) {
   ): Promise<IngestResult> {
     const state: { outcome: IngestResult } = { outcome: { status: "duplicate", runId } };
     await store.update(runId, (current) => {
-      const appended = appendObservation(current, normalized.receipt, received, newId);
+      const receipt = keyed(current, normalized);
+      const appended = appendObservation(current, receipt, received, newId);
       if (appended.status === "duplicate") return null;
       if (appended.status === "rejected") {
         state.outcome = { status: "rejected", runId, reason: appended.reason };
@@ -307,6 +356,7 @@ export function createRunObserver(options: ObserverOptions) {
           agentId: string;
           messageId: string;
           assignment?: { taskId: string; assignmentId: string };
+          since?: string;
         }[] = [];
         for (const assignment of read.record.assignments) {
           if (assignment.state !== "assigned" && assignment.state !== "in_progress") continue;
@@ -314,6 +364,7 @@ export function createRunObserver(options: ObserverOptions) {
             agentId: assignment.agentId,
             messageId: replyAnchor(read.record, assignment),
             assignment: { taskId: assignment.taskId, assignmentId: assignment.assignmentId },
+            since: assignment.createdAt,
           });
         }
         const lifecycle = read.record.lifecycle;
@@ -360,6 +411,9 @@ export function createRunObserver(options: ObserverOptions) {
             turnId: window.turnId,
           });
           if ("skip" in normalized) continue;
+          if (normalized.turn !== undefined) {
+            normalized.turn.since = anchorSince(read.record, item.messageId, item.since ?? null);
+          }
           const result = await record(entry.runId, normalized, clock.now());
           if (result.status === "recorded") summary.recorded += 1;
           else if (result.status === "duplicate") summary.duplicates += 1;

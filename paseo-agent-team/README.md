@@ -318,6 +318,26 @@ you to try once more. A request is never applied twice.
   Going back to 0.6.x: a host-lost decision is an ordinary retry-or-cancel decision there, and the
   Engine's turn end reads as the host's. The settlement itself sends nothing; answering retry sends
   the member one message there as it does now.
+- A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
+  (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
+  time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The
+  turn an assignment (or a repair or plan request) ran in is the earliest appearance after its own message;
+  whether a member has gone quiet is judged on the newest. While an attempt has an unanswered decision that
+  the Engine opened because the turn ended with nothing usable or was lost (a limbo, member-lost or host-lost
+  decision), a reply read for it is not taken in: answer the decision. A cancellation decision does not hold
+  a report back. Known limits: after a restart a member's later reply in a turn that reuses the id (for
+  example to a message from you) is read into the window of an older dispatch, so a valid report in it is
+  taken in only while the attempt has no unanswered decision; a turn id that contains `#`, or a key that
+  would pass 256 characters, keeps the old key and a repeat of it is dropped as before; a session rebuilt
+  inside a running daemon (reload, model change) restarts the numbering and is not told from a replay
+  (whether an Agent resumed without a daemon restart does the same was not confirmed on DEV); a turn that
+  began before a daemon was killed and never ended can take the end of the next turn that reuses its id, and
+  the late start of that turn then stays open as `#2`, so cancelling the whole Run waits for it; a report in
+  a later turn with the same id is held back (`turn-not-ended`, nothing written) until a kick or a recovery
+  records the end of the earlier appearance. What
+  cannot be told apart is left as it was: nothing is settled and the warning and the manual way out stay.
+  Going back to 0.7.0 reads such a ledger fine (`#2` is just a key) but 0.7.0 looks a turn up by its bare
+  id and takes the oldest receipt, so do not roll back while an Engine Run with `#n` receipts is live.
 - Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
   Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.
