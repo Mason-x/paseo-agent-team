@@ -303,16 +303,18 @@ you to try once more. A request is never applied twice.
   restart the member's provider process may still be running (on Windows too): make sure it has
   stopped before you answer. A member the host reads as closed is the closed-or-archived case above.
   The Engine settles only the turn of a producer (the member that does the task). It does not settle
-  the turn of a judge, a smoke tester, a supplement or a re-report, a turn it never saw begin (no turn
-  start on record), or any turn of a Run written as v1 (it has no record of the re-checks): there the
-  warning is still shown, the Run does not move on, a kick sends nothing and writes nothing, and
-  cancelling the whole Run keeps waiting for a turn end the host never reports. The way out is yours:
-  wait until the member is idle in Paseo, send it one message that asks only for a reply of OK, wait
-  for its answer, then press **立即检查并推进**. The member's own turn then reaches the Engine as the
-  host's record and lets the cancellation finish; it is not certain to recover the Run. **继续**
-  (resume) is no way out; if the member does not answer, cancel and start the Run again. If you
-  cancel the whole Run while a settled turn waits, the turn is still recorded (that lets the
-  cancellation finish) but no decision is opened: the Run is cancelled and nothing is left to answer.
+  the turn of a judge, a smoke tester, a supplement or a re-report, or a turn it never saw begin (no
+  turn start on record): for those the warning is still shown, the Run does not move on, a kick
+  sends nothing and writes nothing, and cancelling the whole Run keeps waiting for a turn end the
+  host never reports. There is no such warning for a Run written as v1: it has no record of the
+  re-checks and shows none at all; this description is the only place its way out is written down.
+  The way out is yours: wait until the member is idle in Paseo, send it one message that
+  asks only for a reply of OK, wait for its answer, then press **立即检查并推进**. The member's
+  own turn then reaches the Engine as the host's record and lets the cancellation
+  finish; it is not certain to recover the Run. **继续** (resume) is no way out; if the member
+  does not answer, cancel and start the Run again. If you cancel the whole Run while a settled turn
+  waits, the turn is still recorded (that lets the cancellation finish) but no decision is opened:
+  the Run is cancelled and nothing is left to answer.
   Going back to 0.6.x: a host-lost decision is an ordinary retry-or-cancel decision there, and the
   Engine's turn end reads as the host's. The settlement itself sends nothing; answering retry sends
   the member one message there as it does now.

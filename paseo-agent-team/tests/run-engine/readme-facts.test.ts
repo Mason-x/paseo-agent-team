@@ -158,6 +158,8 @@ describe("the Run Engine section of the README agrees with the code", () => {
       `至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒`,
       "如果这是成员（生产者）的实现回合",
       "且该成员在 Paseo 里空闲",
+      "引擎记录过这一回合的开始",
+      "引擎没见到回合开始",
       "宿主丢失",
       "重试或取消",
       "判官、冒烟、补证或补报回合不会被引擎结算",
@@ -165,14 +167,23 @@ describe("the Run Engine section of the README agrees with the code", () => {
     ]) {
       expect(LOST_TURN_HINT).toContain(word);
     }
+    // The way out applies to a turn the Engine never saw begin, not only to the other purposes.
+    expect(LOST_TURN_HINT).toContain(
+      "引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息",
+    );
     expect(section).toContain("**立即检查并推进**");
     expect(section).toContain("the Engine records the turn as lost by the host");
     expect(section).toContain("`host-lost`");
     expect(section).toContain("you answer with retry or cancel");
     expect(section).toContain("Nothing runs by timer");
     expect(section).toContain("make sure it has\n  stopped before you answer");
-    // What is not settled, and the way out that stays for it.
+    // What is not settled, and the way out that stays for it. A v1 Run is not merely left with the
+    // warning: it has no re-check record, so it shows no such warning at all.
     expect(section).toContain("a Run written as v1");
+    expect(section).toContain(
+      "There is no such warning for a Run written as v1: it has no record of the\n  re-checks and shows none at all",
+    );
+    expect(section).toContain("this description is the only place its way out is written down");
     // The alert and the README say the same: only a producer's own task turn is settled.
     expect(section).toContain("settles only the turn of a producer");
     expect(section).toContain("a judge, a smoke tester, a supplement or a re-report");

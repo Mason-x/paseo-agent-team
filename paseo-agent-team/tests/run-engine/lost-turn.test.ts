@@ -504,7 +504,10 @@ for (const schema of [1, 2] as const) {
           lastCode: LOST_CODE,
         });
         expect(lost.alerts.map((alert) => alert.state)).toEqual(["open"]);
-        expect(lost.alerts[0]?.summary).toContain("至少等 30 秒");
+        const summary = lost.alerts[0]?.summary ?? "";
+        expect(summary).toContain("引擎记录过这一回合的开始");
+        expect(summary).toContain("引擎没见到回合开始");
+        expect(summary).toContain("只要求回复 OK 的消息");
       } else {
         // A v1 Run is not given re-checks: nothing is written down and no alert is raised.
         expect(readReadRetries(lost)).toEqual({ kind: "absent" });
