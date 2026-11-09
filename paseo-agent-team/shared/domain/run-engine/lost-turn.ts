@@ -211,14 +211,18 @@ export function findClosedTurns(
 }
 
 /**
- * Whether the host closed or archived `agentId` after the turn `turnId` began. Such a turn was cut off,
- * so whatever came of it is not a report to retry: the decision about it only offers `cancel`.
+ * Whether the host closed or archived `agentId` after the turn `turnId` began (only `kinds` count when
+ * given). Such a turn was cut off, so whatever came of it is not a report to retry: the decision about it
+ * only offers `cancel`. A `closed` receipt alone is weaker (T9d): a graceful stop of the daemon writes one
+ * for every agent, and the member is usable again afterwards, so the decision about a reply the host lost
+ * asks for `archived` only.
  */
 export function closedSince(
   record: Pick<RunRecord, "eventReceipts">,
   agentId: string,
   turnId: string,
   occurrence?: number,
+  kinds: readonly string[] = ["closed", "archived"],
 ): boolean {
   // One appearance of the turn id: the one asked for, else the newest.
   const mine = (kind: string) => {
@@ -234,10 +238,7 @@ export function closedSince(
   const ended = mine("turn_ended");
   const since = started?.seq ?? ended?.seq ?? 0;
   return record.eventReceipts.some(
-    (receipt) =>
-      (receipt.kind === "closed" || receipt.kind === "archived") &&
-      receipt.agentId === agentId &&
-      receipt.seq > since,
+    (receipt) => kinds.includes(receipt.kind) && receipt.agentId === agentId && receipt.seq > since,
   );
 }
 
@@ -434,8 +435,10 @@ export function findLostTurns(
  *  3. the reply is lost: the re-checks of it are used up with exactly `incomplete:dispatch-not-found`, a
  *     look now still finds the dispatch missing, and `LOST_TURN_SETTLE_DELAY_MS` have gone by since the
  *     last failure. Any other reason (too large, a failed read, unreadable, another incomplete) is not it.
- * The decision is `member-lost` (cancel only) when the host closed or archived the agent after the
- * assignment was made, or reads it as closed now; `host-lost` (retry or cancel) otherwise.
+ * The decision is `member-lost` (cancel only) when the host reads the agent as closed now or archived it
+ * after the assignment was made; `host-lost` (retry or cancel) for a producer's own task turn otherwise.
+ * A `closed` receipt alone proves only that the turn ended (T9d): a graceful stop of the daemon writes one
+ * for every agent, which is usable again after the restart.
  */
 
 export type LostReplyKind = typeof MEMBER_LOST_CODE | typeof HOST_LOST_CODE;
@@ -468,6 +471,16 @@ function sendUnsettled(record: RunRecord, assignment: RunAssignment): boolean {
     (intent) =>
       (intent.state === "sending" || intent.state === "outcome-unknown") &&
       (intent.taskId === assignment.taskId || intent.recipient === assignment.agentId),
+  );
+}
+
+/** Whether the host archived the agent after the assignment was made. */
+function archivedAfterAssignment(record: RunRecord, assignment: RunAssignment): boolean {
+  return record.eventReceipts.some(
+    (receipt) =>
+      receipt.kind === "archived" &&
+      receipt.agentId === assignment.agentId &&
+      Date.parse(receipt.receivedAt) >= Date.parse(assignment.createdAt),
   );
 }
 
@@ -511,9 +524,11 @@ export function lostReplyCandidates(record: RunRecord, now: string): LostReplyCa
 
 /**
  * Which decision a lost reply gets on this read of the member, or null when none: the member must be at
- * rest and the host must have answered (idle or closed, no turn running). `member-lost` when it was closed
- * or archived after the assignment (or reads as closed); otherwise `host-lost`, which only a producer's
- * own task turn gets (as for T4b: the decision of a judge or a supplement has no way to try again).
+ * rest and the host must have answered (idle or closed, no turn running). In this order:
+ *  1. `member-lost` when it reads as closed now, or was archived after the assignment;
+ *  2. `host-lost` for a producer's own task turn (not a supplement): a `closed` receipt does not change it;
+ *  3. a judge, a smoke tester or a supplement (whose decision has no way to try again): `member-lost` when
+ *     the host closed or archived it after the assignment, otherwise none.
  */
 export function lostReplyKind(
   record: RunRecord,
@@ -522,10 +537,16 @@ export function lostReplyKind(
 ): LostReplyKind | null {
   if (seat === undefined || typeof seat !== "object") return null;
   if ((seat.status !== "idle" && seat.status !== "closed") || seat.activeTurn) return null;
-  if (seat.status === "closed" || closedAfterAssignment(record, assignment))
+  if (seat.status === "closed" || archivedAfterAssignment(record, assignment)) {
     return MEMBER_LOST_CODE;
-  if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return null;
-  return evidenceRepairOf(record, assignment) === null ? HOST_LOST_CODE : null;
+  }
+  if (
+    PRODUCER_PURPOSES.includes(assignment.purpose) &&
+    evidenceRepairOf(record, assignment) === null
+  ) {
+    return HOST_LOST_CODE;
+  }
+  return closedAfterAssignment(record, assignment) ? MEMBER_LOST_CODE : null;
 }
 
 /**

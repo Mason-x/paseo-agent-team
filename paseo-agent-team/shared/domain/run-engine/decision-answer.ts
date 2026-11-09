@@ -156,7 +156,9 @@ type AnswerContext = Pick<RunRecord, "lifecycle"> & Partial<Pick<RunRecord, "eve
  * A decision about a turn the host cut off (the member was closed or archived after the turn began) is
  * answered with `cancel` only: whatever the turn left behind is not a report to try again, and the
  * member cannot be asked again. Judged from the receipts, not from the decision's kind, so a real
- * `turn_ended` that came first and a decision opened for a missing report are covered too.
+ * `turn_ended` that came first and a decision opened for a missing report are covered too. One opened as
+ * `host-lost` is cut by an `archived` receipt only (T9d): a `closed` one is what a graceful stop of the
+ * daemon writes for every agent, and the member is usable again after it.
  */
 function turnWasCut(record: AnswerContext, decision: Decision, kind: AnswerableKind): boolean {
   if (kind.kind !== "stuck") return false;
@@ -177,6 +179,7 @@ function turnWasCut(record: AnswerContext, decision: Decision, kind: AnswerableK
     ended.agentId,
     evidence.turnId,
     receiptOccurrence(ended),
+    limboReason(decision) === HOST_LOST_CODE ? ["archived"] : ["closed", "archived"],
   );
 }
 

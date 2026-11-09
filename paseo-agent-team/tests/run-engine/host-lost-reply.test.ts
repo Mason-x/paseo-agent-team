@@ -46,8 +46,10 @@ import { JUDGE_SEAT_REVIEW, JUDGE_SEAT_SMOKE } from "./support/review-run";
  * (a kick, a hook or a recovery; no timer) that proves the turn over (the very proof a cancellation takes),
  * finds the member idle, closed or archived and the dispatch still missing, opens the decision in one
  * commit and takes the warning down: `member-lost` (cancel only) when the member was closed or archived,
- * `host-lost` (retry or cancel) otherwise. It writes no receipt, releases nothing and sends nothing; a
- * reply that becomes readable later is never taken in.
+ * `host-lost` (retry or cancel) otherwise. A `closed` receipt alone is not the member gone (T9d): a
+ * graceful stop of the daemon writes one for every agent, and the member is idle again after the restart.
+ * It writes no receipt, releases nothing and sends nothing; a reply that becomes readable later is never
+ * taken in.
  *
  * Run through the paths production takes (a person's kick, a recovery, a hook), with the clock the
  * settler and the re-checks share held by the test, so the 30 seconds are never a real wait.
@@ -424,9 +426,10 @@ async function plantReceipt(
   agentId: string,
   turnId: string,
   receivedAt: string,
+  occurrence = 1,
 ) {
   await store.update(RUN_ID, (current) => {
-    const key = `${kind}:${agentId}:${turnId}`;
+    const key = `${kind}:${agentId}:${turnId}${occurrence > 1 ? `#${occurrence}` : ""}`;
     const reduced = reduceRun(
       current,
       {
@@ -508,14 +511,16 @@ async function lookAgain(built: Built, via: "kick" | "recover" | "hook") {
 }
 
 /**
- * The receipts the host gave in the three orders DEV saw (dev-report.md L1, L2 and R). The reply of the
+ * The receipts the host gave in the orders DEV saw (dev-report.md L1, L2 and R). The reply of the
  * member's turn is then read from a host that has lost the history, so the reads of it are used up.
  *  - L1: `turn_ended`, `archived`, `closed` (a forced archive of the member).
  *  - L2: `archived`, `turn_ended`, `closed` (the cascade of archiving its coordinator).
- *  - R: `turn_ended` only; after the restart the member is idle (a graceful daemon stop).
+ *  - R: `turn_ended` only; after the restart the member is idle (a graceful daemon stop, no closed receipt).
+ *  - RC: `turn_ended`, `closed`; after the restart the member is idle (a graceful stop as DEV saw it, T9d).
+ *  - RA: RC, and then the member took another turn after the restart (the OK of A21) that ended too.
  * Returns when the reads were used up, in milliseconds on the test clock.
  */
-type Order = "L1" | "L2" | "R";
+type Order = "L1" | "L2" | "R" | "RC" | "RA";
 
 async function reachReplyLost(host: Host, built: Built, order: Order): Promise<number> {
   host.planRequestSent();
@@ -544,6 +549,23 @@ async function reachReplyLost(host: Host, built: Built, order: Order): Promise<n
     await ended();
     await closed();
     host.closedAgents.add(MEMBER);
+  } else if (order === "RC") {
+    await ended();
+    await closed();
+  } else if (order === "RA") {
+    await ended();
+    await closed();
+    // After the restart the member took another turn that ended too, and its id came back (the host
+    // numbers turns per session): the observer of a restarted daemon records it as the second appearance
+    // (`#2`, T9a; turn-reuse.test.ts), planted here because this test's observer lives through the stop.
+    await plantReceipt("turn_started", MEMBER, turnId, iso(built.clock.at), 2);
+    await plantReceipt("turn_ended", MEMBER, turnId, iso(built.clock.at + 1), 2);
+    // The turn id came back (the host numbers turns per session): the second appearance is `#2` (T9a).
+    const again = await stored();
+    expect(endsOf(again, turnId).map((receipt) => receipt.eventKey)).toEqual([
+      `turn_ended:${MEMBER}:${turnId}`,
+      `turn_ended:${MEMBER}:${turnId}#2`,
+    ]);
   } else {
     await ended();
   }
@@ -560,6 +582,8 @@ const KIND: Record<Order, "member-lost" | "host-lost"> = {
   L1: "member-lost",
   L2: "member-lost",
   R: "host-lost",
+  RC: "host-lost",
+  RA: "host-lost",
 };
 
 /** Marks the used-up re-check with another reason, the way a different failure would have left it. */
@@ -582,16 +606,16 @@ for (const schema of [1, 2] as const) {
       await setup();
     });
 
-    // --- the three orders DEV saw -----------------------------------------------------------------
+    // --- the orders DEV saw -----------------------------------------------------------------------
 
-    for (const order of ["L1", "L2", "R"] as const) {
+    for (const order of ["L1", "L2", "R", "RC", "RA"] as const) {
       test(`${order}: used up; at 29 seconds nothing, at 31 exactly one decision (${KIND[order]}) and the alert is down; kicking again writes nothing; no receipt, no message, no archive`, async () => {
         const host = fakeHost();
         const built = build(host);
         const heldAt = await reachReplyLost(host, built, order);
         const lost = await stored();
         expect(states(lost)).toEqual({ t1: "assigned", t2: "pending" });
-        expect(endsOf(lost, host.turnOf(MEMBER))).toHaveLength(1);
+        expect(endsOf(lost, host.turnOf(MEMBER))).toHaveLength(order === "RA" ? 2 : 1);
         if (schema === 2) {
           expect(items(lost)[0]).toMatchObject({ state: "held", lastCode: LOST_CODE });
           expect(alertStates(lost)).toEqual(["open"]);
@@ -616,7 +640,7 @@ for (const schema of [1, 2] as const) {
         expect(host.calls.archives).toBe(0);
         // No receipt of the Engine's in any case: the host's own end is the evidence.
         expect(engineReceipts(settled)).toEqual([]);
-        expect(endsOf(settled, host.turnOf(MEMBER))).toHaveLength(1);
+        expect(endsOf(settled, host.turnOf(MEMBER))).toHaveLength(order === "RA" ? 2 : 1);
         if (schema === 1) {
           expect(settled.revision).toBe(lost.revision);
           expect(openDecisions(settled)).toEqual([]);
@@ -633,7 +657,8 @@ for (const schema of [1, 2] as const) {
           limbo: {
             turnId: host.turnOf(MEMBER),
             reason: KIND[order],
-            endedEventKey: `turn_ended:${MEMBER}:${host.turnOf(MEMBER)}`,
+            // The proof takes the newest end: for RA the one of the turn after the restart.
+            endedEventKey: `turn_ended:${MEMBER}:${host.turnOf(MEMBER)}${order === "RA" ? "#2" : ""}`,
           },
         });
         expect(decision.summary).toContain("回复已丢失");
@@ -700,6 +725,8 @@ for (const schema of [1, 2] as const) {
       }
       expect(openDecisions(settled)).toHaveLength(1);
       expect(openDecisions(settled)[0]?.limbo).toMatchObject({ reason: "member-lost" });
+      // No receipt says it was closed, so only the kind of decision says it can only be cancelled.
+      expect(answerableActions(settled, openDecisions(settled)[0] as never)).toEqual(["cancel"]);
       expect(engineReceipts(settled)).toEqual([]);
     });
 
@@ -883,10 +910,72 @@ for (const schema of [1, 2] as const) {
       expect(openDecisions(await stored())).toHaveLength(1);
     });
 
-    test("answered with retry (host-lost): the same member gets exactly one message, not a second one for another look, and its reply is taken in as usual", async () => {
+    for (const order of ["R", "RC", "RA"] as const) {
+      test(`${order}: answered with retry (host-lost): the same member gets exactly one message, not a second one for another look, and its reply is taken in as usual`, async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachReplyLost(host, built, order);
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        const settled = await stored();
+        if (schema === 1) {
+          expect(openDecisions(settled)).toEqual([]);
+          return;
+        }
+        const [decision] = openDecisions(settled);
+        if (decision === undefined) throw new Error("no decision");
+        expect(host.sentTo(MEMBER)).toBe(1);
+
+        const out = await decide(built, decision.decisionId, "retry");
+        expect({ status: out.status, issues: out.issues }).toEqual({
+          status: "applied",
+          issues: [],
+        });
+        expect(host.sentTo(MEMBER)).toBe(2);
+        expect(host.sentTo(OTHER)).toBe(0);
+        expect(host.calls.archives).toBe(0);
+        const retried = await stored();
+        expect(retried.assignments.filter((entry) => entry.taskId === "t1")).toHaveLength(2);
+        expect(retried.assignments.find((entry) => entry.attempt === 1)?.state).toBe("ended");
+        expect(openDecisions(retried)).toEqual([]);
+        expect(checkLedgerInvariants(retried).ok).toBe(true);
+
+        // The member's new turn begins and it is working: looking again does not send it again.
+        host.runningAgents.add(MEMBER);
+        await built.driver.onHook({
+          name: "agent.turn_started",
+          agentId: MEMBER,
+          turnId: host.turnOf(MEMBER),
+        });
+        for (const via of ["kick", "recover", "hook"] as const) {
+          built.clock.at += 40_000;
+          await lookAgain(built, via);
+        }
+        expect(host.sentTo(MEMBER)).toBe(2);
+
+        // It does the work and reports: the report is taken in as for any attempt.
+        produce(host, MEMBER);
+        host.runningAgents.delete(MEMBER);
+        await built.driver.onHook({
+          name: "agent.turn_ended",
+          agentId: MEMBER,
+          turnId: host.turnOf(MEMBER),
+        });
+        await built.control.idle();
+        const reported = await stored();
+        const second = reported.assignments.find((entry) => entry.attempt === 2);
+        expect(second?.acceptedProof).not.toBeNull();
+        expect(states(reported).t1).not.toBe("assigned");
+        expect(checkLedgerInvariants(reported).ok).toBe(true);
+        expect(host.sentTo(MEMBER)).toBe(2);
+      });
+    }
+
+    test("a closed receipt and a read of closed now: member-lost, cancel only", async () => {
       const host = fakeHost();
       const built = build(host);
-      const heldAt = await reachReplyLost(host, built, "R");
+      const heldAt = await reachReplyLost(host, built, "RC");
+      host.closedAgents.add(MEMBER);
       built.clock.at = heldAt + 31_000;
       await kick(built);
       const settled = await stored();
@@ -895,48 +984,49 @@ for (const schema of [1, 2] as const) {
         return;
       }
       const [decision] = openDecisions(settled);
+      expect(decision?.limbo).toMatchObject({ reason: "member-lost" });
       if (decision === undefined) throw new Error("no decision");
-      expect(host.sentTo(MEMBER)).toBe(1);
+      expect(answerableActions(settled, decision)).toEqual(["cancel"]);
+    });
 
-      const out = await decide(built, decision.decisionId, "retry");
-      expect({ status: out.status, issues: out.issues }).toEqual({ status: "applied", issues: [] });
-      expect(host.sentTo(MEMBER)).toBe(2);
-      expect(host.sentTo(OTHER)).toBe(0);
-      expect(host.calls.archives).toBe(0);
-      const retried = await stored();
-      expect(retried.assignments.filter((entry) => entry.taskId === "t1")).toHaveLength(2);
-      expect(retried.assignments.find((entry) => entry.attempt === 1)?.state).toBe("ended");
-      expect(openDecisions(retried)).toEqual([]);
-      expect(checkLedgerInvariants(retried).ok).toBe(true);
-
-      // The member's new turn begins and it is working: looking again does not send it again.
-      host.runningAgents.add(MEMBER);
-      await built.driver.onHook({
-        name: "agent.turn_started",
-        agentId: MEMBER,
-        turnId: host.turnOf(MEMBER),
-      });
-      for (const via of ["kick", "recover", "hook"] as const) {
-        built.clock.at += 40_000;
-        await lookAgain(built, via);
+    test("a host-lost decision is cut to cancel only when the member is archived afterwards, not by a closed receipt", async () => {
+      const host = fakeHost();
+      const built = build(host);
+      const heldAt = await reachReplyLost(host, built, "RC");
+      built.clock.at = heldAt + 31_000;
+      await kick(built);
+      const opened = await stored();
+      if (schema === 1) {
+        expect(openDecisions(opened)).toEqual([]);
+        return;
       }
-      expect(host.sentTo(MEMBER)).toBe(2);
+      const [decision] = openDecisions(opened);
+      if (decision === undefined) throw new Error("no decision");
+      expect(decision.limbo).toMatchObject({ reason: "host-lost" });
+      expect(answerableActions(opened, decision)).toEqual(["retry", "cancel"]);
 
-      // It does the work and reports: the report is taken in as for any attempt.
-      produce(host, MEMBER);
-      host.runningAgents.delete(MEMBER);
-      await built.driver.onHook({
-        name: "agent.turn_ended",
-        agentId: MEMBER,
-        turnId: host.turnOf(MEMBER),
+      // Another graceful stop: one more closed receipt. The member can still be asked again.
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const closedAgain = await stored();
+      expect(openDecisions(closedAgain)[0]?.decisionId).toBe(decision.decisionId);
+      expect(answerableActions(closedAgain, decision)).toEqual(["retry", "cancel"]);
+
+      // Archived after it opened: only cancel, and a retry is refused without a message.
+      await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
+      const archived = await stored();
+      expect(answerableActions(archived, decision)).toEqual(["cancel"]);
+      const sentBefore = host.sent.length;
+      const out = await decide(built, decision.decisionId, "retry");
+      expect(out.status).not.toBe("applied");
+      expect(host.sent).toHaveLength(sentBefore);
+      expect(openDecisions(await stored())).toHaveLength(1);
+      const cancelled = await decide(built, decision.decisionId, "cancel");
+      expect({ status: cancelled.status, issues: cancelled.issues }).toEqual({
+        status: "applied",
+        issues: [],
       });
-      await built.control.idle();
-      const reported = await stored();
-      const second = reported.assignments.find((entry) => entry.attempt === 2);
-      expect(second?.acceptedProof).not.toBeNull();
-      expect(states(reported).t1).not.toBe("assigned");
-      expect(checkLedgerInvariants(reported).ok).toBe(true);
-      expect(host.sentTo(MEMBER)).toBe(2);
+      expect(host.sent).toHaveLength(sentBefore);
+      expect(host.calls.archives).toBe(0);
     });
 
     // --- cancelling the whole Run -----------------------------------------------------------------
