@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { readDagControl } from "../../shared/domain/run-engine/dag-admission";
+import { ensureCoordinatorBudget } from "../../shared/domain/run-engine/coordinator-budget";
+import { COORDINATOR_SEAT_ID, readDagControl } from "../../shared/domain/run-engine/dag-admission";
 import {
   addPlanRequest,
   bindSeatAgent,
@@ -96,6 +97,47 @@ describe("addPlanRequest", () => {
     expect(() => addPlanRequest(once, { ...request, intentId: "intent-plan-2" })).toThrow(
       "already prepared",
     );
+  });
+
+  // The two refusals of the coordinator's turn used to share one sentence, so a Run whose request was
+  // already paid for read as one that had run out of turns (and the other way round).
+  test("a request whose key or message is already counted says so, not that the turns ran out", () => {
+    const wake = addPlanRequest(fresh(), request).outbox.find((entry) => entry.kind === "wake");
+    if (!wake) throw new Error("expected a plan request");
+    // Something other than a `wake` already holds the plan request's key (or its message id): the
+    // earlier "already prepared" check does not see it, the budget does.
+    for (const held of [
+      { ...wake, kind: "dispatch", messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2" },
+      { ...wake, kind: "dispatch", idempotencyKey: "plan:other:1" },
+    ]) {
+      const record = fresh();
+      record.outbox.push(held as RunRecord["outbox"][number]);
+      let message = "";
+      try {
+        addPlanRequest(record, request);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain("already counted");
+      expect(message).not.toContain("no turn left");
+    }
+  });
+
+  test("a coordinator with no turn left says so, not that the request was already counted", () => {
+    const record = ensureCoordinatorBudget(fresh());
+    const entry = record.budgets.entries.find(
+      (candidate) => candidate.scope === "seat" && candidate.subjectId === COORDINATOR_SEAT_ID,
+    );
+    if (!entry) throw new Error("no coordinator entry");
+    entry.limit = entry.reserved;
+    let message = "";
+    try {
+      addPlanRequest(record, request);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("no turn left");
+    expect(message).not.toContain("already counted");
   });
 });
 

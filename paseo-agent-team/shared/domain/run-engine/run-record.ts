@@ -390,6 +390,12 @@ export function addPlanRequest(record: RunRecord, input: PlanRequestInput): RunR
   // The plan request is the coordinator's first turn, paid in the same commit as the request. A Run
   // is only started with at least one turn (the launch gate and the preflight), so this does not refuse.
   const reservation = reserveCoordinatorTurn(record, `plan:${record.runId}:1`, input.messageId);
+  // Two different refusals, said differently: a request already paid for is not a coordinator out of turns.
+  if (reservation.status === "already-counted") {
+    throw new Error(
+      "the plan request was already counted against the coordinator's turns (its key or message is already in the outbox)",
+    );
+  }
   if (reservation.status !== "reserved") {
     throw new Error("the coordinator has no turn left for the plan request");
   }
