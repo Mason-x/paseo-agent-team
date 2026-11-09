@@ -144,7 +144,7 @@ export const runEngineZh = {
       transport: "没有收到操作结果，服务端可能已执行；请先查看最新状态，再决定是否重试",
       unknownCode: (code: string) => `被拒绝（原因代码 ${code}）`,
       kick: {
-        idle: "没有需要推进的内容",
+        idle: "已检查：没有需要推进的事",
         dispatched: (count: number) => `已发出 ${count} 条消息`,
         waiting: "有任务在等席位",
         blocked: (reason: string | null) =>

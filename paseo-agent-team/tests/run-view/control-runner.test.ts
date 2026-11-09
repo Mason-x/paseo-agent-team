@@ -178,6 +178,7 @@ describe("replan", () => {
     expect(deps.refresh).toHaveBeenCalledTimes(1);
     expect(runner.state).toEqual({
       pending: null,
+      noticeFrom: "replan",
       notice: { tone: "success", text: zh.controls.result.applied, refresh: true },
     });
   });
@@ -275,6 +276,15 @@ describe("kick", () => {
       runId: "run-ctl-a1",
     });
     expect(runner.state.notice?.text).toBe(zh.controls.result.kick.dispatched(1));
+  });
+
+  test("an answer says which control it came from, so the page can put it next to that button", async () => {
+    const { runner } = setup();
+    expect(runner.state.noticeFrom).toBeUndefined();
+    await runner.kick();
+    expect(runner.state.noticeFrom).toBe("kick");
+    await runner.pause(3);
+    expect(runner.state.noticeFrom).toBe("pause");
   });
 });
 
@@ -536,6 +546,7 @@ describe("a request that never got an answer", () => {
     await runner.replan("reason", 7);
     expect(runner.state).toEqual({
       pending: null,
+      noticeFrom: "replan",
       notice: { tone: "warning", text: zh.controls.result.transport, refresh: false },
     });
     expect(deps.refresh).not.toHaveBeenCalled();
