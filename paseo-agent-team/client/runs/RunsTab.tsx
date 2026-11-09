@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   buildRunRows,
+  type EngineListStatus,
   type EngineRunStanding,
   filterCounts,
   filterRows,
@@ -272,6 +273,7 @@ export function RunsTab({
         navigation={navigation}
         legacyRuns={legacyRuns}
         engineRuns={engine.runs}
+        engineStatus={engine.status}
       />
     </View>
   );
@@ -284,12 +286,14 @@ function LabelledRunsTab({
   navigation,
   legacyRuns,
   engineRuns,
+  engineStatus,
 }: {
   theme: PluginTheme;
   hostId: string;
   navigation: Navigation;
   legacyRuns: readonly RunSummary[];
   engineRuns: readonly EngineRunStanding[];
+  engineStatus: EngineListStatus;
 }) {
   const paseo = usePaseo();
   const toast = useToast();
@@ -300,7 +304,10 @@ function LabelledRunsTab({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [followUp, setFollowUp] = useState<FollowUpTarget | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<TeamRun | null>(null);
-  const rows = useMemo(() => buildRunRows(runs, engineRuns), [runs, engineRuns]);
+  const rows = useMemo(
+    () => buildRunRows(runs, engineRuns, engineStatus),
+    [runs, engineRuns, engineStatus],
+  );
   const counts = useMemo(() => filterCounts(rows), [rows]);
   const shown = useMemo(() => filterRows(rows, filter), [rows, filter]);
 

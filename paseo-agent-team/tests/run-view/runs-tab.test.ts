@@ -11,6 +11,8 @@ const shared = vi.hoisted(() => ({
   list: null as null | ((input: unknown) => Promise<unknown>),
   /** The runs the label-derived list (the coordinator chain) finds on the host. */
   labelled: [] as unknown[],
+  /** How many `run.list` calls have been made (answered or not). */
+  asked: 0,
   /** How many `run.list` calls have answered (or failed): the page has what the host knows when it is above 0. */
   answered: 0,
 }));
@@ -29,6 +31,7 @@ vi.mock("react-native", () => {
 vi.mock("@getpaseo/plugin/client", () => {
   // One function for every render: a new one each time would restart the page's poller on every render.
   const call = async (input: unknown) => {
+    shared.asked += 1;
     try {
       return await shared.list?.(input);
     } finally {
@@ -108,6 +111,7 @@ let store: RunStore;
 
 beforeEach(async () => {
   shared.answered = 0;
+  shared.asked = 0;
   home = await realpath(await mkdtemp(path.join(tmpdir(), "run-tab-")));
   await mkdir(path.join(home, "paseo"));
   store = createRunStore({ home: path.join(home, "paseo"), lock: { acquireTimeoutMs: 300 } });
@@ -144,7 +148,15 @@ const textOf = (root: Node): string =>
 /** Renders the page and waits until the list has answered and the text satisfies `until`. */
 async function render(
   until: (text: string) => boolean = () => true,
-): Promise<{ text: string; unmount(): void; open(label: string): Promise<string> }> {
+  /** The list is asked but never answers (yet): wait for the question, not for the answer. */
+  options: { unanswered?: boolean } = {},
+): Promise<{
+  text: string;
+  /** The page text as it is now (after something happened since the render returned). */
+  read(): string;
+  unmount(): void;
+  open(label: string): Promise<string>;
+}> {
   const navigation = {} as never;
   let tree: ReturnType<TestRenderer["create"]> | undefined;
   await renderer.act(async () => {
@@ -155,7 +167,8 @@ async function render(
   if (!tree) throw new Error("not rendered");
   const page = tree;
   // The list answers on the first tick of its poller: wait for that, not for a guess of how long it takes.
-  await waitUntil(renderer.act, () => shared.answered > 0 && until(textOf(page.root)), {
+  const reached = () => (options.unanswered ? shared.asked > 0 : shared.answered > 0);
+  await waitUntil(renderer.act, () => reached() && until(textOf(page.root)), {
     label: "the Runs page to show the list",
   });
   // What the answer set in motion in React (one more turn), then read.
@@ -164,6 +177,7 @@ async function render(
   });
   return {
     text: textOf(page.root),
+    read: () => textOf(page.root),
     unmount: () => page.unmount(),
     /** Presses the button with this accessibility label and returns the page text afterwards. */
     async open(label) {
@@ -270,6 +284,97 @@ describe("the Runs page with an Engine Run and a coordinator-chain Run on the sa
         const page = await render((text) => text.includes(zh.phaseDone));
         expect(countOf(page.text, zh.phaseDone)).toBe(1);
         expect(page.text).toContain(`${zh.filterEnded} 1`);
+        page.unmount();
+      });
+    },
+  );
+
+  describe.each([2, 1] as const)(
+    "the first paint, before the Engine list has answered (schema v%i)",
+    (schemaVersion) => {
+      const at = new Date().toISOString();
+      const idle = (id: string): RunAgentSnapshot => ({
+        ...agent(id),
+        status: "idle",
+        lastUsage: { inputTokens: 1 },
+        attentionTimestamp: at,
+      });
+      const runId = `run-tab10${schemaVersion}-f1`;
+
+      /** A Run that is blocked in the ledger and, by its idle coordinator, looks finished. */
+      async function seedBlocked(): Promise<ReturnType<typeof createRunQueries>> {
+        const record = { ...readyRun({ runId }), schemaVersion };
+        record.lifecycle = "active";
+        const task = record.tasks.find((entry) => entry.spec.id === "t2");
+        if (!task) throw new Error("fixture lost t2");
+        task.state = "blocked";
+        await store.create(record);
+        shared.labelled = [
+          {
+            runId,
+            teamName: "Chain team",
+            coordinator: idle("coord"),
+            members: [idle("member")],
+            startedAt: at,
+            lastActivityAt: at,
+          } satisfies TeamRun,
+        ];
+        return createRunQueries({ store, ensureReady: async () => undefined });
+      }
+
+      test("pending: the Run is read, not completed; once the list answers the ledger's word replaces it", async () => {
+        const queries = await seedBlocked();
+        let answer: (value: unknown) => void = () => undefined;
+        shared.list = (input) =>
+          new Promise((resolve) => {
+            answer = () => resolve(queries.list(input as never));
+          });
+        const page = await render((text) => text.includes("Chain team"), { unanswered: true });
+        expect(page.text).toContain(zh.phaseLoading);
+        expect(page.text).not.toContain(zh.phaseDone);
+        expect(page.text).toContain(`${zh.filterEnded} 1`);
+
+        // The answer comes: the blocked Run needs a person, on the same page.
+        await renderer.act(async () => {
+          answer(undefined);
+        });
+        await waitUntil(renderer.act, () => page.read().includes(zh.phaseNeedsYou), {
+          label: "the page to show the ledger's phase after the answer",
+        });
+        const text = page.read();
+        expect(text).not.toContain(zh.phaseLoading);
+        expect(text).not.toContain(zh.phaseDone);
+        expect(text).toContain(`${zh.filterAttention} 1`);
+        page.unmount();
+      });
+
+      test("the list failed: the page falls back to the agents' reading and does not stay on reading", async () => {
+        await seedBlocked();
+        shared.list = async () => {
+          throw new Error("run.list is down");
+        };
+        const page = await render((text) => text.includes(zh.phaseDone));
+        expect(page.text).toContain(zh.phaseDone);
+        expect(page.text).not.toContain(zh.phaseLoading);
+        page.unmount();
+      });
+
+      test("the list answered and does not name the Run: the agents' reading stands", async () => {
+        shared.labelled = [
+          {
+            runId: "run-legacy-0003",
+            teamName: "Chain team",
+            coordinator: idle("coord"),
+            members: [idle("member")],
+            startedAt: at,
+            lastActivityAt: at,
+          } satisfies TeamRun,
+        ];
+        const queries = createRunQueries({ store, ensureReady: async () => undefined });
+        shared.list = (input) => queries.list(input as never);
+        const page = await render((text) => text.includes(zh.phaseDone));
+        expect(page.text).toContain(zh.phaseDone);
+        expect(page.text).not.toContain(zh.phaseLoading);
         page.unmount();
       });
     },

@@ -177,6 +177,7 @@
 - tests/run-engine/member-closed.test.ts :: 11: after the turn is settled and the task cancelled, another ready task is refused the archived seat, with the reason in Chinese — 已归档成员的席位不再被选，拒绝原因 `seat-archived` 有中文
 - tests/run-engine/member-closed.test.ts :: A1: the reviewer is closed: its turn is settled, the decision offers only cancel, and answering it cancels the task — 审查者被关闭：结算并开只能取消的决策（协调者裁定 A）
 - tests/run-engine/member-closed.test.ts :: A3: a supplement the member was asked for is cut off by the close: the decision offers only cancel — 补证请求的回合被关闭：同样只能取消
+- tests/run-engine/member-closed.test.ts :: R-flush: a closed hook that was held back is recorded by the ${via} before it settles, so the receipt is what shows it — 模板（recover、kick × v1、v2）：缓冲的 closed hook 在结算前先落盘，两条路径一致，basis.closedBy 为 receipt（T6d）
 - tests/run-engine/lost-turn-plan.test.ts :: a closed receipt after the turn began and a host with no turn running: settled, by the receipt — `findClosedTurns` 纯函数用例（条件 a–f）
 - tests/run-engine/lost-turn.test.ts :: the reads of the lost reply are used up and the turn is known: a kick within 30 seconds writes nothing and sends nothing, a kick after 30 seconds settles it once, and the cancellation of the whole Run then finishes — 30 秒边界（T4b，v1/v2，假时钟）：重查用尽后第 29 秒 kick 零写入、零发送，第 31 秒 kick 恰好一条 `host-lost` 回执并让整个 Run 的取消完成；v1 没有重查记录，不结算
 - tests/run-engine/lost-turn.test.ts :: a turn nobody saw begin is not settled: the reads of its reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end — 现状测试（A21，v1/v2）：回合未知（台账里没有 turn_started）时重查用尽，kick 不写台账、宿主零发送，取消 `waiting.turns=1`、占用保留（残余）
@@ -243,6 +244,11 @@
 - tests/run-engine/failure-limit-driver.test.ts :: a review that sends a started task back for rework is followed by the producer although the limit is exceeded (not-started task alongside: %s)
 - tests/run-engine/failure-limit-driver.test.ts :: [v2] a request to add missing evidence to a delivery is sent although the limit is exceeded, and the supplement goes on to review
 - tests/run-engine/failure-limit-driver.test.ts :: a smoke of a started task is sent although the limit is exceeded, and t2 after it is held back
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] a paused Run whose failed tasks were cancelled back within the limit has the alert taken down once, and neither resumes nor sends — 模板（v1、v2）：暂停期间失败数回到上限内，告警只撤一次，Run 不恢复、不发送（T6a）
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] a paused Run still over the failed-task limit keeps its alert open, and later passes write nothing — 模板（v1、v2）：仍超限则告警保持，后续 pass 不写（T6a）
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] a %s Run is not touched: its open failed-task alert stays as it was — 模板（v1、v2 × finished、cancelled）：已结束的 Run 不动（T6a）
+- tests/run-engine/run-record.test.ts :: a request whose key or message is already counted says so, not that the turns ran out — 已付过费的计划请求如实说“已计数”（T6b）
+- tests/run-engine/run-record.test.ts :: a coordinator with no turn left says so, not that the request was already counted — 协调者没有回合时仍说没有回合（T6b）
 - tests/run-engine/coordinator-budget.test.ts :: the plan request is the first turn: the entry takes the policy's limit, one reserved, and nothing else changes — 模板（v1、v2 各一遍）：新 Run 的计划请求扣第一回合，冻结的策略不被写（A14）
 - tests/run-engine/coordinator-budget.test.ts :: a re-plan is the next turn: one more reserved, the Run still passes its invariants — 模板（v1、v2）（A14）
 - tests/run-engine/coordinator-budget.test.ts :: with no turns left a re-plan is refused as budget-exhausted, and the Run is not touched — 模板（v1、v2）（A14）
@@ -329,6 +335,7 @@
 - tests/run-engine/queries.test.ts :: reading never changes the stored record
 - tests/run-engine/driver.test.ts :: idle kicks and repeated or unowned events write nothing and never wake the coordinator
 - tests/run-engine/failure-limit-driver.test.ts :: a Run with failures over the limit and nothing left to start is left alone
+- tests/run-engine/failure-limit-driver.test.ts :: [%s] an idle paused Run, one that never had the alert, is not written to — 模板（v1、v2）：空闲的暂停 Run 零写入（T6a）
 - tests/run-engine/coordinator-budget.test.ts :: asking again with the same request id is the same request: it answers replayed and counts nothing — 模板（v1、v2）：同一个重新规划请求重放不再扣协调者的回合（A14）
 - tests/run-engine/driver.test.ts :: an idle Run, 24 hours later, has made no call to the host, written nothing and left no timer behind — 假计时器前进 24 小时：宿主的读（时间线与席位状态）与归档调用数不变、发送数不变、账本修订号/告警/回执不变，`vi.getTimerCount()` 前后均为 0（A16）
 
@@ -405,6 +412,9 @@
 - tests/run-view/engine-controls-draft.test.ts :: is used once: after the server took it the box is empty and nothing is sent again — 服务端接受后清草稿，输入框重挂载为空，不再发出（T5）
 - tests/run-view/engine-controls-draft.test.ts :: is kept when the server refused the request, so it can be tried again — 被拒绝的请求保留草稿以便重试（T5）
 - tests/run-view/engine-controls-draft.test.ts :: stays an uncontrolled input: no value is handed to it, and nothing is written while the IME composes — 输入框仍是非受控，组字期间不写草稿（T5）
+- tests/run-list.test.ts :: pending (no data, no error): shown as reading, not completed; every other reading is untouched — Engine 列表还没返回时，看似已完成的行显示“读取中”，其余读数不变（T6c）
+- tests/run-list.test.ts :: failed (the query gave an error): back to the agents' reading, not loading for ever — 查询出错后回落到按标签推断，不会一直读取中（T6c）
+- tests/run-view/runs-tab.test.ts :: pending: the Run is read, not completed; once the list answers the ledger's word replaces it — 整页（v1、v2）：回答前读取中，回答后换成账本的读数（T6c）
 
 缺口：真实浏览器、窄屏与断线重连已由 A12 在 DEV 看过一次（1280x900 与 390x844 无横向溢出、按钮可点、停 daemon 显示不可用而非空进度、同端口重启自动重连）；但 Runs 列表把 active 阻塞与 cancelled 的 Run 显示为"已完成"并计入"已结束"，与台账 lifecycle 和同页顶部摘要不一致（缺陷）。"原因与台账一致"仍缺端到端逐项比对；服务端推送式失效没有做（B8）。重查用尽告警的提示（A21、T4b）只有离线文案断言，没有在 DEV 页面上看过。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。
 

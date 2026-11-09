@@ -125,7 +125,8 @@ export function groupTeamRuns(agents: readonly RunAgentSnapshot[]): TeamRun[] {
 
 /**
  * `cancelled` is never read from agents: only an Engine Run's ledger lifecycle says a Run was
- * cancelled (see `buildRunRows`), so it stays apart from `done` and the general `idle`.
+ * cancelled (see `buildRunRows`), so it stays apart from `done` and the general `idle`. `loading` is
+ * not read from agents either: it stands in for `done` while the Engine list has not answered yet.
  */
 export type RunPhase =
   | "starting"
@@ -134,7 +135,8 @@ export type RunPhase =
   | "failed"
   | "done"
   | "idle"
-  | "cancelled";
+  | "cancelled"
+  | "loading";
 
 export type RunProgress = {
   phase: RunPhase;
@@ -310,7 +312,10 @@ const COUNT_ORDER: readonly MemberState[] = [
 /** A finished run's unassigned members are not news, so only a live run lists them as waiting. */
 export function visibleCountStates(progress: RunProgress): MemberState[] {
   const live =
-    progress.phase !== "done" && progress.phase !== "idle" && progress.phase !== "cancelled";
+    progress.phase !== "done" &&
+    progress.phase !== "idle" &&
+    progress.phase !== "cancelled" &&
+    progress.phase !== "loading";
   return COUNT_ORDER.filter(
     (state) => progress.counts[state] > 0 && (live || state !== "not-started"),
   );
