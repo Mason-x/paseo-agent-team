@@ -202,8 +202,12 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("a host-lost decision is an ordinary");
     // T9b: the host said the turn ended and then lost the reply.
     expect(section).toContain("**A reply the host lost after it said the turn ended.**");
-    expect(section).toContain("idle,\n  closed or archived with no turn running");
+    expect(section).toContain("shows it idle or closed with no turn running");
+    expect(section).toContain(
+      "the cancellation also counts a member the host says\n  it has no Agent for as quiet",
+    );
     expect(section).toContain("no receipt, no release, no message");
+    expect(section).toContain("(not rehearsed; from its\n  source)");
     expect(section).toContain("is never taken in, even if it can be read\n  later");
     expect(section).toContain(
       "A judge, a smoke tester or a supplement only ever gets\n  `member-lost`",

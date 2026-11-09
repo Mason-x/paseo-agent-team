@@ -326,12 +326,18 @@ you to try once more. A request is never applied twice.
   recovery) opens the decision when all of this holds: the task still waits for its report and its
   dispatch was delivered, and no message to the member or for the task is on its way or of unknown fate;
   the host's own record says the turn ended (the newest turn end of the member after the task was sent,
-  the task's own turn when it has one, and no turn started after it) and Paseo shows the member idle,
-  closed or archived with no turn running, which is the proof the cancellation of a Run takes too; the
+  the task's own turn when it has one, and no turn started after it; the newest end tells whether the
+  member has gone quiet, while the turn an assignment ran in is still the bound or earliest appearance,
+  see the next item) and a read of the member shows it idle or closed with no turn running. That is the proof the
+  cancellation of a Run takes, with one difference: the cancellation also counts a member the host says
+  it has no Agent for as quiet, this settlement does not, so if the host answers that way (or the read
+  fails) for an archived member nothing opens here and the warning stays; check what the host really
+  answers when you try a forced archive on DEV. The
   tries were used up with exactly `incomplete:dispatch-not-found` and one more look, made at least 30
-  seconds after the last failure, still finds the dispatch missing. Nothing is written but the decision
-  and the warning coming down: no receipt, no release, no message. The decision is `member-lost` (cancel
-  only) when the member was closed or archived after the task was sent or reads as closed now, otherwise
+  seconds after the last failure, still finds the dispatch missing. It writes no receipt, no release, no message:
+  only the decision, the task's note of why it waits and the warning coming down are recorded. The
+  decision is `member-lost` (cancel only) when a closed or archived receipt of the member came after the
+  task was sent or the read says closed, otherwise
   `host-lost` (retry or cancel); it says that the reply is lost, that the member may have done part of
   the work, and asks you to look at its branch and to make sure its process has stopped first (a turn end
   does not prove that: on DEV the member's process kept writing for about 20 seconds after a graceful
@@ -343,10 +349,11 @@ you to try once more. A request is never applied twice.
   host's own end as it is.
   Going back to 0.6.x: a host-lost decision is an ordinary retry-or-cancel decision there, and the
   Engine's turn end reads as the host's. The settlement itself sends nothing; answering retry sends
-  the member one message there as it does now. Going back to 0.7.0: a decision opened for a lost reply
-  that nobody answered is shown there with its retry, but 0.7.0 does not know the reply was lost and
-  does not hold back a reply that becomes readable later; if one does, it is taken in and the retry
-  shown on the decision no longer does anything. Do not roll back while a Run is live (see above).
+  the member one message there as it does now. Going back to 0.7.0 (not rehearsed; from its
+  source): a member-lost decision could only be cancelled there already; the retry of a host-lost
+  decision may still send the member a message if the reply stays unreadable, and 0.7.0 has no gate that
+  holds back a reply that becomes readable later, so if one does, it is taken in and the retry on the
+  decision no longer does anything. Do not roll back while a Run is live (see above).
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The

@@ -239,7 +239,9 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         if (lifecycle === "finished" || lifecycle === "cancelled") return { settled: 0 };
         const lostCandidates =
           options.readReply === undefined ? [] : lostTurnCandidates(read.record, clock.now());
-        // Replies lost after the host said the turn ended (T9b). Not while the Run is being cancelled.
+        // Replies lost after the host said the turn ended (T9b). Not while the Run is being cancelled: this
+        // check only saves the host reads; the check inside the update below is the one that decides, and
+        // it also covers a cancellation asked for between these reads and the commit.
         const replyCandidates =
           options.readReply === undefined || cancelPending(read.record)
             ? []
