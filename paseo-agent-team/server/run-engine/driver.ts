@@ -13,6 +13,7 @@ import type { Compactor } from "./compact";
 import type { DagIntake } from "./dag";
 import { alertIdFor, sha256Hex } from "./digest";
 import type { Intake } from "./intake";
+import type { MemberLostSettler } from "./member-lost";
 import type { IngestResult, ObserverHookEvent, ObserverHost, RunObserver } from "./observer";
 import type { DispatchNextResult, EngineService } from "./service";
 import type { RunStore } from "./store";
@@ -76,6 +77,11 @@ export type DriverOptions = {
   compactor?: Pick<Compactor, "compactIfNeeded">;
   /** Finishes a cancellation that was asked for, at the start of a pass (`cancel.ts`). */
   cancelFinisher?: Pick<CancelFinisher, "finish">;
+  /**
+   * Settles the turns Paseo cut off by closing or archiving a member, at the start of a pass and before
+   * a cancellation is finished (`member-lost.ts`). Its failure is logged and does not stop the pass.
+   */
+  memberLost?: Pick<MemberLostSettler, "settle">;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -190,6 +196,11 @@ export function createEngineDriver(options: DriverOptions) {
       if (read.status === "ok") {
         await options.compactor.compactIfNeeded(runId, { bytesHigh: read.needsCompaction });
       }
+    }
+    if (options.memberLost) {
+      // Its own commit, and the first thing a pass does about the members: a turn it settles is one the
+      // cancellation below may then count as ended. It never throws, and writes nothing when no turn was cut.
+      await options.memberLost.settle(runId);
     }
     if (options.cancelFinisher) {
       // Its own commit; it never throws, and a Run it cancels has nothing more to dispatch below.
@@ -361,7 +372,13 @@ export function createEngineDriver(options: DriverOptions) {
       const ingested = await options.observer.ingest(event);
       if (ingested.status !== "recorded" && ingested.status !== "duplicate") return ingested;
       if (event.name === "agent.turn_ended") await settleAndKick(event.agentId);
-      else if (event.name === "agent.permission_resolved" || event.name === "agent.created") {
+      else if (
+        event.name === "agent.permission_resolved" ||
+        event.name === "agent.created" ||
+        // A member closed or archived mid-turn: the pass settles the turn the host will not end.
+        event.name === "agent.closed" ||
+        event.name === "agent.archived"
+      ) {
         try {
           for (const runId of await options.store.runsForAgent(event.agentId)) await kick(runId);
         } catch (error) {

@@ -138,6 +138,43 @@ function normalize(event: ObserverHookEvent): Normalized | { skip: "no-turn-id" 
   return { receipt };
 }
 
+export type AppendedObservation =
+  | { status: "appended"; next: RunRecord }
+  | { status: "duplicate" }
+  | { status: "rejected"; reason: string };
+
+/**
+ * The one way a receipt gets into the ledger: through the reducer's `observation-recorded`, which
+ * numbers it (`seq`, `counters.observationSeq`) and drops a key it has seen. The observer uses it for
+ * what the host reported, and the Engine's own settlement of a closed member's turn (`member-lost.ts`)
+ * uses it too, inside its own store update, so both are counted and deduplicated the same way.
+ */
+export function appendObservation(
+  current: RunRecord,
+  receipt: Omit<RunEventReceipt, "seq" | "receivedAt">,
+  received: string,
+  newId: () => string,
+): AppendedObservation {
+  if (current.eventReceipts.some((entry) => entry.dedupeKey === receipt.dedupeKey)) {
+    return { status: "duplicate" };
+  }
+  const reduced = reduceRun(
+    current,
+    {
+      kind: "observation-recorded",
+      receipt: { ...receipt, seq: 0, receivedAt: received } as RunEventReceipt,
+    },
+    { now: received, newId },
+  );
+  if (!reduced.ok) {
+    return {
+      status: "rejected",
+      reason: `${reduced.code}:${String(reduced.params.reason ?? "")}`,
+    };
+  }
+  return { status: "appended", next: reduced.next };
+}
+
 export function createRunObserver(options: ObserverOptions) {
   const store = options.store;
   const clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -164,27 +201,14 @@ export function createRunObserver(options: ObserverOptions) {
   ): Promise<IngestResult> {
     const state: { outcome: IngestResult } = { outcome: { status: "duplicate", runId } };
     await store.update(runId, (current) => {
-      if (current.eventReceipts.some((entry) => entry.dedupeKey === normalized.receipt.dedupeKey)) {
-        return null;
-      }
-      const reduced = reduceRun(
-        current,
-        {
-          kind: "observation-recorded",
-          receipt: { ...normalized.receipt, seq: 0, receivedAt: received } as RunEventReceipt,
-        },
-        { now: received, newId },
-      );
-      if (!reduced.ok) {
-        state.outcome = {
-          status: "rejected",
-          runId,
-          reason: `${reduced.code}:${String(reduced.params.reason ?? "")}`,
-        };
+      const appended = appendObservation(current, normalized.receipt, received, newId);
+      if (appended.status === "duplicate") return null;
+      if (appended.status === "rejected") {
+        state.outcome = { status: "rejected", runId, reason: appended.reason };
         return null;
       }
       state.outcome = { status: "recorded", runId };
-      return reduced.next;
+      return appended.next;
     });
     return state.outcome;
   }

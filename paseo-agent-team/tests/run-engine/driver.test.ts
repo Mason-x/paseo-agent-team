@@ -12,6 +12,7 @@ import { createEffects } from "../../server/run-engine/effects";
 import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
 import { createLifecycleControl } from "../../server/run-engine/lifecycle";
+import { createMemberLostSettler } from "../../server/run-engine/member-lost";
 import { createRunObserver } from "../../server/run-engine/observer";
 import { projectDetail } from "../../server/run-engine/projection";
 import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
@@ -890,7 +891,7 @@ describe("two Runs on one repository, and a task whose claims are held", () => {
     expect(memberMessagesOfB(host)).toEqual([]);
   });
 
-  test("known limitation: a member closed in the middle of its turn is not noticed; the task stays assigned with its claims, and a cancellation of the Run keeps waiting for a turn end; the host is sent nothing", async () => {
+  test("a member closed in the middle of its turn: the Engine settles the turn once, the decision can only be cancelled, and a cancellation of the Run finishes; the host is sent nothing", async () => {
     const host = fakeHost();
     const readSeat = async (agentId: string) => {
       const refreshed = await host.port.agents.ref(agentId).refresh();
@@ -899,6 +900,7 @@ describe("two Runs on one repository, and a task whose claims are held", () => {
         : null;
     };
     const { driver } = build(host, {
+      memberLost: createMemberLostSettler({ store, readSeat }),
       cancelFinisher: createCancelFinisher({ store, readSeat }),
       // As production reads the host on a recovery: an agent that still reports a running turn is not idle.
       reconcileHost: createObserverHost(host.port, { requireIdle: true }),
@@ -909,23 +911,33 @@ describe("two Runs on one repository, and a task whose claims are held", () => {
     const before = await stored();
     expect(states(before)).toEqual({ t1: "assigned", t2: "pending" });
     const sentBefore = host.sent.length;
-
-    // The person closes the member while it works: the host reports the close and no turn end.
     host.runningAgents.add("agent-b1");
+    await driver.onHook({
+      name: "agent.turn_started",
+      agentId: "agent-b1",
+      turnId: host.turnOf("agent-b1"),
+    });
+
+    // The person closes the member while it works: the host reports the close and no turn end, and the
+    // host no longer shows a running turn.
+    await driver.onHook({ name: "agent.archived", agentId: "agent-b1" });
+    host.runningAgents.delete("agent-b1");
     await driver.onHook({ name: "agent.closed", agentId: "agent-b1" });
     await driver.kick(RUN_ID);
     await driver.recover();
     const closed = await stored();
-    // Nothing moved: the task is still the member's, its claims are kept, and no other member is chosen.
-    expect(states(closed)).toEqual({ t1: "assigned", t2: "pending" });
-    expect(closed.tasks[0]?.attempts).toBe(before.tasks[0]?.attempts);
-    expect(closed.resources).toEqual(before.resources);
-    expect(closed.assignments.filter((entry) => entry.state !== "ended")).toHaveLength(
-      before.assignments.filter((entry) => entry.state !== "ended").length,
+    const engineEnds = closed.eventReceipts.filter(
+      (receipt) => (receipt as { settledBy?: unknown }).settledBy === "engine",
     );
+    expect(engineEnds).toHaveLength(1);
+    expect(engineEnds[0]).toMatchObject({ kind: "turn_ended", outcome: "agent-closed" });
+    // The task is still the member's and its claims are kept until a person answers; no other member is chosen.
+    expect(states(closed)).toEqual({ t1: "assigned", t2: "pending" });
+    expect(closed.resources).toEqual(before.resources);
+    expect(closed.decisions.filter((entry) => entry.state === "open")).toHaveLength(1);
     expect(host.sent).toHaveLength(sentBefore);
 
-    // Cancelling the Run waits for the turn that will not end.
+    // Cancelling the Run no longer waits for a turn end that will not come.
     const control = createRunControl({ store, ensureReady: async () => undefined, driver });
     const out = await control.cancel({
       runContractVersion: 1 as const,
@@ -934,14 +946,14 @@ describe("two Runs on one repository, and a task whose claims are held", () => {
       expectedRevision: closed.revision,
       reason: "from the test",
     });
-    expect(out).toMatchObject({ status: "applied", lifecycle: "paused" });
-    expect((out as { waiting: { turns: number } }).waiting.turns).toBeGreaterThanOrEqual(1);
+    expect(out).toMatchObject({ status: "applied" });
     await control.idle();
     await driver.kick(RUN_ID);
-    const waiting = await stored();
-    expect(waiting.lifecycle).toBe("paused");
-    expect(states(waiting)).toEqual({ t1: "assigned", t2: "pending" });
-    expect(waiting.resources).toEqual(before.resources);
+    const done = await stored();
+    expect(done.lifecycle).toBe("cancelled");
+    expect(states(done)).toEqual({ t1: "cancelled", t2: "cancelled" });
+    expect(done.resources).toEqual([]);
+    expect(done.events.filter((event) => event.kind === "run-cancel-completed")).toHaveLength(1);
     expect(host.sent).toHaveLength(sentBefore);
     expect(host.calls.archives).toBe(0);
   });

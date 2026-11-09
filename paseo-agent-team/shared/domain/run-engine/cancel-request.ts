@@ -62,8 +62,11 @@ export function withCancelRequest(record: RunRecord, value: CancelRequest): RunR
   return next;
 }
 
-/** What the host says of an agent right now; `unreadable` when asking failed. */
-export type SeatView = { status: string; activeTurn: boolean } | "unreadable";
+/**
+ * What the host says of an agent right now. `unreadable`: asking failed, which proves nothing.
+ * `absent`: the host answered and has no such agent (it was deleted), so it has no turn running.
+ */
+export type SeatView = { status: string; activeTurn: boolean } | "unreadable" | "absent";
 
 export type EndedTurn = { assignmentId: string; turnId: string; endedEventKey: string };
 
@@ -136,10 +139,11 @@ export function planCancelFinish(
         ? { status: "idle", activeTurn: false }
         : seats.get(assignment.agentId);
     const idle =
-      seat !== undefined &&
-      seat !== "unreadable" &&
-      (seat.status === "idle" || seat.status === "closed") &&
-      !seat.activeTurn;
+      seat === "absent" ||
+      (seat !== undefined &&
+        seat !== "unreadable" &&
+        (seat.status === "idle" || seat.status === "closed") &&
+        !seat.activeTurn);
     if (ended === undefined || ended.turnId === null || restarted || !idle) {
       turns += 1;
       continue;

@@ -8,6 +8,7 @@ import { cancelPending } from "./cancel-request";
 import { isDecisionPending } from "./decision-state";
 import { producerHead, resolveD } from "./delivery-binding";
 import { evidenceRepairOf } from "./evidence-repair";
+import { closedSince, MEMBER_LOST_CODE } from "./lost-turn";
 import { reduceRun } from "./reducer";
 import { settleRepairs } from "./report-repair";
 import { hasUnsettledEffects, isNormalEnded, outstandingAssignments } from "./transitions";
@@ -108,6 +109,7 @@ export type DecisionKind =
   | "stuck-producer"
   | "stuck-judge"
   | "limbo-producer"
+  | "member-lost"
   | "evidence-stuck"
   | "cancel"
   | "other";
@@ -126,12 +128,16 @@ export function decisionKindOf(
   const kind = classifyDecision(decision);
   if (kind === null) return "other";
   if (kind.kind === "quality") return kind.level === "D3" ? "quality-d3" : "quality-d4";
-  if (kind.kind === "evidence-stuck") return "evidence-stuck";
+  const lost = limboEvidence(decision) !== null && limboReason(decision) === MEMBER_LOST_CODE;
+  if (kind.kind === "evidence-stuck") return lost ? "member-lost" : "evidence-stuck";
   const assignment = record.assignments.find((entry) => entry.assignmentId === kind.assignmentId);
   if (!assignment || assignment.taskId !== decision.subjectId) return "other";
-  if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") return "stuck-judge";
+  if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
+    return lost ? "member-lost" : "stuck-judge";
+  }
   if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return "other";
-  return limboEvidence(decision) === null ? "stuck-producer" : "limbo-producer";
+  if (limboEvidence(decision) === null) return "stuck-producer";
+  return limboReason(decision) === MEMBER_LOST_CODE ? "member-lost" : "limbo-producer";
 }
 
 /** What each kind of decision can be answered with; a supplement stopped by a member has no retry. */
@@ -139,19 +145,50 @@ function actionsOfKind(kind: AnswerableKind): DecisionAction[] {
   return kind.kind === "evidence-stuck" ? ["cancel"] : ["retry", "cancel"];
 }
 
+/** The record fields that decide what a person may answer; the receipts are optional for a bare lifecycle. */
+type AnswerContext = Pick<RunRecord, "lifecycle"> & Partial<Pick<RunRecord, "eventReceipts">>;
+
+/**
+ * A decision about a turn the host cut off (the member was closed or archived after the turn began) is
+ * answered with `cancel` only: whatever the turn left behind is not a report to try again, and the
+ * member cannot be asked again. Judged from the receipts, not from the decision's kind, so a real
+ * `turn_ended` that came first and a decision opened for a missing report are covered too.
+ */
+function turnWasCut(record: AnswerContext, decision: Decision, kind: AnswerableKind): boolean {
+  if (kind.kind !== "stuck") return false;
+  const evidence = limboEvidence(decision);
+  if (evidence === null) return false;
+  // The Engine opened this one because the host closed the member under the turn (`member-lost.ts`).
+  if (limboReason(decision) === MEMBER_LOST_CODE) return true;
+  if (record.eventReceipts === undefined) return false;
+  const ended = record.eventReceipts.find(
+    (receipt) =>
+      receipt.eventKey === evidence.endedEventKey &&
+      receipt.kind === "turn_ended" &&
+      receipt.turnId === evidence.turnId,
+  );
+  if (ended?.agentId === undefined || ended.agentId === null) return false;
+  return closedSince({ eventReceipts: record.eventReceipts }, ended.agentId, evidence.turnId);
+}
+
+function actionsFor(
+  record: AnswerContext,
+  decision: Decision,
+  kind: AnswerableKind,
+): DecisionAction[] {
+  return turnWasCut(record, decision, kind) ? ["cancel"] : actionsOfKind(kind);
+}
+
 /**
  * The answers a person may give right now, for the Runs page. Empty when it cannot be answered, and
  * while the Run is not `active` (a paused Run answers nothing).
  */
-export function answerableActions(
-  record: Pick<RunRecord, "lifecycle">,
-  decision: Decision,
-): DecisionAction[] {
+export function answerableActions(record: AnswerContext, decision: Decision): DecisionAction[] {
   if (record.lifecycle !== "active" || cancelPending(record) || !isDecisionPending(decision)) {
     return [];
   }
   const kind = classifyDecision(decision);
-  return kind === null ? [] : actionsOfKind(kind);
+  return kind === null ? [] : actionsFor(record, decision, kind);
 }
 
 function taskOf(record: RunRecord, taskId: string): Task | undefined {
@@ -284,12 +321,23 @@ export function openLimboDecision(
   if (task === undefined || assignment === undefined || assignment.taskId !== input.taskId) {
     return { changed: false };
   }
-  if (evidenceRepairOf(record, assignment)) return { changed: false };
-  if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return { changed: false };
+  // A member lost mid-turn (T4a) is also the way out for a judge or a supplement whose turn was cut: the
+  // task waits in `review` for a report that cannot come, and the only answer is to cancel it.
+  const lost = input.reason === MEMBER_LOST_CODE;
+  const supplement = evidenceRepairOf(record, assignment) !== null;
+  if (supplement && !lost) return { changed: false };
+  const judge = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
+  if (!PRODUCER_PURPOSES.includes(assignment.purpose) && !(lost && judge)) {
+    return { changed: false };
+  }
   if (assignment.acceptedProof !== null || !OPEN_ASSIGNMENT.includes(assignment.state)) {
     return { changed: false };
   }
-  if (!OPEN_TASK.includes(task.state) || task.currentAssignmentId !== assignment.assignmentId) {
+  const inReview = lost && (judge || supplement) && task.state === "review";
+  if (
+    (!OPEN_TASK.includes(task.state) && !inReview) ||
+    task.currentAssignmentId !== assignment.assignmentId
+  ) {
     return { changed: false };
   }
   const ended = record.eventReceipts.find(
@@ -299,7 +347,7 @@ export function openLimboDecision(
       receipt.turnId === input.turnId,
   );
   if (ended === undefined) return { changed: false };
-  const dedupeKey = `${STUCK_KEY_PREFIX}${input.assignmentId}`;
+  const dedupeKey = `${supplement ? EVIDENCE_STUCK_KEY_PREFIX : STUCK_KEY_PREFIX}${input.assignmentId}`;
   if (
     record.decisions.some(
       (entry) =>
@@ -319,8 +367,11 @@ export function openLimboDecision(
     cancelIntents: null,
     subjectId: input.taskId,
     summary:
-      `生产者的回合已结束，但没有可用的报告（${input.reason.slice(0, 200)}），补报次数已用尽。` +
-      "可放弃本次尝试并重试。",
+      input.reason === MEMBER_LOST_CODE
+        ? "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告。只能取消这个任务：" +
+          "成员不能再被追问，已归档的席位在本 Run 里不会再派活。"
+        : `生产者的回合已结束，但没有可用的报告（${input.reason.slice(0, 200)}），补报次数已用尽。` +
+          "可放弃本次尝试并重试。",
     createdAt: input.now,
     answeredAt: null,
     answer: null,
@@ -403,6 +454,13 @@ type Resume =
   | { kind: "abandon"; assignmentId: string; turnId: string; endedEventKey: string };
 
 type Planned = { ok: true; resume: Resume } | { ok: false; reason: string };
+
+function limboReason(decision: Decision): string | null {
+  const raw = (decision as Decision & { limbo?: unknown }).limbo;
+  if (typeof raw !== "object" || raw === null) return null;
+  const { reason } = raw as Record<string, unknown>;
+  return typeof reason === "string" ? reason : null;
+}
 
 function limboEvidence(decision: Decision): { turnId: string; endedEventKey: string } | null {
   const raw = (decision as Decision & { limbo?: unknown }).limbo;
@@ -614,11 +672,15 @@ function planCancel(
     return { ok: false, reason: "decision-stale" };
   if (assignment.acceptedProof === null) {
     // A producer whose turn ended with nothing usable (`openLimboDecision`): close the attempt first.
+    // A judge or a supplement whose turn the host cut off (`member-lost`) is closed the same way.
     const evidence = limboEvidence(decision);
-    if (evidence === null || !PRODUCER_PURPOSES.includes(assignment.purpose)) {
+    const lost = limboReason(decision) === MEMBER_LOST_CODE;
+    const judge = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
+    if (evidence === null || !(PRODUCER_PURPOSES.includes(assignment.purpose) || (lost && judge))) {
       return { ok: false, reason: "decision-stale" };
     }
-    if (!OPEN_ASSIGNMENT.includes(assignment.state) || !OPEN_TASK.includes(task.state)) {
+    const taskStateOk = OPEN_TASK.includes(task.state) || (lost && task.state === "review");
+    if (!OPEN_ASSIGNMENT.includes(assignment.state) || !taskStateOk) {
       return { ok: false, reason: "state-changed" };
     }
     const ended = record.eventReceipts.find(
@@ -789,7 +851,7 @@ export function answerDecision(record: RunRecord, input: AnswerRequest): AnswerR
   if (kind === null || decision.subjectId === null) {
     return { ok: false, code: "decision-not-answerable", category: decision.category };
   }
-  if (!actionsOfKind(kind).includes(input.action)) {
+  if (!actionsFor(record, decision, kind).includes(input.action)) {
     return { ok: false, code: "action-unsupported", action: input.action };
   }
   if (record.lifecycle !== "active") {
