@@ -407,11 +407,21 @@
 - tests/run-view/launch-dialog.test.ts :: kickoff-pending: the plan request is submitted, it takes minutes, do not start again — 挂载 `LaunchDialog`：运行中文案（A17）
 - tests/run-view/launch-dialog.test.ts :: a failed launch shows the error, its detail and the kickoff message to copy — 挂载 `LaunchDialog`：失败的启动显示错误与详情，可复制启动消息（A17）
 - tests/run-engine/lost-turn.test.ts :: a lost dispatch is told which turns a check after 30 seconds settles and what to do for the others, without promising more than the Engine does — 重查用尽告警在丢失回合时写明：成员（生产者）的实现回合、成员空闲则至少等 30 秒后点“立即检查并推进”，引擎记为宿主丢失并开决策；判官、冒烟、补证或补报回合不会被结算，改向成员发只要求回复 OK 的消息再点按钮；其他原因码不带；A21 之前与 A21 两种旧摘要的告警仍被新代码识别并解除（T4b 评审修复）
-- tests/run-view/engine-controls-draft.test.ts :: is not shared with another Run's detail, and is still there when the first one is drawn again — 重新规划与取消 Run 的原因草稿按 Run 分键：不同 Run 的详情互不共享草稿；同一详情在轮询丢失期间保留（见上两例，T5）
+- tests/run-view/engine-controls-draft.test.ts :: is not shared with another Run's detail, and is still there when the first one is drawn again — 重新规划与取消 Run 的原因草稿按 Run 分键：不同 Run 的详情互不共享草稿；同一详情在轮询丢失期间保留（见本组的 `is still there, and is what is sent, after a poll where $name` 与 `survives several polls that lose the Run in a row, and the last text typed wins`，T5）
 - tests/run-view/engine-controls-draft.test.ts :: survives several polls that lose the Run in a row, and the last text typed wins — 读取失败、断线、`unchanged` 连续丢失 Run 后恢复，原因框里仍是最后输入的草稿（T5）
 - tests/run-view/engine-controls-draft.test.ts :: is used once: after the server took it the box is empty and nothing is sent again — 服务端接受后清草稿，输入框重挂载为空，不再发出（T5）
 - tests/run-view/engine-controls-draft.test.ts :: is kept when the server refused the request, so it can be tried again — 被拒绝的请求保留草稿以便重试（T5）
 - tests/run-view/engine-controls-draft.test.ts :: stays an uncontrolled input: no value is handed to it, and nothing is written while the IME composes — 输入框仍是非受控，组字期间不写草稿（T5）
+- tests/run-view/engine-controls-draft.test.ts :: is still there, and is what is sent, after a poll where $name — 模板；三种非 ready 轮询（读取失败、断线、`unchanged`）后原因草稿仍在，发送的就是它（T5）
+- tests/run-view/engine-controls-draft.test.ts :: holds at most the 600 characters a request carries — 原因框最多 600 字，与请求合同和 `slice` 的上限一致（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: keeps the number typed, and adds that many, after a poll where $name — 模板；追加预算数字框在三种非 ready 轮询后保留输入的数字，并按该数字追加（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: is not shared with another Run's detail, and is still there when the first one is drawn again — 追加预算数字框按 Run 分键：不同 Run 的详情互不共享，画回第一个时数字仍在（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: stays an uncontrolled input: no value is handed to it — 数字框仍是非受控，不传 `value`（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: is still open after a poll where $name, and sending it closes it — 模板；四个确认对话框（重试、取消任务、追加预算、取消 Run）在三种非 ready 轮询后仍打开，发送后关闭（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: stays shut after the person cancelled it, whatever the polls do — 模板；取消过的确认对话框不再因轮询打开（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: is not shown for another Run's detail, and is still open when the first one is drawn again — 模板；确认对话框按 Run 分键：不显示在另一个 Run 的详情里，画回第一个时仍打开（T6-B）
+- tests/run-view/engine-controls-draft.test.ts :: is dropped, and does not open again when the same offer comes back later — offer 已消失的确认对话框被丢弃，同一个 offer 以后回来也不再打开（T6-B）
+- tests/run-view/control-runner.test.ts :: telling the page the server took the reason of $name — 模板；重新规划与取消 Run 在 applied 与 replayed 时各通知页面一次且带字段，拒绝与传输失败不通知，同一请求重试成功后才通知一次（T6-B）
 - tests/run-list.test.ts :: pending (no data, no error): shown as reading, not completed; every other reading is untouched — Engine 列表还没返回时，看似已完成的行显示“读取中”，其余读数不变（T6c）
 - tests/run-list.test.ts :: failed (the query gave an error): back to the agents' reading, not loading for ever — 查询出错后回落到按标签推断，不会一直读取中（T6c）
 - tests/run-view/runs-tab.test.ts :: pending: the Run is read, not completed; once the list answers the ledger's word replaces it — 整页（v1、v2）：回答前读取中，回答后换成账本的读数（T6c）
