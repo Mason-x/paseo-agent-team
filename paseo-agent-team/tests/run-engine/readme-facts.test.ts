@@ -125,8 +125,17 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("12 by default");
   });
 
-  test("it warns not to close or archive a member while a Run is live", () => {
-    expect(section).toContain("Do not close or archive a member's Agent while a Run is live");
+  test("it says what happens when a member is closed or archived mid-turn, and not to archive the coordinator", () => {
+    expect(section).toContain("Closing or archiving a member's Agent while a Run is live");
+    expect(section).toContain("decision that can only be answered with cancel");
+    expect(section).toContain("An archived\nmember's seat takes no more work in this Run");
+    expect(section).toContain(
+      "a task that needs that seat can only wait or be\ncancelled with the whole Run",
+    );
+    expect(section).toContain("Do not archive the coordinator while a Run is live");
+    expect(section).toContain("archiving it archives the members it created");
+    expect(section).toContain("Going back to 0.6.x");
+    expect(section).not.toContain("Do not close or archive a member's Agent");
   });
 
   test("the page labels it points to exist", () => {

@@ -34,6 +34,7 @@ import {
   devEndpoint,
   producerEpoch,
 } from "../../shared/domain/run-engine/gates";
+import { isAgentArchived } from "../../shared/domain/run-engine/lost-turn";
 import {
   producerSemanticArgs,
   reviewerSemanticArgs,
@@ -282,6 +283,8 @@ export function createEngineService(options: EngineServiceOptions) {
           Boolean(snapshot.lastError) ||
           snapshot.status === "error" ||
           snapshot.status === "closed",
+        // Archived seats take no work for the rest of this Run: nothing here resumes one.
+        archived: isAgentArchived(record, seat.agentId),
         channelState: channel?.state ?? "unknown",
         available: source.available,
         load: mine.filter((entry) => entry.state === "assigned" || entry.state === "in_progress")

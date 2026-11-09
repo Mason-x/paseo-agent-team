@@ -23,6 +23,7 @@ export const DECISION_KIND_WHY_ZH: Readonly<Record<string, string>> = {
   "limbo-producer": "生产者的回合已结束，但没有可用报告，补报次数已用完",
   "evidence-stuck": "补证请求被阻塞或失败，任务已冻结",
   cancel: "任务取消正在等待所需的结束证明",
+  "member-lost": "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告",
 };
 
 const ENGINE = "Engine 自动";
@@ -231,6 +232,7 @@ export const DISPATCH_FAMILIES_ZH: Record<string, WaitingText> = {
 export const SEAT_DENIAL_ZH: Record<string, string> = {
   disabled: "席位被停用",
   "agent-missing": "席位还没有对应的 Agent",
+  "seat-archived": "席位的 Agent 已被归档，本 Run 里不再派活",
   busy: "席位正忙",
   permission: "席位在等权限回应",
   degraded: "席位所在的渠道状态不好",
@@ -246,6 +248,11 @@ export const SEAT_DENIAL_ZH: Record<string, string> = {
 
 /** Exact `waitingReason` values. */
 export const WAITING_EXACT_ZH: Record<string, WaitingText> = {
+  "member-lost": {
+    why: "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告",
+    who: `${YOU}（在决策点取消这个任务）`,
+    next: "只能取消：占用会释放，依赖它的任务一起取消；已归档的席位在本 Run 里不会再派活，需要的话用新的 Run 重做",
+  },
   "report-missing": {
     why: "成员的回合结束了，但回复里没有协议要求的报告块",
     who: ENGINE,

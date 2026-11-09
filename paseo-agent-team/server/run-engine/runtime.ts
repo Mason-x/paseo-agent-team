@@ -15,6 +15,7 @@ import { createEngineDriver, type EngineDriver } from "./driver";
 import { createEffects } from "./effects";
 import { createObserverHost } from "./host";
 import { createIntake } from "./intake";
+import { createMemberLostSettler } from "./member-lost";
 import { createRunObserver, type ObserverHookEvent } from "./observer";
 import { createReadRetry } from "./read-retry";
 import { type CommitIdentity, commitIdentity } from "./repo";
@@ -170,6 +171,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     repair: { send: (runId) => effects.runOutbox(runId) },
     log,
   });
+  // What the host says an agent is doing now; null when it has no such agent. Read only.
+  const readLiveSeat = async (agentId: string) => {
+    const refreshed = await port.agents.ref(agentId).refresh();
+    return refreshed?.agent
+      ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
+      : null;
+  };
   const driver: EngineDriver = createEngineDriver({
     store,
     observer,
@@ -181,17 +189,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     outbox: { run: (runId) => effects.runOutbox(runId) },
     onPassed: (runId) => readRetry.sweep(runId),
     compactor: createCompactor({ store, log }),
-    cancelFinisher: createCancelFinisher({
-      store,
-      readSeat: async (agentId) => {
-        const refreshed = await port.agents.ref(agentId).refresh();
-        return refreshed?.agent
-          ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
-          : null;
-      },
-      onReadFailure,
-      log,
-    }),
+    memberLost: createMemberLostSettler({ store, readSeat: readLiveSeat, onReadFailure, log }),
+    cancelFinisher: createCancelFinisher({ store, readSeat: readLiveSeat, onReadFailure, log }),
     log,
   });
   const control = createRunControl({

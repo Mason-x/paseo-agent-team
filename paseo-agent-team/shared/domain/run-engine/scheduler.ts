@@ -18,6 +18,8 @@ export type SeatRuntime = {
   idle: boolean;
   permissionPending: boolean;
   degraded: boolean;
+  /** The host told us the seat's Agent was archived: it takes no work for the rest of the Run. */
+  archived?: boolean;
   channelState: "available" | "paused" | "unknown";
   available: boolean;
   /** Current assignments (0 or 1 in batch B). */
@@ -56,6 +58,7 @@ export type SeatDenial = {
   reason:
     | "disabled"
     | "agent-missing"
+    | "seat-archived"
     | "busy"
     | "permission"
     | "degraded"
@@ -178,6 +181,10 @@ function evaluateSeats(
       denials.push({ seatId: seat.seatId, reason: "agent-missing" });
       continue;
     }
+    if (seat.archived === true) {
+      denials.push({ seatId: seat.seatId, reason: "seat-archived" });
+      continue;
+    }
     if (!seat.idle || seat.load > 0) {
       denials.push({ seatId: seat.seatId, reason: "busy" });
       continue;
@@ -248,6 +255,7 @@ export type DispatchPlan = {
 
 const TEMPORARY_DENIALS: ReadonlySet<SeatDenial["reason"]> = new Set([
   "agent-missing",
+  "seat-archived",
   "busy",
   "permission",
   "degraded",

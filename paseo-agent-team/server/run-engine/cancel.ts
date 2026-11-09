@@ -80,9 +80,12 @@ export function createCancelFinisher(options: CancelFinisherOptions) {
     const seats = new Map<string, SeatView>();
     for (const agentId of agentsToRead(record)) {
       try {
+        // null: the host answered and has no such agent (deleted): it has no turn running. A read that
+        // throws is a failed read and proves nothing. The host also reads null for an Agent whose
+        // provider is not visible to this client; that is still protected by the rule that the turn must
+        // have an end receipt (`planCancelFinish`), so a turn that may still run is not released.
         const seat = await options.readSeat(agentId);
-        if (seat === null) throw new Error("the host returned no agent state");
-        seats.set(agentId, seat);
+        seats.set(agentId, seat ?? "absent");
       } catch (error) {
         seats.set(agentId, "unreadable");
         log(`cancel could not read ${agentId}`, error);

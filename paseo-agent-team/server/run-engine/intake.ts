@@ -6,6 +6,7 @@ import {
   REPAIR_REQUEST_VERSION,
 } from "../../shared/domain/run-engine/engine-prompts";
 import { evidenceRepairOf } from "../../shared/domain/run-engine/evidence-repair";
+import { engineSettledEnd } from "../../shared/domain/run-engine/lost-turn";
 import { type ReduceFacts, reduceRun } from "../../shared/domain/run-engine/reducer";
 import {
   type RepairIssue,
@@ -100,10 +101,16 @@ const REPORT_PURPOSES: readonly RunAssignment["purpose"][] = [
   "smoker",
 ];
 
-/** An assignment waiting for a report: open, no accepted proof, and its message has gone out. */
+/**
+ * An assignment waiting for a report: open, no accepted proof, and its message has gone out. A turn the
+ * Engine itself settled because Paseo closed the member under it (`member-lost.ts`) is not waited for:
+ * that turn was cut, the member may have had actions left undone, so nothing it said is taken in, even a
+ * well-formed report, and a late real `turn_ended` for it is a duplicate the observer drops.
+ */
 function awaitingReport(record: RunRecord, assignment: RunAssignment): boolean {
   if (!OPEN_STATES.includes(assignment.state) || assignment.acceptedProof !== null) return false;
   if (!REPORT_PURPOSES.includes(assignment.purpose)) return false;
+  if (engineSettledEnd(record, assignment) !== undefined) return false;
   return record.outbox.some(
     (intent) =>
       intent.kind === "dispatch" &&

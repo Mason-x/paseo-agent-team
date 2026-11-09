@@ -195,10 +195,20 @@ new work and says so, so a very long Run is finished and restarted rather than o
 Acceptance status per scenario is in `docs/run-engine-acceptance.md` in the repository; the
 decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
 
-**Do not close or archive a member's Agent while a Run is live.** The Engine does not react to it
-and cannot recover such a task yet: the task stays assigned with its claims, and cancelling the Run
-or the task keeps waiting for a turn end that the closed Agent may never send. Cancel from the Runs
-page and let the turns end, then archive what you no longer want.
+**Closing or archiving a member's Agent while a Run is live.** If Paseo closes or archives a member's
+Agent in the middle of its turn, the host may never report that the turn ended. The Engine notices
+(it saw the Agent closed, or reads it as closed with no turn running) and records the turn as ended
+itself. The task then waits for you at a decision that can only be answered with cancel: the member is
+not asked again, whatever the cut-off turn replied is not taken in (even a valid report), and the
+Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
+and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
+member's seat takes no more work in this Run, so a task that needs that seat can only wait or be
+cancelled with the whole Run (one task cannot be cancelled alone yet).
+**Do not archive the coordinator while a Run is live: archiving it archives the members it created.**
+Going back to 0.6.x: a member-lost decision that
+nobody answered shows a retry there; do not pick it. While the Agent stays closed the seat refuses
+the new attempt and nothing is sent (for a reviewer's decision the retry is refused outright), but
+it is misleading; cancel instead.
 
 **Advanced fields.** Two policy fields have no control in the Team editor. They live in the Team's
 `runEngine` block under `policy` (Teams are stored in the host setting `agent-team-teams`), and the
