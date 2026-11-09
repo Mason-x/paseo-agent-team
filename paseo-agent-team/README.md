@@ -329,8 +329,12 @@ you to try once more. A request is never applied twice.
   example to a message from you) is read into the window of an older dispatch, so a valid report in it is
   taken in only while the attempt has no unanswered decision; a turn id that contains `#`, or a key that
   would pass 256 characters, keeps the old key and a repeat of it is dropped as before; a session rebuilt
-  inside a running daemon (reload, model change) restarts the numbering and is not told from a replay; a
-  turn whose start hook was missed and whose daemon was killed can be attached to the older appearance. What
+  inside a running daemon (reload, model change) restarts the numbering and is not told from a replay
+  (whether an Agent resumed without a daemon restart does the same was not confirmed on DEV); a turn that
+  began before a daemon was killed and never ended can take the end of the next turn that reuses its id, and
+  the late start of that turn then stays open as `#2`, so cancelling the whole Run waits for it; a report in
+  a later turn with the same id is held back (`turn-not-ended`, nothing written) until a kick or a recovery
+  records the end of the earlier appearance. What
   cannot be told apart is left as it was: nothing is settled and the warning and the manual way out stay.
   Going back to 0.7.0 reads such a ledger fine (`#2` is just a key) but 0.7.0 looks a turn up by its bare
   id and takes the oldest receipt, so do not roll back while an Engine Run with `#n` receipts is live.
