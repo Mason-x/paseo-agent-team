@@ -41,6 +41,23 @@ function noticeColor(theme: PluginTheme, tone: NoticeTone): string {
   return theme.colors.foregroundMuted;
 }
 
+/** The answer of the control last pressed; tapping it puts it away. */
+function Notice({
+  theme,
+  notice,
+  onDismiss,
+}: {
+  theme: PluginTheme;
+  notice: NonNullable<ControlState["notice"]>;
+  onDismiss: () => void;
+}) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={notice.text} onPress={onDismiss}>
+      <Text style={{ color: noticeColor(theme, notice.tone), fontSize: 12 }}>{notice.text}</Text>
+    </Pressable>
+  );
+}
+
 function ActionButton({
   theme,
   label,
@@ -300,6 +317,9 @@ export function EngineControls(props: EngineControlsProps) {
             disabled={busy}
             onPress={onKick}
           />
+          {state.notice && state.noticeFrom === "kick" ? (
+            <Notice theme={theme} notice={state.notice} onDismiss={onDismiss} />
+          ) : null}
         </View>
       ) : null}
 
@@ -413,16 +433,8 @@ export function EngineControls(props: EngineControlsProps) {
           {zh.controls.pending}
         </Text>
       ) : null}
-      {state.notice ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={state.notice.text}
-          onPress={onDismiss}
-        >
-          <Text style={{ color: noticeColor(theme, state.notice.tone), fontSize: 12 }}>
-            {state.notice.text}
-          </Text>
-        </Pressable>
+      {state.notice && (state.noticeFrom !== "kick" || !view.kick) ? (
+        <Notice theme={theme} notice={state.notice} onDismiss={onDismiss} />
       ) : null}
 
       <ConfirmDialog
