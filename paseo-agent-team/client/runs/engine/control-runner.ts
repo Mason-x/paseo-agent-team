@@ -43,6 +43,9 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
  *    its account.
  */
 
+/** The most a reason may carry: what the request holds, and what the reason boxes let be typed. */
+export const REASON_MAX_LENGTH = 600;
+
 export type ControlKey =
   | "replan"
   | "kick"
@@ -133,7 +136,7 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
           runId: deps.runId,
           requestId: requestIdFor(signature),
           expectedRevision,
-          reason: text.slice(0, 600),
+          reason: text.slice(0, REASON_MAX_LENGTH),
         });
         if (output.status !== "rejected") deps.accepted?.("replan");
         return replanNotice(output);
@@ -201,7 +204,7 @@ export function createControlRunner(deps: ControlDeps, onChange: (state: Control
           runId: deps.runId,
           requestId: requestIdFor(signature),
           expectedRevision,
-          reason: text.slice(0, 600),
+          reason: text.slice(0, REASON_MAX_LENGTH),
         });
         if (output.status !== "rejected") deps.accepted?.("cancel-run");
         return cancelRunNotice(output);

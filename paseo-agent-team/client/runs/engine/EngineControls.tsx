@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import type {
   BudgetOffer,
@@ -11,7 +11,8 @@ import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import { ImeTextInput } from "../../shared/ImeTextInput";
 import type { PluginTheme } from "../../shared/theme";
-import type { ControlState } from "./control-runner";
+import { type ControlState, REASON_MAX_LENGTH } from "./control-runner";
+import { type ControlUi, stillOffered } from "./control-ui";
 import type { ReasonDrafts } from "./reason-drafts";
 
 export type EngineControlsProps = {
@@ -20,6 +21,8 @@ export type EngineControlsProps = {
   state: ControlState;
   /** What the person has typed as a reason, kept above this component (a poll can draw it off the screen). */
   drafts: ReasonDrafts;
+  /** The turns typed for a seat and the open confirmation, kept above this component for the same reason. */
+  ui: ControlUi;
   onReplan: (reason: string) => void;
   onRetry: (offer: RetryOffer) => void;
   onCancelTask: (offer: CancelOffer) => void;
@@ -74,21 +77,21 @@ function ActionButton({
   );
 }
 
-/** One seat's budget: how many turns to add (1 to 64, 4 to begin with) and a confirmation. */
+/** One seat's budget: how many turns to add (1 to 64, 4 to begin with); the caller asks the confirmation. */
 function BudgetRow({
   theme,
   offer,
   busy,
-  onAdd,
+  ui,
+  onAsk,
 }: {
   theme: PluginTheme;
   offer: BudgetOffer;
   busy: boolean;
-  onAdd: (by: number) => void;
+  ui: ControlUi;
+  onAsk: (by: number) => void;
 }) {
-  const [text, setText] = useState("4");
   const [bad, setBad] = useState(false);
-  const [confirming, setConfirming] = useState<number | null>(null);
   return (
     <View style={{ gap: 4 }}>
       <Text
@@ -101,11 +104,12 @@ function BudgetRow({
       </Text>
       <ImeTextInput
         accessibilityLabel={`${zh.controls.budget.byLabel} ${offer.seatId}`}
-        initialValue="4"
+        initialValue={ui.budgetInitial(offer.seatId)}
+        revision={ui.budgetRevision(offer.seatId)}
         keyboardType="number-pad"
         editable={!busy}
         onChangeText={(value: string) => {
-          setText(value);
+          ui.budgetWrite(offer.seatId, value);
           setBad(false);
         }}
         style={{
@@ -127,30 +131,12 @@ function BudgetRow({
         label={`${zh.controls.budget.button} ${offer.seatId}`}
         disabled={busy}
         onPress={() => {
-          const by = Number(text.trim());
+          const by = Number(ui.budgetRead(offer.seatId).trim());
           if (!Number.isInteger(by) || by < 1 || by > 64) {
             setBad(true);
             return;
           }
-          setConfirming(by);
-        }}
-      />
-      <ConfirmDialog
-        theme={theme}
-        open={confirming !== null}
-        title={zh.controls.budget.confirmTitle}
-        body={
-          confirming === null
-            ? ""
-            : zh.controls.budget.willBe(offer.seatId, confirming, offer.limit + confirming)
-        }
-        confirmLabel={zh.controls.budget.confirm}
-        cancelLabel={zh.controls.budget.cancel}
-        onCancel={() => setConfirming(null)}
-        onConfirm={() => {
-          const by = confirming;
-          setConfirming(null);
-          if (by !== null) onAdd(by);
+          onAsk(by);
         }}
       />
     </View>
@@ -168,6 +154,7 @@ export function EngineControls(props: EngineControlsProps) {
     view,
     state,
     drafts,
+    ui,
     onReplan,
     onRetry,
     onCancelTask,
@@ -179,10 +166,26 @@ export function EngineControls(props: EngineControlsProps) {
     onDismiss,
   } = props;
   const [needReason, setNeedReason] = useState(false);
-  const [confirming, setConfirming] = useState<RetryOffer | null>(null);
-  const [confirmingCancel, setConfirmingCancel] = useState<CancelOffer | null>(null);
   const [needCancelReason, setNeedCancelReason] = useState(false);
-  const [confirmingRun, setConfirmingRun] = useState(false);
+  const open = useSyncExternalStore(ui.subscribe, ui.open);
+  // An offer that went away while a confirmation for it was open (answered elsewhere, no longer
+  // exhausted) takes the confirmation with it; it must not open again if the offer comes back.
+  useEffect(() => {
+    if (open !== null && !stillOffered(view, open)) ui.close();
+  }, [open, view, ui]);
+  const confirming: RetryOffer | null =
+    open?.kind === "retry"
+      ? (view.retries.find((offer) => offer.decisionId === open.decisionId) ?? null)
+      : null;
+  const confirmingCancel: CancelOffer | null =
+    open?.kind === "cancel-task"
+      ? (view.cancels.find((offer) => offer.decisionId === open.decisionId) ?? null)
+      : null;
+  const confirmingBudget =
+    open?.kind === "budget"
+      ? { offer: view.budgets.find((offer) => offer.seatId === open.seatId) ?? null, by: open.by }
+      : null;
+  const confirmingRun = open?.kind === "cancel-run" && view.cancelRun;
   const busy = state.pending !== null;
 
   return (
@@ -216,6 +219,7 @@ export function EngineControls(props: EngineControlsProps) {
             placeholder={zh.controls.replan.reasonPlaceholder}
             placeholderTextColor={theme.colors.foregroundMuted}
             multiline
+            maxLength={REASON_MAX_LENGTH}
             editable={!busy}
             initialValue={drafts.initial("replan")}
             revision={drafts.revision("replan")}
@@ -263,7 +267,7 @@ export function EngineControls(props: EngineControlsProps) {
             theme={theme}
             label={`${zh.controls.retry.button} ${offer.subject ?? offer.categoryLabel}`}
             disabled={busy}
-            onPress={() => setConfirming(offer)}
+            onPress={() => ui.ask({ kind: "retry", decisionId: offer.decisionId })}
           />
         </View>
       ))}
@@ -277,7 +281,7 @@ export function EngineControls(props: EngineControlsProps) {
             theme={theme}
             label={`${zh.controls.cancelTask.button} ${offer.subject ?? offer.categoryLabel}`}
             disabled={busy}
-            onPress={() => setConfirmingCancel(offer)}
+            onPress={() => ui.ask({ kind: "cancel-task", decisionId: offer.decisionId })}
           />
         </View>
       ))}
@@ -347,7 +351,8 @@ export function EngineControls(props: EngineControlsProps) {
               theme={theme}
               offer={offer}
               busy={busy}
-              onAdd={(by) => onAddBudget(offer, by)}
+              ui={ui}
+              onAsk={(by) => ui.ask({ kind: "budget", seatId: offer.seatId, by })}
             />
           ))}
         </View>
@@ -366,6 +371,7 @@ export function EngineControls(props: EngineControlsProps) {
             placeholder={zh.controls.cancelRun.reasonPlaceholder}
             placeholderTextColor={theme.colors.foregroundMuted}
             multiline
+            maxLength={REASON_MAX_LENGTH}
             editable={!busy}
             initialValue={drafts.initial("cancel-run")}
             revision={drafts.revision("cancel-run")}
@@ -396,7 +402,7 @@ export function EngineControls(props: EngineControlsProps) {
                 setNeedCancelReason(true);
                 return;
               }
-              setConfirmingRun(true);
+              ui.ask({ kind: "cancel-run" });
             }}
           />
         </View>
@@ -430,10 +436,10 @@ export function EngineControls(props: EngineControlsProps) {
         }
         confirmLabel={zh.controls.retry.confirm}
         cancelLabel={zh.controls.retry.cancel}
-        onCancel={() => setConfirming(null)}
+        onCancel={() => ui.close()}
         onConfirm={() => {
           const offer = confirming;
-          setConfirming(null);
+          ui.close();
           if (offer !== null) onRetry(offer);
         }}
       />
@@ -444,9 +450,9 @@ export function EngineControls(props: EngineControlsProps) {
         body={zh.controls.cancelRun.help}
         confirmLabel={zh.controls.cancelRun.confirm}
         cancelLabel={zh.controls.cancelRun.cancel}
-        onCancel={() => setConfirmingRun(false)}
+        onCancel={() => ui.close()}
         onConfirm={() => {
-          setConfirmingRun(false);
+          ui.close();
           onCancelRun(drafts.read("cancel-run"));
         }}
       />
@@ -465,11 +471,33 @@ export function EngineControls(props: EngineControlsProps) {
         }
         confirmLabel={zh.controls.cancelTask.confirm}
         cancelLabel={zh.controls.cancelTask.cancel}
-        onCancel={() => setConfirmingCancel(null)}
+        onCancel={() => ui.close()}
         onConfirm={() => {
           const offer = confirmingCancel;
-          setConfirmingCancel(null);
+          ui.close();
           if (offer !== null) onCancelTask(offer);
+        }}
+      />
+      <ConfirmDialog
+        theme={theme}
+        open={confirmingBudget?.offer != null}
+        title={zh.controls.budget.confirmTitle}
+        body={
+          confirmingBudget?.offer == null
+            ? ""
+            : zh.controls.budget.willBe(
+                confirmingBudget.offer.seatId,
+                confirmingBudget.by,
+                confirmingBudget.offer.limit + confirmingBudget.by,
+              )
+        }
+        confirmLabel={zh.controls.budget.confirm}
+        cancelLabel={zh.controls.budget.cancel}
+        onCancel={() => ui.close()}
+        onConfirm={() => {
+          const held = confirmingBudget;
+          ui.close();
+          if (held?.offer != null) onAddBudget(held.offer, held.by);
         }}
       />
     </View>
