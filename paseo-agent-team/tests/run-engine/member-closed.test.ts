@@ -674,35 +674,46 @@ for (const schema of [1, 2] as const) {
       }
     }
 
-    test("R-flush: a closed hook that was held back is recorded by the recovery before it settles, so the receipt is what shows it", async () => {
-      const host = fakeHost();
-      const built = build(host);
-      await reachWorking(host, built);
-      // The close is reported while the observer's store is not ready: the observer holds the hook.
-      built.gate.ready = false;
-      const held = await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
-      expect(held.status).toBe("buffered");
-      built.gate.ready = true;
-      expect(engineReceipts(await stored())).toHaveLength(0);
-      // The host reads the member as having no turn, but not as closed: only the held hook shows the close.
-      host.runningAgents.delete(MEMBER);
+    // Both ways of looking flush what the observer held back before they settle, so the held `agent.closed`
+    // is in the ledger and the settler's receipt can name it. Without the flush on the button's path the host
+    // read that follows would record the member's idle turn as one the host ended, and the report in it
+    // would be taken in.
+    for (const via of ["recover", "kick"] as const) {
+      test(`R-flush: a closed hook that was held back is recorded by the ${via} before it settles, so the receipt is what shows it`, async () => {
+        const host = fakeHost();
+        const built = build(host);
+        await reachWorking(host, built);
+        // The close is reported while the observer's store is not ready: the observer holds the hook.
+        built.gate.ready = false;
+        const held = await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+        expect(held.status).toBe("buffered");
+        built.gate.ready = true;
+        expect(engineReceipts(await stored())).toHaveLength(0);
+        // The host reads the member as having no turn, but not as closed: only the held hook shows the close.
+        host.runningAgents.delete(MEMBER);
 
-      await built.driver.recover();
-      await built.control.idle();
+        await recoverWithoutHook(built, via);
 
-      const settled = await stored();
-      const receipts = engineReceipts(settled);
-      expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toMatchObject({
-        outcome: "agent-closed",
-        settledBy: "engine",
-        basis: { closedBy: "receipt" },
+        const settled = await stored();
+        const receipts = engineReceipts(settled);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]).toMatchObject({
+          outcome: "agent-closed",
+          settledBy: "engine",
+          basis: { closedBy: "receipt" },
+        });
+        expect(openDecisions(settled)).toHaveLength(1);
+        expect(answerableActions(settled, openDecisions(settled)[0] as never)).toEqual(["cancel"]);
+        expect(settled.assignments.every((entry) => entry.acceptedProof === null)).toBe(true);
+        // No turn the host ended: the only end the ledger has for this turn is the Engine's own.
+        expect(
+          settled.eventReceipts.filter(
+            (r) => r.kind === "turn_ended" && r.turnId === host.turnOf(MEMBER),
+          ),
+        ).toHaveLength(1);
+        expect(host.calls.archives).toBe(0);
       });
-      expect(openDecisions(settled)).toHaveLength(1);
-      expect(answerableActions(settled, openDecisions(settled)[0] as never)).toEqual(["cancel"]);
-      expect(settled.assignments.every((entry) => entry.acceptedProof === null)).toBe(true);
-      expect(host.calls.archives).toBe(0);
-    });
+    }
 
     test("R-idle: a Run whose member is working and whose host reads nothing closed: looking by recovery or by the button writes nothing", async () => {
       const host = fakeHost();

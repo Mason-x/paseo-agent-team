@@ -315,6 +315,10 @@ export function createEngineDriver(options: DriverOptions) {
         reason: null,
       };
     }
+    // Flush, then settle, then reconcile: the same order as `recover`. A hook the observer held back (its
+    // store was not ready) is recorded first, so the settler can use a buffered `agent.closed` and a held
+    // `turn_ended` is not dropped as a duplicate of an end the settler wrote without it.
+    await options.observer.flush();
     // Before the host is read for turns whose hook was lost: that read takes a closed Agent for one with
     // no turn and would record the cut-off turn as ended by the host. The settler writes the receipt the
     // read would have (same key), so the read finds it already recorded.
