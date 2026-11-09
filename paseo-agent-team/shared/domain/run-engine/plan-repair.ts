@@ -80,11 +80,24 @@ export function latestSentWake(
  * (`incomplete:dispatch-not-found`). Then the plan was lost when the host restarted under the coordinator's
  * planning turn, if the host itself ended a turn of the coordinator after the request was made
  * (a `turn_ended` it sent, not one the Engine wrote) and the coordinator began no turn after that. A
- * turn that has not ended, or a later turn, is a coordinator that may still answer: not lost.
+ * turn that has not ended, or a later turn, is a coordinator that may still answer: not lost. Nor is it
+ * lost while a message to the coordinator is on its way or of unknown fate (a re-plan is refused then).
  */
 export function planReplyLost(record: RunRecord, agentId: string): boolean {
   const request = latestSentWake(record, agentId);
   if (request === undefined) return false;
+  // A message to the coordinator that may or may not have arrived (the same states a re-plan waits on,
+  // `delivery-unresolved`): the button would be refused and the warning could never be taken down.
+  if (
+    record.outbox.some(
+      (intent) =>
+        intent.kind === "wake" &&
+        intent.recipient === agentId &&
+        (intent.state === "sending" || intent.state === "outcome-unknown"),
+    )
+  ) {
+    return false;
+  }
   const ended = latestEndedTurn(record, { agentId, turnId: null, createdAt: request.createdAt });
   return ended !== undefined && !isEngineSettled(ended);
 }

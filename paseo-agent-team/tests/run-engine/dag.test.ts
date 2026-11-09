@@ -719,6 +719,39 @@ describe.each([1, 2] as const)("a plan reply the host lost (ledger v%i)", (versi
     expect(after.alerts).toEqual([]);
   });
 
+  test.each(["sending", "outcome-unknown"] as const)(
+    "a message to the coordinator that is %s writes nothing: a re-plan would be refused for it",
+    async (state) => {
+      const h = harness(() => NOT_FOUND);
+      await hostEndedTurn(h);
+      await store.update(RUN_ID, (current) => ({
+        ...current,
+        outbox: current.outbox.map((intent) => ({ ...intent, state })) as RunRecord["outbox"],
+      }));
+      const before = await stored();
+      expect(await h.intake.settleCoordinator(COORDINATOR_AGENT)).toEqual([
+        { status: "unverifiable", reason: "dispatch-not-found" },
+      ]);
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(after.lifecycle).toBe("bootstrapping");
+      expect(after.alerts).toEqual([]);
+
+      // Once it is settled the same read is a finding.
+      await store.update(RUN_ID, (current) => ({
+        ...current,
+        outbox: current.outbox.map((intent) => ({
+          ...intent,
+          state: "confirmed",
+        })) as RunRecord["outbox"],
+      }));
+      expect((await h.intake.settleCoordinator(COORDINATOR_AGENT))[0]).toEqual({
+        status: "refused",
+        reasons: LOST_ALERT,
+      });
+    },
+  );
+
   test("an end the Engine wrote itself is not the host's", async () => {
     const h = harness(() => NOT_FOUND);
     await plant("turn_ended", "turn-engine", new Date(Date.now() + 1000).toISOString(), {
