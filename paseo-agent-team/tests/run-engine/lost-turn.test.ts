@@ -11,21 +11,25 @@ import { createEngineDriver, type DriverOptions } from "../../server/run-engine/
 import { createEffects } from "../../server/run-engine/effects";
 import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
+import { createMemberLostSettler } from "../../server/run-engine/member-lost";
 import { createRunObserver } from "../../server/run-engine/observer";
 import { createReadRetry, type ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
+import { isEngineSettled } from "../../shared/domain/run-engine/lost-turn";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import {
   beginTries,
   emptyReadRetries,
   finishTries,
+  LOST_TURN_SETTLE_DELAY_MS,
   noteReadFailure,
   type ReadRetryTarget,
   readReadRetries,
   readRetryAlertSummary,
+  resolveItemAlerts,
   sweepReadRetries,
 } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
@@ -47,12 +51,15 @@ import {
 import { JUDGE_SEAT_REVIEW, JUDGE_SEAT_SMOKE } from "./support/review-run";
 
 /**
- * A12 finding 2 (A21): the host was restarted in the middle of a member's turn and lost the turn.
+ * A12 finding 2 (A21, T4b): the host was restarted in the middle of a member's turn and lost the turn.
  * The dispatch is no longer in the member's history, so the reads of its reply keep failing with
- * `incomplete:dispatch-not-found` until they are used up. The Engine does not settle such a turn
- * itself (that would change what a receipt means, B14) and never sends the member anything again.
- * What there is for a person is a way out that goes through the host's own receipts:
- *  - these tests pin the limitation (the Run does not move, a cancellation of the whole Run waits);
+ * `incomplete:dispatch-not-found` until they are used up. The Engine never sends the member anything
+ * again by itself. What it does (T4b): a look at least 30 seconds after the tries were used up, with the
+ * member idle in Paseo and its turn known, records the turn as lost by the host and opens a decision
+ * (`host-lost.test.ts` has the whole set). What stays as it was is a turn nobody saw begin, and the way
+ * out that goes through the host's own receipts:
+ *  - these tests pin the 30 seconds (a kick before writes nothing, one after settles it once) and what
+ *    stays (a turn nobody saw begin does not move, a cancellation of the whole Run waits);
  *  - and the way out: the member, idle in Paseo, is asked for a plain OK, its own `turn_started` and
  *    `turn_ended` come in, and only then does the cancellation finish;
  *  - and every other signal (someone else's receipt, one from before the assignment, a later
@@ -276,6 +283,14 @@ function build(host: Host) {
     onPassed: (runId) => retry.sweep(runId),
     cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure }),
     reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    // The settler reads the clock the re-checks read, so the 30 seconds are the test's to move.
+    memberLost: createMemberLostSettler({
+      store,
+      readSeat,
+      readReply: (agentId, messageId) => readHost.replyWindow(agentId, messageId),
+      onReadFailure,
+      clock: { now: () => new Date(clock.at).toISOString() },
+    }),
   };
   const driver = createEngineDriver({
     store,
@@ -308,8 +323,16 @@ const items = async () => {
   return block.items;
 };
 
-/** The plan is admitted and t1 goes out to the member; then the host restarts and forgets the turn. */
-async function reachLostTurn(host: Host, built: ReturnType<typeof build>) {
+/**
+ * The plan is admitted and t1 goes out to the member; then the host restarts and forgets the turn. With
+ * `turnStarted` the member's turn is on the ledger (the host's hook said it began); `idle` is how long
+ * after the tries were used up the clock is left (the way out waits long, the 30 seconds count from there).
+ */
+async function reachLostTurn(
+  host: Host,
+  built: ReturnType<typeof build>,
+  options: { turnStarted?: boolean; idle?: number } = {},
+) {
   host.planRequestSent();
   host.reply(COORDINATOR_AGENT, plan());
   await built.driver.onHook({
@@ -319,12 +342,31 @@ async function reachLostTurn(host: Host, built: ReturnType<typeof build>) {
   });
   expect(states(await stored())).toEqual({ t1: "assigned", t2: "pending" });
   expect(host.sent.map((entry) => entry.agentId)).toEqual([MEMBER]);
+  if (options.turnStarted === true) {
+    const created = (await stored()).assignments.find((entry) => entry.taskId === "t1")?.createdAt;
+    await plantReceipt(
+      "turn_started",
+      MEMBER,
+      host.turnOf(MEMBER),
+      new Date(Date.parse(created ?? "") + 1000).toISOString(),
+    );
+  }
   host.dropTimeline(MEMBER);
   await built.driver.recover();
-  for (const wait of [1500, 2500, 4500, 100_000]) {
+  for (const wait of [1500, 2500, 4500, options.idle ?? 100_000]) {
     built.clock.at += wait;
     await built.retry.fire();
   }
+}
+
+/** When the re-check of the lost reply was used up, from the audit event of the ledger (ms); null if none. */
+function heldAtOf(record: RunRecord): number | null {
+  const held = record.events.filter(
+    (event) =>
+      event.kind === "read-retry-changed" && (event.payload as { state?: string }).state === "held",
+  );
+  const last = held.at(-1);
+  return last === undefined ? null : Date.parse(last.at);
 }
 
 async function askForCancel(built: ReturnType<typeof build>, requestId = "cancel-1") {
@@ -386,7 +428,69 @@ for (const schema of [1, 2] as const) {
       await setup();
     });
 
-    test("known limitation: the reads of the lost reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end", async () => {
+    test("the reads of the lost reply are used up and the turn is known: a kick within 30 seconds writes nothing and sends nothing, a kick after 30 seconds settles it once, and the cancellation of the whole Run then finishes", async () => {
+      const host = fakeHost();
+      const built = build(host);
+      await reachLostTurn(host, built, { turnStarted: true, idle: 0 });
+      const lost = await stored();
+      // When the tries were used up is what the ledger's own event says, not the clock the test last
+      // set (a v1 Run has no such event and no re-check: the clock stands in for it).
+      const heldAt = heldAtOf(lost) ?? built.clock.at;
+      expect(states(lost)).toEqual({ t1: "assigned", t2: "pending" });
+      if (schema === 2) {
+        expect((await items())[0]).toMatchObject({ state: "held", lastCode: LOST_CODE });
+        expect(lost.alerts.map((alert) => alert.state)).toEqual(["open"]);
+      } else {
+        expect(readReadRetries(lost)).toEqual({ kind: "absent" });
+      }
+      const sentBefore = host.sent.length;
+      expect(await askForCancel(built)).toMatchObject({ lifecycle: "paused" });
+      const asked = await stored();
+
+      // Just short of 30 seconds after the tries were used up (counted from the event's own time, 0.1
+      // second short; the exact second is the pure test's, which holds `now` itself): a kick finds nothing to do.
+      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS - 100;
+      const report = await built.driver.kick(RUN_ID);
+      expect(JSON.stringify(report)).toContain("idle");
+      await built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
+      const early = await stored();
+      expect(early.revision).toBe(asked.revision);
+      expect(early.eventReceipts.filter((receipt) => isEngineSettled(receipt))).toEqual([]);
+      expect(early.lifecycle).toBe("paused");
+      expect(host.sent).toHaveLength(sentBefore);
+
+      // Just past 30 seconds (0.1 second): a kick settles the turn once (v2), and the cancellation finishes with it.
+      built.clock.at = heldAt + LOST_TURN_SETTLE_DELAY_MS + 100;
+      await built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
+      await built.control.idle();
+      const late = await stored();
+      expect(host.sent).toHaveLength(sentBefore);
+      expect(host.calls.archives).toBe(0);
+      const settled = late.eventReceipts.filter((receipt) => isEngineSettled(receipt));
+      if (schema === 2) {
+        expect(settled).toHaveLength(1);
+        expect(settled[0]).toMatchObject({ outcome: "host-lost", settledBy: "engine" });
+        expect(late.alerts.filter((alert) => alert.state !== "resolved")).toEqual([]);
+        // The Run is cancelled and no decision nobody could answer is left on it.
+        expect(late.decisions.filter((decision) => decision.state === "open")).toEqual([]);
+        expect(late.lifecycle).toBe("cancelled");
+        expect(states(late)).toEqual({ t1: "cancelled", t2: "cancelled" });
+        expect(late.resources).toEqual([]);
+        // Kicking again writes nothing.
+        const revision = late.revision;
+        await built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
+        await built.driver.recover();
+        expect((await stored()).revision).toBe(revision);
+      } else {
+        // A v1 Run has no re-check record to be used up: nothing is settled and the Run keeps waiting.
+        expect(settled).toEqual([]);
+        expect(late.revision).toBe(asked.revision);
+        expect(late.lifecycle).toBe("paused");
+        expect(late.resources).toEqual(lost.resources);
+      }
+    });
+
+    test("a turn nobody saw begin is not settled: the reads of its reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end", async () => {
       const host = fakeHost();
       const built = build(host);
       await reachLostTurn(host, built);
@@ -400,7 +504,10 @@ for (const schema of [1, 2] as const) {
           lastCode: LOST_CODE,
         });
         expect(lost.alerts.map((alert) => alert.state)).toEqual(["open"]);
-        expect(lost.alerts[0]?.summary).toContain("只要求回复 OK");
+        const summary = lost.alerts[0]?.summary ?? "";
+        expect(summary).toContain("引擎记录过这一回合的开始");
+        expect(summary).toContain("引擎没见到回合开始");
+        expect(summary).toContain("只要求回复 OK 的消息");
       } else {
         // A v1 Run is not given re-checks: nothing is written down and no alert is raised.
         expect(readReadRetries(lost)).toEqual({ kind: "absent" });
@@ -580,6 +687,9 @@ describe("the alert for a lost turn says the way out and still matches the wordi
   /** The summary as the code before A21 wrote it. */
   const earlier = (code: string) =>
     `读取重试已用尽（${code}）：Agent ${MEMBER} 的回复（${ASSIGNMENT_T2}），请检查宿主后 kick`;
+  /** The summary as A21 wrote it for a lost dispatch: the text before and the hint that asked for a plain OK. */
+  const earlierWithHint = (code: string) =>
+    `${earlier(code)}。宿主可能丢失了进行中的回合：待该成员在 Paseo 里空闲后，向它发一条只要求回复 OK 的消息，等它回复后点“立即检查并推进”（不保证一定恢复）`;
 
   function run(): RunRecord {
     const record = structuredClone(NORMAL_RUN_LEDGER);
@@ -628,7 +738,7 @@ describe("the alert for a lost turn says the way out and still matches the wordi
 
   const open = (record: RunRecord) => record.alerts.filter((alert) => alert.state === "open");
 
-  test("a lost dispatch is told the way out: wait for the member to be at rest, ask it for a plain OK, then check and push on; nothing is promised", () => {
+  test("a lost dispatch is told which turns a check after 30 seconds settles and what to do for the others, without promising more than the Engine does", () => {
     const record = used(LOST_CODE);
     const summary = open(record)[0]?.summary ?? "";
     expect(open(record)).toHaveLength(1);
@@ -636,10 +746,17 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(summary.startsWith(earlier(LOST_CODE))).toBe(true);
     expect(summary.length).toBeGreaterThan(earlier(LOST_CODE).length);
     expect(summary).toContain("宿主可能丢失了进行中的回合");
-    expect(summary).toContain("Paseo 里空闲");
-    expect(summary).toContain("只要求回复 OK");
-    expect(summary).toContain("立即检查并推进");
-    expect(summary).toContain("不保证");
+    // A producer's own task turn: wait, press the button, the Engine records the loss and opens a decision.
+    expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
+    expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
+    expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
+    // The turns it does not settle, and the way out for them: a plain OK, then the button again.
+    expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
+    expect(summary).toContain(
+      "请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”",
+    );
+    // The text does not say the Engine settles every lost turn.
+    expect(summary).not.toContain("不保证一定恢复");
     expect(summary).toBe(readRetryAlertSummary(heldItem(record)));
     expect(summary.length).toBeLessThanOrEqual(1000);
   });
@@ -663,59 +780,92 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(open(healed.next)[0]?.summary).not.toContain("OK");
   });
 
-  test("an alert the earlier wording wrote is taken down by the new code when its item is over", () => {
+  /** The two wordings earlier versions wrote for the used-up item of a lost dispatch: the plain one and A21's. */
+  const earlierWordings = [
+    { name: "before A21", text: earlier },
+    { name: "A21 (the plain OK hint)", text: earlierWithHint },
+  ];
+
+  for (const wording of earlierWordings) {
+    test(`an alert written as of ${wording.name} is taken down by the new code when its item is over, and by a settlement`, () => {
+      const record = used(LOST_CODE);
+      const fresh = open(record)[0];
+      if (!fresh) throw new Error("no alert");
+      // The ledger as the version before wrote it: the old text under the id of the old text.
+      const old = structuredClone(record);
+      old.alerts = [
+        {
+          ...fresh,
+          alertId: alertIdFor(wording.text(LOST_CODE)),
+          summary: wording.text(LOST_CODE),
+        },
+      ];
+      expect(alertIdFor(wording.text(LOST_CODE))).not.toBe(fresh.alertId);
+
+      // The reply is no longer waited for: the sweep ends the alert of the item, whichever wording it has.
+      const over = structuredClone(old);
+      const assignment = over.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
+      if (!assignment) throw new Error("no assignment");
+      assignment.state = "ended";
+      const swept = sweepReadRetries(over, new Set(), at(20_000), alertIdFor);
+      expect(swept.changed).toBe(true);
+      expect(swept.next.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
+
+      // So does the end of the Run.
+      const finished = structuredClone(old);
+      finished.lifecycle = "cancelled";
+      const ended = sweepReadRetries(finished, new Set(), at(20_000), alertIdFor);
+      expect(ended.next.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
+
+      // And so does the settlement of the lost turn (T4b), which takes down whichever alert there is.
+      const settled = resolveItemAlerts(old, heldItem(old), at(40_000), alertIdFor);
+      expect(settled.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
+    });
+
+    test(`an item that is used up while the wording of ${wording.name} is still open does not open a second alert`, () => {
+      let record = noted(run());
+      record = failedTry(record, at(1000), LOST_CODE);
+      record = failedTry(record, at(3000), LOST_CODE);
+      // The earlier version had already written the alert of this item.
+      record = structuredClone(record);
+      record.alerts.push({
+        alertId: alertIdFor(wording.text(LOST_CODE)),
+        state: "open",
+        severity: "warning",
+        summary: wording.text(LOST_CODE),
+        createdAt: at(3000),
+        acknowledgedAt: null,
+        resolvedAt: null,
+      });
+      const after = failedTry(record, at(7000), LOST_CODE);
+      expect(heldItem(after).state).toBe("held");
+      expect(after.alerts).toHaveLength(1);
+      expect(after.alerts[0]?.summary).toBe(wording.text(LOST_CODE));
+      expect(open(after)).toHaveLength(1);
+    });
+  }
+
+  test("an alert of the new wording is taken down the same way, and a settlement takes down only its own item", () => {
     const record = used(LOST_CODE);
-    const fresh = open(record)[0];
-    if (!fresh) throw new Error("no alert");
-    // The ledger as the version before wrote it: the old text under the id of the old text.
-    const old = structuredClone(record);
-    old.alerts = [
-      { ...fresh, alertId: alertIdFor(earlier(LOST_CODE)), summary: earlier(LOST_CODE) },
-    ];
-    expect(alertIdFor(earlier(LOST_CODE))).not.toBe(fresh.alertId);
-
-    // The reply is no longer waited for: the sweep ends the item's alert, whichever wording it has.
-    const over = structuredClone(old);
-    const assignment = over.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
-    if (!assignment) throw new Error("no assignment");
-    assignment.state = "ended";
-    const swept = sweepReadRetries(over, new Set(), at(20_000), alertIdFor);
-    expect(swept.changed).toBe(true);
-    expect(swept.next.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
-
-    // So does the end of the Run.
-    const finished = structuredClone(old);
-    finished.lifecycle = "cancelled";
-    const ended = sweepReadRetries(finished, new Set(), at(20_000), alertIdFor);
-    expect(ended.next.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
-
-    // And an alert of the new wording is taken down the same way.
     const modern = structuredClone(record);
     modern.lifecycle = "cancelled";
     expect(
       sweepReadRetries(modern, new Set(), at(20_000), alertIdFor).next.alerts.map((a) => a.state),
     ).toEqual(["resolved"]);
-  });
-
-  test("an item that is used up while the earlier wording is still open does not open a second alert", () => {
-    let record = noted(run());
-    record = failedTry(record, at(1000), LOST_CODE);
-    record = failedTry(record, at(3000), LOST_CODE);
-    // The earlier version had already written this item's alert.
-    record = structuredClone(record);
-    record.alerts.push({
-      alertId: alertIdFor(earlier(LOST_CODE)),
+    const settled = resolveItemAlerts(record, heldItem(record), at(40_000), alertIdFor);
+    expect(settled.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
+    // An alert of something else is left open.
+    const other = structuredClone(record);
+    other.alerts.push({
+      alertId: alertIdFor("something else"),
       state: "open",
       severity: "warning",
-      summary: earlier(LOST_CODE),
-      createdAt: at(3000),
+      summary: "something else",
+      createdAt: at(8000),
       acknowledgedAt: null,
       resolvedAt: null,
     });
-    const after = failedTry(record, at(7000), LOST_CODE);
-    expect(heldItem(after).state).toBe("held");
-    expect(after.alerts).toHaveLength(1);
-    expect(after.alerts[0]?.summary).toBe(earlier(LOST_CODE));
-    expect(open(after)).toHaveLength(1);
+    const after = resolveItemAlerts(other, heldItem(other), at(40_000), alertIdFor);
+    expect(after.alerts.map((alert) => alert.state)).toEqual(["resolved", "open"]);
   });
 });

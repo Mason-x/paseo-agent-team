@@ -24,6 +24,7 @@ export const DECISION_KIND_WHY_ZH: Readonly<Record<string, string>> = {
   "evidence-stuck": "补证请求被阻塞或失败，任务已冻结",
   cancel: "任务取消正在等待所需的结束证明",
   "member-lost": "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告",
+  "host-lost": "宿主重启丢失了成员在途的回合，没有报告",
 };
 
 const ENGINE = "Engine 自动";
@@ -252,6 +253,11 @@ export const WAITING_EXACT_ZH: Record<string, WaitingText> = {
     why: "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告",
     who: `${YOU}（在决策点取消这个任务）`,
     next: "只能取消：占用会释放，依赖它的任务一起取消；已归档的席位在本 Run 里不会再派活，需要的话用新的 Run 重做",
+  },
+  "host-lost": {
+    why: "宿主重启丢失了成员在途的回合：派发消息已不在成员的历史里，没有报告",
+    who: `${YOU}（在决策点重试或取消这个任务）`,
+    next: "重试：放弃这次尝试，成员再收到一条派发；取消：占用释放，依赖它的任务一起取消。成员的进程可能还在运行，操作之前先确认它已经停止",
   },
   "report-missing": {
     why: "成员的回合结束了，但回复里没有协议要求的报告块",

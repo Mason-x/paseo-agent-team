@@ -13,7 +13,7 @@ import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
 import { createMemberLostSettler } from "../../server/run-engine/member-lost";
 import { createRunObserver } from "../../server/run-engine/observer";
-import { projectDetail } from "../../server/run-engine/projection";
+import { projectDetail, projectSummary } from "../../server/run-engine/projection";
 import type { ReadFailure } from "../../server/run-engine/read-retry";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
@@ -885,6 +885,40 @@ for (const schema of [1, 2] as const) {
       expect(done.events.filter((event) => event.kind === "run-cancel-completed")).toHaveLength(1);
       expect(host.sent).toHaveLength(sentBefore);
       expect(host.calls.archives).toBe(0);
+      const revision = done.revision;
+      await built.driver.kick(RUN_ID);
+      await built.driver.recover();
+      expect((await stored()).revision).toBe(revision);
+    });
+
+    test("9c: cancelling the whole Run while a closed member's turn waits: the turn is recorded as ended (the Engine's own receipt) so the cancellation finishes, but no decision is opened that nobody could answer", async () => {
+      const host = fakeHost();
+      const built = build(host);
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await askForCancel(built);
+      await built.driver.kick(RUN_ID);
+      const done = await stored();
+      expect(done.lifecycle).toBe("cancelled");
+      // The receipt that let the cancellation finish is there, and it is the Engine's.
+      expect(engineReceipts(done)).toHaveLength(1);
+      expect(engineReceipts(done)[0]).toMatchObject({
+        outcome: "agent-closed",
+        settledBy: "engine",
+      });
+      // No decision was opened for a Run that is cancelled: nothing open, nothing for a person to answer.
+      expect(openDecisions(done)).toEqual([]);
+      expect(done.decisions.filter((decision) => decision.dedupeKey.startsWith("stuck:"))).toEqual(
+        [],
+      );
+      const view = projectDetail(done);
+      if (!view.ok) throw new Error("projection failed");
+      expect(view.view.decisions.filter((entry) => entry.state === "open")).toEqual([]);
+      // The list counts what needs a person: nothing here does.
+      expect(projectSummary(done)?.needsAttention).toBe(false);
+      expect(checkLedgerInvariants(done).ok).toBe(true);
+      expect(host.calls.archives).toBe(0);
+      // Looking again writes nothing.
       const revision = done.revision;
       await built.driver.kick(RUN_ID);
       await built.driver.recover();

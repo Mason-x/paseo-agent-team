@@ -8,7 +8,7 @@ import { cancelPending } from "./cancel-request";
 import { isDecisionPending } from "./decision-state";
 import { producerHead, resolveD } from "./delivery-binding";
 import { evidenceRepairOf } from "./evidence-repair";
-import { closedSince, MEMBER_LOST_CODE } from "./lost-turn";
+import { closedSince, HOST_LOST_CODE, MEMBER_LOST_CODE } from "./lost-turn";
 import { reduceRun } from "./reducer";
 import { settleRepairs } from "./report-repair";
 import { hasUnsettledEffects, isNormalEnded, outstandingAssignments } from "./transitions";
@@ -110,6 +110,7 @@ export type DecisionKind =
   | "stuck-judge"
   | "limbo-producer"
   | "member-lost"
+  | "host-lost"
   | "evidence-stuck"
   | "cancel"
   | "other";
@@ -137,7 +138,9 @@ export function decisionKindOf(
   }
   if (!PRODUCER_PURPOSES.includes(assignment.purpose)) return "other";
   if (limboEvidence(decision) === null) return "stuck-producer";
-  return limboReason(decision) === MEMBER_LOST_CODE ? "member-lost" : "limbo-producer";
+  const reason = limboReason(decision);
+  if (reason === MEMBER_LOST_CODE) return "member-lost";
+  return reason === HOST_LOST_CODE ? "host-lost" : "limbo-producer";
 }
 
 /** What each kind of decision can be answered with; a supplement stopped by a member has no retry. */
@@ -294,6 +297,26 @@ export function openStuckDecision(
   return { changed: true, next };
 }
 
+/** What a person is told at a limbo decision, for the reason it was opened with. */
+function limboSummary(reason: string): string {
+  if (reason === MEMBER_LOST_CODE) {
+    return (
+      "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告。只能取消这个任务：" +
+      "成员不能再被追问，已归档的席位在本 Run 里不会再派活。"
+    );
+  }
+  if (reason === HOST_LOST_CODE) {
+    return (
+      "宿主丢失了成员的这一回合（宿主重启后，派发消息已不在成员的历史里），没有报告。" +
+      "可放弃这次尝试后重试，或取消这个任务。宿主重启后成员的进程可能还在运行：重试或取消之前请先确认它已经停止。"
+    );
+  }
+  return (
+    `生产者的回合已结束，但没有可用的报告（${reason.slice(0, 200)}），补报次数已用尽。` +
+    "可放弃本次尝试并重试。"
+  );
+}
+
 export type LimboOpening = {
   taskId: string;
   assignmentId: string;
@@ -366,12 +389,7 @@ export function openLimboDecision(
     dedupeKey,
     cancelIntents: null,
     subjectId: input.taskId,
-    summary:
-      input.reason === MEMBER_LOST_CODE
-        ? "成员的 Agent 在回合进行中被关闭或归档，这一回合被切断，没有报告。只能取消这个任务：" +
-          "成员不能再被追问，已归档的席位在本 Run 里不会再派活。"
-        : `生产者的回合已结束，但没有可用的报告（${input.reason.slice(0, 200)}），补报次数已用尽。` +
-          "可放弃本次尝试并重试。",
+    summary: limboSummary(input.reason),
     createdAt: input.now,
     answeredAt: null,
     answer: null,

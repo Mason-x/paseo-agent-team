@@ -180,17 +180,31 @@ function label(target: ReadRetryTarget): string {
 }
 
 /** The reason a used-up re-check carries when the host no longer has the turn it was asked about. */
-const LOST_TURN_CODE = "incomplete:dispatch-not-found";
+export const LOST_TURN_CODE = "incomplete:dispatch-not-found";
 
 /**
- * Said after the fixed text when the host lost the turn (a restart in the middle of it). The Engine does
- * not settle such a turn and never asks the member again; what a person can do is let the member answer
- * once, so the host reports a turn of its own. It does not promise that this recovers the Run.
+ * How long after a used-up re-check of a lost dispatch a further look at the host may settle the turn
+ * as lost (T4b). A person's "立即检查并推进", a hook or a recovery brings that look; no timer does.
  */
-export const LOST_TURN_HINT =
+export const LOST_TURN_SETTLE_DELAY_MS = 30_000;
+
+/**
+ * Said after the fixed text when the host lost the turn (a restart in the middle of it). The item does
+ * not say whose turn it was, so the text says for which turns the Engine settles and what to do for the
+ * others: for a member's own task turn whose start the Engine recorded, a look at least this long after
+ * the tries were used up, with the member idle in Paseo, lets the Engine record the turn as lost by the
+ * host and open the decision a person answers; a judge's, smoke tester's, supplement's or re-report's
+ * turn, a turn the Engine never saw begin, and a turn with a later turn start or turn end of the member
+ * are not settled, and a plain OK sent to the member is the way out (A21). The Engine sends the member
+ * nothing by itself.
+ */
+export const LOST_TURN_HINT = `。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算；引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
+
+/** The hint of the version that asked a person to send the member a plain OK (A21); its alerts are still found. */
+const EARLIER_LOST_TURN_HINT =
   "。宿主可能丢失了进行中的回合：待该成员在 Paseo 里空闲后，向它发一条只要求回复 OK 的消息，等它回复后点“立即检查并推进”（不保证一定恢复）";
 
-/** The text before the hint was added; alerts written by earlier versions carry exactly this. */
+/** The text before any hint was added; alerts written by the earliest versions carry exactly this. */
 function earlierAlertSummary(item: ReadRetryItem): string {
   return item.state === "held"
     ? `读取重试已用尽（${item.lastCode ?? "unknown"}）：${label(item.target)}，请检查宿主后 kick`
@@ -205,9 +219,28 @@ export function readRetryAlertSummary(item: ReadRetryItem): string {
     : base;
 }
 
-/** Every text the alert of an item may carry: the current one, and the one of earlier versions. */
+/** The texts of the alert of an item that earlier versions wrote (not the current one). */
+function earlierSummariesOf(item: ReadRetryItem): string[] {
+  const base = earlierAlertSummary(item);
+  return item.state === "held" && item.lastCode === LOST_TURN_CODE
+    ? [base, `${base}${EARLIER_LOST_TURN_HINT}`]
+    : [];
+}
+
+/** Every text the alert of an item may carry: the current one, and the ones of earlier versions. */
 function alertSummariesOf(item: ReadRetryItem): string[] {
-  return [...new Set([readRetryAlertSummary(item), earlierAlertSummary(item)])];
+  return [...new Set([readRetryAlertSummary(item), ...earlierSummariesOf(item)])];
+}
+
+/** Takes down every alert of an item, whichever wording it was written with. */
+export function resolveItemAlerts(
+  record: RunRecord,
+  item: ReadRetryItem,
+  now: string,
+  alertId: (summary: string) => string,
+): RunRecord {
+  const ids = new Set(alertSummariesOf(item).map((summary) => alertId(summary)));
+  return resolveAlerts(record, (alert) => ids.has(alert.alertId), now).next;
 }
 
 /**
@@ -221,10 +254,12 @@ function raiseItemAlert(
   alertId: (summary: string) => string,
 ): RunRecord {
   const summary = readRetryAlertSummary(item);
-  const earlier = earlierAlertSummary(item);
+  const earlier = earlierSummariesOf(item);
   if (
-    earlier !== summary &&
-    record.alerts.some((alert) => alert.state !== "resolved" && alert.summary === earlier)
+    record.alerts.some(
+      (alert) =>
+        alert.state !== "resolved" && alert.summary !== summary && earlier.includes(alert.summary),
+    )
   ) {
     return record;
   }
