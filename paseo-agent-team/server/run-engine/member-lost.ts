@@ -5,13 +5,20 @@ import {
   agentsToCheck,
   ENGINE_SETTLER,
   findClosedTurns,
+  findLostTurns,
+  HOST_LOST_CODE,
+  HOST_LOST_OUTCOME,
+  type LostReplyRead,
+  lostTurnCandidates,
   MEMBER_LOST_CODE,
   type SeatRead,
 } from "../../shared/domain/run-engine/lost-turn";
+import { resolveItemAlerts } from "../../shared/domain/run-engine/read-retry";
 import { noteTask } from "../../shared/domain/run-engine/task-note";
 import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { sha256Hex } from "./digest";
+import { alertIdFor, sha256Hex } from "./digest";
 import { appendObservation } from "./observer";
+import type { ReplyWindow } from "./protocol";
 import type { ReadFailure } from "./read-retry";
 import type { RunStore } from "./store";
 
@@ -27,14 +34,27 @@ import type { RunStore } from "./store";
  *  - the decision is the limbo decision (`openLimboDecision`) with the reason `member-lost`, which a
  *    person can only answer with `cancel`.
  *
+ * The same settler also settles a turn the host lost by restarting (T4b): the member is idle in Paseo,
+ * the dispatch is gone from its history, and the re-checks of the reply were used up with
+ * `incomplete:dispatch-not-found` at least `LOST_TURN_SETTLE_DELAY_MS` ago. A look now (a kick, a hook or
+ * a recovery; there is no timer) that finds the dispatch missing again records the turn as ended with
+ * `outcome: "host-lost"`, opens the ordinary limbo decision (reason `host-lost`, retry or cancel) and takes
+ * down the alert of the used-up re-checks, in the same commit. It runs at the same place as the closed
+ * turns, before the host is reconciled, so the receipt is the Engine's own and not an inference.
+ *
  * Reads the host, never writes to it: no message, no archive. A pass that finds nothing to settle
- * writes nothing, and asks the host nothing unless a turn might have been cut off.
+ * writes nothing, and asks the host nothing unless a turn might have been cut off or lost.
  */
 
 export type MemberLostOptions = {
   store: Pick<RunStore, "get" | "update">;
   /** The live state of an agent; null when the host has none. Read only. */
   readSeat(agentId: string): Promise<{ status: string; activeTurn: boolean } | null>;
+  /**
+   * The reply window of an agent for a message. Read only. Without it a turn the host lost (T4b) is
+   * never settled.
+   */
+  readReply?(agentId: string, messageId: string): Promise<ReplyWindow>;
   /** Told when a read failed, so it is tried again. */
   onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   clock?: { now(): string };
@@ -72,6 +92,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
   function settleIn(
     current: RunRecord,
     seats: ReadonlyMap<string, SeatRead>,
+    reads: ReadonlyMap<string, LostReplyRead>,
     now: string,
   ): { next: RunRecord; turns: number } | null {
     let next = current;
@@ -109,6 +130,43 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       });
       if (noted.ok && noted.changed) next = noted.next;
     }
+    // A turn the host lost, on the record the closed turns left: one that was just settled has its
+    // receipt now and is not found again.
+    for (const turn of findLostTurns(next, seats, reads, now)) {
+      const key = `turn_ended:${turn.agentId}:${turn.turnId}`;
+      const receipt = {
+        eventKey: key,
+        kind: "turn_ended",
+        agentId: turn.agentId,
+        turnId: turn.turnId,
+        dedupeKey: key,
+        disposition: "observed",
+        outcome: HOST_LOST_OUTCOME,
+        settledBy: ENGINE_SETTLER,
+        basis: { ...turn.basis },
+      } as Omit<RunEventReceipt, "seq" | "receivedAt">;
+      const appended = appendObservation(next, receipt, now, uuid);
+      if (appended.status !== "appended") continue;
+      // The receipt and the decision go together or not at all: a turn that cannot be given a decision
+      // (its task moved on) is left as it is.
+      const opened = openLimboDecision(appended.next, {
+        taskId: turn.taskId,
+        assignmentId: turn.assignmentId,
+        reason: HOST_LOST_CODE,
+        turnId: turn.turnId,
+        decisionId: uuid(),
+        controlNonceDigest: sha256Hex(uuid()),
+        now,
+      });
+      if (!opened.changed) continue;
+      next = resolveItemAlerts(opened.next, turn.item, now, alertIdFor);
+      turns += 1;
+      const noted = noteTask(next, turn.taskId, HOST_LOST_CODE, {
+        now,
+        detail: { assignmentId: turn.assignmentId },
+      });
+      if (noted.ok && noted.changed) next = noted.next;
+    }
     return turns === 0 ? null : { next, turns };
   }
 
@@ -120,9 +178,36 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         if (read.status !== "ok") return { settled: 0 };
         const lifecycle = read.record.lifecycle;
         if (lifecycle === "finished" || lifecycle === "cancelled") return { settled: 0 };
-        const agents = agentsToCheck(read.record);
+        const lostCandidates =
+          options.readReply === undefined ? [] : lostTurnCandidates(read.record, clock.now());
+        const agents = [
+          ...new Set([
+            ...agentsToCheck(read.record),
+            ...lostCandidates.map((candidate) => candidate.assignment.agentId),
+          ]),
+        ].sort();
         if (agents.length === 0) return { settled: 0 };
         const seats = await readSeats(runId, agents);
+        // Only a member the host reads as idle is asked for the reply again: any other reading settles
+        // nothing, so it costs nothing.
+        const reads = new Map<string, LostReplyRead>();
+        for (const candidate of lostCandidates) {
+          const seat = seats.get(candidate.assignment.agentId);
+          if (seat === undefined || typeof seat !== "object" || seat.status !== "idle") continue;
+          try {
+            const window = await options.readReply?.(
+              candidate.assignment.agentId,
+              candidate.anchorMessageId,
+            );
+            if (window === undefined) continue;
+            reads.set(candidate.assignment.assignmentId, {
+              dispatchNotFound: !window.complete && window.reason === "dispatch-not-found",
+              at: clock.now(),
+            });
+          } catch (error) {
+            log(`could not read the reply of ${candidate.assignment.agentId} again`, error);
+          }
+        }
         let settled = 0;
         await options.store.update(runId, (current) => {
           if (current.lifecycle === "finished" || current.lifecycle === "cancelled") return null;
@@ -130,7 +215,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
           // ended, or began again) may change the answer, and the hook that recorded it runs another
           // pass: settle nothing on a read that may be out of date.
           if (current.counters.observationSeq !== read.record.counters.observationSeq) return null;
-          const result = settleIn(current, seats, clock.now());
+          const result = settleIn(current, seats, reads, clock.now());
           if (result === null) return null;
           settled = result.turns;
           return result.next;

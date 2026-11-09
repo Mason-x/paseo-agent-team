@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { AUTO_EVIDENCE_ROOT } from "../../server/run-engine/repo";
 import { RUN_ENGINE_ENV } from "../../server/run-engine/runtime";
-import { LOST_TURN_HINT } from "../../shared/domain/run-engine/read-retry";
+import {
+  LOST_TURN_HINT,
+  LOST_TURN_SETTLE_DELAY_MS,
+} from "../../shared/domain/run-engine/read-retry";
 import { DEFAULT_ENGINE_LIMITS } from "../../shared/domain/run-engine/team-config-edit";
 import {
   RUN_SCHEMA_VERSION,
@@ -145,13 +148,30 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(runEngineZh.teamEditor.title).toBe("Run 引擎");
   });
 
-  test("the way out of a turn the host lost is told in the README and in the alert the same way", () => {
+  test("what happens to a turn the host lost is told in the README and in the alert the same way, with the number the code uses", () => {
     expect(section).toContain("incomplete:dispatch-not-found");
-    expect(section).toContain("asks only for a reply\n  of OK");
-    for (const word of ["立即检查并推进", "只要求回复 OK", "Paseo 里空闲"]) {
+    // The wait before the Engine settles it: the README names the number the code has.
+    expect(LOST_TURN_SETTLE_DELAY_MS).toBe(30_000);
+    expect(section).toContain(`at least ${LOST_TURN_SETTLE_DELAY_MS / 1000} seconds`);
+    for (const word of [
+      "立即检查并推进",
+      `至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒`,
+      "如果该成员在 Paseo 里空闲",
+      "宿主丢失",
+      "重试或取消",
+    ]) {
       expect(LOST_TURN_HINT).toContain(word);
     }
     expect(section).toContain("**立即检查并推进**");
+    expect(section).toContain("the Engine records the turn as lost by the host");
+    expect(section).toContain("`host-lost`");
+    expect(section).toContain("you answer with retry or cancel");
+    expect(section).toContain("Nothing runs by timer");
+    expect(section).toContain("make sure it has\n  stopped before you answer");
+    // What is not settled, and the way out that stays for it.
+    expect(section).toContain("a Run written as v1");
+    expect(section).toContain("asks only for a reply of OK");
     expect(section).toContain("cancelling the whole Run keeps waiting");
+    expect(section).toContain("a host-lost decision is an ordinary");
   });
 });

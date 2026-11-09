@@ -178,11 +178,20 @@
 - tests/run-engine/member-closed.test.ts :: A1: the reviewer is closed: its turn is settled, the decision offers only cancel, and answering it cancels the task — 审查者被关闭：结算并开只能取消的决策（协调者裁定 A）
 - tests/run-engine/member-closed.test.ts :: A3: a supplement the member was asked for is cut off by the close: the decision offers only cancel — 补证请求的回合被关闭：同样只能取消
 - tests/run-engine/lost-turn-plan.test.ts :: a closed receipt after the turn began and a host with no turn running: settled, by the receipt — `findClosedTurns` 纯函数用例（条件 a–f）
-- tests/run-engine/lost-turn.test.ts :: known limitation: the reads of the lost reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end — 现状测试（A21，v1/v2）：重启丢回合后重查用尽，kick 不写台账、宿主零发送，取消 `waiting.turns=1`、占用保留
+- tests/run-engine/lost-turn.test.ts :: the reads of the lost reply are used up and the turn is known: a kick within 30 seconds writes nothing and sends nothing, a kick after 30 seconds settles it once, and the cancellation of the whole Run then finishes — 30 秒边界（T4b，v1/v2，假时钟）：重查用尽后第 29 秒 kick 零写入、零发送，第 31 秒 kick 恰好一条 `host-lost` 回执并让整个 Run 的取消完成；v1 没有重查记录，不结算
+- tests/run-engine/lost-turn.test.ts :: a turn nobody saw begin is not settled: the reads of its reply are used up, a kick writes nothing and the host is sent nothing, and a cancellation of the whole Run keeps waiting for a turn end — 现状测试（A21，v1/v2）：回合未知（台账里没有 turn_started）时重查用尽，kick 不写台账、宿主零发送，取消 `waiting.turns=1`、占用保留（残余）
 - tests/run-engine/lost-turn.test.ts :: the way out: the member is asked in Paseo for a plain OK, its own turn start and end come in, and the cancellation finishes once — 出路（A21）：成员自己的 turn_started/turn_ended 回执加宿主 idle，一次取消完成、占用释放、零发送、零归档
 - tests/run-engine/lost-turn.test.ts :: signals that are not proof keep the cancellation waiting and the claims held — 他人的回执、早于 assignment 创建的回执、其后又有 turn_started、宿主非 idle、送达不明的派发都继续等，也没有 stuck 告警
+- tests/run-engine/host-lost-plan.test.ts :: the re-checks used up, 30 seconds later, a member that is idle and the dispatch still missing: settled, with what showed it — `findLostTurns` 纯函数用例（T4b 条件 a–f；29.999 秒不结算、30 秒结算）
+- tests/run-engine/host-lost.test.ts :: used up: a kick 29 seconds later writes nothing and sends nothing; one at 31 seconds writes one receipt and one decision and takes the alert down; kicking again writes nothing — 宿主丢失回合（T4b，v1/v2，假时钟，经 control.kick 的生产路径）：一条 `host-lost` 回执、一个决策、告警 resolved，再 kick/recover/hook 修订号不变
+- tests/run-engine/host-lost.test.ts :: cancel: the claims are released, the task and what depends on it are cancelled, the Run finishes, and nothing is sent or archived — 答复取消：占用释放、下游级联取消、Run 结束，宿主零发送、零归档（T4b）
+- tests/run-engine/host-lost.test.ts :: retry: the same member gets exactly one message, not a second one for another look, and its reply is taken in as usual — 答复重试：同一成员恰好收到一条消息，不重复；成员回复后正常入账（T4b）
+- tests/run-engine/host-lost.test.ts :: what is not evidence of a lost turn settles nothing — 别人的回执、早于创建的回执、之后又有 turn_started 或 turn_ended、宿主读到非 idle、送达没结清都不结算（T4b）
+- tests/run-engine/host-lost.test.ts :: the person sent OK first and the member's own receipts came first: no receipt of the Engine's, and the cancellation finishes by the host's own — 人先按 A21 发了 OK，成员自己的回执先到：不写引擎回执，取消按现有路径完成（T4b）
+- tests/run-engine/host-lost.test.ts :: the host reads the member as closed: it is a closed turn (T4a), a decision that can only be cancelled — 宿主读到 closed 走 T4a：`member-lost` 决策只给取消（T4b）
+- tests/run-engine/host-lost.test.ts :: no timer is added: the count of timers does not change before, during and after the settlement — 假时钟下没有新增定时器（T4b，`vi.getTimerCount()`）
 
-缺口：A21 起，重启丢失在途回合有出路（告警与 README 都写明：成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，成员自己的回执让取消的现有结算条件满足；离线用例覆盖，DEV 未验），引擎不自行结算（B14，须新批准）。T4a 起成员在回合中被关闭或归档有了处理：引擎在 hook 或宿主读取证明会话已关闭且没有活动回合后，自己写结束回执并开只能取消的决策（回合未知、关闭失败、读取失败仍不结算，见 6.3）；宿主是否发 `turn_ended` 仍没有直接证据，但 A12 在真实宿主上重启 daemon 后看到：在途回复丢失、重查用尽、没有决策、取消一直等（Run 4），与限制一致（见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
+缺口：重启丢失在途回合（T4b）：重查用尽后至少 30 秒，再点“立即检查并推进”（或 hook、恢复触发再读），宿主读到成员 idle、派发仍找不到、回合已知、送达没有未结清时，引擎自己写 `host-lost` 回执并开可重试、可取消的决策，同时撤下用尽告警（离线用例覆盖，DEV 验证放在 T8-R；v1 Run 没有重查记录，回合未知、判官与补证的回合、读到 closed 不走这条）。A21 的人工出路对这些剩下的情形仍有效（成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，成员自己的回执让取消的现有结算条件满足）。T4a 起成员在回合中被关闭或归档有了处理：引擎在 hook 或宿主读取证明会话已关闭且没有活动回合后，自己写结束回执并开只能取消的决策（回合未知、关闭失败、读取失败仍不结算，见 6.3）；宿主是否发 `turn_ended` 仍没有直接证据，但 A12 在真实宿主上重启 daemon 后看到：在途回复丢失、重查用尽、没有决策、取消一直等（Run 4），与限制一致（见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
 
 ### AC11 收到报告后 hook 才到，或 hook 早于初始化/关键记录
 - tests/run-engine/observer.test.ts :: a turn end the hooks missed is recovered from the host, and a late hook is then a duplicate
@@ -268,7 +277,7 @@
 - tests/run-engine/driver.test.ts :: a dispatch that was committed and never sent is withdrawn locally when the Run is cancelled: the Run is the cause, its claims go, and the host is sent nothing — 真实 store：派发已提交（`prepared`）但进程停在发送之前，Run 取消后该意图 `failed`、`localCancellation` 为 `{ reason: cancel-before-send, cause: run-cancelled }`，占用清空、nonce 以 `cancel-before-send` 作废，宿主零发送（A16）
 - tests/run-engine/lost-turn.test.ts :: the way out: the member is asked in Paseo for a plain OK, its own turn start and end come in, and the cancellation finishes once — 重启丢失在途回合后的出路（A21，v1/v2）：取消在成员自己的回执加宿主 idle 后完成并释放占用；其余信号继续等
 
-缺口：暂停、续办与取消都已是 RPC 并有页面入口。真实宿主上 Run 1 的阻塞取消完成并释放；Run 4 在重启丢失在途回复后取消停在 paused、`waiting.turns=1`，释放不了（2.12 的已知限制）；A21 起告警与 README 给出出路并有离线用例，DEV 未验。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。归档式取消（不等回合结束）推迟，见 `docs/next-phase-plan.md` 2.3。取消的 RPC 与决策答复见 A4、A5。
+缺口：暂停、续办与取消都已是 RPC 并有页面入口。真实宿主上 Run 1 的阻塞取消完成并释放；Run 4 在重启丢失在途回复后取消停在 paused、`waiting.turns=1`，释放不了（2.12 的已知限制）；A21 起告警与 README 给出出路，T4b 起重查用尽后至少 30 秒的又一次检查由引擎结算并开决策（离线用例覆盖，DEV 未验）。启动中断后已安全关闭并告警，完整续办仍推迟（B13）。归档式取消（不等回合结束）推迟，见 `docs/next-phase-plan.md` 2.3。取消的 RPC 与决策答复见 A4、A5。
 
 ### AC15 台账损坏、未知版本、CAS 冲突、超过硬上限
 - tests/run-engine/store.test.ts :: corrupt bytes are preserved, quarantined with a diagnostic, and refuse updates
@@ -383,9 +392,9 @@
 - tests/run-view/seat-profile-facts.test.ts :: TeamEditor hands the plan's rows to the section and does not build the facts itself — 源码扫描：`TeamEditor` 把规划行交给该区（A17）
 - tests/run-view/launch-dialog.test.ts :: kickoff-pending: the plan request is submitted, it takes minutes, do not start again — 挂载 `LaunchDialog`：运行中文案（A17）
 - tests/run-view/launch-dialog.test.ts :: a failed launch shows the error, its detail and the kickoff message to copy — 挂载 `LaunchDialog`：失败的启动显示错误与详情，可复制启动消息（A17）
-- tests/run-engine/lost-turn.test.ts :: a lost dispatch is told the way out: wait for the member to be at rest, ask it for a plain OK, then check and push on — 重查用尽告警在丢失回合时带出路提示，其他原因码不带；旧摘要告警仍被新代码识别并解除（A21）
+- tests/run-engine/lost-turn.test.ts :: a lost dispatch is told what a check after 30 seconds does: wait, press the button, and the Engine records the lost turn and opens a decision if the member is idle — 重查用尽告警在丢失回合时写明至少等 30 秒后点“立即检查并推进”，其他原因码不带；A21 之前与 A21 两种旧摘要的告警仍被新代码识别并解除（T4b）
 
-缺口：真实浏览器、窄屏与断线重连已由 A12 在 DEV 看过一次（1280x900 与 390x844 无横向溢出、按钮可点、停 daemon 显示不可用而非空进度、同端口重启自动重连）；但 Runs 列表把 active 阻塞与 cancelled 的 Run 显示为"已完成"并计入"已结束"，与台账 lifecycle 和同页顶部摘要不一致（缺陷）。"原因与台账一致"仍缺端到端逐项比对；服务端推送式失效没有做（B8）。重查用尽告警的出路提示（A21）只有离线文案断言，没有在 DEV 页面上看过。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。
+缺口：真实浏览器、窄屏与断线重连已由 A12 在 DEV 看过一次（1280x900 与 390x844 无横向溢出、按钮可点、停 daemon 显示不可用而非空进度、同端口重启自动重连）；但 Runs 列表把 active 阻塞与 cancelled 的 Run 显示为"已完成"并计入"已结束"，与台账 lifecycle 和同页顶部摘要不一致（缺陷）。"原因与台账一致"仍缺端到端逐项比对；服务端推送式失效没有做（B8）。重查用尽告警的提示（A21、T4b）只有离线文案断言，没有在 DEV 页面上看过。Team 编辑器的 Run Engine 区与启动对话框的 Engine 文案已用 `react-test-renderer` 挂载渲染（A17），但那不是真实浏览器。
 
 ## 这份表之外还没做的
 

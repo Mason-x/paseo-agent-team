@@ -257,12 +257,15 @@ describe("what a retry will do is said per kind of decision", () => {
     const producer = retryExplanation("D1", "stuck-producer");
     const judge = retryExplanation("D1", "stuck-judge");
     const missing = retryExplanation("D1", "limbo-producer");
+    const lost = retryExplanation("D1", "host-lost");
     expect(producer).toContain("生产者");
     expect(retryExplanation("D3", "quality-d3")).toContain("返工");
     expect(retryExplanation("D4", "quality-d4")).toContain("返工");
     expect(judge).toContain("判官");
     expect(missing).toContain("报告");
-    expect(new Set([producer, judge, missing]).size).toBe(3);
+    expect(lost).toContain("宿主重启");
+    expect(lost).toContain("确认它已经停止");
+    expect(new Set([producer, judge, missing, lost]).size).toBe(4);
     expect(retryExplanation("D1", "future-kind")).toBe(retryExplanation("D1"));
     expect(retryExplanation("D1", "constructor")).toBe(retryExplanation("D1"));
     const view = controlsOf(

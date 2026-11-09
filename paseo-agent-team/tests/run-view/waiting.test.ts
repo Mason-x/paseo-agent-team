@@ -298,6 +298,15 @@ describe("explainTask", () => {
     whole(missing);
   });
 
+  test("a turn the host lost (T4b) says whose it is, who answers and what each answer does", () => {
+    const said = explainTask(task({ state: "assigned", waitingReason: "host-lost" }), []);
+    expect(said.why).toContain("宿主重启");
+    expect(said.who).toContain("你");
+    expect(said.next).toContain("重试");
+    expect(said.next).toContain("取消");
+    expect(said.next).toContain("确认它已经停止");
+  });
+
   test("a member's own reason code on a blocked task is shown as theirs", () => {
     const said = explainTask(task({ state: "blocked", waitingReason: "EVIDENCE_UNAVAILABLE" }), []);
     expect(said.why).toContain("EVIDENCE_UNAVAILABLE");
@@ -332,6 +341,8 @@ describe("explainDecision", () => {
     expect(explainDecision({ ...base, kind: "other" })).toEqual(explainDecision(base));
     expect(explainDecision({ ...base, kind: "stuck-judge" }).why).toContain("判官");
     expect(explainDecision({ ...base, kind: "limbo-producer" }).why).toContain("报告");
+    expect(explainDecision({ ...base, kind: "member-lost" }).why).toContain("关闭或归档");
+    expect(explainDecision({ ...base, kind: "host-lost" }).why).toContain("宿主重启");
     expect(explainDecision({ ...base, kind: "evidence-stuck", actions: ["cancel"] }).why).toContain(
       "补证",
     );

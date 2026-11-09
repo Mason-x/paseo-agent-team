@@ -189,7 +189,13 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     outbox: { run: (runId) => effects.runOutbox(runId) },
     onPassed: (runId) => readRetry.sweep(runId),
     compactor: createCompactor({ store, log }),
-    memberLost: createMemberLostSettler({ store, readSeat: readLiveSeat, onReadFailure, log }),
+    memberLost: createMemberLostSettler({
+      store,
+      readSeat: readLiveSeat,
+      readReply: (agentId, messageId) => host.replyWindow(agentId, messageId),
+      onReadFailure,
+      log,
+    }),
     cancelFinisher: createCancelFinisher({ store, readSeat: readLiveSeat, onReadFailure, log }),
     log,
   });

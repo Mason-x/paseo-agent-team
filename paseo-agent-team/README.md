@@ -292,14 +292,25 @@ you to try once more. A request is never applied twice.
   would throw the delivery away). Look at the member's conversation, then cancel the task or leave
   it frozen; re-assigning is not in the page yet.
 - A host restart loses the turn a member was in the middle of. The Engine reads the member's reply
-  three times, then leaves a warning that says the tries are used up (`incomplete:dispatch-not-found`)
-  and the Run does not move on: the task stays in review or assigned, a kick sends nothing and writes
-  nothing, and cancelling the whole Run keeps waiting for a turn end the host never reports. The way
-  out is yours: wait until the member is idle in Paseo, send it one message that asks only for a reply
-  of OK, wait for its answer, then press **立即检查并推进**. The member's own turn then reaches the
-  Engine as the host's record and lets the cancellation finish; it is not certain to recover the Run.
-  **继续** (resume) is no way out, and the Engine never asks the member again by itself; if the member
-  does not answer, cancel and start the Run again.
+  three times, then leaves a warning that says the tries are used up (`incomplete:dispatch-not-found`).
+  Wait at least 30 seconds after that, then press **立即检查并推进**: if the member is idle in Paseo and
+  the dispatch is still not in its history, the Engine records the turn as lost by the host (a turn
+  end it writes itself, with `outcome` `host-lost`), takes the warning down and opens a decision that
+  you answer with retry or cancel. Retry gives the task a new attempt and the same member one new
+  message; cancel releases the task's claims and cancels what depends on it, and cancelling the whole
+  Run finishes as well. Nothing runs by timer: the look happens when you press the button, when a hook
+  arrives or when the daemon recovers, and the Engine sends the member nothing by itself. After a host
+  restart the member's provider process may still be running (on Windows too): make sure it has
+  stopped before you answer. A member the host reads as closed is the closed-or-archived case above.
+  The Engine does not settle a turn it never saw begin (no turn start on record), a turn of a judge or
+  of a supplement, or a Run written as v1 (it has no record of the re-checks): there the Run does not
+  move on, a kick sends nothing and writes nothing, and cancelling the whole Run keeps waiting for a
+  turn end the host never reports. The way out is yours: wait until the member is idle in Paseo, send
+  it one message that asks only for a reply of OK, wait for its answer, then press **立即检查并推进**.
+  The member's own turn then reaches the Engine as the host's record and lets the cancellation finish;
+  it is not certain to recover the Run. **继续** (resume) is no way out; if the member does not
+  answer, cancel and start the Run again. Going back to 0.6.x: a host-lost decision is an ordinary
+  retry-or-cancel decision there, and the Engine's turn end reads as the host's; nothing is sent.
 - Turning the daemon switch off, or disabling the Team's Engine block, stops new Engine Runs only.
   Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.
