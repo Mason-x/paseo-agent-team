@@ -5,6 +5,7 @@ import { displayText, shortTime } from "../../../shared/domain/run-engine/view";
 import type { RunHealthEntrySchema, RunSummaryView } from "../../../shared/schemas/run-engine/rpc";
 import { runEngineZh as zh } from "../../../shared/zh/run-engine";
 import type { PluginLayout, PluginTheme } from "../../shared/theme";
+import { useControlUi } from "./control-ui";
 import { EngineView } from "./EngineView";
 import { useReasonDrafts } from "./reason-drafts";
 import { useEngineControls } from "./use-engine-controls";
@@ -24,8 +25,10 @@ export function RunDetailPane({
   runId: string;
 }) {
   const { session, error, loadingOlder, refresh, loadOlder } = useEngineRun(hostId, runId, true);
-  // The pane stays mounted while a poll cannot show the Run, so the words a person typed live here.
+  // The pane stays mounted while a poll cannot show the Run, so what a person typed (the reasons, the
+  // turns for a seat) and the confirmation they opened live here.
   const drafts = useReasonDrafts(runId);
+  const ui = useControlUi(runId);
   const { state: controlState, runner } = useEngineControls(runId, refresh, drafts.clear);
   return (
     <View>
@@ -39,6 +42,7 @@ export function RunDetailPane({
         controls={{
           state: controlState,
           drafts,
+          ui,
           onReplan: (reason) => {
             const held = session.state;
             if (held?.kind === "ready") void runner.replan(reason, held.run.revision);

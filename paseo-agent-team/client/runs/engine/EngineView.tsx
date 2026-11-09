@@ -37,6 +37,7 @@ export type EngineViewProps = {
     EngineControlsProps,
     | "state"
     | "drafts"
+    | "ui"
     | "onReplan"
     | "onRetry"
     | "onCancelTask"

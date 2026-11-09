@@ -583,3 +583,77 @@ describe("dismiss", () => {
     expect(runner.state).toEqual({ pending: null, notice: null });
   });
 });
+
+/** The two controls that carry a reason the person wrote, with what each asks of its RPC. */
+const REASON_CONTROLS = [
+  {
+    name: "replan",
+    field: "replan" as const,
+    deps: (answer: () => Promise<never>): Partial<ControlDeps> => ({ replan: vi.fn(answer) }),
+    send: (runner: ReturnType<typeof createControlRunner>) => runner.replan("缺少 API", 7),
+    rpc: (deps: ControlDeps) => deps.replan,
+    answered: (status: "applied" | "replayed" | "rejected") =>
+      (status === "rejected" ? conflict : { ...applied(), status }) as never,
+  },
+  {
+    name: "cancel",
+    field: "cancel-run" as const,
+    deps: (answer: () => Promise<never>): Partial<ControlDeps> => ({ cancel: vi.fn(answer) }),
+    send: (runner: ReturnType<typeof createControlRunner>) => runner.cancelRun("缺少 API", 7),
+    rpc: (deps: ControlDeps) => deps.cancel,
+    answered: (status: "applied" | "replayed" | "rejected") =>
+      (status === "rejected" ? conflict : { ...cancelled(), status }) as never,
+  },
+];
+
+describe.each(REASON_CONTROLS)(
+  "telling the page the server took the reason of $name",
+  (control) => {
+    test.each(["applied", "replayed"] as const)(
+      "a %s answer tells the page once, with the field",
+      async (status) => {
+        const accepted = vi.fn();
+        const { runner } = setup({
+          ...control.deps(async () => control.answered(status)),
+          accepted,
+        });
+        await control.send(runner);
+        expect(accepted).toHaveBeenCalledExactlyOnceWith(control.field);
+      },
+    );
+
+    test("a refusal does not: the words are kept for another try", async () => {
+      const accepted = vi.fn();
+      const { runner } = setup({
+        ...control.deps(async () => control.answered("rejected")),
+        accepted,
+      });
+      await control.send(runner);
+      expect(accepted).not.toHaveBeenCalled();
+    });
+
+    test("a request that got no answer does not, and asking again under the same id does once it is answered", async () => {
+      const accepted = vi.fn();
+      let reachable = false;
+      const { runner, deps } = setup({
+        ...control.deps(async () => {
+          if (!reachable) throw new Error("network down");
+          return control.answered("applied");
+        }),
+        accepted,
+      });
+      await control.send(runner);
+      expect(runner.state.notice).toMatchObject({ refresh: false });
+      expect(accepted).not.toHaveBeenCalled();
+
+      reachable = true;
+      await control.send(runner);
+      expect(accepted).toHaveBeenCalledExactlyOnceWith(control.field);
+      const ids = vi
+        .mocked(control.rpc(deps))
+        .mock.calls.map((call) => (call[0] as { requestId: string }).requestId);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toBe(ids[1]);
+    });
+  },
+);

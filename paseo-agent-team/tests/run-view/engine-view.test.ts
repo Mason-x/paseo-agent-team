@@ -30,6 +30,7 @@ vi.mock("@getpaseo/plugin/client/react-native", () => {
   };
 });
 
+import { createControlUi, newControlUiStore } from "../../client/runs/engine/control-ui";
 import { EngineView } from "../../client/runs/engine/EngineView";
 import { createReasonDrafts } from "../../client/runs/engine/reason-drafts";
 import {
@@ -498,6 +499,7 @@ describe("EngineView controls", () => {
   const handlers = () => ({
     state: { pending: null, notice: null } as never,
     drafts: createReasonDrafts("run-view-a1", new Map(), new Map(), () => undefined),
+    ui: createControlUi("run-view-a1", newControlUiStore()),
     onReplan: vi.fn(),
     onRetry: vi.fn(),
     onCancelTask: vi.fn(),

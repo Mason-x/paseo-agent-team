@@ -400,7 +400,7 @@
 - tests/run-view/launch-dialog.test.ts :: kickoff-pending: the plan request is submitted, it takes minutes, do not start again — 挂载 `LaunchDialog`：运行中文案（A17）
 - tests/run-view/launch-dialog.test.ts :: a failed launch shows the error, its detail and the kickoff message to copy — 挂载 `LaunchDialog`：失败的启动显示错误与详情，可复制启动消息（A17）
 - tests/run-engine/lost-turn.test.ts :: a lost dispatch is told which turns a check after 30 seconds settles and what to do for the others, without promising more than the Engine does — 重查用尽告警在丢失回合时写明：成员（生产者）的实现回合、成员空闲则至少等 30 秒后点“立即检查并推进”，引擎记为宿主丢失并开决策；判官、冒烟、补证或补报回合不会被结算，改向成员发只要求回复 OK 的消息再点按钮；其他原因码不带；A21 之前与 A21 两种旧摘要的告警仍被新代码识别并解除（T4b 评审修复）
-- tests/run-view/engine-controls-draft.test.ts :: does not follow the person to another Run, and is waiting when they come back — 重新规划与取消 Run 的原因草稿按 Run 分键，切到别的 Run 不串，回来仍在（T5）
+- tests/run-view/engine-controls-draft.test.ts :: is not shared with another Run's detail, and is still there when the first one is drawn again — 重新规划与取消 Run 的原因草稿按 Run 分键：不同 Run 的详情互不共享草稿；同一详情在轮询丢失期间保留（见上两例，T5）
 - tests/run-view/engine-controls-draft.test.ts :: survives several polls that lose the Run in a row, and the last text typed wins — 读取失败、断线、`unchanged` 连续丢失 Run 后恢复，原因框里仍是最后输入的草稿（T5）
 - tests/run-view/engine-controls-draft.test.ts :: is used once: after the server took it the box is empty and nothing is sent again — 服务端接受后清草稿，输入框重挂载为空，不再发出（T5）
 - tests/run-view/engine-controls-draft.test.ts :: is kept when the server refused the request, so it can be tried again — 被拒绝的请求保留草稿以便重试（T5）
