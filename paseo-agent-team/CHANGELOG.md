@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## [0.7.0](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.6.1...paseo-agent-team-v0.7.0) (2026-11-09)
+
+
+### Features
+
+* **run-engine:** let a check after 30 seconds settle a turn the host lost ([8d4fd18](https://github.com/Mason-x/paseo-agent-team/commit/8d4fd1888c2dbfeb60f3f16166713beb1d7d322f))
+* **run-engine:** settle a member's turn when Paseo closes or archives it mid-turn ([0e15317](https://github.com/Mason-x/paseo-agent-team/commit/0e1531745150c532b6ca88daf75616dabeabc7ca))
+
+
+### Bug Fixes
+
+* **run-engine:** flush held hooks before the button's check settles a lost turn ([b65d4eb](https://github.com/Mason-x/paseo-agent-team/commit/b65d4eb2dcb055a1cacc172053f4909c09d8f4f8))
+* **run-engine:** say a plan request was already counted instead of reporting no turns left ([6445203](https://github.com/Mason-x/paseo-agent-team/commit/6445203d94bf13c2e1e3548a76348f7c05cccc02))
+* **run-engine:** say accurately which lost turns the engine settles and keep a cancelled Run clean ([6fb9222](https://github.com/Mason-x/paseo-agent-team/commit/6fb9222356b79ed53d6127d0f58baa04cc8092f9))
+* **run-engine:** settle a closed member's turn before the recovery read can record it ([496e517](https://github.com/Mason-x/paseo-agent-team/commit/496e517909dbf4721abfa5d4e403bb76c2e795ee))
+* **run-engine:** state exactly which lost turns the engine settles and what a v1 Run shows ([f0279da](https://github.com/Mason-x/paseo-agent-team/commit/f0279dadfc545a3df76072d6b0e68f2987b10450))
+* **run-engine:** take down a failed-task alert that went stale while the Run was paused ([d616d06](https://github.com/Mason-x/paseo-agent-team/commit/d616d06159650b268761f3bc304b3dc4f0abe82e))
+* **runs-page:** do not call a Run completed before the Engine list has answered ([82de62a](https://github.com/Mason-x/paseo-agent-team/commit/82de62aa0a929db8a169214e5873acf5b49da29c))
+* **runs-page:** keep a typed reason when a poll briefly loses the Run ([87db5f7](https://github.com/Mason-x/paseo-agent-team/commit/87db5f7bbd9272594d755dd7992aa83013392a1c))
+* **runs-page:** keep the turns box and the open confirmations when a poll briefly loses the Run ([68f3376](https://github.com/Mason-x/paseo-agent-team/commit/68f33763c6da9d520d99ca3b89c01c6eabb9940f))
+
 ## [0.6.1](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.6.0...paseo-agent-team-v0.6.1) (2026-11-08)
 
 
