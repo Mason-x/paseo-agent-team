@@ -468,7 +468,7 @@ describe("findLostTurns: what proves a turn was lost by the host", () => {
   });
 });
 
-describe("the decision for a lost turn: retry or cancel, until the member is closed", () => {
+describe("the decision for a lost turn: retry or cancel, until the member is archived", () => {
   function decisionFor(opened: RunRecord) {
     const decision = opened.decisions.at(-1);
     if (decision === undefined) throw new Error("no decision");
@@ -513,7 +513,7 @@ describe("the decision for a lost turn: retry or cancel, until the member is clo
     expect(decision.summary).toContain("确认它已经停止");
   });
 
-  test("a member closed or archived after the turn began makes it cancel only", () => {
+  test("a member archived after the turn began makes it cancel only; a closed receipt alone does not (T9d)", () => {
     for (const kind of ["closed", "archived"] as const) {
       const base = settled();
       const opened = openLimboDecision(base, {
@@ -527,8 +527,45 @@ describe("the decision for a lost turn: retry or cancel, until the member is clo
       });
       if (!opened.changed) throw new Error("the decision was not opened");
       opened.next.eventReceipts.push(receipt(kind, AFTER + 5000));
-      expect(answerableActions(opened.next, decisionFor(opened.next))).toEqual(["cancel"]);
+      // A graceful stop of the daemon writes a closed receipt for every agent; it is usable again.
+      expect(answerableActions(opened.next, decisionFor(opened.next)), kind).toEqual(
+        kind === "archived" ? ["cancel"] : ["retry", "cancel"],
+      );
     }
+  });
+
+  test("a decision for another reason (an unusable report) is still cut by a closed receipt (T9d changes host-lost only)", () => {
+    for (const kind of ["closed", "archived"] as const) {
+      const opened = openLimboDecision(settled(), {
+        taskId: "t1",
+        assignmentId: "a1",
+        reason: "report-missing",
+        turnId: "turn-1",
+        decisionId: "d1",
+        controlNonceDigest: "0".repeat(64),
+        now: at(AFTER),
+      });
+      if (!opened.changed) throw new Error("the decision was not opened");
+      expect(answerableActions(opened.next, decisionFor(opened.next))).toEqual(["retry", "cancel"]);
+      opened.next.eventReceipts.push(receipt(kind, AFTER + 5000));
+      expect(answerableActions(opened.next, decisionFor(opened.next)), kind).toEqual(["cancel"]);
+    }
+  });
+
+  test("an archived receipt of another agent does not cut a host-lost decision", () => {
+    const base = settled();
+    const opened = openLimboDecision(base, {
+      taskId: "t1",
+      assignmentId: "a1",
+      reason: HOST_LOST_CODE,
+      turnId: "turn-1",
+      decisionId: "d1",
+      controlNonceDigest: "0".repeat(64),
+      now: at(AFTER),
+    });
+    if (!opened.changed) throw new Error("the decision was not opened");
+    opened.next.eventReceipts.push(receipt("archived", AFTER + 5000, { agentId: "agent-other" }));
+    expect(answerableActions(opened.next, decisionFor(opened.next))).toEqual(["retry", "cancel"]);
   });
 
   test("a judge's or a supplement's turn is not given a host-lost decision: its decision has no retry", () => {

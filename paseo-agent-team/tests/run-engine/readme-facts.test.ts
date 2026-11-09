@@ -214,5 +214,20 @@ describe("the Run Engine section of the README agrees with the code", () => {
     );
     expect(section).toContain("Going back to 0.7.0");
     expect(section).toContain("no longer does anything");
+    // T9d: a closed receipt alone does not make a lost reply member-lost; the rule is written down.
+    expect(section).toContain(
+      "when the read of the member says closed now, or when the host\n  archived it after the task was sent (an `archived` receipt)",
+    );
+    expect(section).toContain("A `closed` receipt alone does not count");
+    expect(section).toContain("writes one for every agent");
+    expect(section).toContain(
+      "gets `host-lost` (retry or cancel)\n  whatever closed receipts there are",
+    );
+    expect(section).toContain(
+      "A host-lost decision is cut to cancel only when the\n  member is archived",
+    );
+    expect(section).toContain("or the\n  read says closed now, and no decision otherwise");
+    expect(section).toContain("before you retry, make sure the member was not archived");
+    expect(section).not.toContain("when a closed or archived receipt of the member came after the");
   });
 });

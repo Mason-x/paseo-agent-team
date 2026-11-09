@@ -339,34 +339,112 @@ describe("lostReplyKind: which decision", () => {
     );
   });
 
-  test("a closed or archived receipt after the assignment, or a read of closed now: member-lost", () => {
-    for (const kind of ["closed", "archived"] as const) {
-      const base = record({
-        receipts: [receipt("turn_started", 1000), receipt("turn_ended", 2000), receipt(kind, 2500)],
-      });
-      expect(lostReplyKind(base, assignment(), { status: "idle", activeTurn: false }), kind).toBe(
-        MEMBER_LOST_CODE,
-      );
-      // The order of the receipts does not matter: archived, then the end, then closed.
-      const reordered = record({
-        receipts: [receipt("turn_started", 1000), receipt(kind, 1500), receipt("turn_ended", 2000)],
-      });
-      expect(
-        lostReplyKind(reordered, assignment(), { status: "idle", activeTurn: false }),
-        kind,
-      ).toBe(MEMBER_LOST_CODE);
-    }
+  test("an archived receipt after the assignment, or a read of closed now: member-lost, in any order of the receipts", () => {
+    const base = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("archived", 2500),
+        receipt("closed", 2600),
+      ],
+    });
+    expect(lostReplyKind(base, assignment(), { status: "idle", activeTurn: false })).toBe(
+      MEMBER_LOST_CODE,
+    );
+    // Archived, then the end, then closed (the cascade of archiving the coordinator).
+    const cascade = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("archived", 1500),
+        receipt("turn_ended", 2000),
+        receipt("closed", 2500),
+      ],
+    });
+    expect(lostReplyKind(cascade, assignment(), { status: "idle", activeTurn: false })).toBe(
+      MEMBER_LOST_CODE,
+    );
+    // An archived receipt alone is enough.
+    const only = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("archived", 2500),
+      ],
+    });
+    expect(lostReplyKind(only, assignment(), { status: "idle", activeTurn: false })).toBe(
+      MEMBER_LOST_CODE,
+    );
     expect(lostReplyKind(record(), assignment(), { status: "closed", activeTurn: false })).toBe(
       MEMBER_LOST_CODE,
     );
   });
 
-  test("a closed or archived receipt from before the assignment is not about this turn", () => {
-    const base = record({
+  test("a closed receipt alone is not the member gone (a graceful stop writes one for every agent): a producer's turn stays host-lost (T9d)", () => {
+    // R of DEV: the end (canceled), then the closed receipt; after the restart the member reads idle.
+    const afterStop = record({
       receipts: [
-        receipt("closed", -3000),
         receipt("turn_started", 1000),
         receipt("turn_ended", 2000),
+        receipt("closed", 2500),
+      ],
+    });
+    for (const purpose of ["member", "coordinator", "reopen"] as const) {
+      expect(
+        lostReplyKind(afterStop, assignment({ purpose }), { status: "idle", activeTurn: false }),
+        purpose,
+      ).toBe(HOST_LOST_CODE);
+    }
+    // Its order does not matter either: the closed receipt before the end.
+    const reordered = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("closed", 1500),
+        receipt("turn_ended", 2000),
+      ],
+    });
+    expect(lostReplyKind(reordered, assignment(), { status: "idle", activeTurn: false })).toBe(
+      HOST_LOST_CODE,
+    );
+    // After the restart the member took another turn (the OK of A21) and that ended too.
+    const again = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("closed", 2500),
+        receipt("turn_started", 3000),
+        receipt("turn_ended", 4000),
+      ],
+    });
+    expect(lostReplyKind(again, assignment(), { status: "idle", activeTurn: false })).toBe(
+      HOST_LOST_CODE,
+    );
+    // A closed receipt and a read of closed now: it is closed now, so member-lost.
+    expect(lostReplyKind(afterStop, assignment(), { status: "closed", activeTurn: false })).toBe(
+      MEMBER_LOST_CODE,
+    );
+  });
+
+  test("a closed or archived receipt from before the assignment is not about this turn", () => {
+    for (const kind of ["closed", "archived"] as const) {
+      const base = record({
+        receipts: [
+          receipt(kind, -3000),
+          receipt("turn_started", 1000),
+          receipt("turn_ended", 2000),
+        ],
+      });
+      expect(lostReplyKind(base, assignment(), { status: "idle", activeTurn: false }), kind).toBe(
+        HOST_LOST_CODE,
+      );
+    }
+  });
+
+  test("an archived receipt of another agent is not this one's", () => {
+    const base = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("archived", 2500, { agentId: "agent-other" }),
       ],
     });
     expect(lostReplyKind(base, assignment(), { status: "idle", activeTurn: false })).toBe(
@@ -385,13 +463,46 @@ describe("lostReplyKind: which decision", () => {
   });
 
   test("a judge's or a smoke tester's turn only gets member-lost: its decision has no way to try again", () => {
+    const afterStop = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("closed", 2500),
+      ],
+    });
+    const archived = record({
+      receipts: [
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+        receipt("archived", 2500),
+      ],
+    });
+    const before = record({
+      receipts: [
+        receipt("closed", -3000),
+        receipt("turn_started", 1000),
+        receipt("turn_ended", 2000),
+      ],
+    });
     for (const purpose of ["reviewer", "smoker"] as const) {
       const judge = assignment({ purpose });
+      // Nothing closed it: no decision (its way out is the stuck-judge one).
       expect(
         lostReplyKind(record(), judge, { status: "idle", activeTurn: false }),
         purpose,
       ).toBeNull();
+      expect(
+        lostReplyKind(before, judge, { status: "idle", activeTurn: false }),
+        purpose,
+      ).toBeNull();
       expect(lostReplyKind(record(), judge, { status: "closed", activeTurn: false }), purpose).toBe(
+        MEMBER_LOST_CODE,
+      );
+      // The order of R (the end, then closed) is the same as before T9d: member-lost, never host-lost.
+      expect(lostReplyKind(afterStop, judge, { status: "idle", activeTurn: false }), purpose).toBe(
+        MEMBER_LOST_CODE,
+      );
+      expect(lostReplyKind(archived, judge, { status: "idle", activeTurn: false }), purpose).toBe(
         MEMBER_LOST_CODE,
       );
     }
@@ -467,6 +578,16 @@ describe("the decision it opens", () => {
     expect(lostReplyKind(supplemented, supplement, { status: "closed", activeTurn: false })).toBe(
       MEMBER_LOST_CODE,
     );
+    // The order of R (the end, then closed) is the same as before T9d: member-lost, never host-lost.
+    for (const kind of ["closed", "archived"] as const) {
+      const stopped = record({
+        assignments: [supplement],
+        receipts: [receipt("turn_started", 1000), receipt("turn_ended", 2000), receipt(kind, 2500)],
+      });
+      expect(lostReplyKind(stopped, supplement, { status: "idle", activeTurn: false }), kind).toBe(
+        MEMBER_LOST_CODE,
+      );
+    }
     // It is still a candidate (the decision of a closed member is its way out); only the kind differs.
     expect(lostReplyCandidates(supplemented, at(AFTER))).toHaveLength(1);
   });
