@@ -505,3 +505,35 @@ describe("a reply window that runs over several user messages of one turn id (ca
     expect(window.complete && window.text).toBe("interrupted\nOK");
   });
 });
+
+describe("an end that comes first while an earlier appearance never ended (a known limit)", () => {
+  test("it is attached to the earlier appearance and the late start becomes an unended #2: the cancellation waits", async () => {
+    const store = await newStore();
+    const record = ledger("run-trep03-a1", 1);
+    const mine = record.assignments.find((entry) => entry.assignmentId === ASSIGNMENT_T2);
+    if (mine) mine.turnId = "T1";
+    await store.create(record);
+    const time = clock("2026-11-09T10:00:00.000Z");
+    const killed = createRunObserver({ store, clock: time });
+    time.tick();
+    await killed.ingest(started("T1"));
+    // The daemon was killed: no end for it. After the restart the new turn's end comes before its start.
+    time.tick(60_000);
+    const live = createRunObserver({ store, clock: time });
+    await live.ingest(ended("T1"));
+    time.tick();
+    await live.ingest(started("T1"));
+    const read = ((await store.get("run-trep03-a1")) as { record: RunRecord }).record;
+    const keys = read.eventReceipts
+      .map((r) => r.eventKey)
+      .filter((k) => k.endsWith(":T1") || k.endsWith("#2"));
+    expect(keys).toEqual([
+      `turn_started:${AGENT}:T1`,
+      `turn_ended:${AGENT}:T1`,
+      `turn_started:${AGENT}:T1#2`,
+    ]);
+    // The two inputs cannot be told apart from a replay, so nothing is guessed: the Run waits for a
+    // person (or the next turn end) instead of cancelling on a turn that may still be running.
+    expect(planCancelFinish(read, "assume-idle").kind).toBe("wait");
+  });
+});

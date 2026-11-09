@@ -399,3 +399,27 @@ describe("a reconcile reads a reply by the message it answers", () => {
     expect((await stored()).revision).toBe(revision);
   });
 });
+
+describe("an earlier appearance that never ended (a known limit)", () => {
+  const TID = "foreground-turn-1";
+  test("a report in the later turn waits for the earlier appearance to be ended by a reconcile, then is taken in", async () => {
+    const record = await seed(1);
+    // A turn that began before the restart and never ended, then a later turn with the same id.
+    const old = processAt("2026-11-05T12:05:00.000Z");
+    await old.ingest({ name: "agent.turn_started", agentId: AGENT, turnId: TID });
+    const h = harness(() => window(doneReport(record), TID));
+    await h.observer.ingest({ name: "agent.turn_started", agentId: AGENT, turnId: TID });
+    await h.observer.ingest({ name: "agent.turn_ended", agentId: AGENT, turnId: TID });
+
+    // The assignment's own turn is the earliest appearance, which has no end yet: nothing is taken in
+    // and nothing is written (no note, no repair, no decision).
+    const before = await stored();
+    expect(await h.intake.settleAgent(AGENT)).toEqual([{ status: "turn-not-ended" }]);
+    expect((await stored()).revision).toBe(before.revision);
+
+    // A reconcile reads the reply, records the missing end of that appearance, and the report follows.
+    const host: ObserverHost = { replyWindow: async () => window(doneReport(record), TID) };
+    expect((await h.observer.reconcile(host)).recorded).toBe(1);
+    expect((await h.intake.settleAgent(AGENT))[0]?.status).toBe("settled");
+  });
+});
