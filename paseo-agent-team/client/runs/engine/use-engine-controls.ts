@@ -10,13 +10,19 @@ import {
   runResumeRpc,
 } from "../../../shared/rpc/run-engine";
 import { type ControlState, createControlRunner, newRequestId } from "./control-runner";
+import type { ReasonField } from "./reason-drafts";
 
 /**
  * The controls of one Run: `run.replan`, `run.decide` (retry), `run.kick`, `run.pause` and `run.resume`. The state machine is
  * `control-runner.ts`; this only gives it the RPCs and mirrors its state for the component.
  * Switching to another run starts a fresh runner, so a notice never follows you to another Run.
+ * `accepted` is told when the server took a reason the person wrote, so the page can drop that draft.
  */
-export function useEngineControls(runId: string, refresh: () => Promise<void>) {
+export function useEngineControls(
+  runId: string,
+  refresh: () => Promise<void>,
+  accepted?: (field: ReasonField) => void,
+) {
   const replan = useRpc(runReplanRpc);
   const decide = useRpc(runDecideRpc);
   const kick = useRpc(runKickRpc);
@@ -26,8 +32,8 @@ export function useEngineControls(runId: string, refresh: () => Promise<void>) {
   const resume = useRpc(runResumeRpc);
   const [state, setState] = useState<ControlState>({ pending: null, notice: null });
   // The RPC functions and `refresh` may be new on every render; the runner reads the latest ones.
-  const latest = useRef({ replan, decide, kick, pause, resume, cancel, budget, refresh });
-  latest.current = { replan, decide, kick, pause, resume, cancel, budget, refresh };
+  const latest = useRef({ replan, decide, kick, pause, resume, cancel, budget, refresh, accepted });
+  latest.current = { replan, decide, kick, pause, resume, cancel, budget, refresh, accepted };
 
   const runner = useMemo(
     () =>
@@ -42,6 +48,7 @@ export function useEngineControls(runId: string, refresh: () => Promise<void>) {
           budget: (input) => latest.current.budget(input),
           resume: (input) => latest.current.resume(input),
           refresh: () => latest.current.refresh(),
+          accepted: (field) => latest.current.accepted?.(field),
           newId: newRequestId,
         },
         setState,

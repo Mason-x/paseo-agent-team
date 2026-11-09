@@ -31,6 +31,7 @@ vi.mock("@getpaseo/plugin/client/react-native", () => {
 });
 
 import { EngineView } from "../../client/runs/engine/EngineView";
+import { createReasonDrafts } from "../../client/runs/engine/reason-drafts";
 import {
   buildEngineModel,
   type EngineState,
@@ -496,6 +497,7 @@ describe("EngineView controls", () => {
     );
   const handlers = () => ({
     state: { pending: null, notice: null } as never,
+    drafts: createReasonDrafts("run-view-a1", new Map(), new Map(), () => undefined),
     onReplan: vi.fn(),
     onRetry: vi.fn(),
     onCancelTask: vi.fn(),

@@ -12,11 +12,14 @@ import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import { ImeTextInput } from "../../shared/ImeTextInput";
 import type { PluginTheme } from "../../shared/theme";
 import type { ControlState } from "./control-runner";
+import type { ReasonDrafts } from "./reason-drafts";
 
 export type EngineControlsProps = {
   theme: PluginTheme;
   view: ControlsView;
   state: ControlState;
+  /** What the person has typed as a reason, kept above this component (a poll can draw it off the screen). */
+  drafts: ReasonDrafts;
   onReplan: (reason: string) => void;
   onRetry: (offer: RetryOffer) => void;
   onCancelTask: (offer: CancelOffer) => void;
@@ -164,6 +167,7 @@ export function EngineControls(props: EngineControlsProps) {
     theme,
     view,
     state,
+    drafts,
     onReplan,
     onRetry,
     onCancelTask,
@@ -174,11 +178,9 @@ export function EngineControls(props: EngineControlsProps) {
     onResume,
     onDismiss,
   } = props;
-  const [reason, setReason] = useState("");
   const [needReason, setNeedReason] = useState(false);
   const [confirming, setConfirming] = useState<RetryOffer | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState<CancelOffer | null>(null);
-  const [cancelReason, setCancelReason] = useState("");
   const [needCancelReason, setNeedCancelReason] = useState(false);
   const [confirmingRun, setConfirmingRun] = useState(false);
   const busy = state.pending !== null;
@@ -215,8 +217,10 @@ export function EngineControls(props: EngineControlsProps) {
             placeholderTextColor={theme.colors.foregroundMuted}
             multiline
             editable={!busy}
+            initialValue={drafts.initial("replan")}
+            revision={drafts.revision("replan")}
             onChangeText={(text: string) => {
-              setReason(text);
+              drafts.write("replan", text);
               if (text.trim() !== "") setNeedReason(false);
             }}
             style={{
@@ -238,6 +242,7 @@ export function EngineControls(props: EngineControlsProps) {
             label={zh.controls.replan.submit}
             disabled={busy}
             onPress={() => {
+              const reason = drafts.read("replan");
               if (reason.trim() === "") {
                 setNeedReason(true);
                 return;
@@ -362,8 +367,10 @@ export function EngineControls(props: EngineControlsProps) {
             placeholderTextColor={theme.colors.foregroundMuted}
             multiline
             editable={!busy}
+            initialValue={drafts.initial("cancel-run")}
+            revision={drafts.revision("cancel-run")}
             onChangeText={(text: string) => {
-              setCancelReason(text);
+              drafts.write("cancel-run", text);
               if (text.trim() !== "") setNeedCancelReason(false);
             }}
             style={{
@@ -385,7 +392,7 @@ export function EngineControls(props: EngineControlsProps) {
             label={zh.controls.cancelRun.submit}
             disabled={busy}
             onPress={() => {
-              if (cancelReason.trim() === "") {
+              if (drafts.read("cancel-run").trim() === "") {
                 setNeedCancelReason(true);
                 return;
               }
@@ -440,7 +447,7 @@ export function EngineControls(props: EngineControlsProps) {
         onCancel={() => setConfirmingRun(false)}
         onConfirm={() => {
           setConfirmingRun(false);
-          onCancelRun(cancelReason);
+          onCancelRun(drafts.read("cancel-run"));
         }}
       />
       <ConfirmDialog
