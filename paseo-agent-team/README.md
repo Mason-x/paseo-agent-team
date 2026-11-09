@@ -339,9 +339,14 @@ daemon restart.
   tries were used up with exactly `incomplete:dispatch-not-found` and one more look, made at least 30
   seconds after the last failure, still finds the dispatch missing. It writes no receipt, no release, no message:
   only the decision, the task's note of why it waits and the warning coming down are recorded. The
-  decision is `member-lost` (cancel only) when a closed or archived receipt of the member came after the
-  task was sent or the read says closed, otherwise
-  `host-lost` (retry or cancel); it says that the reply is lost, that the member may have done part of
+  decision is `member-lost` (cancel only) when the read of the member says closed now, or when the host
+  archived it after the task was sent (an `archived` receipt). A `closed` receipt alone does not count: a
+  graceful stop of the daemon writes one for every agent, and after the restart the member is idle and
+  can be asked again (DEV, T9v). So the producer's own task turn gets `host-lost` (retry or cancel)
+  whatever closed receipts there are. A judge, a smoke tester or a supplement (their decision has no
+  retry) gets `member-lost` when a closed or archived receipt of it came after the task was sent, and no
+  decision otherwise. A host-lost decision is cut to cancel only when the member is archived after it was
+  opened; a closed receipt does not do that. The decision says that the reply is lost, that the member may have done part of
   the work, and asks you to look at its branch and to make sure its process has stopped first (a turn end
   does not prove that: on DEV the member's process kept writing for about 20 seconds after a graceful
   stop). Once the decision is open, the reply of this attempt is never taken in, even if it can be read
