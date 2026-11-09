@@ -66,6 +66,8 @@
 缺口：没有端到端的页面显示（旧 `reviewedRef`、自审、网关层错 DEV 目标的具体原因码已断言，A15）。
 
 ### AC03 同一 hook、报告或人的决定重复到达
+- tests/run-engine/turn-reuse.test.ts :: in one process a start replayed after the end is a duplicate and leaves no open turn (case 4) — 模板（v1、v2 × 宿主序号 1、0；T9a）：同进程重放仍是重复
+- tests/run-engine/turn-reuse.test.ts :: two hooks for the same new turn at once record one appearance — 模板（T9a）：并发重复 hook 只记一次
 - tests/run-engine/observer.test.ts :: records one receipt for an owned agent and treats redelivery as a duplicate
 - tests/run-engine/observer.test.ts :: an event storm of repeats and reorderings leaves one receipt per distinct fact
 - tests/run-engine/intake.test.ts :: settling again changes nothing: the assignment is no longer waiting
@@ -202,6 +204,8 @@
 缺口：重启丢失在途回合（T4b）：重查用尽后至少 30 秒，再点“立即检查并推进”（或 hook、恢复触发再读），宿主读到成员 idle、派发仍找不到、回合已知、送达没有未结清时，引擎自己写 `host-lost` 回执并开可重试、可取消的决策，同时撤下用尽告警（离线用例覆盖，DEV 验证放在 T8-R；只结算生产者的回合：判官、冒烟、补证、补报的回合、v1 Run（没有重查记录）、回合未知、读到 closed 不走这条；整个 Run 取消时回执照写但不开决策）。A21 的人工出路对这些剩下的情形仍有效（成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，成员自己的回执让取消的现有结算条件满足）。T4a 起成员在回合中被关闭或归档有了处理：引擎在 hook 或宿主读取证明会话已关闭且没有活动回合后，自己写结束回执并开只能取消的决策（回合未知、关闭失败、读取失败仍不结算，见 6.3）；宿主是否发 `turn_ended` 仍没有直接证据，但 A12 在真实宿主上重启 daemon 后看到：在途回复丢失、重查用尽、没有决策、取消一直等（Run 4），与限制一致（见 `docs/next-phase-plan.md` 2.12）。派发结果不明的"保留占用"已有用例，其余缺口已由 A16 关闭。
 
 ### AC11 收到报告后 hook 才到，或 hook 早于初始化/关键记录
+- tests/run-engine/turn-reuse.test.ts :: a turn that spans a plugin reload has exactly one effective end (case 5) — 模板（T9a）：跨插件重载的回合只有一个有效结束
+- tests/run-engine/turn-reuse-intake.test.ts :: a reconcile reads a reply by the message it answers — 重启后 hook 丢失的新回合由 reconcile 记为新的一次出现（T9a）
 - tests/run-engine/observer.test.ts :: a turn end the hooks missed is recovered from the host, and a late hook is then a duplicate
 - tests/run-engine/observer.test.ts :: a hook that arrives before the store is ready or before any run names the agent is kept, then delivered
 - tests/run-engine/observer.test.ts :: overflow and age both drop hooks and flag that hooks alone are no longer enough
@@ -328,6 +332,7 @@
 缺口：无（页面本身不读取开关，开关关闭时 `run.list` 与控制仍可用由 runtime.test.ts 既有两例证明；没有把两者放进同一个渲染用例）。
 
 ### AC17 长时间无 hook 且无到期工作；重复普通状态事件
+- tests/run-engine/turn-reuse.test.ts :: a recovery with nothing new writes nothing, and the next new turn is still seen (case 6) — 模板（T9a）：空闲恢复零写入，且不污染后续新回合
 - tests/run-engine/driver.test.ts :: a hook delivered twice, or for an agent no Run knows, sends nothing more
 - tests/run-engine/driver.test.ts :: a burst of kicks costs one pass and one more, not one each
 - tests/run-engine/control.test.ts :: two kicks at once cost one pass: the second joins the first instead of reading the host again
