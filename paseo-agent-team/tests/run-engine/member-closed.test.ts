@@ -199,8 +199,25 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
+/**
+ * One clock for every part of the wiring, moving forward a second each time it is read. The Engine only
+ * settles a turn whose `turn_started` receipt is strictly later than the assignment it belongs to
+ * (`lost-turn.ts`); with the real clock that was true only because the machine took a few milliseconds
+ * in between, so a fast one could put both in the same millisecond. Here "later" is a fact of the test.
+ */
+function steppedClock(): { now(): string } {
+  let at = Date.parse("2026-11-05T12:00:00.000Z");
+  return {
+    now: () => {
+      at += 1000;
+      return new Date(at).toISOString();
+    },
+  };
+}
+
 /** The wiring as production makes it: the settler first, the cancellation finisher after it. */
 function build(host: Host) {
+  const clock = steppedClock();
   const failures: ReadFailure[] = [];
   const onReadFailure = (_runId: string, failure: ReadFailure) => {
     failures.push(failure);
@@ -224,13 +241,14 @@ function build(host: Host) {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const observer = createRunObserver({ store: observerStore, onReadFailure });
+  const observer = createRunObserver({ store: observerStore, onReadFailure, clock });
   const effects = createEffects({
     store,
     port: host.port,
     compile: compileEngineIntent,
     resolveWorkspace: () => ({ workspaceId: "ws-start", directory: repoDir }),
     onReadFailure,
+    clock,
   });
   const profile = (family: string, id: string) => ({
     id,
@@ -260,12 +278,14 @@ function build(host: Host) {
     resolveWorkspace,
     compile: compileDispatch,
     onReadFailure,
+    clock,
   });
   const intake = createIntake({
     store,
     observer,
     host: observerHost,
     onReadFailure,
+    clock,
     repair: { send: (runId) => effects.runOutbox(runId) },
   });
   const dagIntake = createDagIntake({
@@ -273,6 +293,7 @@ function build(host: Host) {
     host: observerHost,
     seatFamily: () => null,
     resolveWorkspace,
+    clock,
     repair: { send: (runId) => effects.runOutbox(runId) },
   });
   const driver = createEngineDriver({
@@ -282,11 +303,12 @@ function build(host: Host) {
     intake,
     dagIntake,
     service,
-    memberLost: createMemberLostSettler({ store, readSeat, onReadFailure }),
-    cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure }),
+    clock,
+    memberLost: createMemberLostSettler({ store, readSeat, onReadFailure, clock }),
+    cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure, clock }),
     reconcileHost: createObserverHost(host.port, { requireIdle: true }),
   });
-  const control = createRunControl({ store, ensureReady: async () => undefined, driver });
+  const control = createRunControl({ store, ensureReady: async () => undefined, driver, clock });
   return { driver, control, failures, seatReads, gate };
 }
 
