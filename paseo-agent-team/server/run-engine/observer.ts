@@ -1,6 +1,7 @@
 import { latestSentWake } from "../../shared/domain/run-engine/plan-repair";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { REPORT_KINDS_BY_PURPOSE, replyAnchor } from "../../shared/domain/run-engine/report-repair";
+import { reboundFromAgents } from "../../shared/domain/run-engine/seat-rebuild";
 import {
   anchorSince,
   resolveHookOccurrence,
@@ -46,7 +47,10 @@ export type IngestResult =
   | { status: "recorded"; runId: string }
   | { status: "duplicate"; runId: string }
   | { status: "buffered"; reason: "store-not-ready" | "no-owner-yet" }
-  | { status: "ignored"; reason: "no-turn-id" | "ambiguous-owner" | "no-active-run" }
+  | {
+      status: "ignored";
+      reason: "no-turn-id" | "ambiguous-owner" | "no-active-run" | "seat-rebound";
+    }
   | { status: "rejected"; runId: string; reason: string };
 
 export type ObserverHost = {
@@ -249,6 +253,13 @@ export function createRunObserver(options: ObserverOptions) {
   ): Promise<IngestResult> {
     const state: { outcome: IngestResult } = { outcome: { status: "duplicate", runId } };
     await store.update(runId, (current) => {
+      // An Agent its seat was rebuilt away from is no longer listened to: whatever it still reports is
+      // dropped, not buffered and not counted as a lost hook. Judged on the rebuild record alone (the
+      // roster no longer names it), and only once the new Agent is bound.
+      if (reboundFromAgents(current).has(normalized.receipt.agentId as string)) {
+        state.outcome = { status: "ignored", reason: "seat-rebound" };
+        return null;
+      }
       const receipt = keyed(current, normalized);
       const appended = appendObservation(current, receipt, received, newId);
       if (appended.status === "duplicate") return null;

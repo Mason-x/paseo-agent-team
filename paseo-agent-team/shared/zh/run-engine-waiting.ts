@@ -384,6 +384,11 @@ export const EVENT_CAUSE_ZH: Record<string, EventCause> = {
     cause: "启动流程往前走了一步（创建成员、发送计划请求），或失败了",
   },
   "seat-bound": { label: "成员已绑定席位", cause: "启动时创建的 Agent 记到了它的席位上" },
+  "seat-rebound": {
+    label: "成员的 Agent 已换绑",
+    cause:
+      "席位原来的 Agent 在重启后打不开，Engine 按启动时冻结的配置新建了一个并换绑；旧 Agent 仍在 Paseo 里",
+  },
   "plan-request-prepared": {
     label: "计划请求已备好",
     cause: "启动完成后，向协调者要任务图的请求写进了待发队列",

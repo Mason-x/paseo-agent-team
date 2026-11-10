@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { z } from "zod";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
+import { reboundFromAgents } from "../../shared/domain/run-engine/seat-rebuild";
 import {
   RUN_HARD_BYTES,
   RUN_SCHEMA_VERSION,
@@ -152,6 +153,9 @@ function agentsOf(record: RunRecord): Set<string> {
   for (const seat of record.roster) if (seat.agentId) agents.add(seat.agentId);
   for (const entry of record.assignments) agents.add(entry.agentId);
   for (const entry of record.nonceRegistry) agents.add(entry.agentId);
+  // An Agent a seat was rebuilt away from stays the Run's: a member that never ran has no assignment to
+  // keep it here, and a hook of it must find its owner to be dropped rather than held for want of one.
+  for (const agentId of reboundFromAgents(record)) agents.add(agentId);
   return agents;
 }
 

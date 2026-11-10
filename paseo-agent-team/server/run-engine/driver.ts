@@ -51,7 +51,8 @@ export type RetryReport = {
 
 export type DriverOptions = {
   store: Pick<RunStore, "get" | "update" | "list" | "runsForAgent">;
-  observer: Pick<RunObserver, "ingest" | "flush" | "reconcile">;
+  observer: Pick<RunObserver, "ingest" | "flush" | "reconcile"> &
+    Partial<Pick<RunObserver, "buffered">>;
   host: ObserverHost;
   /**
    * The host `recover` reconciles with, when it must be stricter than `host`: reconcile records a
@@ -216,6 +217,12 @@ export function createEngineDriver(options: DriverOptions) {
       last = await options.service.dispatchNext(runId);
       if (last.status !== "dispatched") break;
       dispatched += 1;
+    }
+    // A hook for an Agent the Run only named a moment ago (a rebuilt member's `agent.created`) may have
+    // been held for want of an owner; now that the pass may have bound it, it is delivered, not left to
+    // age out and make the observer ask for a full reconcile.
+    if ((options.observer.buffered ?? 0) > 0) {
+      await options.observer.flush().catch((error: unknown) => log("could not flush hooks", error));
     }
     await show(runId, last);
     await openMissingDecisions(runId);

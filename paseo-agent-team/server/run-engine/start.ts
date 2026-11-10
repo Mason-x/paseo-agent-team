@@ -23,12 +23,13 @@ import {
   seatProfileOf,
   setLaunchState,
 } from "../../shared/domain/run-engine/run-record";
+import { type AgentSpec, freezeAgentSpecs } from "../../shared/domain/run-engine/seat-rebuild";
 import type { PaseoAdapter } from "../../shared/paseo/adapter";
 import type { Role } from "../../shared/schemas/role";
 import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
 import { runEngineZh } from "../../shared/zh/run-engine";
-import { alertIdFor, sha256Hex } from "./digest";
+import { alertIdFor, mcpServersSha256, sha256Hex } from "./digest";
 import { type Effects, payloadHash, type SendableIntent } from "./effects";
 import {
   type CommitIdentity,
@@ -247,6 +248,31 @@ export async function startEngineRun(
     workspace: { id: plan.workspaceId, directory: input.workspaceDirectory },
   });
   (record.launch as Record<string, unknown>).systemPrompts = pinned;
+  // What a rebuild needs to make this seat's Agent again, frozen in the same commit as the record and
+  // before any Agent exists. Members first, so that if the total is over its limit it is the coordinator
+  // (never rebuilt) that is left out. The Role's MCP configuration may hold secrets: only its digest is kept.
+  const specOf = (seatId: string, agent: PlannedAgent, parentSeatId: string | null) => {
+    const spec: AgentSpec = {
+      parentSeatId,
+      title: agent.title,
+      labels: { ...agent.labels },
+      systemPrompt: systemPrompts.get(seatId) ?? "",
+      systemPromptSha256: pinned[seatId]?.hash ?? "",
+      profile: structuredClone(agent.profile),
+      roleId: agent.role.id,
+      mcpServersSha256: mcpServersSha256(agent.role.mcpServers),
+    };
+    return { seatId, spec };
+  };
+  (record.launch as Record<string, unknown>).agentSpecs = freezeAgentSpecs([
+    ...engine.seats
+      .filter((seat) => seat.enabled)
+      .flatMap((seat) => {
+        const member = memberOfSeat.get(seat.seatId);
+        return member ? [specOf(seat.seatId, member, COORDINATOR_SEAT_ID)] : [];
+      }),
+    specOf(COORDINATOR_SEAT_ID, plan.coordinator, null),
+  ]);
   try {
     await deps.store.create(record);
   } catch (cause) {

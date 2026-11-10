@@ -44,6 +44,7 @@ import {
   templateVersionFor,
 } from "../../shared/domain/run-engine/prompt-template";
 import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
+import { rebindBlocker } from "../../shared/domain/run-engine/run-record";
 import {
   eligibleReviewSeats,
   heldByClosedSeat,
@@ -58,6 +59,14 @@ import {
   SEAT_CLOSED_ALERT_PREFIX,
 } from "../../shared/domain/run-engine/seat-closed";
 import {
+  readSeatRebuilds,
+  rebuildsOfSeat,
+  rebuildTitle,
+  SEAT_REBUILD_MAX_PER_SEAT,
+  settleRebuildAlerts,
+} from "../../shared/domain/run-engine/seat-rebuild";
+import {
+  classifySeatForReopen,
   mayReopen,
   REOPEN_READS_PER_PASS,
   REOPEN_TIMEOUT_MS,
@@ -82,6 +91,15 @@ import {
   prepareEvidenceDir,
   verifyScopes,
 } from "./repo";
+import {
+  checkRebuildable,
+  hasCreatingRebuild,
+  type RebuildDeps,
+  type RebuildHost,
+  resumeRebuilds,
+  startRebuild,
+  warnCannotRebuild,
+} from "./seat-rebuild";
 import type { OtherResources, RunStore } from "./store";
 
 /**
@@ -134,6 +152,13 @@ export type EngineServiceOptions = {
   capacityLimits?: Partial<CompactionLimits>;
   /** How long reading a closed member's history to reopen it may take (default 30 s). */
   reopenTimeoutMs?: number;
+  /**
+   * What rebuilding a member's Agent needs from the host (T11b). Absent, the Engine reopens closed seats
+   * as before and never rebuilds one.
+   */
+  rebuild?: Omit<RebuildHost, "reopenAgent">;
+  /** How long a person's "check now" lets a seat be rebuilt a second time (default 2 minutes). */
+  rebuildPermitMs?: number;
   ids?: { uuid(): string };
   clock?: { now(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -288,6 +313,18 @@ export function createEngineService(options: EngineServiceOptions) {
    * person's "check now" clears the Run's entries (`grantReopen`) and so allows one more try each.
    */
   const reopenTried = new Set<string>();
+  /**
+   * The closed seats whose reading was tried by this process and did not bring them back (it threw, timed out
+   * or left the seat closed), by the same key. Unlike `reopenTried` a person's "check now" does not clear it:
+   * it says what happened, not whether to try again. A seat that never ran is only rebuilt once it is in here.
+   */
+  const reopenFailed = new Set<string>();
+  /**
+   * A Run a person has just asked to check (`grantReopen`) until when: only then may a seat that already
+   * had a rebuild that failed be rebuilt a second time. An automatic pass (a restart's recovery, a hook) never
+   * gives it, and a failed rebuild is not a permission.
+   */
+  const rebuildPermit = new Map<string, number>();
   /** The seat facts the last dispatch of each Run was planned with, so reopening ranks the same way. */
   const lastSeatFacts = new Map<string, readonly SeatRuntime[]>();
 
@@ -890,6 +927,29 @@ export function createEngineService(options: EngineServiceOptions) {
   }
 
   /**
+   * Takes down the rebuild alerts that no longer tell the truth (`settleRebuildAlerts`). Only a Run that has
+   * ever had one is looked at, so a Run that never rebuilt is not written to.
+   */
+  async function noteRebuildAlerts(
+    runId: string,
+    record: RunRecord,
+    state: { held: boolean; over: boolean },
+  ): Promise<void> {
+    const mine = record.alerts.some(
+      (alert) => alert.state !== "resolved" && alert.alertId.startsWith("rebuild-"),
+    );
+    if (!mine && readSeatRebuilds(record).kind !== "valid") return;
+    try {
+      await options.store.update(runId, (current) => {
+        const next = settleRebuildAlerts(current, state, clock.now());
+        return next === current ? null : next;
+      });
+    } catch (error) {
+      log(`could not take down the rebuild alerts of ${runId}`, error);
+    }
+  }
+
+  /**
    * One warning while the task this pass looked at is held back only by closed seats, found again by its
    * fixed prefix so asking again writes nothing. It is taken down once that stops being true (a seat
    * is idle again, a pass went on to something else, or there is nothing left to dispatch), and only if
@@ -901,6 +961,7 @@ export function createEngineService(options: EngineServiceOptions) {
     result: DispatchNextResult | null,
   ): Promise<void> {
     const held = result?.status === "waiting" && heldByClosedSeat(result.denials);
+    await noteRebuildAlerts(runId, record, { held, over: false });
     if (held === hasOpenSeatClosedAlert(record)) return;
     try {
       await options.store.update(runId, (current) => {
@@ -1018,26 +1079,111 @@ export function createEngineService(options: EngineServiceOptions) {
       budget.reads += 1;
       try {
         if (await reopenByReading(seat.agentId)) {
+          reopenFailed.delete(key);
           log(`reopened the closed seat ${seat.seatId} of ${runId} by reading its history`);
           return true;
         }
+        reopenFailed.add(key);
         log(
           `the closed seat ${seat.seatId} of ${runId} does not read idle after its history was read`,
         );
       } catch (error) {
+        reopenFailed.add(key);
         log(`could not reopen the closed seat ${seat.seatId} of ${runId}`, error);
       }
     }
     return false;
   }
 
+  /**
+   * The seat to rebuild, if any: the first closed seat, in the order the closed seats are read, that can be
+   * and should be. One that cannot (a seat that has been archived, one that still carries work, one that
+   * could still be reopened by reading, one whose spec is gone) is passed over and does not hold up the
+   * ones behind it; one that cannot be rebuilt but would need to be gets its own warning. Only one is
+   * started. Returns true when a seat was given a new Agent.
+   */
+  async function rebuildFirstPossible(
+    runId: string,
+    work: Work,
+    denials: readonly SeatDenial[],
+  ): Promise<boolean> {
+    const rebuild = options.rebuild;
+    if (!rebuild) return false;
+    const read = await options.store.get(runId);
+    if (read.status !== "ok") return false;
+    const record = read.record;
+    if (record.lifecycle !== "active" || cancelPending(record)) return false;
+    if (record.launch.state !== "running") return false;
+    const deps: RebuildDeps = { store: options.store, host: hostFor(rebuild), clock, log };
+    const rebuilds = readSeatRebuilds(record);
+    const items = rebuilds.kind === "valid" ? rebuilds.items : [];
+    const permitted = (rebuildPermit.get(runId) ?? 0) > Date.parse(clock.now());
+    for (const seat of reopenCandidates(record, work, denials)) {
+      if (isAgentArchived(record, seat.agentId)) continue;
+      const kind = classifySeatForReopen(record, seat.agentId);
+      // Reading can bring a P seat back, and a seat that never ran has to fail to be read first.
+      if (kind === "P") continue;
+      if (kind === "N" && !reopenFailed.has(reopenKey(runId, seat.seatId, seat.agentId))) continue;
+      // The records of this Run cannot be read: nothing is started or continued, and the Run says so.
+      if (rebuilds.kind === "invalid") {
+        await warnCannotRebuild(deps, runId, seat.seatId, "records-unreadable");
+        return false;
+      }
+      // Something is still being made, or this seat has had all its tries.
+      if (items.some((item) => item.state === "creating")) return false;
+      const mine = rebuildsOfSeat(items, seat.seatId);
+      if (mine.length >= SEAT_REBUILD_MAX_PER_SEAT) continue;
+      // A second try is a person's to ask for.
+      if (mine.length >= 1 && !permitted) continue;
+      // The member-lost settler has not closed its turn yet, or something is on its way to it: not now.
+      if (rebindBlocker(record, seat.seatId, seat.agentId) !== null) continue;
+      const checked = await checkRebuildable(deps.host, record, seat.seatId);
+      if (!checked.ok) {
+        await warnCannotRebuild(deps, runId, seat.seatId, checked.why);
+        continue;
+      }
+      const generation = (mine.length + 1) as 1 | 2;
+      if (generation > 1) rebuildPermit.delete(runId);
+      log(`rebuilding the closed seat ${seat.seatId} of ${runId} (try ${generation})`);
+      const outcome = await startRebuild(
+        deps,
+        runId,
+        {
+          seatId: seat.seatId,
+          fromAgentId: seat.agentId,
+          generation,
+          reason: kind === "C" ? "turn-cut-off" : "never-ran-unopenable",
+        },
+        rebuildTitle(checked.spec.title, generation),
+      );
+      return outcome.status === "bound";
+    }
+    return false;
+  }
+
+  /** The host's side of a rebuild: what the caller supplied, and reading a parent so it can have children. */
+  function hostFor(rebuild: NonNullable<EngineServiceOptions["rebuild"]>): RebuildHost {
+    return { ...rebuild, reopenAgent: reopenByReading };
+  }
+
   async function dispatchNextUnlocked(
     runId: string,
     mayReopenSeats = true,
     quiet = false,
+    mayRebuild = true,
   ): Promise<DispatchNextResult> {
-    const read = await options.store.get(runId);
+    let read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
+    // A rebuild a restart cut off is carried on first, whatever state the Run is in: the Agent it made (or
+    // will make, with the same key) belongs to the seat.
+    if (options.rebuild && hasCreatingRebuild(read.record)) {
+      await resumeRebuilds(
+        { store: options.store, host: hostFor(options.rebuild), clock, log },
+        runId,
+      );
+      read = await options.store.get(runId);
+      if (read.status !== "ok") return { status: "run-unavailable" };
+    }
     // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
     // its DAG, have nothing to send. A paused Run is the one exception to "nothing to do": a person may
     // cancel failed tasks while it is paused, and then the failed-task alert is no longer true, so it is
@@ -1051,6 +1197,9 @@ export function createEngineService(options: EngineServiceOptions) {
         hasOpenSeatClosedAlert(read.record)
       ) {
         await noteSeatClosed(runId, read.record, null);
+      }
+      if (read.record.lifecycle === "finished" || read.record.lifecycle === "cancelled") {
+        await noteRebuildAlerts(runId, read.record, { held: false, over: true });
       }
       if (
         read.record.lifecycle === "paused" &&
@@ -1120,7 +1269,31 @@ export function createEngineService(options: EngineServiceOptions) {
       (await reopenClosedSeats(runId, read.record, work, latest.denials, budget))
     ) {
       // A look that still waits says nothing about the warning yet: the next candidate may take the work.
-      latest = await dispatchNextUnlocked(runId, false, true);
+      latest = await dispatchNextUnlocked(runId, false, true, false);
+      if (latest.status !== "waiting") return latest;
+    }
+    // Still held back only by closed seats after every read: one that cannot come back by being read is
+    // rebuilt, a member's Agent made again from the spec the Run was started with. A supplement is the one
+    // piece of work that cannot go to a new Agent (it must be the original producer), so it never rebuilds.
+    if (
+      mayRebuild &&
+      options.rebuild &&
+      work.kind !== "evidence" &&
+      latest.status === "waiting" &&
+      heldByClosedSeat(latest.denials) &&
+      (await rebuildFirstPossible(runId, work, latest.denials))
+    ) {
+      // The seat has its new Agent. Whether to send anything is decided on the Run as it is now, not on the
+      // snapshot this pass began with: a pause or a cancellation may have come while it was being made.
+      const after = await options.store.get(runId);
+      if (
+        after.status !== "ok" ||
+        after.record.lifecycle !== "active" ||
+        cancelPending(after.record)
+      ) {
+        return latest;
+      }
+      latest = await dispatchNextUnlocked(runId, false, true, false);
       if (latest.status !== "waiting") return latest;
     }
     // Quiet: this is one of those looks; if it still waits, the pass that asked for it settles the warning.
@@ -1137,6 +1310,8 @@ export function createEngineService(options: EngineServiceOptions) {
       for (const key of [...reopenTried]) {
         if ((JSON.parse(key) as string[])[0] === runId) reopenTried.delete(key);
       }
+      // The same click is what lets a seat whose rebuild failed be rebuilt once more, for a little while.
+      rebuildPermit.set(runId, Date.parse(clock.now()) + (options.rebuildPermitMs ?? 120_000));
     },
 
     /**
@@ -1146,7 +1321,11 @@ export function createEngineService(options: EngineServiceOptions) {
      */
     dispatchNext(runId: string): Promise<DispatchNextResult> {
       const previous = chains.get(runId) ?? Promise.resolve();
-      const run = previous.catch(() => undefined).then(() => dispatchNextUnlocked(runId));
+      const run = previous
+        .catch(() => undefined)
+        .then(() => dispatchNextUnlocked(runId))
+        // A person's click is good for the first look it brings, and for no other.
+        .finally(() => rebuildPermit.delete(runId));
       chains.set(
         runId,
         run.catch(() => undefined),
