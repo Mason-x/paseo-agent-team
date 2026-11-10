@@ -154,6 +154,8 @@
 - tests/run-engine/seat-rebuild.test.ts :: after the record and before the create: the next look creates with the same key, binds once and sends once — 三轮 T11b：写下 creating 之后、创建之前崩溃
 - tests/run-engine/seat-rebuild-record.test.ts :: an unsettled assignment, a proof the Agent was accepted with, or something still on its way to it, blocks it — 三轮 T11b：有未结 assignment、已接受的证明或在途发送的席位不换绑
 - tests/run-engine/seat-rebuild.test.ts :: C: a member whose first turn was cut off is not read; its Agent is made again from the frozen spec and gets the work once — 三轮 T11b：C 类不读，直接重建，恰好派发一次
+- tests/run-engine/seat-rebuild.test.ts :: the host made the Agent but the seat cannot be given to it yet: the attempt stays, nothing is asked of the host while it cannot, and the same Agent is bound later — 三轮 T11b：绑定被拒保持 creating，换绑条件满足前宿主不再被询问，之后同一个 Agent 只绑定一次
+- tests/run-engine/seat-rebuild.test.ts :: a Run that is over while an attempt is still being made: a recovery closes it as failed, creates nothing and takes the warning down — 三轮 T11b：终态 Run 上的 creating 项记 failed
 - tests/run-engine/driver.test.ts :: a request whose delivery is unknown stays sent once: claims freeze and nothing is re-sent
 - tests/spec/run-core-reducer.spec.test.ts :: a dispatched assignment without turn end or authorization stays frozen
 - tests/spec/run-core-reducer.spec.test.ts :: an in-flight task stays frozen when a later turn starts after the end

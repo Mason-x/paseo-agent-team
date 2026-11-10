@@ -443,24 +443,31 @@ daemon restart.
   and the warning stays.
   **Rebuilding (0.8.0).** A closed member that reading cannot bring back is given a new Agent: one whose first turn was
   cut off (it started a turn and never finished one, so it is not read), or one that never ran and whose read failed or
-  left it closed in this plugin process (a Codex member after a restart). The new Agent is made from what the Run froze
+  left it closed in this plugin process (a Codex member after a restart; a read that finds a turn running, or that
+  does not finish in time, proves nothing and rebuilds nothing). Just before the attempt is written the Engine looks at
+  the Agent once more and leaves it alone if it is not closed with no turn running. The new Agent is made from what the Run froze
   when it was started, `launch.agentSpecs`, written in the same commit as the Run and before any Agent exists: the
   system prompt, the whole Profile, title, labels, the Role's id and **only a digest** of the Role's MCP configuration
   (it may hold keys; nothing of it is kept). A seat whose prompt is over 64 KiB, or that would take the specs past
   256 KiB together (members first, the coordinator last), is left out whole and cannot be rebuilt. It happens in the
   pass in which the task is held back only by closed seats and the reads have been made, for the first seat in reading
   order that can be rebuilt, one at a time per Run: the attempt is written first (`seatRebuilds`, state creating),
-  the Agent is created with a key that names the attempt (up to three tries, the same key every time, so a lost answer
-  costs nothing), and one commit gives the seat the new Agent (the history shows 成员的 Agent 已换绑, `seat-rebound`)
+  the Agent is created with a key that names the attempt (up to three tries, the same key every time, so one lost answer
+  costs nothing: only if all three answers are lost, and a person then presses **立即检查并推进** for the second
+  generation, which has a key of its own, can the host be left with an Agent that no Run lists), and one commit gives the seat the new Agent (the history shows 成员的 Agent 已换绑, `seat-rebound`)
   and marks the attempt bound. The work then goes to the new Agent, which is titled "… （重建 n）". A restart or a crash
   in the middle leaves the attempt on the ledger and the next look carries it on with the same key: one new Agent, bound
-  once. A Run paused or cancelled while the Agent is being made still gets it bound; nothing is sent. The old Agent stays in Paseo
+  once. If the Agent was made but the seat cannot be given to it yet (work or a message turned up for the old Agent),
+  the attempt stays "being rebuilt", the host is not asked again while that lasts, and the same Agent is bound later. An
+  attempt of a Run that is over is closed as failed on the next recovery or check, and creates nothing. A Run paused or cancelled while the Agent is being made still gets it bound; nothing is sent. The old Agent stays in Paseo
   and archiving it does not affect the Run; what it reports afterwards is dropped by the Engine. **Limits.** A seat is
   rebuilt at most twice. The second time needs a person's **立即检查并推进**; a restart, a hook, a recovered read or an
   answer does not give it, and there is no third. Never rebuilt: a supplement (it must go to the producer that holds the
   task), the coordinator, a member that finished a turn (it is reopened by reading), an archived seat, a seat that still
-  has work or a message on its way to it (a lost turn is first settled by its decision), and a Run that is paused, being
-  cancelled or not running. A producer whose seat was rebuilt can no longer be asked for a supplement for its earlier
+  has work or a message on its way to it (a lost turn is first settled by its decision), a seat whose Agent was accepted
+  with a delivery proof (changing its Agent would make the ledger refuse the commit: the Run says so once, and the way out
+  is to cancel it and start again), and a Run that is paused, being cancelled or not running. When the second generation
+  fails too, the warning says that the two are used up; there is nothing to press. A producer whose seat was rebuilt can no longer be asked for a supplement for its earlier
   task (`evidence-seat-unavailable`): cancel the Run and start it again. **Warnings.** Being rebuilt, rebuilt (it comes
   down when the new Agent has taken its first dispatch), and failed (with a code, never the host's text; it stays
   while the seat is still held). A Run with no usable spec (a v1 Run, one started before 0.8.0, a seat over the size
