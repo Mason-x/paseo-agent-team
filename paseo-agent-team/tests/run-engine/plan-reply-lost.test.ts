@@ -40,7 +40,8 @@ import { ROLE } from "./support/plan-fixtures";
  */
 
 const RUN_ID = "run-planlost-a1";
-const LOST_ALERT = "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划";
+const LOST_ALERT =
+  "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失。请在“控制”里填写原因后点“请求重新规划”；如果协调者打不开（重启打断规划太早时会这样），只能取消这个 Run 后重新启动。";
 
 let home: string;
 let repoDir: string;

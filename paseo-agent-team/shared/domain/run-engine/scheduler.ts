@@ -20,6 +20,11 @@ export type SeatRuntime = {
   degraded: boolean;
   /** The host told us the seat's Agent was archived: it takes no work for the rest of the Run. */
   archived?: boolean;
+  /**
+   * The host read the seat's Agent and it is closed (a daemon restart closes every member whose
+   * session is not open). The Engine does not reopen it, so it takes no work until it is idle again.
+   */
+  closed?: boolean;
   channelState: "available" | "paused" | "unknown";
   available: boolean;
   /** Current assignments (0 or 1 in batch B). */
@@ -59,6 +64,7 @@ export type SeatDenial = {
     | "disabled"
     | "agent-missing"
     | "seat-archived"
+    | "seat-closed"
     | "busy"
     | "permission"
     | "degraded"
@@ -185,6 +191,11 @@ function evaluateSeats(
       denials.push({ seatId: seat.seatId, reason: "seat-archived" });
       continue;
     }
+    // A closed seat is not busy: nothing will free it, and saying "busy" would tell a person to wait.
+    if (seat.closed === true) {
+      denials.push({ seatId: seat.seatId, reason: "seat-closed" });
+      continue;
+    }
     if (!seat.idle || seat.load > 0) {
       denials.push({ seatId: seat.seatId, reason: "busy" });
       continue;
@@ -256,12 +267,28 @@ export type DispatchPlan = {
 const TEMPORARY_DENIALS: ReadonlySet<SeatDenial["reason"]> = new Set([
   "agent-missing",
   "seat-archived",
+  "seat-closed",
   "busy",
   "permission",
   "degraded",
   "channel",
   "profile-unavailable",
 ]);
+
+/**
+ * True when a task is held back by a closed seat and by nothing that will clear by itself: every
+ * temporary reason is `seat-closed`, or `seat-archived` (which no one clears either), and at least one
+ * is `seat-closed`. A busy seat, a pending permission or a channel that comes back make it a plain wait.
+ */
+export function heldByClosedSeat(denials: readonly SeatDenial[]): boolean {
+  const temporary = denials.filter((denial) => TEMPORARY_DENIALS.has(denial.reason));
+  return (
+    temporary.some((denial) => denial.reason === "seat-closed") &&
+    temporary.every(
+      (denial) => denial.reason === "seat-closed" || denial.reason === "seat-archived",
+    )
+  );
+}
 
 /**
  * Advisory plan: one proposal per ready task, simulating one-slot occupancy so the same seat is

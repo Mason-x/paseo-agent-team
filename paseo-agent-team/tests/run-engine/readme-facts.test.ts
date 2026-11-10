@@ -8,6 +8,7 @@ import {
   LOST_TURN_HINT,
   LOST_TURN_SETTLE_DELAY_MS,
 } from "../../shared/domain/run-engine/read-retry";
+import { SEAT_CLOSED_ALERT_PREFIX } from "../../shared/domain/run-engine/seat-closed";
 import { DEFAULT_ENGINE_LIMITS } from "../../shared/domain/run-engine/team-config-edit";
 import {
   RUN_SCHEMA_VERSION,
@@ -17,6 +18,7 @@ import {
 } from "../../shared/schemas/run-engine/ledger";
 import { RUN_ACTION_CONTROLS } from "../../shared/schemas/run-engine/rpc-actions";
 import { runEngineZh } from "../../shared/zh/run-engine";
+import { SEAT_DENIAL_ZH } from "../../shared/zh/run-engine-waiting";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
@@ -229,5 +231,21 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("or the\n  read says closed now, and no decision otherwise");
     expect(section).toContain("before you retry, make sure the member was not archived");
     expect(section).not.toContain("when a closed or archived receipt of the member came after the");
+  });
+
+  test("it describes the closed seat after a restart: the reason, the warning and the way out (T9f)", () => {
+    expect(section).toContain("**A host restart leaves members closed.**");
+    expect(section).toContain((SEAT_DENIAL_ZH["seat-closed"] as string).split("，")[0] as string);
+    expect(section).toContain(SEAT_CLOSED_ALERT_PREFIX);
+    expect(section).toContain("It is still a wait:\n  no decision is opened and nothing is sent");
+    expect(section).toContain("**立即检查并推进**");
+    expect(section).toContain("should not message the member to wake it while the Run is live");
+    expect(section).toContain("no rollout found");
+    expect(section).toContain("it does not\n  start them");
+    // The lost plan reply warning names the button the page really has, and the one way out left.
+    expect(section).toContain("write a reason under 控制 and press **请求重新规划**");
+    expect(section).toContain(runEngineZh.controls.replan.submit);
+    expect(section).toContain("只能取消这个 Run 后重新启动");
+    expect(section).not.toContain("请点重新规划");
   });
 });

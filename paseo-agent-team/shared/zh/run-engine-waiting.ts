@@ -234,6 +234,7 @@ export const SEAT_DENIAL_ZH: Record<string, string> = {
   disabled: "席位被停用",
   "agent-missing": "席位还没有对应的 Agent",
   "seat-archived": "席位的 Agent 已被归档，本 Run 里不再派活",
+  "seat-closed": "席位的 Agent 已关闭（例如 daemon 重启后还没被重新打开），Engine 不会给它派活",
   busy: "席位正忙",
   permission: "席位在等权限回应",
   degraded: "席位所在的渠道状态不好",
