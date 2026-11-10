@@ -409,7 +409,7 @@ daemon restart.
   way, or because the ledger is full, does not look at the task, so the warning is left as it was; a
   pass that still dispatches work under way takes it down, even if the task is still held back by the
   failed-task limit. A paused Run keeps the warning until it is resumed and a pass takes it down; a finished
-  or cancelled one keeps it for good (cancelling is one of the ways out the warning names). For a review
+  or cancelled one has it taken down once (nothing waits for a seat any more). For a review
   task the warning can name a closed seat that is not the real obstacle: the only idle reviewer may be
   refused because it is of the producer's family, and reopening the closed seat would not help; that
   takes every available reviewer to be of the producer's family, and the way out is to cancel. An

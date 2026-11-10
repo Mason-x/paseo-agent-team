@@ -879,8 +879,16 @@ export function createEngineService(options: EngineServiceOptions) {
     // its DAG, have nothing to send. A paused Run is the one exception to "nothing to do": a person may
     // cancel failed tasks while it is paused, and then the failed-task alert is no longer true, so it is
     // taken down here (and only here: nothing is sent and the Run is not resumed). A Run that has no such
-    // alert, or is still over the limit, is not written to.
+    // alert, or is still over the limit, is not written to. The closed-seat warning is taken down once
+    // for a Run that is over (finished or cancelled: nothing waits for a seat any more); a paused Run
+    // keeps it, because it is still true.
     if (read.record.lifecycle !== "active") {
+      if (
+        (read.record.lifecycle === "finished" || read.record.lifecycle === "cancelled") &&
+        hasOpenSeatClosedAlert(read.record)
+      ) {
+        await noteSeatClosed(runId, read.record, null);
+      }
       if (
         read.record.lifecycle === "paused" &&
         !failedTaskLimit(read.record).exceeded &&

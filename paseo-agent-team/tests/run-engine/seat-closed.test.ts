@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { alertIdFor } from "../../server/run-engine/digest";
 import { createEngineDriver } from "../../server/run-engine/driver";
 import { createEffects } from "../../server/run-engine/effects";
 import { inspectRepo } from "../../server/run-engine/repo";
@@ -452,6 +453,56 @@ for (const version of [1, 2] as const) {
 
       expect(result).toMatchObject({ status: "waiting" });
       expect(seatAlerts(await stored())).toHaveLength(1);
+    });
+
+    for (const lifecycle of ["finished", "cancelled"] as const) {
+      test(`a ${lifecycle} Run takes its open warning down, once, and sends nothing`, async () => {
+        await seed((record) => {
+          record.lifecycle = lifecycle;
+          record.alerts.push({
+            alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+            state: "open",
+            severity: "warning",
+            summary: SEAT_CLOSED_ALERT,
+            createdAt: record.updatedAt,
+            acknowledgedAt: null,
+            resolvedAt: null,
+          });
+        });
+        const host = fakeHost();
+        host.closed.add(PRODUCER_AGENT);
+        const service = makeService(host);
+        expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+        const after = await stored();
+        expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
+        expect(eventsOf(after, "alert-resolved")).toHaveLength(1);
+
+        expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+        expect((await stored()).revision).toBe(after.revision);
+        expect(host.sent).toHaveLength(0);
+      });
+    }
+
+    test("a paused Run keeps its open warning and is not written to", async () => {
+      await seed((record) => {
+        record.lifecycle = "paused";
+        record.alerts.push({
+          alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+          state: "open",
+          severity: "warning",
+          summary: SEAT_CLOSED_ALERT,
+          createdAt: record.updatedAt,
+          acknowledgedAt: null,
+          resolvedAt: null,
+        });
+      });
+      const host = fakeHost();
+      host.closed.add(PRODUCER_AGENT);
+      const before = await stored();
+      expect(await makeService(host).dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["open"]);
     });
 
     test("a Run with nothing to dispatch and no warning is not written to", async () => {
