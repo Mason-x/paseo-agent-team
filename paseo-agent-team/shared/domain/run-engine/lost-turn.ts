@@ -201,10 +201,11 @@ export const CLOSED_TURN_WAIT_MS = LOST_TURN_SETTLE_DELAY_MS;
  * a producer's own task or of a reviewer. Smoke tests, supplements (evidence requests) and the coordinator
  * keep T4a as it was: closed means lost, at once.
  */
+const REOPEN_PURPOSES: readonly RunAssignment["purpose"][] = ["member", "reopen", "reviewer"];
+
 export function reopensBeforeLost(record: RunRecord, assignment: RunAssignment): boolean {
   return (
-    (PRODUCER_PURPOSES.includes(assignment.purpose) || assignment.purpose === "reviewer") &&
-    evidenceRepairOf(record, assignment) === null
+    REOPEN_PURPOSES.includes(assignment.purpose) && evidenceRepairOf(record, assignment) === null
   );
 }
 
@@ -288,7 +289,8 @@ export type ClosedTurnPlan = {
  *
  * A producer's task turn or a reviewer's turn (`reopensBeforeLost`) gets a wait first, unless the host
  * archived the member after the turn began or no longer has it (`lost` at once, as T4a always did), or the
- * whole Run is being cancelled (the receipt is all the cancellation needs). The wait runs from the host's
+ * whole Run is being cancelled (the receipt is all the cancellation needs), or the Run is not active (a
+ * paused Run is settled by the earlier rule, with no wait and no read of the member's history). The wait runs from the host's
  * `closed` receipt when the ledger has one, else from the first look that saw the member closed
  * (`seenAt`; with no memory of one, from `now`). After it:
  *  - the member reads idle with no turn running (the caller tried to reopen it by reading its history):
@@ -301,16 +303,24 @@ export type ClosedTurnPlan = {
 export function planClosedTurns(
   record: RunRecord,
   seats: ReadonlyMap<string, SeatRead>,
-  options: { now: string; cancelling: boolean; seenAt: SeenClosedAt },
+  options: { now: string; cancelling: boolean; inactive?: boolean; seenAt: SeenClosedAt },
 ): ClosedTurnPlan {
   const plan: ClosedTurnPlan = { lost: [], hostLost: [], waiting: [] };
   for (const facts of closedTurnFacts(record, seats, options.seenAt, true)) {
     const { turn, seat } = facts;
     if (facts.running) {
-      if (facts.reopens && !options.cancelling && !facts.archived) plan.waiting.push(turn);
+      if (facts.reopens && !options.cancelling && options.inactive !== true && !facts.archived) {
+        plan.waiting.push(turn);
+      }
       continue;
     }
-    if (!facts.reopens || options.cancelling || facts.archived || seat === "absent") {
+    if (
+      !facts.reopens ||
+      options.cancelling ||
+      options.inactive === true ||
+      facts.archived ||
+      seat === "absent"
+    ) {
       plan.lost.push(turn);
       continue;
     }

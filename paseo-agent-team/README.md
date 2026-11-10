@@ -201,9 +201,12 @@ Agent in the middle of its turn, the host may never report that the turn ended. 
 itself. When the host reported the turn's end first, the lost-reply rules under *Recover and roll back*
 apply instead: an `archived` receipt gives a cancel-only decision, while a producer or reviewer that is
 idle after a graceful daemon stop with only a `closed` receipt gets a `host-lost` decision with retry
-or cancel. When the Engine recorded a closed turn itself (a producer or reviewer that is only closed is first given a
-look at reopening: see *A member that is only closed* below), the task waits for a
-decision that can only be answered with cancel: the member is not asked again. Whatever the cut-off
+or cancel. When the Engine recorded a closed turn itself, what the person is offered depends on whether the member
+can be reopened: a producer's or reviewer's turn whose member is only closed is first given a look at
+reopening (see *A member that is only closed* below) and gets a `host-lost` decision (retry or cancel) when
+the member reopens; a member that cannot be reopened or was archived, a smoke tester, a supplement, the
+coordinator and a paused Run get a `member-lost` decision, a
+decision that can only be answered with cancel: that member is not asked again. Whatever the cut-off
 turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
@@ -229,8 +232,10 @@ running, the Engine writes its own turn end (`outcome` `host-lost`), opens a `ho
 or cancel) and takes the warning down in the same commit. If it is still closed, cannot be read or does
 not open, the turn is `member-lost` (cancel only) as before and the task note keeps the host's own error
 text. A member with a turn running at that moment (someone wrote to it) is left alone and the warning
-stays. An `archived` receipt, a member the host no longer has, a smoke tester, a supplement and a Run that
-is being cancelled keep the earlier rule: lost at once. Before you answer retry, look at the member's
+stays; so is a look that cannot read the member (the warning stays, nothing is timed or settled, the wait
+goes on when it can be read). An `archived` receipt, a member the host no longer has, a smoke tester, a
+supplement, the coordinator, a Run that is being cancelled and a Run that is paused keep the earlier rule:
+lost at once (a paused Run reads no history and waits for nothing). Before you answer retry, look at the member's
 branch and clean up what the cut-off turn left behind; the Engine sends the new task only after your
 answer. The text of the `host-lost` decision names both causes: the dispatch is gone from the member's history, or the member was closed and reads idle after being reopened. Two cases stay: a reopened member can read idle without being usable (a Claude member cut off in
 the first seconds of its first turn), and then the retried turn fails through the ordinary failure path

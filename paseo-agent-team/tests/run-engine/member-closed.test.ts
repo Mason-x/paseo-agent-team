@@ -1564,6 +1564,124 @@ for (const schema of [1, 2] as const) {
       expect(built.watch.holds(MEMBER)).toBe(false);
     });
 
+    test("the coordinator is not waited on: only closed means member-lost at once, no history is read, no warning", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      await store.update(RUN_ID, (current) => {
+        const next = structuredClone(current);
+        const assignment = next.assignments.find((entry) => entry.state === "assigned");
+        if (assignment) assignment.purpose = "coordinator";
+        return next;
+      });
+      host.close(MEMBER);
+      const reads = built.reopens.count;
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+      expect(closingAlerts(settled)).toEqual([]);
+      expect(built.reopens.count).toBe(reads);
+      expect(openDecisions(settled)).toHaveLength(1);
+      expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+    });
+
+    /** What a person pause leaves in the record: the Run is paused, the assignments are untouched. */
+    async function pause() {
+      await store.update(RUN_ID, (current) => {
+        const next = structuredClone(current);
+        next.lifecycle = "paused";
+        return next;
+      });
+    }
+
+    for (const withReceipt of [true, false]) {
+      test(`a paused Run (${withReceipt ? "closed receipt" : "no receipt, the host reads it closed"}) is settled by the earlier rule at once: member-lost, no history read, no warning`, async () => {
+        const host = fakeHost({ reopensOnRead: true });
+        const built = build(host, { tickMs: 1, reopen: true });
+        await reachWorking(host, built);
+        await pause();
+        host.close(MEMBER);
+        const reads = built.reopens.count;
+        if (withReceipt) await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+        else await built.driver.kick(RUN_ID);
+        const settled = await stored();
+        expect(settled.lifecycle).toBe("paused");
+        expect(engineReceipts(settled)).toHaveLength(1);
+        expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+        expect(openDecisions(settled)).toHaveLength(1);
+        expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+        expect(closingAlerts(settled)).toEqual([]);
+        expect(built.reopens.count).toBe(reads);
+        // Settled once: looking again writes nothing.
+        await built.driver.kick(RUN_ID);
+        expect((await stored()).revision).toBe(settled.revision);
+      });
+    }
+
+    test("a Run paused while a closed member turn waits: the next look settles it by the earlier rule and takes the warning down; no further read", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(closingAlerts(await stored()).map((alert) => alert.state)).toEqual(["open"]);
+      const reads = built.reopens.count;
+      await pause();
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+      expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+      expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+      expect(built.reopens.count).toBe(reads);
+    });
+
+    test("a look that cannot read the member while its turn waits keeps the warning, writes nothing and settles nothing; once it can be read the wait goes on from the first sight", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const waiting = await stored();
+      expect(closingAlerts(waiting).map((alert) => alert.state)).toEqual(["open"]);
+      expect(built.watch.holds(MEMBER)).toBe(true);
+
+      host.unreadableAgents.add(MEMBER);
+      built.clock.jump(40_000);
+      await built.driver.kick(RUN_ID);
+      await recoverWithoutHook(built, "recover");
+      const failed = await stored();
+      expect(failed.revision).toBe(waiting.revision);
+      expect(closingAlerts(failed).map((alert) => alert.state)).toEqual(["open"]);
+      expect(engineReceipts(failed)).toHaveLength(0);
+      expect(openDecisions(failed)).toHaveLength(0);
+      // Still held: nothing reads the member behind the Engine back.
+      expect(built.watch.holds(MEMBER)).toBe(true);
+
+      // It can be read again, and more than 30 seconds have gone by since the first sight: settled.
+      host.unreadableAgents.delete(MEMBER);
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "host-lost" });
+      expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+    });
+
+    test("the host own turn end after the hold was set takes the hold off before the report is read, so the report is taken in", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      produce(host, MEMBER);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(built.watch.holds(MEMBER)).toBe(true);
+      expect(states(await stored()).t1).toBe("assigned");
+      // The turn really did end (the host says so): its report must be readable by the hook that says it.
+      await turnEnded(host, built, MEMBER, "completed");
+      expect(states(await stored()).t1).toBe("review");
+    });
+
     test("a person opens the member again and it works before the 30 seconds: nothing is settled and the warning comes down", async () => {
       const host = fakeHost({ reopensOnRead: true });
       const built = build(host, { tickMs: 1, reopen: true });

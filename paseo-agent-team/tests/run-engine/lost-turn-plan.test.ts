@@ -409,8 +409,8 @@ describe("planClosedTurns: a producer's or reviewer's turn under a closed member
     });
   });
 
-  test("a smoke tester and a supplement are not waited on; a reviewer and a re-opened producer are", () => {
-    for (const purpose of ["smoker"] as const) {
+  test("a smoke tester, a supplement and the coordinator are not waited on; a reviewer and a producer are", () => {
+    for (const purpose of ["smoker", "coordinator"] as const) {
       seq = 0;
       const rec = record([receipt("turn_started", 1), receipt("closed", 2)], {
         assignments: [assignment({ purpose })],
@@ -436,7 +436,7 @@ describe("planClosedTurns: a producer's or reviewer's turn under a closed member
       hostLost: 0,
       waiting: 0,
     });
-    for (const purpose of ["reviewer", "reopen", "member", "coordinator"] as const) {
+    for (const purpose of ["reviewer", "reopen", "member"] as const) {
       seq = 0;
       const rec = record([receipt("turn_started", 1), receipt("closed", 2)], {
         assignments: [assignment({ purpose })],
@@ -483,6 +483,35 @@ describe("planClosedTurns: a producer's or reviewer's turn under a closed member
       lost: 0,
       hostLost: 0,
       waiting: 0,
+    });
+  });
+
+  test("a Run that is not active (paused) is settled by the earlier rule: lost at once, never waiting, even for a producer", () => {
+    seq = 0;
+    expect(shape(plan(cut(), idle, { now: AT(3), inactive: true }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+    seq = 0;
+    expect(shape(plan(cut(), closedSeat, { now: AT(3), inactive: true }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+    seq = 0;
+    const running = new Map<string, SeatRead>([[AGENT, { status: "running", activeTurn: true }]]);
+    expect(shape(plan(cut(), running, { inactive: true }))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 0,
+    });
+    // Active, for contrast.
+    seq = 0;
+    expect(shape(plan(cut(), idle, { now: AT(3), inactive: false }))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 1,
     });
   });
 

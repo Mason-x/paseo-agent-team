@@ -305,11 +305,19 @@ describe("the Run Engine section of the README agrees with the code", () => {
       ],
       [
         "unchanged cases",
-        "`archived` receipt, a member the host no longer has, a smoke tester, a supplement and a Run that is being cancelled keep the earlier rule: lost at once",
+        "`archived` receipt, a member the host no longer has, a smoke tester, a supplement, the coordinator, a Run that is being cancelled and a Run that is paused keep the earlier rule: lost at once",
       ],
       [
         "clean the branch",
         "look at the member's branch and clean up what the cut-off turn left behind",
+      ],
+      [
+        "what is offered",
+        "gets a `host-lost` decision (retry or cancel) when the member reopens; a member that cannot be reopened or was archived, a smoke tester, a supplement, the coordinator and a paused Run get a `member-lost` decision",
+      ],
+      [
+        "unreadable look",
+        "a look that cannot read the member (the warning stays, nothing is timed or settled",
       ],
       ["decision text", "The text of the `host-lost` decision names both causes"],
       ["false idle", "a reopened member can read idle without being usable"],

@@ -186,9 +186,12 @@ export function createMemberLostSettler(options: MemberLostOptions) {
     let turns = 0;
     const cancelling = cancelPending(current);
     const runId = current.runId;
+    // A Run that is not active (paused) is settled by the earlier rule: no wait, no read of the history.
+    const inactive = current.lifecycle !== "active";
     const plan = planClosedTurns(current, seats, {
       now,
       cancelling,
+      inactive,
       seenAt: (ref) => seen.get(seenKey(runId, ref)) ?? null,
     });
     // A member that is closed but may come back: the turn waits, and says so.
@@ -196,6 +199,22 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       (alert) => alert.state !== "resolved" && alert.summary.startsWith(CLOSING_TURN_ALERT_PREFIX),
     );
     let alertChanged = false;
+    // A member that was being waited on and cannot be read on this look: the warning stays, and nothing is
+    // timed or settled (the wait goes on when it can be read again).
+    const unreadable = new Set<string>();
+    if (!cancelling && !inactive) {
+      for (const { assignment, started } of closedTurnCandidates(current)) {
+        if (!reopensBeforeLost(current, assignment) || started.turnId === null) continue;
+        if (seats.get(assignment.agentId) !== "unreadable") continue;
+        const ref: ClosedTurnRef = {
+          assignmentId: assignment.assignmentId,
+          agentId: assignment.agentId,
+          turnId: started.turnId,
+          occurrence: receiptOccurrence(started),
+        };
+        if (hasAlert || seen.has(seenKey(runId, ref))) unreadable.add(assignment.agentId);
+      }
+    }
     if (plan.waiting.length > 0) {
       const raised = raiseAlert(
         next,
@@ -293,7 +312,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
       if (noted.ok && noted.changed) next = noted.next;
     }
     // Nothing waits any more: the warning comes down, in this commit.
-    if (plan.waiting.length === 0 && hasAlert) {
+    if (plan.waiting.length === 0 && unreadable.size === 0 && hasAlert) {
       const resolved = resolveAlerts(
         next,
         (alert) => alert.summary.startsWith(CLOSING_TURN_ALERT_PREFIX),
@@ -382,7 +401,7 @@ export function createMemberLostSettler(options: MemberLostOptions) {
     return {
       next: turns === 0 && !alertChanged ? null : next,
       turns,
-      waiting: [...new Set(plan.waiting.map((turn) => turn.agentId))].sort(),
+      waiting: [...new Set([...plan.waiting.map((turn) => turn.agentId), ...unreadable])].sort(),
     };
   }
 
@@ -483,7 +502,9 @@ export function createMemberLostSettler(options: MemberLostOptions) {
         return { settled: 0 };
       }
       const seats = await readSeats(runId, agents);
-      if (!cancelPending(read.record)) await tryReopen(runId, read.record, seats);
+      if (!cancelPending(read.record) && lifecycle === "active") {
+        await tryReopen(runId, read.record, seats);
+      }
       // Only a member the host reads as idle is asked for the reply again: any other reading settles
       // nothing, so it costs nothing.
       const reads = new Map<string, LostReplyRead>();
