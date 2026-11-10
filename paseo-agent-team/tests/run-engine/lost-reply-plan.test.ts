@@ -462,7 +462,7 @@ describe("lostReplyKind: which decision", () => {
     expect(lostReplyKind(record(), assignment(), undefined)).toBeNull();
   });
 
-  test("a judge's or a smoke tester's turn only gets member-lost: its decision has no way to try again", () => {
+  test("a smoke tester's lost reply still gets only member-lost", () => {
     const afterStop = record({
       receipts: [
         receipt("turn_started", 1000),
@@ -484,7 +484,7 @@ describe("lostReplyKind: which decision", () => {
         receipt("turn_ended", 2000),
       ],
     });
-    for (const purpose of ["reviewer", "smoker"] as const) {
+    for (const purpose of ["smoker"] as const) {
       const judge = assignment({ purpose });
       // Nothing closed it: no decision (its way out is the stuck-judge one).
       expect(
@@ -506,6 +506,36 @@ describe("lostReplyKind: which decision", () => {
         MEMBER_LOST_CODE,
       );
     }
+  });
+
+  test("a reviewer's lost reply follows the producer's archived and closed rules", () => {
+    const reviewer = assignment({ purpose: "reviewer" });
+    const idleSeat = { status: "idle", activeTurn: false };
+    const started = receipt("turn_started", 1000);
+    const ended = receipt("turn_ended", 2000);
+    expect(lostReplyKind(record({ receipts: [started, ended] }), reviewer, idleSeat)).toBe(
+      HOST_LOST_CODE,
+    );
+    expect(
+      lostReplyKind(
+        record({ receipts: [started, ended, receipt("closed", 2500)] }),
+        reviewer,
+        idleSeat,
+      ),
+    ).toBe(HOST_LOST_CODE);
+    expect(
+      lostReplyKind(
+        record({ receipts: [started, receipt("archived", 1500), ended] }),
+        reviewer,
+        idleSeat,
+      ),
+    ).toBe(MEMBER_LOST_CODE);
+    expect(
+      lostReplyKind(record({ receipts: [started, ended] }), reviewer, {
+        status: "closed",
+        activeTurn: false,
+      }),
+    ).toBe(MEMBER_LOST_CODE);
   });
 });
 

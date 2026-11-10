@@ -28,7 +28,7 @@ import { emptyReadRetries, readReadRetries } from "../../shared/domain/run-engin
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
-import { PROFILE_HAIKU } from "../fixtures/run-engine/base";
+import { PROFILE_HAIKU, task } from "../fixtures/run-engine/base";
 import {
   bootstrapRun,
   COORDINATOR_AGENT,
@@ -598,6 +598,216 @@ async function setHeldCode(code: string): Promise<void> {
 }
 
 const alertStates = (record: RunRecord) => record.alerts.map((alert) => alert.state);
+
+type ReviewOrder = "archived-first" | "closed" | "no-closed" | "killed";
+
+async function reachLostReview(host: Host, built: Built, order: ReviewOrder): Promise<number> {
+  host.planRequestSent();
+  host.reply(COORDINATOR_AGENT, planText());
+  await built.driver.onHook({
+    name: "agent.turn_ended",
+    agentId: COORDINATOR_AGENT,
+    turnId: host.turnOf(COORDINATOR_AGENT),
+  });
+  const producerTurn = host.turnOf(MEMBER);
+  await built.driver.onHook({ name: "agent.turn_started", agentId: MEMBER, turnId: producerTurn });
+  produce(host, MEMBER);
+  await built.driver.onHook({ name: "agent.turn_ended", agentId: MEMBER, turnId: producerTurn });
+  await built.control.idle();
+  expect(host.sentTo(OTHER)).toBe(1);
+  expect(states(await stored()).t1).toBe("review");
+
+  const reviewTurn = host.turnOf(OTHER);
+  await built.driver.onHook({ name: "agent.turn_started", agentId: OTHER, turnId: reviewTurn });
+  host.dropTimeline(OTHER);
+  if (order === "archived-first") {
+    await built.driver.onHook({ name: "agent.archived", agentId: OTHER });
+  }
+  if (order !== "killed") {
+    await built.driver.onHook({ name: "agent.turn_ended", agentId: OTHER, turnId: reviewTurn });
+  }
+  if (order === "closed") await built.driver.onHook({ name: "agent.closed", agentId: OTHER });
+  if (order === "killed") await built.driver.recover();
+  for (const wait of [1500, 2500, 4500]) {
+    built.clock.at += wait;
+    await built.retry.fire();
+  }
+  const held = heldAtOf(await stored());
+  return Number.isNaN(held) ? built.clock.at : held;
+}
+
+function acceptReview(host: Host): void {
+  const prompt = host.lastSent(OTHER)?.text ?? "";
+  const { messageId: _unused, ...identity } = section<Identity>(prompt, "【身份资料 JSON】");
+  const facts = section<{ delivery: { deliveryRef: unknown } }>(prompt, "【执行事实 JSON】");
+  host.reply(
+    OTHER,
+    fence("review-report", {
+      ...identity,
+      reviewedRef: facts.delivery.deliveryRef,
+      verdict: "可合入",
+      blockers: [],
+      probes: [],
+    }),
+  );
+}
+
+for (const schema of [1, 2] as const) {
+  describe(`a review lost after a host restart [v${schema}]`, () => {
+    beforeEach(async () => {
+      version = schema;
+      await setup();
+    });
+
+    for (const order of ["archived-first", "closed", "no-closed", "killed"] as const) {
+      test(`${order}: settle only when the version has read re-checks`, async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachLostReview(host, built, order);
+        const before = await stored();
+        const sent = host.sent.length;
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        await built.control.idle();
+        const after = await stored();
+        expect(host.sent).toHaveLength(sent);
+        if (schema === 1) {
+          expect(readReadRetries(after)).toEqual({ kind: "absent" });
+          expect(after.revision).toBe(before.revision);
+          expect(openDecisions(after)).toEqual([]);
+          expect(engineReceipts(after)).toEqual([]);
+          return;
+        }
+        const [decision] = openDecisions(after);
+        if (!decision) throw new Error("review decision missing");
+        const expected = order === "archived-first" ? "member-lost" : "host-lost";
+        expect(decisionKindOf(after, decision)).toBe(expected);
+        expect(decision.limbo).toMatchObject({ reason: expected });
+        expect(answerableActions(after, decision)).toEqual(
+          expected === "member-lost" ? ["cancel"] : ["retry", "cancel"],
+        );
+        expect(engineReceipts(after)).toHaveLength(order === "killed" ? 1 : 0);
+        expect(after.resources).toEqual(before.resources);
+        expect(checkLedgerInvariants(after).ok).toBe(true);
+      });
+    }
+
+    if (schema === 2) {
+      test("retry preserves the delivery and counts, debits one review, permits a second loss, and eventually accepts a review", async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachLostReview(host, built, "closed");
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        const before = await stored();
+        const [firstDecision] = openDecisions(before);
+        const producer = before.assignments.find((entry) => entry.purpose === "member");
+        const firstReview = before.assignments.find((entry) => entry.purpose === "reviewer");
+        const originalTask = before.tasks.find((entry) => entry.spec.id === "t1");
+        const budget = before.budgets.entries.find(
+          (entry) => entry.subjectId === JUDGE_SEAT_REVIEW,
+        );
+        if (!firstDecision || !producer || !firstReview || !originalTask || !budget)
+          throw new Error("missing review facts");
+        const out = await decide(built, firstDecision.decisionId, "retry");
+        expect(out).toMatchObject({ status: "applied", issues: [] });
+        const retried = await stored();
+        expect(host.sentTo(OTHER)).toBe(2);
+        expect(retried.assignments.filter((entry) => entry.purpose === "reviewer")).toHaveLength(2);
+        expect(
+          retried.assignments.find((entry) => entry.assignmentId === producer.assignmentId),
+        ).toEqual(producer);
+        expect(
+          retried.assignments.find((entry) => entry.assignmentId === firstReview.assignmentId),
+        ).toMatchObject({ state: "ended", acceptedProof: null });
+        expect(
+          retried.nonceRegistry.find((entry) => entry.assignmentId === firstReview.assignmentId),
+        ).toMatchObject({ acceptedAt: null, revokeReason: "abandoned-by-retry" });
+        expect(retried.resources).toEqual(before.resources);
+        expect(retried.tasks.find((entry) => entry.spec.id === "t1")).toMatchObject({
+          state: "review",
+          attempts: originalTask.attempts,
+          reworkCount: originalTask.reworkCount,
+          qualityFailures: originalTask.qualityFailures,
+        });
+        expect(
+          retried.budgets.entries.find((entry) => entry.subjectId === JUDGE_SEAT_REVIEW)?.reserved,
+        ).toBe(budget.reserved + 1);
+        expect(checkLedgerInvariants(retried).ok).toBe(true);
+        host.runningAgents.add(OTHER);
+        await kick(built);
+        expect(host.sentTo(OTHER)).toBe(2);
+
+        const secondTurn = host.turnOf(OTHER);
+        await built.driver.onHook({
+          name: "agent.turn_started",
+          agentId: OTHER,
+          turnId: secondTurn,
+        });
+        host.dropTimeline(OTHER);
+        host.runningAgents.delete(OTHER);
+        await built.driver.onHook({ name: "agent.turn_ended", agentId: OTHER, turnId: secondTurn });
+        for (const wait of [1500, 2500, 4500]) {
+          built.clock.at += wait;
+          await built.retry.fire();
+        }
+        const secondHeld = heldAtOf(await stored());
+        built.clock.at = secondHeld + 31_000;
+        await kick(built);
+        const again = await stored();
+        const [secondDecision] = openDecisions(again);
+        expect(secondDecision?.decisionId).not.toBe(firstDecision.decisionId);
+        expect(secondDecision?.limbo).toMatchObject({ reason: "host-lost" });
+        if (!secondDecision) throw new Error("second review decision missing");
+        expect((await decide(built, secondDecision.decisionId, "retry")).status).toBe("applied");
+        expect(host.sentTo(OTHER)).toBe(3);
+        acceptReview(host);
+        await built.driver.onHook({
+          name: "agent.turn_ended",
+          agentId: OTHER,
+          turnId: host.turnOf(OTHER),
+        });
+        const finished = await stored();
+        expect(states(finished).t1).toBe("done");
+        expect(checkLedgerInvariants(finished).ok).toBe(true);
+      });
+
+      test("retry dispatches a review even when the failed-task gate is exceeded", async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachLostReview(host, built, "no-closed");
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        await store.update(RUN_ID, (current) => {
+          const next = structuredClone(current);
+          next.tasks.unshift(task("ready-1", "Waiting task", { state: "ready" }));
+          for (let index = 0; index <= next.policy.run.failedTasks; index += 1) {
+            next.tasks.push(task(`failed-${index}`, "Failed task", { state: "failed" }));
+          }
+          return next;
+        });
+        const [decision] = openDecisions(await stored());
+        if (!decision) throw new Error("review decision missing");
+        expect((await decide(built, decision.decisionId, "retry")).status).toBe("applied");
+        expect(host.sentTo(OTHER)).toBe(2);
+        expect(states(await stored())["ready-1"]).toBe("ready");
+      });
+
+      test("cancel still cancels a task with a lost review", async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachLostReview(host, built, "no-closed");
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        const [decision] = openDecisions(await stored());
+        if (!decision) throw new Error("review decision missing");
+        expect((await decide(built, decision.decisionId, "cancel")).status).toBe("applied");
+        expect(states(await stored())).toEqual({ t1: "cancelled", t2: "cancelled" });
+        expect(host.sentTo(OTHER)).toBe(1);
+      });
+    }
+  });
+}
 
 for (const schema of [1, 2] as const) {
   describe(`a reply the host lost after it said the turn ended is settled [v${schema}]`, () => {

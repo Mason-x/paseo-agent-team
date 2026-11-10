@@ -488,7 +488,7 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
       entry.taskId === task.spec.id &&
       entry.purpose === "reviewer" &&
       entry.delivery?.producerAssignmentId === d.producer.assignmentId &&
-      !judgedNothing(entry),
+      !judgedNothing(record, entry),
   );
   if (reviewers.length === 0)
     return fail("review", ["tasks", task.spec.id, "reviews"], "no-reviewer");
@@ -512,7 +512,7 @@ export function doneGate(record: RunRecord, task: RunTaskRecord): GateResult {
         entry.taskId === task.spec.id &&
         entry.purpose === "smoker" &&
         entry.delivery?.producerAssignmentId === d.producer.assignmentId &&
-        !judgedNothing(entry),
+        !judgedNothing(record, entry),
     );
     if (smokers.length === 0) return fail("smoke", ["tasks", task.spec.id, "smoke"], "no-smoker");
     for (const smoker of smokers) {

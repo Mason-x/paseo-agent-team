@@ -134,6 +134,13 @@ export function decisionKindOf(
   if (kind.kind === "evidence-stuck") return lost ? "member-lost" : "evidence-stuck";
   const assignment = record.assignments.find((entry) => entry.assignmentId === kind.assignmentId);
   if (!assignment || assignment.taskId !== decision.subjectId) return "other";
+  if (
+    assignment.purpose === "reviewer" &&
+    limboEvidence(decision) !== null &&
+    limboReason(decision) === HOST_LOST_CODE
+  ) {
+    return "host-lost";
+  }
   if (assignment.purpose === "reviewer" || assignment.purpose === "smoker") {
     return lost ? "member-lost" : "stuck-judge";
   }
@@ -391,20 +398,21 @@ export function openLimboDecision(
   if (task === undefined || assignment === undefined || assignment.taskId !== input.taskId) {
     return { changed: false };
   }
-  // A member lost mid-turn (T4a) is also the way out for a judge or a supplement whose turn was cut: the
-  // task waits in `review` for a report that cannot come, and the only answer is to cancel it.
+  // A lost reviewer can be retried after a host restart; a smoker or supplement can only be cancelled.
   const lost = input.reason === MEMBER_LOST_CODE;
+  const hostLostReview = input.reason === HOST_LOST_CODE && assignment.purpose === "reviewer";
   const supplement = evidenceRepairOf(record, assignment) !== null;
   if (supplement && !lost) return { changed: false };
   const judge = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
-  if (!PRODUCER_PURPOSES.includes(assignment.purpose) && !(lost && judge)) {
+  if (!PRODUCER_PURPOSES.includes(assignment.purpose) && !(lost && judge) && !hostLostReview) {
     return { changed: false };
   }
   if (assignment.acceptedProof !== null || !OPEN_ASSIGNMENT.includes(assignment.state)) {
     return { changed: false };
   }
-  const inReview = lost && (judge || supplement) && task.state === "review";
+  const inReview = ((lost && (judge || supplement)) || hostLostReview) && task.state === "review";
   if (
+    (hostLostReview && task.state !== "review") ||
     (!OPEN_TASK.includes(task.state) && !inReview) ||
     task.currentAssignmentId !== assignment.assignmentId
   ) {
@@ -526,7 +534,12 @@ type Resume =
   | { kind: "rework" }
   | { kind: "fresh" }
   | { kind: "rejudge"; phase: "review" | "smoke" }
-  | { kind: "abandon"; assignmentId: string; turnId: string; endedEventKey: string };
+  | {
+      kind: "abandon" | "abandon-review";
+      assignmentId: string;
+      turnId: string;
+      endedEventKey: string;
+    };
 
 type Planned = { ok: true; resume: Resume } | { ok: false; reason: string };
 
@@ -584,13 +597,26 @@ function planResume(
 
   if (evidenceRepairOf(record, assignment)) return { ok: false, reason: "decision-stale" };
   if (assignment.acceptedProof === null) {
-    // A producer whose turn ended with nothing usable (`openLimboDecision`): still `assigned`.
+    // An unfinished reviewer may be abandoned only for the host-lost decision on its delivery.
     const evidence = limboEvidence(decision);
-    if (evidence === null || !PRODUCER_PURPOSES.includes(assignment.purpose)) {
+    const review = assignment.purpose === "reviewer" && limboReason(decision) === HOST_LOST_CODE;
+    if (evidence === null || !(PRODUCER_PURPOSES.includes(assignment.purpose) || review)) {
       return { ok: false, reason: "decision-stale" };
     }
-    if (!OPEN_ASSIGNMENT.includes(assignment.state) || !OPEN_TASK.includes(task.state)) {
+    if (
+      !OPEN_ASSIGNMENT.includes(assignment.state) ||
+      !(review ? task.state === "review" : OPEN_TASK.includes(task.state))
+    ) {
       return { ok: false, reason: "state-changed" };
+    }
+    if (review) {
+      const delivery = resolveD(record, taskId);
+      if (
+        delivery.kind !== "ok" ||
+        assignment.delivery?.producerAssignmentId !== delivery.d.producer.assignmentId
+      ) {
+        return { ok: false, reason: "delivery-missing" };
+      }
     }
     const ended = record.eventReceipts.find(
       (receipt) =>
@@ -604,7 +630,7 @@ function planResume(
     return {
       ok: true,
       resume: {
-        kind: "abandon",
+        kind: review ? "abandon-review" : "abandon",
         assignmentId: assignment.assignmentId,
         turnId: evidence.turnId,
         endedEventKey: evidence.endedEventKey,
@@ -746,15 +772,20 @@ function planCancel(
   if (supplement !== (kind.kind === "evidence-stuck"))
     return { ok: false, reason: "decision-stale" };
   if (assignment.acceptedProof === null) {
-    // A producer whose turn ended with nothing usable (`openLimboDecision`): close the attempt first.
-    // A judge or a supplement whose turn the host cut off (`member-lost`) is closed the same way.
+    // Close the stopped producer, judge or supplement before cancelling the task.
     const evidence = limboEvidence(decision);
     const lost = limboReason(decision) === MEMBER_LOST_CODE;
+    const hostLostReview =
+      limboReason(decision) === HOST_LOST_CODE && assignment.purpose === "reviewer";
     const judge = assignment.purpose === "reviewer" || assignment.purpose === "smoker";
-    if (evidence === null || !(PRODUCER_PURPOSES.includes(assignment.purpose) || (lost && judge))) {
+    if (
+      evidence === null ||
+      !(PRODUCER_PURPOSES.includes(assignment.purpose) || (lost && judge) || hostLostReview)
+    ) {
       return { ok: false, reason: "decision-stale" };
     }
-    const taskStateOk = OPEN_TASK.includes(task.state) || (lost && task.state === "review");
+    const taskStateOk =
+      OPEN_TASK.includes(task.state) || ((lost || hostLostReview) && task.state === "review");
     if (!OPEN_ASSIGNMENT.includes(assignment.state) || !taskStateOk) {
       return { ok: false, reason: "state-changed" };
     }
@@ -938,7 +969,7 @@ export function answerDecision(record: RunRecord, input: AnswerRequest): AnswerR
   if (!planned.ok) return { ok: false, code: "task-not-releasable", reason: planned.reason };
 
   let next = structuredClone(record);
-  if (planned.resume.kind === "abandon") {
+  if (planned.resume.kind === "abandon" || planned.resume.kind === "abandon-review") {
     const closed = closeEndedAttempt(next, { ...planned.resume, now: input.now });
     if (!closed.ok) return { ok: false, code: "task-not-releasable", reason: closed.reason };
     next = closed.next;
@@ -972,6 +1003,11 @@ export function answerDecision(record: RunRecord, input: AnswerRequest): AnswerR
     case "rejudge":
       task.state = "review";
       task.phase = planned.resume.phase;
+      break;
+    case "abandon-review":
+      task.state = "review";
+      task.phase = "review";
+      task.currentAssignmentId = null;
       break;
     case "fresh":
     case "abandon":
