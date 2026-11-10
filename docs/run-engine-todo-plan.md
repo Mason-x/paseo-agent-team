@@ -6,6 +6,18 @@
 与旧文的关系：本文取代 `docs/next-phase-plan.md` 里与之冲突的裁决和规则。那份文档第 4 节（门禁、变异检查、三次尝试、安全）和第 6 节的硬约束继续适用，本文第 4 节写明修订和补充。上一轮标为"Opus"的裁决实际出自 Sonnet，本文逐项重审，改动和理由列在 2.2。
 任务号：本文写作 T1–T10。写进 `docs/autonomous-notes.md` 和计划 P04 行时加"三轮"前缀（如"三轮 T4a"），以免和笔记里上一轮的 T0–T7 混淆。
 
+## 执行结果（2026-11-10，协调者整理；不改下文裁决）
+
+- **合并的 PR**（均走 PR + CI，merge commit；代码 PR 无管理员绕过）：#15 T2 `6caa304`；#16 T3 `61f788a`；#17 T4a `0fef059`；#19 T4b `16bd298`；#20 T5 `c1f3345`；#21 T6-A `c935724`；#22 T6-B `cd40b44`；#23 T6 docs `4287854`；#18 发布 0.7.0 `4032b84`；#24 T9a `3f11b6d`；#26 T9c `a9d679a`；#27 T9b `67db906`；#28 T8 DEV 记录 `c8f87c5`；#29 T9e `7fd82de`；#30 T9d `c95762b`；#31 T9f `7602134`；#25 发布 0.7.1 `bf89b83`。
+- **发布**：v0.7.0（2 feat + 9 fix，`4032b84`，标签与 Release 都在，zip 1024823 B）；v0.7.1（8 fix 0 feat：T9a、T9b×2（含收尾）、T9c×2、T9d、T9e×2、T9f；`bf89b83`，zip 1042116 B，Release 正文追加回滚注意）。两次发布都是 Release Please PR 无检查 → 以 Mason-x 关闭再打开 → CI 绿 → 合并，**没有管理员绕过**；0.6.1 的绕过仍只在 `docs/release-process.md` 记录。
+- **测试数**（分支 HEAD 门禁；文件/通过/todo）：T1 基线 202/3407/3；T4a 204/3475；T4b 206/3543；T5 207/3559；T6-A 207/3583；T6-B 207/3595；T9a 211/3701；T9c 213/3712；T9b 213/3920；T9e 216/3969；T9d 合并后 3985；T9f 217/4015/3。最终 `main` 的独立重跑见状态文件与重跑记录（`rerun-071-grok.md`），本文件不重抄数字。
+- **撤回**：无。T4a、T4b、T5、T6、T9a–T9f 都已合并；T6 三项都做了。
+- **DEV 结果**：共 13 个 Engine Run（T8 6、T9v 4、R″ 3），模型只用 claude-haiku-5-5 与 gpt-6-luna；浏览器是 Playwright Chromium（宽 1440/窄 390，不是真实 Chrome）；每项 N=1。T8：E、P、I、B、V2′ 有记录，L/R 与 T4a/T4b 假设不符（宿主先发 `turn_ended`），F 跳过。T9v：T9a/T9b/T9c 通过，`host-lost` 未出现，规划被打断的 Run 永久 `bootstrapping`，R-kill 未做。R″：T9d/T9e 通过，L1′ 回归通过；R″-B 没走到 Run finished，T9f 未再上 DEV。细节见计划第 85、89 点与 `docs/run-engine-acceptance.md` 的 DEV 记录栏。
+- **违规记录**：3 个会话误跑 python/python3（T4a 修复轮 `python3 --version`；T4b 修复轮 `python --version` 与 `python -`；T9c `python3 --version` 与 `python -`），均未执行脚本，进程已杀、无残留；其余会话无。
+- **已接受的残余**（压缩；完整清单见第 6.3 节与 `docs/run-engine-acceptance.md`）：回合未知时被关闭不结算；关闭失败不结算；Windows 孤儿进程；被结算回合的报告不入账；已归档成员的席位本 Run 不能再用；协调者计划回复不在重查范围；B13、B7、B8、`run.export`、`assign-seat`、策略字段编辑入口按 2.1 推迟；AC20 不做异常记录；发布 PR 的 CI 靠关闭再打开触发；回滚到 0.6.x 的 `member-lost` 决策显示“重试”（误导）。另外：重启后从未跑过回合的成员永久 closed，只能取消重来；`SeatRead` 没有 archived 标志；引擎恢复是惰性的；T5 草稿不跨 daemon 重启；浏览器不是真实 Chrome；R″-B 的取消停在 paused（原因未查）。
+- **下一批第一项**：(a) 拒绝 closed 席位前先设法重新打开（先查清重启后哪个宿主调用把生产者变回 idle，对从没开过回合的 Claude 成员是否有效，要上 DEV 验证）；(b) 打不开的成员只能给席位重建 Agent（需冻结启动规格并换绑席位，是合同变化；B13 触发条件视为已满足，下一批重新裁决）。
+- **预批准合同变化**：只有 T4a/T4b（B14 修改后批准：引擎自行写结束回执并开决策，T4b 的 outcome 为 `host-lost`）与 T9a 的 `#n` 后缀键（同回合 id 的第 n 次出现）；T9b–T9f 合同变化为零（schema、RPC、提示词模板、台账字段均未改）。
+
 ## 0. 摘要
 
 ### 0.1 裁决要点

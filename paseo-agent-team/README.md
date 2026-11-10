@@ -384,7 +384,10 @@ daemon restart.
   the restart cut the coordinator's first planning turn within a few seconds, its session may never have
   been saved and cannot be opened again; the re-plan request is then answered with an error instead of a plan
   (a second warning, 「DAG 缺失：协调者的回复里没有 task-dag 块」) and the only way out is to cancel the Run
-  and start it again (DEV, T9 re-check: a restart 2.7 seconds into the first planning turn).
+  and start it again (DEV, T9 re-check: a restart 2.7 seconds into the first planning turn). A Run that
+  already carries the warning written by 0.7.0 may show two warnings for the same lost plan after the
+  upgrade: the id is made from the text, which changed; both are taken down together when a plan is
+  admitted or a re-plan is asked for.
 - **A host restart leaves members closed.** After a daemon restart the members that were not in the middle
   of a turn read as closed in Paseo, and the Engine never opens an Agent again: it reads seats, it does not
   start them. A task that needs such a seat used to wait under the reason 席位正忙, as if it would free
@@ -396,15 +399,26 @@ daemon restart.
   「有任务在等一个已关闭的席位：」. It says the Engine will not reopen the seat and will not hand the
   task to another one; that you press **立即检查并推进** once the member is idle in Paseo again, or
   cancel the Run and start it again; that a member that never ran a turn, Codex ones above all, may not
-  open again after a restart (DEV: `Failed to resume Codex thread … no rollout found`); and that you
+  open again after a restart (DEV: `Failed to resume Codex thread … no rollout found`), so it stays
+  closed for good and the only way out is to cancel the Run and start it again; and that you
   should not message the member to wake it while the Run is live, because that message collides with the
   dispatch that follows (DEV: the member answered the wake-up with an OK, the dispatch came back as a
   report that could not be used and a stuck-producer decision opened). The warning comes down in the
   pass in which the task is dispatched, or no longer held by closed seats; asking again while nothing
-  changed writes nothing. A task blocked by the failed-task limit or a full ledger is not looked at in
-  that pass, so the warning is left as it was. The Engine does not try to reopen the seat before
-  refusing it, and it cannot rebuild an Agent for a seat; both are open work (T10). Before 0.7.0 the
-  same restart showed the same 席位正忙. Going back: nothing in the ledger changes shape; a Run that
+  changed writes nothing. A pass that returns early because the failed-task limit leaves no work under
+  way, or because the ledger is full, does not look at the task, so the warning is left as it was; a
+  pass that still dispatches work under way takes it down, even if the task is still held back by the
+  failed-task limit. A paused Run keeps the warning until it is resumed and a pass takes it down; a finished
+  or cancelled one keeps it for good (cancelling is one of the ways out the warning names). For a review
+  task the warning can name a closed seat that is not the real obstacle: the only idle reviewer may be
+  refused because it is of the producer's family, and reopening the closed seat would not help; that
+  takes every available reviewer to be of the producer's family, and the way out is to cancel. An
+  evidence request (a supplement) is not checked this way: a closed seat leaves the task blocked with
+  `evidence-seat-unavailable`, the note still says the seat will go on by itself once it is back (a
+  closed seat does not), and no closed-seat warning is raised for it. The Engine does not try to reopen
+  the seat before refusing it, and it cannot rebuild an Agent for a seat; both are open work (T10).
+  Before 0.7.0 the same restart showed the same 席位正忙. Going back: nothing in the ledger changes
+  shape; a Run that
   already carries the warning keeps it there (nothing in an older version takes it down) and the task's
   note `waiting-for-seat:seat-closed` reads as an unknown reason until the next pass rewrites it.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
