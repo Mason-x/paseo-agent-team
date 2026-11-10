@@ -2380,7 +2380,8 @@ describe("kick", () => {
     expect(await control.replan(request(waiting.revision))).toMatchObject({ status: "applied" });
     await control.idle();
     await control.kick({ runContractVersion: 1, runId: RUN_ID });
-    expect(asked).toEqual([{ afterWrite: true }, null]);
+    // Only the person's button asks for the one more try at reopening a closed seat.
+    expect(asked).toEqual([{ afterWrite: true }, { byPerson: true }]);
   });
 
   test("the host is read for this Run's agents only", async () => {

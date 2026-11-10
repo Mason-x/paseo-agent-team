@@ -61,7 +61,11 @@ export type DriverOptions = {
   reconcileHost?: ObserverHost;
   intake: Pick<Intake, "settleAgent">;
   dagIntake: Pick<DagIntake, "settleCoordinator">;
-  service: Pick<EngineService, "dispatchNext">;
+  /**
+   * `grantReopen` lets a person's "check now" allow one more try at reopening each closed seat of the
+   * Run (the automatic passes try each seat only once); without it a check does not.
+   */
+  service: Pick<EngineService, "dispatchNext"> & Partial<Pick<EngineService, "grantReopen">>;
   /**
    * The outbox executor. With it, a recovery or a retry also settles the messages whose delivery was
    * unknown (by the host's echo, never by sending again) and sends the ones that were prepared and
@@ -344,11 +348,19 @@ export function createEngineDriver(options: DriverOptions) {
    * re-plan or an answer was just committed) is different: the running one began before the write
    * and may be past the step that would have seen it (the outbox, the dispatch), so one more starts
    * when it is done. A burst of such writes costs one more pass, not one each.
+   *
+   * `byPerson` marks the button "check now" (and nothing else): only that allows one more try at
+   * reopening each closed seat of the Run. A retry after a write, a resume or a recovered read is an
+   * automatic pass and does not.
    */
-  function retryRun(runId: string, options: { afterWrite?: boolean } = {}): Promise<RetryReport> {
+  function retryRun(
+    runId: string,
+    ask: { afterWrite?: boolean; byPerson?: boolean } = {},
+  ): Promise<RetryReport> {
+    if (ask.byPerson) options.service.grantReopen?.(runId);
     const running = retrying.get(runId);
     if (running) {
-      if (options.afterWrite) retryAfterWrite.add(runId);
+      if (ask.afterWrite) retryAfterWrite.add(runId);
       return running;
     }
     const run = (async () => {

@@ -773,7 +773,7 @@ export function createRunControl(options: RunControlOptions) {
       if (!loaded.ok) return rejected(loaded.issue);
       let report: Awaited<ReturnType<EngineDriver["retryRun"]>>;
       try {
-        report = await options.driver.retryRun(input.runId);
+        report = await options.driver.retryRun(input.runId, { byPerson: true });
       } catch (error) {
         log(`kick of ${input.runId} failed`, error);
         return rejected(issue("ledger-refused", {}, "retry"));

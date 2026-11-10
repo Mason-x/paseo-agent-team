@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { alertIdFor } from "../../server/run-engine/digest";
 import { createEngineDriver } from "../../server/run-engine/driver";
 import { createEffects } from "../../server/run-engine/effects";
 import { inspectRepo } from "../../server/run-engine/repo";
@@ -83,6 +84,7 @@ const emptyPage: PortTimelinePage = {
 function fakeHost() {
   const closed = new Set<string>();
   const running = new Set<string>();
+  const unreadable = new Set<string>();
   const sent: { agentId: string; text: string }[] = [];
   const snapshot = (agentId: string): PortAgentSnapshot => {
     if (closed.has(agentId)) return { status: "closed", activeTurn: null };
@@ -98,11 +100,14 @@ function fakeHost() {
         archive: async () => undefined,
         timeline: { refetch: async () => emptyPage },
         current: () => snapshot(agentId),
-        refresh: async () => ({ agent: snapshot(agentId) }),
+        refresh: async () => {
+          if (unreadable.has(agentId)) throw new Error("host read failed");
+          return { agent: snapshot(agentId) };
+        },
       }),
     },
   };
-  return { port, sent, closed, running };
+  return { port, sent, closed, running, unreadable };
 }
 
 type Host = ReturnType<typeof fakeHost>;
@@ -316,12 +321,21 @@ for (const version of [1, 2] as const) {
     });
 
     test("the warning tells what to do, in Chinese, without a raw reason code", () => {
-      expect(SEAT_CLOSED_ALERT).toContain("不会自己重新打开");
+      // T11a: the Engine has already tried to reopen it, by reading its history and sending nothing.
+      expect(SEAT_CLOSED_ALERT).toContain("已经对能读的席位试过重新打开");
+      expect(SEAT_CLOSED_ALERT).toContain("只读它的历史，不发消息");
       expect(SEAT_CLOSED_ALERT).toContain("也不会改派");
+      // What cannot be opened, and the way out.
+      expect(SEAT_CLOSED_ALERT).toContain("从没开过回合的 Codex 成员");
+      expect(SEAT_CLOSED_ALERT).toContain("第一个回合开头几秒就被打断的成员");
+      expect(SEAT_CLOSED_ALERT).toContain("Engine 根本不读");
+      // A member that never ran a turn is not said to be unopenable in general: Claude ones open.
+      expect(SEAT_CLOSED_ALERT).not.toContain("从没开过回合的成员");
       expect(SEAT_CLOSED_ALERT).toContain("立即检查并推进");
       expect(SEAT_CLOSED_ALERT).toContain("取消这个 Run 后重新启动");
       expect(SEAT_CLOSED_ALERT).toContain("Codex");
       expect(SEAT_CLOSED_ALERT).toContain("不要给它发消息");
+      expect(SEAT_CLOSED_ALERT).not.toContain("不会自己重新打开");
       expect(SEAT_CLOSED_ALERT).not.toContain("seat-closed");
     });
 
@@ -452,6 +466,121 @@ for (const version of [1, 2] as const) {
 
       expect(result).toMatchObject({ status: "waiting" });
       expect(seatAlerts(await stored())).toHaveLength(1);
+    });
+
+    test("a seat the host could not be read for is not a closed one: no seat-closed refusal, no warning", async () => {
+      await seed();
+      const host = fakeHost();
+      host.unreadable.add(PRODUCER_AGENT);
+      const result = await makeService(host).dispatchNext(RUN_ID);
+
+      expect(result).toMatchObject({ status: "waiting", taskId: "t2" });
+      if (result.status === "waiting") {
+        expect(result.denials.map((denial) => denial.reason)).not.toContain("seat-closed");
+      }
+      expect(seatAlerts(await stored())).toEqual([]);
+      expect(host.sent).toHaveLength(0);
+    });
+
+    test("an acknowledged warning is not written again while the seat is still closed", async () => {
+      await seed((record) => {
+        record.alerts.push({
+          alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+          state: "acknowledged",
+          severity: "warning",
+          summary: SEAT_CLOSED_ALERT,
+          createdAt: record.updatedAt,
+          acknowledgedAt: record.updatedAt,
+          resolvedAt: null,
+        });
+      });
+      const host = fakeHost();
+      host.closed.add(PRODUCER_AGENT);
+      const driver = makeDriver(host);
+      await driver.kick(RUN_ID);
+      const before = await stored();
+      await driver.kick(RUN_ID);
+
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["acknowledged"]);
+      expect(eventsOf(after, "alert-raised")).toEqual([]);
+    });
+
+    test("nothing left to dispatch takes an open warning down, once", async () => {
+      await seed((record) => {
+        const t2 = record.tasks.find((task) => task.spec.id === "t2");
+        if (t2) t2.state = "pending";
+        record.alerts.push({
+          alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+          state: "open",
+          severity: "warning",
+          summary: SEAT_CLOSED_ALERT,
+          createdAt: record.updatedAt,
+          acknowledgedAt: null,
+          resolvedAt: null,
+        });
+      });
+      const host = fakeHost();
+      host.closed.add(PRODUCER_AGENT);
+      const service = makeService(host);
+      expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+      const after = await stored();
+      expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
+      expect(eventsOf(after, "alert-resolved")).toHaveLength(1);
+
+      expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+      expect((await stored()).revision).toBe(after.revision);
+    });
+
+    for (const lifecycle of ["finished", "cancelled"] as const) {
+      test(`a ${lifecycle} Run takes its open warning down, once, and sends nothing`, async () => {
+        await seed((record) => {
+          record.lifecycle = lifecycle;
+          record.alerts.push({
+            alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+            state: "open",
+            severity: "warning",
+            summary: SEAT_CLOSED_ALERT,
+            createdAt: record.updatedAt,
+            acknowledgedAt: null,
+            resolvedAt: null,
+          });
+        });
+        const host = fakeHost();
+        host.closed.add(PRODUCER_AGENT);
+        const service = makeService(host);
+        expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+        const after = await stored();
+        expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
+        expect(eventsOf(after, "alert-resolved")).toHaveLength(1);
+
+        expect(await service.dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+        expect((await stored()).revision).toBe(after.revision);
+        expect(host.sent).toHaveLength(0);
+      });
+    }
+
+    test("a paused Run keeps its open warning and is not written to", async () => {
+      await seed((record) => {
+        record.lifecycle = "paused";
+        record.alerts.push({
+          alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+          state: "open",
+          severity: "warning",
+          summary: SEAT_CLOSED_ALERT,
+          createdAt: record.updatedAt,
+          acknowledgedAt: null,
+          resolvedAt: null,
+        });
+      });
+      const host = fakeHost();
+      host.closed.add(PRODUCER_AGENT);
+      const before = await stored();
+      expect(await makeService(host).dispatchNext(RUN_ID)).toEqual({ status: "idle" });
+      const after = await stored();
+      expect(after.revision).toBe(before.revision);
+      expect(seatAlerts(after).map((alert) => alert.state)).toEqual(["open"]);
     });
 
     test("a Run with nothing to dispatch and no warning is not written to", async () => {

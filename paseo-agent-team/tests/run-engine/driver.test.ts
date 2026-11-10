@@ -1823,6 +1823,100 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     expect(t1(again)).toMatchObject({ attempts: 1, evidenceReturns: 1 });
   });
 
+  /**
+   * The producer is closed (a restart left it so) when its refused report is taken in. Reading its history
+   * (a tail page of one entry, which only the reopening does) brings it back when `opens` is set.
+   */
+  async function refusedWhileClosed(opens: boolean, archived = false) {
+    const host = fakeHost();
+    const { driver } = build(host);
+    host.planRequestSent();
+    host.reply(COORDINATOR_AGENT, plan());
+    await hook(host, driver, COORDINATOR_AGENT);
+    produce(host, "agent-b1", { evidenceId: "not-required" });
+    if (archived) {
+      await store.update(RUN_ID, (record) => {
+        record.eventReceipts.push({
+          eventKey: "agent-b1|archived",
+          kind: "archived",
+          agentId: "agent-b1",
+          turnId: null,
+          seq: record.counters.observationSeq,
+          receivedAt: record.updatedAt,
+          dedupeKey: "agent-b1|archived",
+          disposition: "accepted",
+        });
+        return record;
+      });
+    }
+    const state = { closed: true, reopenReads: 0 };
+    const ref = host.port.agents.ref;
+    host.port.agents.ref = (agentId) => {
+      const handle = ref(agentId);
+      if (agentId !== "agent-b1") return handle;
+      return {
+        ...handle,
+        timeline: {
+          refetch: async (options) => {
+            if (options?.limit === 1) {
+              state.reopenReads += 1;
+              if (opens) state.closed = false;
+            }
+            return handle.timeline.refetch(options);
+          },
+        },
+        current: () => (state.closed ? { status: "closed", activeTurn: null } : handle.current()),
+        refresh: async () =>
+          state.closed ? { agent: { status: "closed", activeTurn: null } } : handle.refresh(),
+      };
+    };
+    await hook(host, driver, "agent-b1");
+    return { host, driver, state };
+  }
+
+  test("the producer's own Agent reads closed: its history is read once, it opens, and the supplement is asked for exactly once", async () => {
+    const { host, state } = await refusedWhileClosed(true);
+    const after = await stored();
+    expect(state.reopenReads).toBe(1);
+    expect(evidenceRequests(host)).toHaveLength(1);
+    expect(host.sent.filter((entry) => entry.agentId === "agent-b1")).toHaveLength(2);
+    expect(supplements(after)).toHaveLength(1);
+    expect(t1(after)).toMatchObject({ attempts: 1, evidenceReturns: 1 });
+    expect(
+      after.alerts.filter((alert) => alert.summary.startsWith("有任务在等一个已关闭的席位")),
+    ).toEqual([]);
+  });
+
+  test("the producer's own Agent is archived and closed: it is not read, and the supplement stays blocked", async () => {
+    const { host, state } = await refusedWhileClosed(true, true);
+    const after = await stored();
+    expect(state.reopenReads).toBe(0);
+    expect(evidenceRequests(host)).toHaveLength(0);
+    expect(supplements(after)).toHaveLength(0);
+  });
+
+  test("the producer's own Agent reads closed and stays so: nothing is asked, one closed-seat warning, and no more reads until a person checks", async () => {
+    const { host, driver, state } = await refusedWhileClosed(false);
+    const held = await stored();
+    expect(state.reopenReads).toBe(1);
+    expect(evidenceRequests(host)).toHaveLength(0);
+    expect(supplements(held)).toHaveLength(0);
+    const alerts = held.alerts.filter((alert) =>
+      alert.summary.startsWith("有任务在等一个已关闭的席位"),
+    );
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.state).toBe("open");
+
+    await driver.kick(RUN_ID);
+    await driver.kick(RUN_ID);
+    expect(state.reopenReads).toBe(1);
+    expect((await stored()).revision).toBe(held.revision);
+
+    await driver.retryRun(RUN_ID, { byPerson: true });
+    expect(state.reopenReads).toBe(2);
+    expect(evidenceRequests(host)).toHaveLength(0);
+  });
+
   test("a restart finds the request already out and sends no second one", async () => {
     const { host } = await refused();
     const second = build(host, { outbox: { run: (runId) => second.effects.runOutbox(runId) } });

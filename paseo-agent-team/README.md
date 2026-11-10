@@ -284,7 +284,10 @@ daemon restart.
 **Recover and roll back.**
 
 - After a restart the daemon recovers every live Run from its ledger and works out again which
-  reads and sends are due. One case needs a person: a Run whose launch was interrupted while its
+  reads and sends are due. The plugin gets no Paseo handle when it loads: recovery starts with the
+  first RPC or hook it receives after the daemon is up, so after restarting the daemon **open the
+  Runs page** (any call counts, and the page makes one as soon as it loads) for the Engine to
+  start; until then a live Run does not move. One case needs a person: a Run whose launch was interrupted while its
   members were being created cannot be resumed. It is closed with a critical alert that lists the
   Agents already recorded for it (it may be missing ones that were created but not recorded, the
   coordinator is created first). Look for those Agents in Paseo, archive them if you do not want
@@ -394,18 +397,21 @@ daemon restart.
   upgrade: the id is made from the text, which changed; both are taken down together when a plan is
   admitted or a re-plan is asked for.
 - **A host restart leaves members closed.** After a daemon restart the members that were not in the middle
-  of a turn read as closed in Paseo, and the Engine never opens an Agent again: it reads seats, it does not
-  start them. A task that needs such a seat used to wait under the reason 席位正忙, as if it would free
+  of a turn read as closed in Paseo, and the Engine does not start Agents: it reads seats, and only when work is held back by a closed seat
+  does it read that member's history once (below), which is what makes the host load the Agent again; it
+  never sends a message and never calls a model. A task that needs such a seat used to wait under the reason 席位正忙, as if it would free
   itself. Now the seat is refused for what it is, 席位的 Agent 已关闭（例如 daemon 重启后还没被重新打开），
   Engine 不会给它派活, on the producer's seat and on the review and smoke seats alike. It is still a wait:
   no decision is opened and nothing is sent. When a task is held back only by closed seats (archived
   ones may be among them) and no other seat is busy, waiting for a permission, short of a channel or
   otherwise on its way back, the Run gets one warning, written once and found again by its start,
-  「有任务在等一个已关闭的席位：」. It says the Engine will not reopen the seat and will not hand the
-  task to another one; that you press **立即检查并推进** once the member is idle in Paseo again, or
-  cancel the Run and start it again; that a member that never ran a turn, Codex ones above all, may not
-  open again after a restart (DEV: `Failed to resume Codex thread … no rollout found`), so it stays
-  closed for good and the only way out is to cancel the Run and start it again; and that you
+  「有任务在等一个已关闭的席位：」. It says the Engine has already tried to reopen the seats it can read (their history, sent nothing) and will not
+  hand the task to another one; that you press **立即检查并推进** once the member is idle in Paseo again (the
+  seats it can read are read once more), or cancel the Run and start it again; that a Codex member that never
+  ran a turn cannot be opened after a restart (DEV: `Failed to resume Codex thread … no rollout found`), and
+  that a member whose first turn was cut off within a few seconds is not read at all, nor is a review seat the
+  family gate would refuse, so those stay closed for good and the only way out is to cancel the Run and start it
+  again; and that you
   should not message the member to wake it while the Run is live, because that message collides with the
   dispatch that follows (DEV: the member answered the wake-up with an OK, the dispatch came back as a
   report that could not be used and a stuck-producer decision opened). The warning comes down in the
@@ -414,18 +420,31 @@ daemon restart.
   way, or because the ledger is full, does not look at the task, so the warning is left as it was; a
   pass that still dispatches work under way takes it down, even if the task is still held back by the
   failed-task limit. A paused Run keeps the warning until it is resumed and a pass takes it down; a finished
-  or cancelled one keeps it for good (cancelling is one of the ways out the warning names). For a review
+  or cancelled one has it taken down once (nothing waits for a seat any more). For a review
   task the warning can name a closed seat that is not the real obstacle: the only idle reviewer may be
   refused because it is of the producer's family, and reopening the closed seat would not help; that
   takes every available reviewer to be of the producer's family, and the way out is to cancel. An
-  evidence request (a supplement) is not checked this way: a closed seat leaves the task blocked with
-  `evidence-seat-unavailable`, the note still says the seat will go on by itself once it is back (a
-  closed seat does not), and no closed-seat warning is raised for it. The Engine does not try to reopen
-  the seat before refusing it, and it cannot rebuild an Agent for a seat; both are open work (T10).
+  evidence request (a supplement) is looked at the same way: when the producer's own Agent reads closed, the
+  task waits, the history is read once, and the supplement is asked for as soon as it reads idle; if it does
+  not open, the closed-seat warning is raised for it too.
+  **Reopening.** Before it refuses a closed seat, the Engine reads the last entry of the member's timeline
+  (no message, no model call, 30 seconds at most) and looks at the seat again; if it reads idle with no turn
+  running, the dispatch is looked at once more in the same pass. A member that finished a turn in this Run,
+  or never started one, is read; one that started a turn and never finished one is not (its conversation
+  may never have reached the disk, and it would read idle while its next turn fails). Each seat is read once
+  per plugin process on its own, only the button **立即检查并推进** allows one more read (a retry after an
+  answer, a resume or a recovered read does not), and at most two seats are read per pass. They are read in
+  the scheduler's own order (fewest tasks first, then fewest earlier quality reworks, then the roster order),
+  and a seat is left out when it would be refused again once it opens: it still carries another task (a
+  supplement is the exception), its Profile or channel is not usable, or a permission waits. If a reopened seat
+  does not take the work after all, the next candidate is read in the same pass, within the two. Archived seats, review seats the family gate would refuse, and idle, paused, finished and cancelled
+  Runs, and Runs being cancelled, are never read. A read that fails or leaves the seat closed is only logged
+  and the warning stays. The Engine cannot rebuild an Agent for a seat that does not open; that is open work
+  (T11b).
   Before 0.7.0 the same restart showed the same 席位正忙. Going back: nothing in the ledger changes
   shape; a Run that
   already carries the warning keeps it there (nothing in an older version takes it down) and the task's
-  note `waiting-for-seat:seat-closed` reads as an unknown reason until the next pass rewrites it.
+  note `waiting-for-seat:seat-closed` shows the raw code `seat-closed` after 没有可用的席位： until the next pass rewrites it.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The

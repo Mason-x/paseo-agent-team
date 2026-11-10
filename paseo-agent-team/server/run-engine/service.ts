@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cancelPending } from "../../shared/domain/run-engine/cancel-request";
 import {
   CAPACITY_REFUSE_ALERT,
   CAPACITY_WARN_ALERT,
@@ -56,10 +57,21 @@ import {
   SEAT_CLOSED_ALERT,
   SEAT_CLOSED_ALERT_PREFIX,
 } from "../../shared/domain/run-engine/seat-closed";
+import {
+  mayReopen,
+  REOPEN_READS_PER_PASS,
+  REOPEN_TIMEOUT_MS,
+  reopenKey,
+  reopenOrder,
+} from "../../shared/domain/run-engine/seat-reopen";
 import { reviewRequirement } from "../../shared/domain/run-engine/tier";
 import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
-import type { RunRecord, RunTaskRecord } from "../../shared/schemas/run-engine/ledger";
+import type {
+  RunAssignment,
+  RunRecord,
+  RunTaskRecord,
+} from "../../shared/schemas/run-engine/ledger";
 import { alertIdFor } from "./digest";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
 import type { ReadFailure } from "./read-retry";
@@ -120,6 +132,8 @@ export type EngineServiceOptions = {
   onReadFailure?: (runId: string, failure: ReadFailure) => void | Promise<void>;
   /** Lower thresholds for tests; the defaults are the ledger-sized ones in `compaction.ts`. */
   capacityLimits?: Partial<CompactionLimits>;
+  /** How long reading a closed member's history to reopen it may take (default 30 s). */
+  reopenTimeoutMs?: number;
   ids?: { uuid(): string };
   clock?: { now(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -233,6 +247,29 @@ function nextWork(
   return null;
 }
 
+/**
+ * An L1 review needs another model family than the producer's; the scheduler does not know families.
+ * Every other judge (a lower tier, a smoke) may be of any family.
+ */
+function judgeFamilyAllows(
+  task: RunTaskRecord,
+  producer: RunAssignment,
+  purpose: "reviewer" | "smoker",
+  source: SeatSource,
+): boolean {
+  const familyMatters =
+    purpose === "reviewer" && reviewRequirement(producerEpoch(task, producer)).level === "L1";
+  return (
+    !familyMatters || (source.profile.family !== null && source.profile.family !== producer.family)
+  );
+}
+
+/** The refusal of a seat the host reads as closed (a denial, not a blocked reason). */
+function closedDenial(seatId: string): SeatDenial {
+  const reason: SeatDenial["reason"] = "seat-closed";
+  return { seatId, reason };
+}
+
 function sameFiles(claimed: readonly string[], actual: readonly string[]): boolean {
   const normalize = (files: readonly string[]) =>
     [...new Set(files.map((file) => file.replaceAll("\\", "/")))].sort();
@@ -246,6 +283,13 @@ export function createEngineService(options: EngineServiceOptions) {
   const uuid = options.ids?.uuid ?? (() => randomUUID());
   const log = options.log ?? (() => undefined);
   const chains = new Map<string, Promise<unknown>>();
+  /**
+   * The closed seats this process has already tried to reopen by themselves, by (Run, seat, Agent). A
+   * person's "check now" clears the Run's entries (`grantReopen`) and so allows one more try each.
+   */
+  const reopenTried = new Set<string>();
+  /** The seat facts the last dispatch of each Run was planned with, so reopening ranks the same way. */
+  const lastSeatFacts = new Map<string, readonly SeatRuntime[]>();
 
   async function liveSnapshot(
     runId: string,
@@ -305,6 +349,7 @@ export function createEngineService(options: EngineServiceOptions) {
         order: source.order,
       });
     }
+    lastSeatFacts.set(record.runId, seats);
     return seats;
   }
 
@@ -532,6 +577,25 @@ export function createEngineService(options: EngineServiceOptions) {
       return { status: "blocked", taskId, reason: "evidence-return-limit" };
     }
     const seat = (await seatFacts(record)).find((entry) => entry.seatId === previous.seatId);
+    // The producer's own Agent reads as closed (a restart left it so): a wait like any other closed
+    // seat, so it is reopened by reading its history and the person is told when it cannot be.
+    if (
+      seat &&
+      seat.closed === true &&
+      seat.archived !== true &&
+      seat.agentId === previous.agentId &&
+      seat.enabled &&
+      seat.available &&
+      !record.policy.disabledChannels.includes(previous.channelId) &&
+      !record.policy.disabledProfileIds.includes(previous.profileId)
+    ) {
+      return {
+        status: "waiting",
+        taskId,
+        reason: "no-seat",
+        denials: [closedDenial(seat.seatId)],
+      };
+    }
     if (
       !seat ||
       seat.agentId !== previous.agentId ||
@@ -656,16 +720,9 @@ export function createEngineService(options: EngineServiceOptions) {
       context,
       new Set([producer.seatId]),
     );
-    // An L1 review needs another model family; the scheduler does not know families.
-    const familyMatters =
-      purpose === "reviewer" && reviewRequirement(producerEpoch(task, producer)).level === "L1";
     const candidate = eligibility.candidates.find((entry) => {
       const source = options.resolveSeat(record, entry.seatId);
-      if (!source) return false;
-      return (
-        !familyMatters ||
-        (source.profile.family !== null && source.profile.family !== producer.family)
-      );
+      return source !== null && judgeFamilyAllows(task, producer, purpose, source);
     });
     if (!candidate) {
       return { status: "waiting", taskId, reason: "no-seat", denials: eligibility.denials };
@@ -872,15 +929,129 @@ export function createEngineService(options: EngineServiceOptions) {
     }
   }
 
-  async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
+  /**
+   * The closed seats the work waits for that are worth reading, in the scheduler's own order (`rankCandidates`:
+   * load, quality rework, frozen order, seat id). A seat is worth reading only if, once it reads idle, the
+   * scheduler would hand it the work: it carries no other work (a supplement goes back to the producer that
+   * already holds the task, so it is the exception), its Profile and channel are usable and nothing waits for
+   * a permission. A review that needs another family is also limited to seats that family gate allows. The facts
+   * are the ones the dispatch that refused the work was planned with.
+   */
+  function reopenCandidates(
+    record: RunRecord,
+    work: Work,
+    denials: readonly SeatDenial[],
+  ): { seatId: string; agentId: string }[] {
+    const facts = lastSeatFacts.get(record.runId) ?? [];
+    const resolved = work.kind === "reviewer" ? resolveD(record, work.task.spec.id) : null;
+    const ordered = reopenOrder(
+      facts,
+      denials.filter((denial) => denial.reason === "seat-closed").map((denial) => denial.seatId),
+      {
+        ignoreLoad: work.kind === "evidence",
+        allows: (seat) => {
+          const source = options.resolveSeat(record, seat.seatId);
+          if (source === null) return false;
+          if (work.kind !== "reviewer") return true;
+          return (
+            resolved?.kind === "ok" &&
+            judgeFamilyAllows(work.task, resolved.d.producer, "reviewer", source)
+          );
+        },
+      },
+    );
+    return ordered.flatMap((seatId) => {
+      const agentId = facts.find((entry) => entry.seatId === seatId)?.agentId;
+      return agentId === null || agentId === undefined ? [] : [{ seatId, agentId }];
+    });
+  }
+
+  /**
+   * Reads the tail of the member's timeline, which is what makes the host load a closed Agent again
+   * (reading a snapshot does not), then looks at it once more. It sends nothing and calls no model.
+   * Reopened means: it reads idle and has no turn running.
+   */
+  async function reopenByReading(agentId: string): Promise<boolean> {
+    const handle = options.port.agents.ref(agentId);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("reading the history timed out")),
+        options.reopenTimeoutMs ?? REOPEN_TIMEOUT_MS,
+      );
+    });
+    const reading = (async () => {
+      await handle.timeline.refetch({ direction: "tail", limit: 1, projection: "canonical" });
+      return handle.refresh();
+    })();
+    // If the timeout wins, the read may still fail later: nobody waits for it, so say nothing.
+    reading.catch(() => undefined);
+    try {
+      const refreshed = await Promise.race([reading, timeout]);
+      const snapshot = refreshed?.agent;
+      return snapshot !== undefined && snapshot.status === "idle" && !snapshot.activeTurn;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Tries to reopen the closed seats the work waits for, in scheduling order, stopping at the first one that
+   * reads idle. `budget` counts the reads of the whole pass, which may come back here after a reopened seat
+   * still did not take the work: at most `REOPEN_READS_PER_PASS` in all. A seat is only read when it has not been
+   * tried by this process since the last "check now" (a failed read is only logged: the warning stays),
+   * and only when its history says reading can work (`seat-reopen.ts`). True when one is open again.
+   */
+  async function reopenClosedSeats(
+    runId: string,
+    record: RunRecord,
+    work: Work,
+    denials: readonly SeatDenial[],
+    budget: { reads: number },
+  ): Promise<boolean> {
+    for (const seat of reopenCandidates(record, work, denials)) {
+      if (budget.reads >= REOPEN_READS_PER_PASS) break;
+      if (!mayReopen(record, seat.agentId)) continue;
+      const key = reopenKey(runId, seat.seatId, seat.agentId);
+      if (reopenTried.has(key)) continue;
+      reopenTried.add(key);
+      budget.reads += 1;
+      try {
+        if (await reopenByReading(seat.agentId)) {
+          log(`reopened the closed seat ${seat.seatId} of ${runId} by reading its history`);
+          return true;
+        }
+        log(
+          `the closed seat ${seat.seatId} of ${runId} does not read idle after its history was read`,
+        );
+      } catch (error) {
+        log(`could not reopen the closed seat ${seat.seatId} of ${runId}`, error);
+      }
+    }
+    return false;
+  }
+
+  async function dispatchNextUnlocked(
+    runId: string,
+    mayReopenSeats = true,
+    quiet = false,
+  ): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
     // Only an active Run dispatches: paused, finished and cancelled ones, and one still waiting for
     // its DAG, have nothing to send. A paused Run is the one exception to "nothing to do": a person may
     // cancel failed tasks while it is paused, and then the failed-task alert is no longer true, so it is
     // taken down here (and only here: nothing is sent and the Run is not resumed). A Run that has no such
-    // alert, or is still over the limit, is not written to.
+    // alert, or is still over the limit, is not written to. The closed-seat warning is taken down once
+    // for a Run that is over (finished or cancelled: nothing waits for a seat any more); a paused Run
+    // keeps it, because it is still true.
     if (read.record.lifecycle !== "active") {
+      if (
+        (read.record.lifecycle === "finished" || read.record.lifecycle === "cancelled") &&
+        hasOpenSeatClosedAlert(read.record)
+      ) {
+        await noteSeatClosed(runId, read.record, null);
+      }
       if (
         read.record.lifecycle === "paused" &&
         !failedTaskLimit(read.record).exceeded &&
@@ -935,11 +1106,39 @@ export function createEngineService(options: EngineServiceOptions) {
         : work.kind === "evidence"
           ? await dispatchEvidence(runId, record, work.task)
           : await dispatchJudge(runId, record, work.task, work.kind);
-    await noteSeatClosed(runId, read.record, result);
-    return result;
+    // Held back only by closed seats: read the history of the ones that may come back before refusing
+    // them. After each one that opens the dispatch is looked at again (that look reads nothing); if it
+    // still waits for a closed seat (the reopened one did not take the work), the next candidate is read,
+    // up to the pass's budget.
+    let latest = result;
+    const budget = { reads: 0 };
+    while (
+      mayReopenSeats &&
+      latest.status === "waiting" &&
+      heldByClosedSeat(latest.denials) &&
+      !cancelPending(read.record) &&
+      (await reopenClosedSeats(runId, read.record, work, latest.denials, budget))
+    ) {
+      // A look that still waits says nothing about the warning yet: the next candidate may take the work.
+      latest = await dispatchNextUnlocked(runId, false, true);
+      if (latest.status !== "waiting") return latest;
+    }
+    // Quiet: this is one of those looks; if it still waits, the pass that asked for it settles the warning.
+    if (!(quiet && latest.status === "waiting")) await noteSeatClosed(runId, read.record, latest);
+    return latest;
   }
 
   return {
+    /**
+     * A person asked to check now: the closed seats of this Run may each be tried once more. Nothing is
+     * read here; the next dispatch does it.
+     */
+    grantReopen(runId: string): void {
+      for (const key of [...reopenTried]) {
+        if ((JSON.parse(key) as string[])[0] === runId) reopenTried.delete(key);
+      }
+    },
+
     /**
      * Moves the next unit of work (producer, reviewer or smoker, in task order) to the best
      * available seat and sends it. Calls for one Run are serialized in this process; across
