@@ -88,12 +88,13 @@ const emptyPage: PortTimelinePage = {
   reset: false,
 };
 
-type ReadsAs = "opens" | "throws" | "stays" | "hangs";
+type ReadsAs = "opens" | "throws" | "stays" | "hangs" | "wakes-with-turn" | "flaps";
 
 /**
  * A host whose agents are idle, closed or running. Reading the timeline of a closed one does what the
  * test says: `opens` (the host loads it again: idle), `throws`, `stays` (the read works and it is still
- * closed) or `hangs`. Every read of a timeline and every read of a snapshot is counted.
+ * closed), `hangs`, `wakes-with-turn` (it reads idle but a turn is running) or `flaps` (the first
+ * snapshot after the read says idle, every later one says closed again). Every read of a timeline and every read of a snapshot is counted.
  */
 function fakeHost() {
   const closed = new Set<string>();
@@ -102,7 +103,10 @@ function fakeHost() {
   const sent: { agentId: string; text: string }[] = [];
   const timelineReads: string[] = [];
   const snapshotReads: string[] = [];
+  const idleWithTurn = new Set<string>();
+  const flapFresh = new Set<string>();
   const snapshot = (agentId: string): PortAgentSnapshot => {
+    if (idleWithTurn.has(agentId)) return { status: "idle", activeTurn: { id: "turn-x" } };
     if (closed.has(agentId)) return { status: "closed", activeTurn: null };
     if (running.has(agentId)) return { status: "running", activeTurn: { id: "turn" } };
     return { status: "idle", activeTurn: null };
@@ -121,12 +125,20 @@ function fakeHost() {
             if (how === "throws") throw new Error("Failed to resume: no rollout found");
             if (how === "hangs") await new Promise<never>(() => undefined);
             if (how === "opens") closed.delete(agentId);
+            if (how === "wakes-with-turn") {
+              closed.delete(agentId);
+              idleWithTurn.add(agentId);
+            }
+            if (how === "flaps") flapFresh.add(agentId);
             return emptyPage;
           },
         },
         current: () => snapshot(agentId),
         refresh: async () => {
           snapshotReads.push(agentId);
+          if (flapFresh.delete(agentId)) {
+            return { agent: { status: "idle", activeTurn: null } };
+          }
           return { agent: snapshot(agentId) };
         },
       }),
@@ -577,20 +589,55 @@ for (const version of [1, 2] as const) {
       await seed();
       const host = fakeHost();
       host.closed.add(B1);
-      const service = makeService(host);
-      // After the read the host says it is running: reading brought it back in the middle of a turn.
-      const ref = host.port.agents.ref;
-      host.port.agents.ref = (agentId) => {
-        const handle = ref(agentId);
-        return {
-          ...handle,
-          refresh: async () => ({ agent: { status: "idle", activeTurn: { id: "turn-x" } } }),
-          timeline: handle.timeline,
-        };
-      };
-      const result = await service.dispatchNext(RUN_ID);
+      // After the read the host says idle but a turn is running: not a seat to hand work to.
+      host.readsAs.set(B1, "wakes-with-turn");
+      const result = await makeService(host).dispatchNext(RUN_ID);
       expect(result).toMatchObject({ status: "waiting" });
+      expect(host.timelineReads).toEqual([B1]);
       expect(host.sent).toHaveLength(0);
+      // The seat was read as closed when the pass began, so the warning stands.
+      expect(seatAlerts(await stored())).toHaveLength(1);
+    });
+
+    test("after a reopening the dispatch is looked at once more, and that look reads nothing", async () => {
+      await seed((record) => {
+        withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
+        archiveB1(record);
+      });
+      const host = fakeHost();
+      host.closed.add(B3);
+      host.closed.add(B4);
+      // B3 reads idle once and is closed again by the time the dispatch looks; B4 would open.
+      host.readsAs.set(B3, "flaps");
+      host.readsAs.set(B4, "opens");
+      const result = await makeService(host).dispatchNext(RUN_ID);
+
+      expect(result).toMatchObject({ status: "waiting", taskId: "t2" });
+      expect(host.timelineReads).toEqual([B3]);
+      expect(host.sent).toHaveLength(0);
+      expect(seatAlerts(await stored())).toHaveLength(1);
+    });
+
+    test("a person's check on one Run allows one more try only for that Run", async () => {
+      const OTHER_RUN = "run-reopen-b2";
+      await seed();
+      const other = readyRun({ runId: OTHER_RUN, repoId, evidenceRoot });
+      other.schemaVersion = schema;
+      if (schema === 2) (other as Record<string, unknown>).readRetries = emptyReadRetries();
+      await store.create(other);
+      const host = fakeHost();
+      host.closed.add(B1);
+      host.readsAs.set(B1, "throws");
+      const service = makeService(host);
+
+      await service.dispatchNext(RUN_ID);
+      await service.dispatchNext(OTHER_RUN);
+      expect(host.timelineReads).toEqual([B1, B1]);
+      service.grantReopen(RUN_ID);
+      await service.dispatchNext(OTHER_RUN);
+      expect(host.timelineReads).toEqual([B1, B1]);
+      await service.dispatchNext(RUN_ID);
+      expect(host.timelineReads).toEqual([B1, B1, B1]);
     });
 
     test("at most two seats are read in one pass; the third waits for the next pass", async () => {

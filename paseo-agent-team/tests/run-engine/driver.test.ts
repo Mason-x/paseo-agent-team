@@ -1827,13 +1827,28 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
    * The producer is closed (a restart left it so) when its refused report is taken in. Reading its history
    * (a tail page of one entry, which only the reopening does) brings it back when `opens` is set.
    */
-  async function refusedWhileClosed(opens: boolean) {
+  async function refusedWhileClosed(opens: boolean, archived = false) {
     const host = fakeHost();
     const { driver } = build(host);
     host.planRequestSent();
     host.reply(COORDINATOR_AGENT, plan());
     await hook(host, driver, COORDINATOR_AGENT);
     produce(host, "agent-b1", { evidenceId: "not-required" });
+    if (archived) {
+      await store.update(RUN_ID, (record) => {
+        record.eventReceipts.push({
+          eventKey: "agent-b1|archived",
+          kind: "archived",
+          agentId: "agent-b1",
+          turnId: null,
+          seq: record.counters.observationSeq,
+          receivedAt: record.updatedAt,
+          dedupeKey: "agent-b1|archived",
+          disposition: "accepted",
+        });
+        return record;
+      });
+    }
     const state = { closed: true, reopenReads: 0 };
     const ref = host.port.agents.ref;
     host.port.agents.ref = (agentId) => {
@@ -1870,6 +1885,14 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     expect(
       after.alerts.filter((alert) => alert.summary.startsWith("有任务在等一个已关闭的席位")),
     ).toEqual([]);
+  });
+
+  test("the producer's own Agent is archived and closed: it is not read, and the supplement stays blocked", async () => {
+    const { host, state } = await refusedWhileClosed(true, true);
+    const after = await stored();
+    expect(state.reopenReads).toBe(0);
+    expect(evidenceRequests(host)).toHaveLength(0);
+    expect(supplements(after)).toHaveLength(0);
   });
 
   test("the producer's own Agent reads closed and stays so: nothing is asked, one closed-seat warning, and no more reads until a person checks", async () => {
