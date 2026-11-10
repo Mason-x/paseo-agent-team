@@ -19,7 +19,11 @@ import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import type { CompactionLimits } from "../../shared/domain/run-engine/compaction";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
-import { answerableActions, decisionKindOf } from "../../shared/domain/run-engine/decision-answer";
+import {
+  answerableActions,
+  answerDecision,
+  decisionKindOf,
+} from "../../shared/domain/run-engine/decision-answer";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants";
 import { isEngineSettled } from "../../shared/domain/run-engine/lost-turn";
@@ -770,6 +774,43 @@ for (const schema of [1, 2] as const) {
         const finished = await stored();
         expect(states(finished).t1).toBe("done");
         expect(checkLedgerInvariants(finished).ok).toBe(true);
+      });
+
+      test("retry refuses a lost review if its delivery is missing or bound to another producer", async () => {
+        const host = fakeHost();
+        const built = build(host);
+        const heldAt = await reachLostReview(host, built, "no-closed");
+        built.clock.at = heldAt + 31_000;
+        await kick(built);
+        const before = await stored();
+        const [decision] = openDecisions(before);
+        if (!decision) throw new Error("review decision missing");
+        const mismatch = structuredClone(before);
+        const review = mismatch.assignments.find((entry) => entry.purpose === "reviewer");
+        if (!review?.delivery) throw new Error("review delivery missing");
+        review.delivery.producerAssignmentId = "another-producer";
+        const missing = structuredClone(before);
+        const producer = missing.assignments.find((entry) => entry.purpose === "member");
+        if (!producer) throw new Error("producer missing");
+        producer.acceptedProof = null;
+        for (const record of [mismatch, missing]) {
+          const snapshot = structuredClone(record);
+          const result = answerDecision(record, {
+            decisionId: decision.decisionId,
+            requestId: "stale-review-retry",
+            expectedRevision: record.revision,
+            reason: "check stale delivery",
+            action: "retry",
+            now: iso(built.clock.at),
+          });
+          expect(result).toEqual({
+            ok: false,
+            code: "task-not-releasable",
+            reason: "delivery-missing",
+          });
+          expect(record).toEqual(snapshot);
+        }
+        expect(host.sentTo(OTHER)).toBe(1);
       });
 
       test("retry dispatches a review even when the failed-task gate is exceeded", async () => {

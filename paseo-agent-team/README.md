@@ -198,11 +198,12 @@ decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
 **Closing or archiving a member's Agent while a Run is live.** If Paseo closes or archives a member's
 Agent in the middle of its turn, the host may never report that the turn ended. The Engine notices
 (it saw the Agent closed, or reads it as closed with no turn running) and records the turn as ended
-itself. (When the host did report the turn's end first, as DEV saw for a forced archive, for archiving
-the coordinator and for stopping the daemon, the reply is lost instead and the decision comes from the
-lost-reply paragraph under *Recover and roll back*; it is the same cancel-only decision.) The task then
-waits for you at a decision that can only be answered with cancel: the member is
-not asked again, whatever the cut-off turn replied is not taken in (even a valid report), and the
+itself. When the host reported the turn's end first, the lost-reply rules under *Recover and roll back*
+apply instead: an `archived` receipt gives a cancel-only decision, while a producer or reviewer that is
+idle after a graceful daemon stop with only a `closed` receipt gets a `host-lost` decision with retry
+or cancel. When the Engine recorded a closed turn itself, the task waits for a
+decision that can only be answered with cancel: the member is not asked again. Whatever the cut-off
+turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
 member's seat takes no more work in this Run, so a task that needs that seat can only wait or be

@@ -746,6 +746,8 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(summary.startsWith(earlier(LOST_CODE))).toBe(true);
     expect(summary.length).toBeGreaterThan(earlier(LOST_CODE).length);
     expect(summary).toContain("宿主可能丢失了进行中的回合");
+    expect(summary).toContain("或审查者的评审回合");
+    expect(summary).toContain("冒烟、补证或补报回合不会被引擎结算");
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
     expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
     // T9b: the host said the turn ended and the reply cannot be read: idle, closed or archived, then a decision.

@@ -610,6 +610,7 @@ function planResume(
       return { ok: false, reason: "state-changed" };
     }
     if (review) {
+      // A valid open review keeps its producer; reject a stale or inconsistent delivery binding.
       const delivery = resolveD(record, taskId);
       if (
         delivery.kind !== "ok" ||
