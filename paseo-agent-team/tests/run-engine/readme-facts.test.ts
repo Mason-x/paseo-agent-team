@@ -133,6 +133,13 @@ describe("the Run Engine section of the README agrees with the code", () => {
   test("it says what happens when a member is closed or archived mid-turn, and not to archive the coordinator", () => {
     expect(section).toContain("Closing or archiving a member's Agent while a Run is live");
     expect(section).toContain("decision that can only be answered with cancel");
+    const closing = section
+      .slice(section.indexOf("**Closing or archiving"), section.indexOf("**Advanced fields."))
+      .replace(/\s+/gu, " ");
+    expect(closing).toMatch(/`archived` receipt gives a cancel-only decision/u);
+    expect(closing).toMatch(
+      /producer or reviewer.*only a `closed` receipt.*`host-lost`.*retry or cancel/u,
+    );
     expect(section).toContain("An archived\nmember's seat takes no more work in this Run");
     expect(section).toContain(
       "a task that needs that seat can only wait or be\ncancelled with the whole Run",
@@ -150,87 +157,89 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(runEngineZh.teamEditor.title).toBe("Run 引擎");
   });
 
-  test("what happens to a turn the host lost is told in the README and in the alert the same way, with the number the code uses", () => {
-    expect(section).toContain("incomplete:dispatch-not-found");
-    // The wait before the Engine settles it: the README names the number the code has.
-    expect(LOST_TURN_SETTLE_DELAY_MS).toBe(30_000);
-    expect(section).toContain(`at least ${LOST_TURN_SETTLE_DELAY_MS / 1000} seconds`);
-    for (const word of [
-      "立即检查并推进",
-      `至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒`,
-      "如果这是成员（生产者）的实现回合",
-      "且该成员在 Paseo 里空闲",
-      "引擎记录过这一回合的开始",
-      "引擎没见到回合开始",
-      "宿主丢失",
-      "重试或取消",
-      "判官、冒烟、补证或补报回合不会被引擎结算",
-      "只要求回复 OK 的消息",
-    ]) {
-      expect(LOST_TURN_HINT).toContain(word);
-    }
-    // The way out applies to a turn the Engine never saw begin, not only to the other purposes.
-    expect(LOST_TURN_HINT).toContain(
-      "引擎没见到回合开始、或该成员之后又有更晚的回合记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息",
-    );
-    // T9b: the host said the turn ended and the reply cannot be read; the member may be idle, closed or archived.
-    for (const word of [
-      "如果宿主已经报告这一回合结束、回复却读不到",
-      "成员空闲、已关闭或已归档",
-      "成员已关闭或归档时只能取消",
-    ]) {
-      expect(LOST_TURN_HINT).toContain(word);
-    }
-    expect(section).toContain("**立即检查并推进**");
-    expect(section).toContain("the Engine records the turn as lost by the host");
-    expect(section).toContain("`host-lost`");
-    expect(section).toContain("you answer with retry or cancel");
-    expect(section).toContain("Nothing runs by timer");
-    expect(section).toContain("make sure it has\n  stopped before you answer");
-    // What is not settled, and the way out that stays for it. A v1 Run is not merely left with the
-    // warning: it has no re-check record, so it shows no such warning at all.
-    expect(section).toContain("a Run written as v1");
-    expect(section).toContain(
-      "There is no such warning for a Run written as v1: it has no record of the\n  re-checks and shows none at all",
-    );
-    expect(section).toContain("this description is the only place its way out is written down");
-    // The alert and the README say the same: only a producer's own task turn is settled.
-    expect(section).toContain("settles only the turn of a producer");
-    expect(section).toContain("a judge, a smoke tester, a supplement or a re-report");
-    expect(section).toContain("asks only for a reply of OK");
-    // A Run cancelled while a settled turn waits is left with no decision nobody can answer.
-    expect(section).toContain("no decision is opened");
-    expect(section).toContain("cancelling the whole Run keeps waiting");
-    expect(section).toContain("a host-lost decision is an ordinary");
-    // T9b: the host said the turn ended and then lost the reply.
-    expect(section).toContain("**A reply the host lost after it said the turn ended.**");
-    expect(section).toContain("shows it idle or closed with no turn running");
-    expect(section).toContain(
-      "the cancellation also counts a member the host says\n  it has no Agent for as quiet",
-    );
-    expect(section).toContain("no receipt, no release, no message");
-    expect(section).toContain("(not rehearsed; from its\n  source)");
-    expect(section).toContain("is never taken in, even if it can be read\n  later");
-    expect(section).toContain(
-      "A judge, a smoke tester or a supplement only ever gets\n  `member-lost`",
-    );
-    expect(section).toContain("Going back to 0.7.0");
-    expect(section).toContain("no longer does anything");
-    // T9d: a closed receipt alone does not make a lost reply member-lost; the rule is written down.
-    expect(section).toContain(
-      "when the read of the member says closed now, or when the host\n  archived it after the task was sent (an `archived` receipt)",
-    );
-    expect(section).toContain("A `closed` receipt alone does not count");
-    expect(section).toContain("writes one for every agent");
-    expect(section).toContain(
-      "gets `host-lost` (retry or cancel)\n  whatever closed receipts there are",
-    );
-    expect(section).toContain(
-      "A host-lost decision is cut to cancel only when the\n  member is archived",
-    );
-    expect(section).toContain("or the\n  read says closed now, and no decision otherwise");
-    expect(section).toContain("before you retry, make sure the member was not archived");
-    expect(section).not.toContain("when a closed or archived receipt of the member came after the");
+  test("lost-turn guidance agrees on eligibility, recovery, cancellation, and rollback", () => {
+    const start = section.indexOf("**Recover and roll back.**");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const recovery = section.slice(start).replace(/\s+/gu, " ");
+    const delaySeconds = LOST_TURN_SETTLE_DELAY_MS / 1000;
+    expect(delaySeconds).toBe(30);
+    const facts: [string, RegExp][] = [
+      ["dispatch missing", /incomplete:dispatch-not-found/u],
+      ["kick button", /\*\*立即检查并推进\*\*/u],
+      ["delay", new RegExp(`at least ${delaySeconds} seconds`, "u")],
+      ["eligible turns", /producer's own task turn or a reviewer's turn/u],
+      ["idle seat", /member is idle in Paseo/u],
+      ["dispatch is still missing", /dispatch is still not in its history/u],
+      ["engine records the lost turn", /Engine records the turn as lost by the host/u],
+      ["retry or cancel", /you answer with retry or cancel/u],
+      ["producer retry", /Retrying a producer starts a new attempt/u],
+      [
+        "review retry",
+        /Retrying a reviewer closes that review and sends one new review.*budget reservation/u,
+      ],
+      ["no timer", /Nothing runs by timer/u],
+      ["confirm process stopped", /make sure it has stopped before you answer/u],
+      ["eligible purposes", /Engine settles only a producer's or reviewer's turn/u],
+      ["excluded purposes", /does not settle a smoke tester, a supplement or a re-report/u],
+      ["unknown turn", /turn it never saw begin/u],
+      [
+        "v1 has no warning or retries",
+        /There is no such warning for a Run written as v1: it has no record of the re-checks and shows none at all/u,
+      ],
+      ["v1 documented way out", /this description is the only place its way out is written down/u],
+      ["manual OK", /asks only for a reply of OK/u],
+      ["cancellation may wait", /cancelling the whole Run keeps waiting/u],
+      ["no decision after run cancellation", /no decision is opened/u],
+      ["0.6 host-lost decision", /host-lost decision is an ordinary retry-or-cancel decision/u],
+      ["lost reply", /\*\*A reply the host lost after it said the turn ended\.\*\*/u],
+      ["seat is at rest", /shows it idle or closed with no turn running/u],
+      [
+        "cancellation accepts absent",
+        /cancellation also counts a member the host says it has no Agent for as quiet/u,
+      ],
+      ["no receipt, release, or send", /no receipt, no release, no message/u],
+      ["0.7.0 source-only evidence", /\(not rehearsed; from its source\)/u],
+      ["late reply gated", /is never taken in, even if it can be read later/u],
+      ["smoke and supplement", /smoke tester or supplement only ever gets `member-lost`/u],
+      ["0.7.0 rollback", /Going back to 0\.7\.0/u],
+      ["old late reply", /no longer does anything/u],
+      [
+        "closed read or archive",
+        /read of the member says closed now, or when the host archived it after the task was sent \(an `archived` receipt\)/u,
+      ],
+      ["closed receipt is insufficient", /A `closed` receipt alone does not count/u],
+      ["graceful stop writes closed", /writes one for every agent/u],
+      [
+        "reviewer host-lost",
+        /producer's own task turn or a reviewer's turn gets `host-lost` \(retry or cancel\) whatever closed receipts there are/u,
+      ],
+      [
+        "archive cuts host-lost",
+        /host-lost decision is cut to cancel only when the member is archived/u,
+      ],
+      ["smoke and supplement stop", /read says closed now, and no decision otherwise/u],
+      ["check archive before retry", /before you retry, make sure the member was not archived/u],
+      ["0.7.1 rollback", /Answer such decisions before rolling back to 0\.7\.1/u],
+    ];
+    for (const [fact, pattern] of facts) expect(recovery, fact).toMatch(pattern);
+    expect(recovery).not.toMatch(/when a closed or archived receipt of the member came after the/u);
+
+    const hintFacts: [string, RegExp][] = [
+      ["kick control", /立即检查并推进/u],
+      ["delay", new RegExp(`至少等 ${delaySeconds} 秒`, "u")],
+      ["producer", /成员（生产者）的实现回合/u],
+      ["reviewer", /或审查者的评审回合/u],
+      ["idle seat", /成员在 Paseo 里空闲/u],
+      ["known start", /引擎记录过这一回合的开始/u],
+      ["host-lost", /宿主丢失/u],
+      ["retry or cancel", /重试或取消/u],
+      ["excluded purposes", /冒烟、补证或补报回合不会被引擎结算/u],
+      ["unknown turn and manual OK", /引擎没见到回合开始.*更晚的回合记录.*只要求回复 OK 的消息/u],
+      ["lost reply", /宿主已经报告这一回合结束、回复却读不到/u],
+      ["seat statuses", /成员空闲、已关闭或已归档/u],
+      ["closed or archived cancel only", /成员已关闭或归档时只能取消/u],
+    ];
+    for (const [fact, pattern] of hintFacts) expect(LOST_TURN_HINT, fact).toMatch(pattern);
   });
 
   test("it describes the closed seat after a restart: the reason, the warning and the way out (T9f)", () => {

@@ -236,7 +236,7 @@ function nextWork(
         (entry) =>
           entry.purpose === purpose &&
           entry.delivery?.producerAssignmentId === producerId &&
-          !(entry.state === "ended" && judgedNothing(entry)),
+          !(entry.state === "ended" && judgedNothing(record, entry)),
       );
     if (!bound("reviewer")) return { kind: "reviewer", task };
     if (task.spec.devSmoke && !bound("smoker") && checkReviewGate(record, task).ok) {

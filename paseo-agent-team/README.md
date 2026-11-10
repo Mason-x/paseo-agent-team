@@ -198,11 +198,12 @@ decisions on what is left out, and why, are in `docs/next-phase-plan.md`.
 **Closing or archiving a member's Agent while a Run is live.** If Paseo closes or archives a member's
 Agent in the middle of its turn, the host may never report that the turn ended. The Engine notices
 (it saw the Agent closed, or reads it as closed with no turn running) and records the turn as ended
-itself. (When the host did report the turn's end first, as DEV saw for a forced archive, for archiving
-the coordinator and for stopping the daemon, the reply is lost instead and the decision comes from the
-lost-reply paragraph under *Recover and roll back*; it is the same cancel-only decision.) The task then
-waits for you at a decision that can only be answered with cancel: the member is
-not asked again, whatever the cut-off turn replied is not taken in (even a valid report), and the
+itself. When the host reported the turn's end first, the lost-reply rules under *Recover and roll back*
+apply instead: an `archived` receipt gives a cancel-only decision, while a producer or reviewer that is
+idle after a graceful daemon stop with only a `closed` receipt gets a `host-lost` decision with retry
+or cancel. When the Engine recorded a closed turn itself, the task waits for a
+decision that can only be answered with cancel: the member is not asked again. Whatever the cut-off
+turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
 member's seat takes no more work in this Run, so a task that needs that seat can only wait or be
@@ -302,17 +303,19 @@ daemon restart.
   it frozen; re-assigning is not in the page yet.
 - A host restart loses the turn a member was in the middle of. The Engine reads the member's reply
   three times, then leaves a warning that says the tries are used up (`incomplete:dispatch-not-found`).
-  For a member's own task turn, wait at least 30 seconds after that, then press **立即检查并推进**: if the member is idle in Paseo and
-  the dispatch is still not in its history, the Engine records the turn as lost by the host (a turn
-  end it writes itself, with `outcome` `host-lost`), takes the warning down and opens a decision that
-  you answer with retry or cancel. Retry gives the task a new attempt and the same member one new
-  message; cancel releases the task's claims and cancels what depends on it, and cancelling the whole
+  For a producer's own task turn or a reviewer's turn, wait at least 30 seconds after that, then press
+  **立即检查并推进**: if the member is idle in Paseo and the dispatch is still not in its history, the
+  Engine records the turn as lost by the host (a turn end it writes itself, with `outcome` `host-lost`),
+  takes the warning down and opens a decision that you answer with retry or cancel. Retrying a producer
+  starts a new attempt. Retrying a reviewer closes that review and sends one new review, with the usual
+  budget reservation; the producer's delivery, evidence, claims, attempt and quality counters stay as
+  they were. Cancel releases the task's claims and cancels what depends on it, and cancelling the whole
   Run finishes as well. Nothing runs by timer: the look happens when you press the button, when a hook
   arrives or when the daemon recovers, and the Engine sends the member nothing by itself. After a host
   restart the member's provider process may still be running (on Windows too): make sure it has
   stopped before you answer. A member the host reads as closed is the closed-or-archived case above.
-  Where the host never reported the turn's end, the Engine settles only the turn of a producer (the member that does the task). It does not settle
-  the turn of a judge, a smoke tester, a supplement or a re-report, or a turn it never saw begin (no
+  Where the host never reported the turn's end, the Engine settles only a producer's or reviewer's turn.
+  It does not settle a smoke tester, a supplement or a re-report, or a turn it never saw begin (no
   turn start on record): for those the warning is still shown, the Run does not move on, a kick
   sends nothing and writes nothing, and cancelling the whole Run keeps waiting for a turn end the
   host never reports. There is no such warning for a Run written as v1: it has no record of the
@@ -345,10 +348,10 @@ daemon restart.
   decision is `member-lost` (cancel only) when the read of the member says closed now, or when the host
   archived it after the task was sent (an `archived` receipt). A `closed` receipt alone does not count: a
   graceful stop of the daemon writes one for every agent, and after the restart the member is idle and
-  can be asked again (DEV, T9v). So the producer's own task turn gets `host-lost` (retry or cancel)
-  whatever closed receipts there are. A judge, a smoke tester or a supplement (their decision has no
-  retry) gets `member-lost` when a closed or archived receipt of it came after the task was sent or the
-  read says closed now, and no decision otherwise. A host-lost decision is cut to cancel only when the
+  can be asked again (DEV, T9v). So a producer's own task turn or a reviewer's turn gets `host-lost`
+  (retry or cancel) whatever closed receipts there are. A smoke tester or supplement still gets
+  `member-lost` when a closed or archived receipt came after the task was sent or the read says closed
+  now, and no decision otherwise. A host-lost decision is cut to cancel only when the
   member is archived after it was opened; a closed receipt does not do that. One case is worse than it
   was: if the archived hook of a member was lost and a graceful stop then wrote a `closed` receipt, the archived member reads as idle, the decision is `host-lost`, and retry sends the task to an Agent that is archived (the seat read carries no archived flag, and the dispatch does not refuse it). It is rare; before you retry, make sure the member was not archived. The decision says that the reply is lost, that the member may have done part of
   the work, and asks you to look at its branch and to make sure its process has stopped first (a turn end
@@ -356,7 +359,7 @@ daemon restart.
   stop). Once the decision is open, the reply of this attempt is never taken in, even if it can be read
   later. Any other reason (a reply that is too large, a failed read, an unreadable window, another
   incomplete reading), a member that is still running, a turn started after the end, or a delivery that is
-  not settled opens nothing and leaves the warning. A judge, a smoke tester or a supplement only ever gets
+  not settled opens nothing and leaves the warning. A smoke tester or supplement only ever gets
   `member-lost`. While the whole Run is being cancelled nothing is opened: the cancellation takes the
   host's own end as it is.
   Going back to 0.6.x: a host-lost decision is an ordinary retry-or-cancel decision there, and the
@@ -366,6 +369,8 @@ daemon restart.
   decision may still send the member a message if the reply stays unreadable, and 0.7.0 has no gate that
   holds back a reply that becomes readable later, so if one does, it is taken in and the retry on the
   decision no longer does anything. Do not roll back while a Run is live (see above).
+  A 0.7.1 rollback drill used a real v2 review `host-lost` decision: 0.7.1 showed retry but rejected it
+  as `decision-stale`. Answer such decisions before rolling back to 0.7.1.
 - **A host restart while the coordinator is planning.** The plan is the coordinator's reply to the
   plan request, and a restart can lose it. When the coordinator's plan request is no longer in its history
   (`incomplete:dispatch-not-found`), the host reported the end of a turn of the coordinator after the

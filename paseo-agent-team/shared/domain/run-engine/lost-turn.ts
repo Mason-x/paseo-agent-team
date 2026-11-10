@@ -334,11 +334,9 @@ function deliveryUnsettled(record: RunRecord, assignment: RunAssignment): boolea
  *  d. one turn of the agent began after the assignment was made (its own, when the assignment has one),
  *     and nothing of the agent came after it: no later `turn_started`, no `turn_ended` of any turn;
  *  f. no message for the task or to the agent is still on its way, or of unknown fate.
- * Only a producer's own task turn is found. A judge's or smoke tester's turn is left out by its purpose;
- * a supplement (an evidence request: purpose `member`, with an `evidenceRepair`) is left out here too,
- * because the decision for it has no way to try again and `openLimboDecision` would refuse it, so the
- * host would be read for nothing. Those turns, and a re-report turn (the agent began a second turn after
- * the assignment, which condition d rules out), stay with the way out of A21.
+ * A producer's own task turn or a reviewer's turn is found. Smoke tests and supplements (evidence
+ * requests) are left out: their decisions still have no retry. A re-report turn is also left to A21
+ * because the agent began another turn after the assignment.
  */
 export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCandidate[] {
   const block = readReadRetries(record);
@@ -346,7 +344,8 @@ export function lostTurnCandidates(record: RunRecord, now: string): LostTurnCand
   const found: LostTurnCandidate[] = [];
   for (const assignment of record.assignments) {
     if (!OPEN.includes(assignment.state) || assignment.acceptedProof !== null) continue;
-    if (!PRODUCER_PURPOSES.includes(assignment.purpose)) continue;
+    if (!PRODUCER_PURPOSES.includes(assignment.purpose) && assignment.purpose !== "reviewer")
+      continue;
     if (evidenceRepairOf(record, assignment) !== null) continue;
     if (!dispatchConfirmed(record, assignment)) continue;
     if (deliveryUnsettled(record, assignment)) continue;
@@ -436,7 +435,7 @@ export function findLostTurns(
  *     look now still finds the dispatch missing, and `LOST_TURN_SETTLE_DELAY_MS` have gone by since the
  *     last failure. Any other reason (too large, a failed read, unreadable, another incomplete) is not it.
  * The decision is `member-lost` (cancel only) when the host reads the agent as closed now or archived it
- * after the assignment was made; `host-lost` (retry or cancel) for a producer's own task turn otherwise.
+ * after the assignment was made; `host-lost` (retry or cancel) for a producer's own task turn or a reviewer.
  * A `closed` receipt alone proves only that the turn ended (T9d): a graceful stop of the daemon writes one
  * for every agent, which is usable again after the restart.
  */
@@ -526,9 +525,9 @@ export function lostReplyCandidates(record: RunRecord, now: string): LostReplyCa
  * Which decision a lost reply gets on this read of the member, or null when none: the member must be at
  * rest and the host must have answered (idle or closed, no turn running). In this order:
  *  1. `member-lost` when it reads as closed now, or was archived after the assignment;
- *  2. `host-lost` for a producer's own task turn (not a supplement): a `closed` receipt does not change it;
- *  3. a judge, a smoke tester or a supplement (whose decision has no way to try again): `member-lost` when
- *     the host closed or archived it after the assignment, otherwise none.
+ *  2. `host-lost` for a producer's own task turn or a reviewer: a `closed` receipt does not change it;
+ *  3. a smoke tester or a supplement: `member-lost` when the host closed or archived it after the
+ *     assignment, otherwise none.
  */
 export function lostReplyKind(
   record: RunRecord,
@@ -541,7 +540,7 @@ export function lostReplyKind(
     return MEMBER_LOST_CODE;
   }
   if (
-    PRODUCER_PURPOSES.includes(assignment.purpose) &&
+    (PRODUCER_PURPOSES.includes(assignment.purpose) || assignment.purpose === "reviewer") &&
     evidenceRepairOf(record, assignment) === null
   ) {
     return HOST_LOST_CODE;

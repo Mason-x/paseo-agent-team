@@ -402,18 +402,16 @@ describe("findLostTurns: what proves a turn was lost by the host", () => {
     }
   });
 
-  test("only a producer's turn is settled, and only one that is open and has no report", () => {
-    for (const purpose of ["reviewer", "smoker"] as const) {
-      expect(
-        findLostTurns(
-          record({ assignments: [assignment({ purpose })] }),
-          idle,
-          found(AFTER),
-          at(AFTER),
-        ),
-      ).toEqual([]);
-    }
-    for (const purpose of ["member", "coordinator", "reopen"] as const) {
+  test("a producer or reviewer is settled, but a smoke tester is not; the assignment must still be open", () => {
+    expect(
+      findLostTurns(
+        record({ assignments: [assignment({ purpose: "smoker" })] }),
+        idle,
+        found(AFTER),
+        at(AFTER),
+      ),
+    ).toEqual([]);
+    for (const purpose of ["member", "coordinator", "reopen", "reviewer"] as const) {
       expect(
         findLostTurns(
           record({ assignments: [assignment({ purpose })] }),
@@ -568,19 +566,31 @@ describe("the decision for a lost turn: retry or cancel, until the member is arc
     expect(answerableActions(opened.next, decisionFor(opened.next))).toEqual(["retry", "cancel"]);
   });
 
-  test("a judge's or a supplement's turn is not given a host-lost decision: its decision has no retry", () => {
+  test("a host-lost review decision is opened only while the task waits for that reviewer", () => {
     const base = settled();
     base.assignments = [assignment({ purpose: "reviewer" })];
-    const opened = openLimboDecision(base, {
-      taskId: "t1",
-      assignmentId: "a1",
-      reason: HOST_LOST_CODE,
-      turnId: "turn-1",
-      decisionId: "d1",
-      controlNonceDigest: "0".repeat(64),
-      now: at(AFTER),
-    });
-    expect(opened.changed).toBe(false);
+    const open = () =>
+      openLimboDecision(base, {
+        taskId: "t1",
+        assignmentId: "a1",
+        reason: HOST_LOST_CODE,
+        turnId: "turn-1",
+        decisionId: "d1",
+        controlNonceDigest: "0".repeat(64),
+        now: at(AFTER),
+      });
+    expect(open().changed).toBe(false);
+    if (!base.tasks[0]) throw new Error("no task");
+    base.tasks[0].state = "review";
+    const opened = open();
+    if (!opened.changed) throw new Error("review decision not opened");
+    const decision = decisionFor(opened.next);
+    expect(decisionKindOf(opened.next, decision)).toBe("host-lost");
+    expect(answerableActions(opened.next, decision)).toEqual(["retry", "cancel"]);
+    const reviewer = base.assignments[0];
+    if (!reviewer) throw new Error("no reviewer");
+    reviewer.purpose = "smoker";
+    expect(open().changed).toBe(false);
   });
 });
 

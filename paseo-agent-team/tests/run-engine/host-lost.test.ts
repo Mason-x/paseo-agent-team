@@ -1240,10 +1240,6 @@ describe("the alert of a used-up re-check says what a look after 30 seconds does
     };
     const summary = readRetryAlertSummary(item);
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
-    expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
-    expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
-    expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
-    expect(summary).toContain("只要求回复 OK 的消息");
     expect(alertIdFor(summary)).toBeTruthy();
   });
 });
