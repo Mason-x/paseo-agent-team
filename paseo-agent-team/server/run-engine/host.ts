@@ -106,12 +106,23 @@ export async function findDispatchEcho(
  */
 export function createObserverHost(
   port: ObservedHostPort,
-  options: { maxPages?: number; pageLimit?: number; requireIdle?: boolean } = {},
+  options: {
+    maxPages?: number;
+    pageLimit?: number;
+    requireIdle?: boolean;
+    /**
+     * An agent the Engine is holding for a few seconds (T11e: its turn was cut off under a closed member and
+     * the Engine is trying to reopen it). Nothing reads its timeline meanwhile, for a read could reopen it and
+     * be taken for the end of the turn: the answer is `turn-open`, as for a turn that is still running.
+     */
+    isHeld?: (agentId: string) => boolean;
+  } = {},
 ): ObserverHost {
   const maxPages = options.maxPages ?? PROTOCOL_MAX_PAGES;
   const limit = options.pageLimit ?? PAGE_LIMIT;
   return {
     async replyWindow(agentId, dispatchMessageId): Promise<ReplyWindow> {
+      if (options.isHeld?.(agentId)) return { complete: false, reason: "turn-open" };
       const handle = port.agents.ref(agentId);
       if (options.requireIdle && handle.refresh) {
         const snapshot = await handle.refresh();

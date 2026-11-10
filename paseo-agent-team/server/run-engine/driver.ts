@@ -87,7 +87,8 @@ export type DriverOptions = {
    * Settles the turns Paseo cut off by closing or archiving a member, at the start of a pass and before
    * a cancellation is finished (`member-lost.ts`). Its failure is logged and does not stop the pass.
    */
-  memberLost?: Pick<MemberLostSettler, "settle">;
+  memberLost?: Pick<MemberLostSettler, "settle"> &
+    Partial<Pick<MemberLostSettler, "grantReopen" | "release">>;
   clock?: { now(): string };
   ids?: { uuid(): string };
   log?: (message: string, detail?: unknown) => void;
@@ -366,11 +367,17 @@ export function createEngineDriver(options: DriverOptions) {
    * reopening each closed seat of the Run. A retry after a write, a resume or a recovered read is an
    * automatic pass and does not.
    */
+  /** A person's "check now": the closed seats of the Run, and the cut-off turns waiting on one, may each be read once more. */
+  function grantReopen(runId: string): void {
+    options.service.grantReopen?.(runId);
+    options.memberLost?.grantReopen?.(runId);
+  }
+
   function retryRun(
     runId: string,
     ask: { afterWrite?: boolean; byPerson?: boolean } = {},
   ): Promise<RetryReport> {
-    if (ask.byPerson) options.service.grantReopen?.(runId);
+    if (ask.byPerson) grantReopen(runId);
     const running = retrying.get(runId);
     if (running) {
       if (ask.afterWrite) retryAfterWrite.add(runId);
@@ -386,7 +393,7 @@ export function createEngineDriver(options: DriverOptions) {
         let retryByPersonAgain = false;
         do {
           retryAfterWrite.delete(runId);
-          if (again && retryByPersonAgain) options.service.grantReopen?.(runId);
+          if (again && retryByPersonAgain) grantReopen(runId);
           report = await retryNow(runId);
           again = retryAfterWrite.has(runId);
           retryByPersonAgain = false;
@@ -422,6 +429,10 @@ export function createEngineDriver(options: DriverOptions) {
     async onHook(event: ObserverHookEvent): Promise<IngestResult> {
       const ingested = await options.observer.ingest(event);
       if (ingested.status !== "recorded" && ingested.status !== "duplicate") return ingested;
+      // The agent works or ended a turn again: a cut-off turn it was held for is not waiting any more.
+      if (event.name === "agent.turn_ended" || event.name === "agent.turn_started") {
+        options.memberLost?.release?.(event.agentId);
+      }
       if (event.name === "agent.turn_ended") await settleAndKick(event.agentId);
       else if (
         event.name === "agent.permission_resolved" ||

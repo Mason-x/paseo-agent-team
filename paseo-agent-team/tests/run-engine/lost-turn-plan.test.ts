@@ -7,6 +7,7 @@ import {
   findClosedTurns,
   isAgentArchived,
   isEngineSettled,
+  planClosedTurns,
   type SeatRead,
 } from "../../shared/domain/run-engine/lost-turn";
 import type {
@@ -304,5 +305,192 @@ describe("the helpers around it", () => {
     expect(
       closedSince(record([receipt("turn_ended", 1), receipt("closed", 2)]), AGENT, "turn-1"),
     ).toBe(true);
+  });
+});
+
+describe("planClosedTurns: a producer's or reviewer's turn under a closed member waits before it is called lost (T11e)", () => {
+  const plan = (
+    rec: RunRecord,
+    seats: ReadonlyMap<string, SeatRead>,
+    over: Partial<Parameters<typeof planClosedTurns>[2]> = {},
+  ) => planClosedTurns(rec, seats, { now: AT(40), cancelling: false, seenAt: () => null, ...over });
+  const shape = (found: ReturnType<typeof plan>) => ({
+    lost: found.lost.length,
+    hostLost: found.hostLost.length,
+    waiting: found.waiting.length,
+  });
+  const cut = () => record([receipt("turn_started", 1), receipt("closed", 2)]);
+
+  test("the wait is 30 seconds from the closed receipt: 29.999 seconds waits, 30 settles", () => {
+    seq = 0;
+    const rec = cut();
+    expect(shape(plan(rec, idle, { now: "2026-11-09T10:00:31.999Z" }))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 1,
+    });
+    expect(shape(plan(rec, idle, { now: AT(32) }))).toEqual({ lost: 0, hostLost: 1, waiting: 0 });
+  });
+
+  test("after the wait: idle with no turn is host-lost; closed, or any other reading, is lost", () => {
+    seq = 0;
+    const rec = cut();
+    expect(shape(plan(rec, idle))).toEqual({ lost: 0, hostLost: 1, waiting: 0 });
+    expect(shape(plan(rec, closedSeat))).toEqual({ lost: 1, hostLost: 0, waiting: 0 });
+    const errored = new Map<string, SeatRead>([[AGENT, { status: "error", activeTurn: false }]]);
+    expect(shape(plan(rec, errored))).toEqual({ lost: 1, hostLost: 0, waiting: 0 });
+    const found = plan(rec, idle).hostLost[0];
+    expect(found).toMatchObject({
+      assignmentId: "a1",
+      agentId: AGENT,
+      turnId: "turn-1",
+      basis: { closedBy: "receipt" },
+    });
+  });
+
+  test("with no closed receipt the wait runs from the first look that saw it closed (or from now)", () => {
+    seq = 0;
+    const rec = record([receipt("turn_started", 1)]);
+    // Never seen: it is first seen now, so it waits.
+    expect(shape(plan(rec, closedSeat))).toEqual({ lost: 0, hostLost: 0, waiting: 1 });
+    // Seen 31 seconds ago, still closed: lost.
+    expect(shape(plan(rec, closedSeat, { seenAt: () => AT(9) }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+    // Seen 31 seconds ago and reopened since: host-lost, and the basis says the host read it.
+    const reopened = plan(rec, idle, { seenAt: () => AT(9) });
+    expect(shape(reopened)).toEqual({ lost: 0, hostLost: 1, waiting: 0 });
+    expect(reopened.hostLost[0]?.basis).toEqual({ closedBy: "host-read", closedReceiptKey: null });
+    // Seen 5 seconds ago: still waiting.
+    expect(shape(plan(rec, closedSeat, { seenAt: () => AT(35) }))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 1,
+    });
+    // Idle and never seen closed, no receipt: not a closed turn at all.
+    expect(shape(plan(rec, idle))).toEqual({ lost: 0, hostLost: 0, waiting: 0 });
+  });
+
+  test("the receipt's time wins over a later first look", () => {
+    seq = 0;
+    expect(shape(plan(cut(), closedSeat, { seenAt: () => AT(39) }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+  });
+
+  test("an archived receipt after the turn began, or a host that has no such Agent: lost at once", () => {
+    seq = 0;
+    const archived = record([
+      receipt("turn_started", 1),
+      receipt("closed", 2),
+      receipt("archived", 3),
+    ]);
+    expect(shape(plan(archived, idle, { now: AT(4) }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+    seq = 0;
+    expect(
+      shape(plan(cut(), new Map<string, SeatRead>([[AGENT, "absent"]]), { now: AT(3) })),
+    ).toEqual({ lost: 1, hostLost: 0, waiting: 0 });
+  });
+
+  test("the whole Run being cancelled: lost at once", () => {
+    seq = 0;
+    expect(shape(plan(cut(), idle, { now: AT(3), cancelling: true }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+  });
+
+  test("a smoke tester and a supplement are not waited on; a reviewer and a re-opened producer are", () => {
+    for (const purpose of ["smoker"] as const) {
+      seq = 0;
+      const rec = record([receipt("turn_started", 1), receipt("closed", 2)], {
+        assignments: [assignment({ purpose })],
+      });
+      expect(shape(plan(rec, idle, { now: AT(3) }))).toEqual({ lost: 1, hostLost: 0, waiting: 0 });
+    }
+    seq = 0;
+    const supplement = record([receipt("turn_started", 1), receipt("closed", 2)], {
+      assignments: [
+        assignment({
+          evidenceRepair: {
+            version: 1,
+            predecessorAssignmentId: "a0",
+            rootAssignmentId: "a0",
+            ordinal: 1,
+          },
+        } as Partial<RunAssignment>),
+      ],
+    });
+    (supplement as { schemaVersion: number }).schemaVersion = 2;
+    expect(shape(plan(supplement, idle, { now: AT(3) }))).toEqual({
+      lost: 1,
+      hostLost: 0,
+      waiting: 0,
+    });
+    for (const purpose of ["reviewer", "reopen", "member", "coordinator"] as const) {
+      seq = 0;
+      const rec = record([receipt("turn_started", 1), receipt("closed", 2)], {
+        assignments: [assignment({ purpose })],
+      });
+      expect(shape(plan(rec, idle, { now: AT(3) }))).toEqual({
+        lost: 0,
+        hostLost: 0,
+        waiting: 1,
+      });
+    }
+  });
+
+  test("a turn running when the wait is over is not settled and keeps waiting; one never seen closed is not in the plan", () => {
+    seq = 0;
+    const running = new Map<string, SeatRead>([[AGENT, { status: "running", activeTurn: true }]]);
+    expect(shape(plan(cut(), running))).toEqual({ lost: 0, hostLost: 0, waiting: 1 });
+    seq = 0;
+    expect(
+      shape(plan(record([receipt("turn_started", 1)]), running, { seenAt: () => AT(2) })),
+    ).toEqual({ lost: 0, hostLost: 0, waiting: 1 });
+    seq = 0;
+    expect(shape(plan(record([receipt("turn_started", 1)]), running))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 0,
+    });
+    // Archived or cancelling: nothing to wait for.
+    seq = 0;
+    const archivedRunning = record([
+      receipt("turn_started", 1),
+      receipt("closed", 2),
+      receipt("archived", 3),
+    ]);
+    expect(shape(plan(archivedRunning, running))).toEqual({ lost: 0, hostLost: 0, waiting: 0 });
+    seq = 0;
+    expect(shape(plan(cut(), running, { cancelling: true }))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 0,
+    });
+    // A read that failed is not in the plan either.
+    seq = 0;
+    expect(shape(plan(cut(), new Map<string, SeatRead>([[AGENT, "unreadable"]])))).toEqual({
+      lost: 0,
+      hostLost: 0,
+      waiting: 0,
+    });
+  });
+
+  test("findClosedTurns keeps T4a for every kind of turn: closed means closed at once", () => {
+    seq = 0;
+    const rec = record([receipt("turn_started", 1), receipt("closed", 2)], {
+      assignments: [assignment({ purpose: "reviewer" })],
+    });
+    expect(findClosedTurns(rec, idle)).toHaveLength(1);
   });
 });

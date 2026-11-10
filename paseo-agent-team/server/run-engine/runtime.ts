@@ -2,6 +2,7 @@ import path from "node:path";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { readLaunchWorkspace, readSeatProfiles } from "../../shared/domain/run-engine/run-record";
+import { REOPEN_TIMEOUT_MS } from "../../shared/domain/run-engine/seat-reopen";
 import { createPaseoAdapter, type PaseoAdapter } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -17,9 +18,10 @@ import { createEngineDriver, type EngineDriver } from "./driver";
 import { createEffects } from "./effects";
 import { createObserverHost } from "./host";
 import { createIntake } from "./intake";
-import { createMemberLostSettler } from "./member-lost";
+import { createClosingWatch, createMemberLostSettler } from "./member-lost";
 import { createRunObserver, type ObserverHookEvent } from "./observer";
 import { createReadRetry } from "./read-retry";
+import { reopenByReading } from "./reopen-read";
 import { type CommitIdentity, commitIdentity } from "./repo";
 import type { RoleMcp } from "./seat-rebuild";
 import { createEngineService, type SeatSource } from "./service";
@@ -141,7 +143,11 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
   const onReadFailure = (runId: string, failure: Parameters<typeof readRetry.note>[1]) =>
     readRetry.note(runId, failure);
   const observer = createRunObserver({ store, log, onReadFailure });
-  const host = createObserverHost(port);
+  // The agents whose cut-off turn waits to be settled (member-lost.ts): in memory only. Reads of their
+  // timeline would reopen them and be taken for the end of the turn, so the host answers `turn-open`.
+  const closingWatch = createClosingWatch();
+  const isHeld = (agentId: string) => closingWatch.holds(agentId);
+  const host = createObserverHost(port, { isHeld });
   // Reads a host that failed to answer again a few times and says what came of it. It holds two
   // functions that read and nothing that sends, settles or dispatches.
   const readRetry = createReadRetry({
@@ -161,7 +167,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     log,
   });
   // Reconcile has no hook behind it, so it must not call a turn that is still running finished.
-  const reconcileHost = createObserverHost(port, { requireIdle: true });
+  const reconcileHost = createObserverHost(port, { requireIdle: true, isHeld });
   const resolveWorkspace = (record: RunRecord) => {
     const workspace = readLaunchWorkspace(record);
     return workspace ? { workspaceId: workspace.id, directory: workspace.directory } : null;
@@ -234,6 +240,8 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     memberLost: createMemberLostSettler({
       store,
       readSeat: readLiveSeat,
+      reopenSeat: (agentId) => reopenByReading(port, agentId, REOPEN_TIMEOUT_MS),
+      watch: closingWatch,
       readReply: (agentId, messageId) => host.replyWindow(agentId, messageId),
       onReadFailure,
       log,
