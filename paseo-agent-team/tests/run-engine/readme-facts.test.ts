@@ -241,12 +241,25 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("**立即检查并推进**");
     expect(section).toContain("should not message the member to wake it while the Run is live");
     expect(section).toContain("no rollout found");
-    expect(section).toContain("it does not\n  start them");
+    expect(section).toContain("the Engine does not start Agents");
     // The lost plan reply warning names the button the page really has, and the one way out left.
     expect(section).toContain("write a reason under 控制 and press **请求重新规划**");
     expect(section).toContain(runEngineZh.controls.replan.submit);
     expect(section).toContain("只能取消这个 Run 后重新启动");
     expect(section).not.toContain("请点重新规划");
+  });
+
+  test("it describes reopening a closed seat by reading its history, and what is never read (T11a)", () => {
+    expect(section).toContain("**Reopening.**");
+    expect(section).toContain("(no message, no model call, 30 seconds at most)");
+    expect(section).toContain(
+      "or never started one, is read; one that started a turn and never finished one is not",
+    );
+    expect(section).toContain("at most two seats are read per\n  pass");
+    expect(section).toContain("Archived seats, review seats the family gate would refuse");
+    expect(section).toContain("has already tried to reopen the seat");
+    expect(section).toContain("or whose first turn was cut off within a few\n  seconds");
+    expect(section).not.toContain("will not reopen the seat");
   });
 
   test("it says the Engine starts recovering only when something calls the plugin: open the Runs page after a restart (T11a)", () => {
