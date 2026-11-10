@@ -45,12 +45,17 @@ import {
 import { raiseAlert, resolveAlerts } from "../../shared/domain/run-engine/run-alert";
 import {
   eligibleReviewSeats,
+  heldByClosedSeat,
   planDispatchWithReasons,
   type SchedulerContext,
   type SchedulerMode,
   type SeatDenial,
   type SeatRuntime,
 } from "../../shared/domain/run-engine/scheduler";
+import {
+  SEAT_CLOSED_ALERT,
+  SEAT_CLOSED_ALERT_PREFIX,
+} from "../../shared/domain/run-engine/seat-closed";
 import { reviewRequirement } from "../../shared/domain/run-engine/tier";
 import { isNormalEnded } from "../../shared/domain/run-engine/transitions";
 import type { PaseoEnginePort, PortAgentSnapshot } from "../../shared/paseo/port";
@@ -285,6 +290,8 @@ export function createEngineService(options: EngineServiceOptions) {
           snapshot.status === "closed",
         // Archived seats take no work for the rest of this Run: nothing here resumes one.
         archived: isAgentArchived(record, seat.agentId),
+        // Read as closed: a restart leaves it so, and nothing here reopens it (see `heldByClosedSeat`).
+        closed: readable && snapshot.status === "closed",
         channelState: channel?.state ?? "unknown",
         available: source.available,
         load: mine.filter((entry) => entry.state === "assigned" || entry.state === "in_progress")
@@ -819,6 +826,52 @@ export function createEngineService(options: EngineServiceOptions) {
     }
   }
 
+  function hasOpenSeatClosedAlert(record: RunRecord): boolean {
+    return record.alerts.some(
+      (alert) => alert.state !== "resolved" && alert.summary.startsWith(SEAT_CLOSED_ALERT_PREFIX),
+    );
+  }
+
+  /**
+   * One warning while the task this pass looked at is held back only by closed seats, found again by its
+   * fixed prefix so asking again writes nothing. It is taken down once that stops being true (a seat
+   * is idle again, a pass went on to something else, or there is nothing left to dispatch), and only if
+   * there is one to take down.
+   */
+  async function noteSeatClosed(
+    runId: string,
+    record: RunRecord,
+    result: DispatchNextResult | null,
+  ): Promise<void> {
+    const held = result?.status === "waiting" && heldByClosedSeat(result.denials);
+    if (held === hasOpenSeatClosedAlert(record)) return;
+    try {
+      await options.store.update(runId, (current) => {
+        if (held) {
+          if (hasOpenSeatClosedAlert(current)) return null;
+          const raised = raiseAlert(
+            current,
+            {
+              alertId: alertIdFor(SEAT_CLOSED_ALERT_PREFIX),
+              severity: "warning",
+              summary: SEAT_CLOSED_ALERT,
+            },
+            clock.now(),
+          );
+          return raised.changed ? raised.next : null;
+        }
+        const resolved = resolveAlerts(
+          current,
+          (alert) => alert.summary.startsWith(SEAT_CLOSED_ALERT_PREFIX),
+          clock.now(),
+        );
+        return resolved.changed ? resolved.next : null;
+      });
+    } catch (error) {
+      log(`could not note the closed seats of ${runId}`, error);
+    }
+  }
+
   async function dispatchNextUnlocked(runId: string): Promise<DispatchNextResult> {
     const read = await options.store.get(runId);
     if (read.status !== "ok") return { status: "run-unavailable" };
@@ -848,7 +901,10 @@ export function createEngineService(options: EngineServiceOptions) {
       await clearFailedLimit(runId);
     }
     const first = nextWork(read.record);
-    if (!first) return { status: "idle" };
+    if (!first) {
+      await noteSeatClosed(runId, read.record, null);
+      return { status: "idle" };
+    }
     if (capacity?.level === "refuse") {
       return { status: "blocked", taskId: first.task.spec.id, reason: "ledger-capacity" };
     }
@@ -873,9 +929,14 @@ export function createEngineService(options: EngineServiceOptions) {
         tasks: read.record.tasks.filter((entry) => entry.state !== "ready"),
       };
     }
-    if (work.kind === "produce") return dispatchProducer(runId, record, work.task);
-    if (work.kind === "evidence") return dispatchEvidence(runId, record, work.task);
-    return dispatchJudge(runId, record, work.task, work.kind);
+    const result =
+      work.kind === "produce"
+        ? await dispatchProducer(runId, record, work.task)
+        : work.kind === "evidence"
+          ? await dispatchEvidence(runId, record, work.task)
+          : await dispatchJudge(runId, record, work.task, work.kind);
+    await noteSeatClosed(runId, read.record, result);
+    return result;
   }
 
   return {

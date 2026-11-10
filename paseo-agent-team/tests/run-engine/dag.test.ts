@@ -584,7 +584,8 @@ describe("a plan the strict parser refuses is asked for again, once", () => {
  * warning and waits for a person's re-plan; every other way of not reading a plan still writes nothing.
  * Run on a v1 and on a v2 ledger.
  */
-const LOST_ALERT = "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划";
+const LOST_ALERT =
+  "DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失。请在“控制”里填写原因后点“请求重新规划”；如果协调者打不开（重启打断规划太早时会这样），只能取消这个 Run 后重新启动。";
 const NOT_FOUND: ReplyWindow = { complete: false, reason: "dispatch-not-found" };
 
 describe.each([1, 2] as const)("a plan reply the host lost (ledger v%i)", (version) => {
