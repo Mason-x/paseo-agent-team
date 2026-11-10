@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [0.7.1](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.7.0...paseo-agent-team-v0.7.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **run-engine:** a closed receipt no longer makes a lost reply member-lost ([7038923](https://github.com/Mason-x/paseo-agent-team/commit/70389238d63bc99f042231481ab4638a6e15d2ab))
+* **run-engine:** hold back the lost plan reply warning while a coordinator message is unsettled ([8cc4d9b](https://github.com/Mason-x/paseo-agent-team/commit/8cc4d9b59af5bffc62ce3e5e62d04d5242700e7c))
+* **run-engine:** keep a turn id that comes back after a restart from hiding new turns ([632ca14](https://github.com/Mason-x/paseo-agent-team/commit/632ca14e7bbbbbebbe642616d721217e76fe67f1))
+* **run-engine:** open a decision when the host ended a turn and then lost its reply ([b9cef18](https://github.com/Mason-x/paseo-agent-team/commit/b9cef18862a9c219f588121e71e762a28ec864e8))
+* **run-engine:** report a plan reply the host lost when it restarted during planning ([cee3dfa](https://github.com/Mason-x/paseo-agent-team/commit/cee3dfa591943c44d715b6f6ff02bd736888babe))
+* **run-engine:** show a closed seat as closed, not busy, and warn once ([bfcdc07](https://github.com/Mason-x/paseo-agent-team/commit/bfcdc0734b8e842291090af4a171a2ea2b3a3efa))
+* **ui:** keep the kick answer on screen when the kick group goes away ([a8b0d12](https://github.com/Mason-x/paseo-agent-team/commit/a8b0d125e0b2b31cc6e9cfae483f335b412fa006))
+* **ui:** show the kick answer next to its button and show alert text whole ([bc2c6cd](https://github.com/Mason-x/paseo-agent-team/commit/bc2c6cd524fac46e6527d63120425825b0b57672))
+
 ## [0.7.0](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.6.1...paseo-agent-team-v0.7.0) (2026-11-09)
 
 
