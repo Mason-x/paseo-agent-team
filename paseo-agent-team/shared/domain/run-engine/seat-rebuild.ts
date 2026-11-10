@@ -216,11 +216,17 @@ export function rebuildKeyFor(runId: string, seatId: string, generation: number)
   return `engine:${runId}:seat:${seatId}:rebuild:${generation}`;
 }
 
-/** The title of a rebuilt Agent. The host cuts a title at 60 characters, so the base is cut, not the suffix. */
+/**
+ * The title of a rebuilt Agent. The host cuts a title at 60 UTF-16 units (`String.slice`), so the base is cut,
+ * not the suffix, counted the same way, and never between the two halves of a surrogate pair.
+ */
 export const REBUILD_TITLE_MAX = 60;
 export function rebuildTitle(base: string, generation: number): string {
   const suffix = `（重建 ${generation}）`;
-  return `${[...base].slice(0, Math.max(0, REBUILD_TITLE_MAX - [...suffix].length)).join("")}${suffix}`;
+  let head = base.slice(0, Math.max(0, REBUILD_TITLE_MAX - suffix.length));
+  const last = head.charCodeAt(head.length - 1);
+  if (head.length > 0 && last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  return `${head}${suffix}`;
 }
 
 /** The Agents a seat was rebuilt away from: what the observer no longer listens to. */
@@ -257,7 +263,9 @@ export const rebuildingAlertText = (seatId: string, generation: number): string 
 export const reboundAlertText = (seatId: string, generation: number): string =>
   `${REBOUND(seatId, generation)}旧 Agent 留在 Paseo 里，归档它不影响这个 Run。`;
 export const failedAlertText = (seatId: string, generation: number, code: string): string =>
-  `${FAILED(seatId, generation)}原因码 ${code}）：这个席位仍不可用。点“立即检查并推进”可再试一次（每个席位最多重建 ${SEAT_REBUILD_MAX_PER_SEAT} 次），否则取消这个 Run 后重新启动。`;
+  generation >= SEAT_REBUILD_MAX_PER_SEAT
+    ? `${FAILED(seatId, generation)}原因码 ${code}）：这个席位的 ${SEAT_REBUILD_MAX_PER_SEAT} 次重建都用完了，Engine 不会再试，只能取消这个 Run 后重新启动。`
+    : `${FAILED(seatId, generation)}原因码 ${code}）：这个席位仍不可用。点“立即检查并推进”可再试一次（每个席位最多重建 ${SEAT_REBUILD_MAX_PER_SEAT} 次），否则取消这个 Run 后重新启动。`;
 
 export type CannotRebuild =
   | "no-spec"
@@ -267,7 +275,9 @@ export type CannotRebuild =
   | "prompt-mismatch"
   | "no-workspace"
   | "no-coordinator"
-  | "records-unreadable";
+  | "records-unreadable"
+  | "proof-bound"
+  | "records-full";
 
 const UNABLE_REASON: Record<CannotRebuild, string> = {
   "no-spec": "这个 Run 没有保存这个成员的启动规格（0.8.0 之前启动的 Run，或规格超过大小上限）",
@@ -278,6 +288,8 @@ const UNABLE_REASON: Record<CannotRebuild, string> = {
   "no-workspace": "这个 Run 没有记下启动时的 Workspace",
   "no-coordinator": "协调者的席位里没有 Agent，新成员没有父 Agent 可挂",
   "records-unreadable": "这个 Run 的重建记录读不懂",
+  "proof-bound": "它的 Agent 已有被接受的交付证明，换绑会让台账失效",
+  "records-full": "这个 Run 的重建记录已经写到大小上限，再写一条会让整块读不懂",
 };
 
 export const unableAlertText = (seatId: string, why: CannotRebuild): string =>
@@ -316,6 +328,36 @@ export type RebuildStart = {
   reason: string;
 };
 
+/** What binding or failing an attempt adds to its record (an Agent id, a time, a code), kept free when one starts. */
+const SETTLE_RESERVE_BYTES = 512;
+
+/**
+ * Whether this attempt can be written, and later settled, without the block of attempts passing its size
+ * limit (a block over it is not readable, and then nothing in it counts). Asked before anything is created.
+ */
+export function canStartRebuild(record: RunRecord, input: RebuildStart): boolean {
+  const read = readSeatRebuilds(record);
+  if (read.kind === "invalid") return false;
+  const items = read.kind === "valid" ? read.items : [];
+  if (items.length + 1 > SEAT_REBUILD_MAX_ITEMS) return false;
+  const next = {
+    rebuildId: rebuildIdFor(input.seatId, input.generation),
+    seatId: input.seatId,
+    generation: input.generation,
+    fromAgentId: input.fromAgentId,
+    toAgentId: null,
+    idempotencyKey: rebuildKeyFor(record.runId, input.seatId, input.generation),
+    title: input.title,
+    reason: input.reason.slice(0, 200),
+    state: "creating",
+    requestedAt: record.updatedAt,
+    settledAt: null,
+    error: null,
+  };
+  const block = { version: SEAT_REBUILDS_VERSION, items: [...items, next] };
+  return utf8Bytes(JSON.stringify(block)) + SETTLE_RESERVE_BYTES <= SEAT_REBUILD_MAX_BYTES;
+}
+
 /** Writes the attempt before anything is created: a restart then finds it and carries on. */
 export function startRebuildRecord(
   record: RunRecord,
@@ -327,6 +369,8 @@ export function startRebuildRecord(
   const items = read.kind === "valid" ? read.items : [];
   const rebuildId = rebuildIdFor(input.seatId, input.generation);
   if (items.some((item) => item.rebuildId === rebuildId)) return { changed: false, next: record };
+  // Never write a block that the next read would call invalid.
+  if (!canStartRebuild(record, input)) return { changed: false, next: record };
   const next = structuredClone(record);
   const item: SeatRebuildItem = {
     rebuildId,

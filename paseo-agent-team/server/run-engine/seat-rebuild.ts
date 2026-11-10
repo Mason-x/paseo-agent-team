@@ -164,6 +164,13 @@ export async function executeRebuild(
   if (record.lifecycle === "finished" || record.lifecycle === "cancelled") {
     return fail("run-ended");
   }
+  // The seat is not free to be moved (work or a message is on its way to the old Agent, or a proof ties it):
+  // nothing is asked of the host. The attempt stays `creating`; a later look asks again, with the same key.
+  const blocked = rebindBlocker(record, item.seatId, item.fromAgentId);
+  if (blocked !== null) {
+    deps.log(`the rebuild ${rebuildId} of ${runId} waits: its seat cannot be moved (${blocked})`);
+    return { status: "skipped" };
+  }
   const checked = await checkRebuildable(deps.host, record, item.seatId);
   if (!checked.ok) return fail(checked.why);
   const parent = checked.parentAgentId;
@@ -210,6 +217,11 @@ export async function executeRebuild(
       );
       if (!done.ok) {
         holder.code = `bind-${done.code}`;
+        // The Agent exists on the host and its id is only in this process. A refusal that may pass (work on its
+        // way to the old Agent, a seat that is not ready) leaves the attempt `creating`: the same key gives the
+        // same Agent again and the bind is tried once more. Only an attempt that is gone or already settled
+        // cannot be carried on, and is failed.
+        if (done.code !== "rebuild-missing" && done.code !== "rebuild-settled") return null;
         const failed = failRebuildRecord(current, rebuildId, holder.code, deps.clock.now());
         return failed.changed ? failed.next : null;
       }
@@ -226,7 +238,10 @@ export async function executeRebuild(
       `the rebuilt Agent ${created} of ${item.seatId} in ${runId} could not be bound`,
       holder.code,
     );
-    return { status: "failed", seatId: item.seatId, code: holder.code };
+    const lost = holder.code === "bind-rebuild-missing" || holder.code === "bind-rebuild-settled";
+    return lost
+      ? { status: "failed", seatId: item.seatId, code: holder.code }
+      : { status: "skipped" };
   }
   return { status: "bound", seatId: item.seatId, agentId: created };
 }

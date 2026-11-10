@@ -15,6 +15,7 @@ import {
   AGENT_SPEC_PROMPT_MAX_BYTES,
   AGENT_SPECS_MAX_BYTES,
   type AgentSpec,
+  canStartRebuild,
   failRebuildRecord,
   freezeAgentSpecs,
   readAgentSpecs,
@@ -264,6 +265,18 @@ describe("the attempts (readSeatRebuilds)", () => {
     expect(readSeatRebuilds(withItem({ title: "t".repeat(501) })).kind).toBe("invalid");
   });
 
+  test("a title is cut in UTF-16 units like the host's, keeps its suffix and never splits a pair", () => {
+    // In unicode mode a class only matches a surrogate that is not half of a pair.
+    const lone = /[\ud800-\udfff]/u;
+    for (const base of ["😀".repeat(40), `a${"😀".repeat(40)}`, "界".repeat(80), "x"]) {
+      const title = rebuildTitle(base, 2);
+      expect(title.length).toBeLessThanOrEqual(60);
+      expect(title.endsWith("（重建 2）")).toBe(true);
+      expect(title.slice(0, 60)).toBe(title);
+      expect(lone.test(title)).toBe(false);
+    }
+  });
+
   test("the key and the title: the key names the attempt, and the suffix survives the host's 60-character cut", () => {
     expect(rebuildKeyFor("run-1", "seat-b1", 2)).toBe("engine:run-1:seat:seat-b1:rebuild:2");
     expect(rebuildTitle("Builder", 1)).toBe("Builder（重建 1）");
@@ -401,6 +414,69 @@ describe("rebindSeatAgent", () => {
       ok: false,
       code: "seat-bound-to-another-agent",
     });
+  });
+});
+
+describe("the block of attempts stays readable", () => {
+  const fillItem = (index: number, titleLength: number, reasonLength = 100) => ({
+    rebuildId: `rebuild-seat-fill-${index}-g1`,
+    seatId: `seat-fill-${index}`,
+    generation: 1,
+    fromAgentId: `agent-fill-${index}`,
+    toAgentId: `agent-fill-${index}-new`,
+    idempotencyKey: `engine:run:seat:seat-fill-${index}:rebuild:1`,
+    title: "t".repeat(titleLength),
+    reason: "r".repeat(reasonLength),
+    state: "bound",
+    requestedAt: NOW,
+    settledAt: NOW,
+    error: null,
+  });
+  const input = {
+    seatId: SEAT,
+    generation: 1 as const,
+    fromAgentId: OLD,
+    title: rebuildTitle("Builder", 1),
+    reason: "turn-cut-off",
+  };
+  const withItems = (items: unknown[]) => {
+    const record = frozen({ [SEAT]: spec("hello") });
+    (record as Record<string, unknown>).seatRebuilds = { version: 1, items };
+    return record;
+  };
+
+  test("an attempt that would take the block past its limit is not written; one that fits is, and binding it leaves the block readable", () => {
+    // Fill the block until one more attempt no longer fits.
+    const items: unknown[] = [];
+    while (canStartRebuild(withItems(items), input)) items.push(fillItem(items.length, 300));
+    expect(readSeatRebuilds(withItems(items)).kind).toBe("valid");
+    const refused = startRebuildRecord(withItems(items), input, NOW);
+    expect(refused.changed).toBe(false);
+    expect(readSeatRebuilds(refused.next).kind).toBe("valid");
+
+    // One filler is cut down, a byte at a time, until the new attempt just fits: as tight as the check allows.
+    items.pop();
+    items.pop();
+    let total = 700;
+    const filler = (size: number) => {
+      const title = Math.min(500, size - 1);
+      return fillItem(items.length, title, size - title);
+    };
+    while (total > 2 && !canStartRebuild(withItems([...items, filler(total)]), input)) total -= 1;
+    const tight = withItems([...items, filler(total)]);
+    const started = startRebuildRecord(tight, input, NOW);
+    expect(started.changed).toBe(true);
+    expect(readSeatRebuilds(started.next).kind).toBe("valid");
+    const done = completeSeatRebuild(
+      started.next,
+      { rebuildId: "rebuild-seat-b9-g1", toAgentId: NEW },
+      LATER,
+    );
+    expect(done.ok && done.changed).toBe(true);
+    if (done.ok) expect(readSeatRebuilds(done.next).kind).toBe("valid");
+    const failed = failRebuildRecord(started.next, "rebuild-seat-b9-g1", "create-failed", LATER);
+    expect(failed.changed).toBe(true);
+    expect(readSeatRebuilds(failed.next).kind).toBe("valid");
   });
 });
 

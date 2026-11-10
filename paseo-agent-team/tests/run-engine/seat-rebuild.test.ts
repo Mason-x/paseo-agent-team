@@ -25,6 +25,7 @@ import { emptyReadRetries } from "../../shared/domain/run-engine/read-retry";
 import { readSeatProfiles } from "../../shared/domain/run-engine/run-record";
 import {
   type AgentSpec,
+  canStartRebuild,
   readSeatRebuilds,
   startRebuildRecord,
 } from "../../shared/domain/run-engine/seat-rebuild";
@@ -95,18 +96,21 @@ const emptyPage: PortTimelinePage = {
   reset: false,
 };
 
-type ReadsAs = "opens" | "throws" | "stays";
+type ReadsAs = "opens" | "throws" | "stays" | "runs" | "hangs";
 
 /** A host whose agents are idle unless said to be closed (reading a closed one does what the test says). */
 function fakeHost() {
   const closed = new Set<string>();
+  const running = new Set<string>();
   const readsAs = new Map<string, ReadsAs>();
   const sent: { agentId: string; text: string }[] = [];
   const timelineReads: string[] = [];
   const snapshot = (agentId: string): PortAgentSnapshot =>
-    closed.has(agentId)
-      ? { status: "closed", activeTurn: null }
-      : { status: "idle", activeTurn: null };
+    running.has(agentId)
+      ? { status: "running", activeTurn: null }
+      : closed.has(agentId)
+        ? { status: "closed", activeTurn: null }
+        : { status: "idle", activeTurn: null };
   const port: PaseoEnginePort = {
     agents: {
       ref: (agentId) => ({
@@ -119,7 +123,13 @@ function fakeHost() {
             timelineReads.push(agentId);
             const how = readsAs.get(agentId) ?? "stays";
             if (how === "throws") throw new Error("Failed to resume: no rollout found");
+            if (how === "hangs") await new Promise<never>(() => undefined);
             if (how === "opens") closed.delete(agentId);
+            if (how === "runs") {
+              // Loaded by the read, and a turn started on it meanwhile (a person wrote to it).
+              closed.delete(agentId);
+              running.add(agentId);
+            }
             return emptyPage;
           },
         },
@@ -128,7 +138,7 @@ function fakeHost() {
       }),
     },
   };
-  return { port, sent, closed, readsAs, timelineReads };
+  return { port, sent, closed, running, readsAs, timelineReads };
 }
 type Host = ReturnType<typeof fakeHost>;
 
@@ -181,7 +191,11 @@ const PRODUCERS: Record<string, number> = {
   "seat-b5": 3,
 };
 
-function makeService(host: Host, rebuild: Rebuild | null) {
+function makeService(
+  host: Host,
+  rebuild: Rebuild | null,
+  extra: Partial<EngineServiceOptions> = {},
+) {
   const effects = createEffects({ store, port: host.port, compile: compileDispatch });
   return createEngineService({
     store,
@@ -219,6 +233,7 @@ function makeService(host: Host, rebuild: Rebuild | null) {
     resolveWorkspace: () => ({ workspaceId: "ws-start", directory: repoDir }),
     compile: compileDispatch,
     rebuild: rebuild?.host,
+    ...extra,
   });
 }
 
@@ -1482,6 +1497,334 @@ for (const version of [1, 2] as const) {
       const before = flushed.length;
       await driver.kick(RUN_ID);
       expect(flushed.length).toBeGreaterThan(before);
+    });
+
+    describe("what the review of the first version found", () => {
+      test("an N seat whose read finds a turn running is not unopenable: nothing is rebuilt, and the next look sends to it", async () => {
+        const { host, rebuild } = await neverRanSeat("runs");
+        const service = makeService(host, rebuild);
+        const first = await service.dispatchNext(RUN_ID);
+        expect(first).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+        expect(roster(await stored(), "seat-b3")).toBe(B3);
+
+        // It is not on the list of seats that cannot be opened: even if it read closed again, it is not rebuilt.
+        let looked = false;
+        rebuild.state.onReadRole = async () => {
+          looked = true;
+        };
+        host.running.delete(B3);
+        host.closed.add(B3);
+        host.readsAs.set(B3, "stays");
+        await service.dispatchNext(RUN_ID);
+        expect(looked).toBe(false);
+        expect(rebuild.created).toHaveLength(0);
+        host.closed.delete(B3);
+        host.readsAs.set(B3, "runs");
+        // The turn ends; the seat is idle in Paseo again. The Run goes on with the same Agent.
+        host.running.delete(B3);
+        const second = await service.dispatchNext(RUN_ID);
+        expect(second).toMatchObject({ status: "dispatched", seatId: "seat-b3" });
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+        // The Agent is still the seat's: what it reports is recorded, not dropped.
+        expect(
+          await createRunObserver({ store }).ingest({
+            name: "agent.turn_started",
+            agentId: B3,
+            turnId: "turn-person",
+          }),
+        ).toMatchObject({ status: "recorded" });
+      });
+
+      test("a read that does not finish in time is not proof that the seat cannot be opened: nothing is rebuilt", async () => {
+        const { host, rebuild } = await neverRanSeat("hangs");
+        const service = makeService(host, rebuild, { reopenTimeoutMs: 20 });
+        const result = await service.dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+        expect(roster(await stored(), "seat-b3")).toBe(B3);
+      });
+
+      test("a seat that is found running when the attempt is about to be written is not rebuilt", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        rebuild.state.onReadRole = async () => {
+          host.closed.delete(B3);
+          host.running.add(B3);
+        };
+        await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+        expect(host.sent).toHaveLength(0);
+      });
+
+      test("the host made the Agent but the seat cannot be given to it yet: the attempt stays, nothing is asked of the host while it cannot, and the same Agent is bound later", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        const setEnabled = (enabled: boolean) =>
+          store.update(RUN_ID, (record) => {
+            const seat = record.roster.find((entry) => entry.seatId === "seat-b3");
+            if (seat) seat.enabled = enabled;
+            return record;
+          });
+        let taken = false;
+        rebuild.state.onCreate = async () => {
+          if (taken) return;
+          taken = true;
+          // The seat stops being a member's while its new Agent is being made.
+          await setEnabled(false);
+        };
+        const service = makeService(host, rebuild);
+        await service.dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(1);
+        let held = await stored();
+        expect(items(held).map((item) => [item.generation, item.state, item.error])).toEqual([
+          [1, "creating", null],
+        ]);
+        expect(roster(held, "seat-b3")).toBe(B3);
+        expect(eventsOf(held, "seat-rebound")).toHaveLength(0);
+        expect(host.sent).toHaveLength(0);
+
+        // Still in the way: the host is not asked again.
+        await service.dispatchNext(RUN_ID);
+        await service.dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(1);
+
+        // Cleared: the same key gives the same Agent, which is bound once.
+        await setEnabled(true);
+        await service.dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(2);
+        expect(new Set(rebuild.created.map((request) => request.idempotencyKey)).size).toBe(1);
+        expect(rebuild.byKey.size).toBe(1);
+        held = await stored();
+        const fresh = rebuild.byKey.get(KEY("seat-b3", 1)) ?? "";
+        expect(items(held).map((item) => [item.generation, item.state])).toEqual([[1, "bound"]]);
+        expect(roster(held, "seat-b3")).toBe(fresh);
+        expect(eventsOf(held, "seat-rebound")).toHaveLength(1);
+      });
+
+      test("a seat whose Agent was accepted with a delivery proof is never moved, and the Run says so", async () => {
+        await seed();
+        await store.update(RUN_ID, (record) => {
+          for (const entry of record.eventReceipts) {
+            if (entry.agentId === B1 && entry.kind === "turn_ended") {
+              (entry as { outcome?: string }).outcome = "failed";
+            }
+          }
+          return record;
+        });
+        const host = fakeHost();
+        host.closed.add(B1);
+        const rebuild = fakeRebuild();
+        const result = await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([]);
+        expect(rebuild.created).toHaveLength(0);
+        const record = await stored();
+        expect(readSeatRebuilds(record).kind).toBe("absent");
+        const alerts = rebuildAlerts(record);
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]?.summary).toContain("Engine 无法重建席位 seat-b1");
+        expect(alerts[0]?.summary).toContain("交付证明");
+        expect(alerts[0]?.summary).toContain("取消这个 Run 后重新启动");
+      });
+
+      test("the block of attempts is not written past its limit: the Run says so and nothing is made", async () => {
+        const { host, rebuild } = await cutOffSeat((record) => {
+          const fill: Record<string, unknown>[] = [];
+          const input = {
+            seatId: "seat-b3",
+            generation: 1 as const,
+            fromAgentId: B3,
+            title: "Builder seat-b3（重建 1）",
+            reason: "turn-cut-off",
+          };
+          for (let index = 0; ; index += 1) {
+            fill.push({
+              rebuildId: `rebuild-seat-fill-${index}-g1`,
+              seatId: `seat-fill-${index}`,
+              generation: 1,
+              fromAgentId: `agent-fill-${index}`,
+              toAgentId: `agent-fill-${index}-new`,
+              idempotencyKey: `engine:${RUN_ID}:seat:seat-fill-${index}:rebuild:1`,
+              title: "t".repeat(300),
+              reason: "r".repeat(100),
+              state: "bound",
+              requestedAt: record.updatedAt,
+              settledAt: record.updatedAt,
+              error: null,
+            });
+            (record as Record<string, unknown>).seatRebuilds = { version: 1, items: fill };
+            if (!canStartRebuild(record, input)) break;
+            if (index > 200) throw new Error("the fill never reached the limit");
+          }
+        });
+        expect(readSeatRebuilds(await stored()).kind).toBe("valid");
+        await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(0);
+        expect(host.sent).toHaveLength(0);
+        const record = await stored();
+        expect(readSeatRebuilds(record).kind).toBe("valid");
+        expect(items(record).some((item) => item.seatId === "seat-b3")).toBe(false);
+        const alerts = rebuildAlerts(record);
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]?.summary).toContain("Engine 无法重建席位 seat-b3");
+        expect(alerts[0]?.summary).toContain("大小上限");
+      });
+
+      test("the second generation that fails says there is no third: no 'try again', only to cancel", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        rebuild.state.failures = 6;
+        const driver = makeDriver(makeService(host, rebuild));
+        await driver.kick(RUN_ID);
+        expect(rebuildAlerts(await stored())[0]?.summary).toContain("可再试一次");
+        await driver.retryRun(RUN_ID, { byPerson: true });
+        const alerts = rebuildAlerts(await stored());
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]?.summary).toContain("第 2 次");
+        expect(alerts[0]?.summary).toContain("都用完了");
+        expect(alerts[0]?.summary).not.toContain("可再试一次");
+        expect(alerts[0]?.summary).toContain("取消这个 Run 后重新启动");
+      });
+
+      test("a click on 'check now' that joins a pass already under way still gets its own pass, and with it the second try", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        rebuild.state.failures = 3;
+        await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(items(await stored()).map((item) => item.state)).toEqual(["failed"]);
+
+        // A pass is under way for this Run (a recovery, say); it has judged the seats and is writing what it found.
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const arrived = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        let held = false;
+        const slowStore = {
+          ...store,
+          update: async (...args: Parameters<RunStore["update"]>) => {
+            if (!held) {
+              held = true;
+              reached();
+              await gate;
+            }
+            return store.update(...args);
+          },
+        } as RunStore;
+        const driver = makeDriver(makeService(host, rebuild, { store: slowStore }));
+        const automatic = driver.retryRun(RUN_ID);
+        await arrived;
+        // The person presses the button now: the pass under way is past the step that would let a seat be rebuilt again.
+        const click = driver.retryRun(RUN_ID, { byPerson: true });
+        release();
+        await Promise.all([automatic, click]);
+        expect(items(await stored()).map((item) => [item.generation, item.state])).toEqual([
+          [1, "failed"],
+          [2, "bound"],
+        ]);
+      });
+
+      test("a click that joins a pass under way costs no extra pass when it would change nothing", async () => {
+        await seed((record) => {
+          const t2 = record.tasks.find((task) => task.spec.id === "t2");
+          if (t2) t2.state = "pending";
+        });
+        const host = fakeHost();
+        const real = makeService(host, fakeRebuild());
+        let calls = 0;
+        let gate: Promise<void> | null = null;
+        let reached: () => void = () => undefined;
+        const arrived = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const service = {
+          ...real,
+          dispatchNext: async (runId: string) => {
+            calls += 1;
+            if (gate) {
+              reached();
+              await gate;
+              gate = null;
+            }
+            return real.dispatchNext(runId);
+          },
+        };
+        const driver = makeDriver(service as never);
+
+        await driver.retryRun(RUN_ID);
+        const alone = calls;
+        expect(alone).toBeGreaterThan(0);
+
+        calls = 0;
+        let release: () => void = () => undefined;
+        gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const automatic = driver.retryRun(RUN_ID);
+        await arrived;
+        const click = driver.retryRun(RUN_ID, { byPerson: true });
+        const second = driver.retryRun(RUN_ID, { byPerson: true });
+        release();
+        await Promise.all([automatic, click, second]);
+        expect(calls).toBe(alone);
+      });
+
+      test("a Run that is over while an attempt is still being made: a recovery closes it as failed, creates nothing and takes the warning down", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        await store.update(RUN_ID, (record) => {
+          const started = startRebuildRecord(
+            record,
+            {
+              seatId: "seat-b3",
+              generation: 1,
+              fromAgentId: B3,
+              title: "Builder seat-b3（重建 1）",
+              reason: "turn-cut-off",
+            },
+            record.updatedAt,
+          );
+          started.next.lifecycle = "cancelled";
+          return started.next;
+        });
+        expect(rebuildAlerts(await stored())).toHaveLength(1);
+        await makeDriver(makeService(host, rebuild)).recover();
+        const record = await stored();
+        expect(items(record).map((item) => [item.state, item.error])).toEqual([
+          ["failed", "run-ended"],
+        ]);
+        expect(rebuildAlerts(record)).toEqual([]);
+        expect(rebuild.created).toHaveLength(0);
+        expect(roster(record, "seat-b3")).toBe(B3);
+      });
+
+      test("the pass that follows a bind delivers the hooks the real observer held for want of an owner", async () => {
+        const { host, rebuild } = await cutOffSeat();
+        const observer = createRunObserver({ store });
+        rebuild.state.onCreate = async () => {
+          await observer.ingest({ name: "agent.created", agentId: "agent-new-1" });
+        };
+        const driver = createEngineDriver({
+          store,
+          observer,
+          host: {} as never,
+          intake: { settleAgent: async () => undefined } as never,
+          dagIntake: { settleCoordinator: async () => undefined } as never,
+          service: makeService(host, rebuild),
+        });
+        await driver.kick(RUN_ID);
+        expect(rebuild.created).toHaveLength(1);
+        expect(observer.buffered).toBe(0);
+        expect(observer.needsReconcile).toBe(false);
+        expect(
+          (await stored()).eventReceipts.some((entry) => entry.agentId === "agent-new-1"),
+        ).toBe(true);
+      });
     });
 
     describe("the old Agent after the rebind", () => {
