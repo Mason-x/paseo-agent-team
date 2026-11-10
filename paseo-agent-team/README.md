@@ -535,6 +535,51 @@ daemon restart.
   Runs that already exist can still be listed and read, still take hooks, recovery and the
   controls, and run to the end.
 
+**A retried turn after a restart.** After a restart the host numbers turns from the start again, so the
+retry of a turn the Engine ended as `host-lost` can carry the id of that turn. The receipts keep them apart
+by appearance (the second one has `#2` at the end of its key). The end of the retried turn is recorded by
+its own `turn_ended` hook: the report is taken in and the review is sent in that same pass, without
+pressing **立即检查并推进**. Only an end the host delivered counts as one this plugin process has already
+seen; an end the Engine wrote itself does not. A late real end of a turn the Engine settled (with no newer
+start), a repeat of the host's own end and an Engine end written by an earlier plugin process are judged as
+before, and the reconcile read is unchanged. Before 0.8.0 the hook of the retried turn was dropped as a
+repeat of the Engine's own end and only a check recorded it, so the Run waited with neither a warning nor a
+decision.
+
+**A member that never ran, after a kill.** After a kill the host reads a member that was not in a turn as
+idle, with no `closed` receipt, so it looks usable. A member that has never started a turn in this Run, whose
+Agent was made before this plugin process began, is therefore held back like a closed seat until this
+process has read its history once. The age of the Agent is its first `created` receipt; without one, the time
+its rebuild was asked for; without that, the creation of the Run. The coordinator, a member that finished a
+turn and one that was cut off in a turn are never read for this, and neither is an Agent this process made
+(a rebuilt one included). The read is the one above, with the same limits: 30 seconds at most, two seats per
+pass, no message and no model call; a failed read is not repeated by the automatic looks and each press of
+**立即检查并推进** allows exactly one more; a paused Run, a Run with nothing to send and a pass with no work for
+that seat read nothing. It is read when the work would go to it: a free seat takes the work first, and a seat
+that is only busy does not keep it from being read. If the read works (a Claude member), the seat is marked
+opened in memory and gets the work, once. If it fails, the old Agent is sent nothing and the seat is rebuilt
+(**Rebuilding**, reason `never-ran-unopenable`, at most twice, the second needs the button); this is the only
+case in which a seat the host reads as idle is rebuilt, and a closed seat a person has opened since is not.
+A read that does not finish in time proves nothing: no rebuild, no dispatch, the next press reads again.
+Where nothing can be rebuilt (a Run started before specs were frozen, a Role that changed) the seat stays
+refused with the closed-seat warning and the Run can only be cancelled.
+
+**A Run frozen by a dispatch of unknown outcome, and the last way out.** If the host crashes or restarts
+while a dispatch is being sent, and the receiver can no longer be read (a Codex member that never ran), the
+outcome of that dispatch stays unknown: the Run is frozen, cancelling it stops at `paused`, and its
+repository claim stays, so every later Engine Run in the same repository waits for it. The window is
+milliseconds long with 0.8.0 (only the intent being sent at the moment of the crash); without the fix above it
+was the rest of the Run, because every message to such a member went out after the crash. The product has no
+button for it. The last way out, checked offline with the store code and not tried on a live daemon: stop the
+daemon; move the Run's ledger file (`<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json`) to a backup
+directory outside `agent-team-runs`, do not delete it; start the daemon. The Run is gone from the Runs
+page, its claim is gone, the other Runs stay readable and trusted (a missing file is "missing", not
+"damaged"), and putting the file back at the next stop brings the Run back. Members of that Run that are
+still alive in Paseo are not touched. Going back to 0.7.x loses both fixes: a retried turn that reused its id
+is recorded only when you press **立即检查并推进**, and after a crash every message to a member that never ran
+goes out and may freeze the Run, so cancel a Run with a Codex reviewer that has not reviewed yet and start it
+again.
+
 **Where the data is.** `<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json` is the ledger;
 damaged or unreadable ledgers are kept as they are and listed on the page, never repaired or
 overwritten. The design, the numbered implementation record and the open work are in

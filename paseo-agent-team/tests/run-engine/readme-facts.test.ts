@@ -9,6 +9,10 @@ import {
   LOST_TURN_SETTLE_DELAY_MS,
 } from "../../shared/domain/run-engine/read-retry";
 import { SEAT_CLOSED_ALERT_PREFIX } from "../../shared/domain/run-engine/seat-closed";
+import {
+  REOPEN_READS_PER_PASS,
+  REOPEN_TIMEOUT_MS,
+} from "../../shared/domain/run-engine/seat-reopen";
 import { DEFAULT_ENGINE_LIMITS } from "../../shared/domain/run-engine/team-config-edit";
 import {
   RUN_SCHEMA_VERSION,
@@ -54,6 +58,25 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(rebuilding).toContain("can the host be left with an Agent that no Run lists");
     expect(rebuilding).toContain("evidence-seat-unavailable");
     expect(rebuilding).toContain("delivery proof");
+  });
+
+  test("the paragraphs on a retried turn, a member that never ran and the last way out say what the code does", () => {
+    const flat = section.replace(/\s+/gu, " ");
+    expect(flat).toContain("**A retried turn after a restart.**");
+    expect(flat).toContain(
+      "Only an end the host delivered counts as one this plugin process has already seen",
+    );
+    expect(flat).toContain("**A member that never ran, after a kill.**");
+    expect(flat).toContain("never-ran-unopenable");
+    expect(REOPEN_READS_PER_PASS).toBe(2);
+    expect(flat).toContain("two seats per pass");
+    expect(flat).toContain(`${REOPEN_TIMEOUT_MS / 1000} seconds at most`);
+    expect(flat).toContain(
+      "**A Run frozen by a dispatch of unknown outcome, and the last way out.**",
+    );
+    expect(flat).toContain("move the Run's ledger file");
+    expect(flat).toContain("outside `agent-team-runs`");
+    expect(flat).toContain("Going back to 0.7.x loses both fixes");
   });
 
   test("the ledger path and the evidence root are the ones the code uses", () => {
