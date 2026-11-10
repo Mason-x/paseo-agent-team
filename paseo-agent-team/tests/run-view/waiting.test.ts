@@ -355,6 +355,18 @@ describe("explainDecision", () => {
     ).toContain("丢掉");
   });
 
+  test("the reason a lost-reply decision gives is the one its summary gives, for both lost kinds", () => {
+    const base = decision({ category: "D1" });
+    for (const kind of ["member-lost", "host-lost"]) {
+      const said = explainDecision({ ...base, kind }).why;
+      // The reply was lost after the turn ended, or the turn was cut off: both are said.
+      expect(said).toContain("回合被切断");
+      expect(said).toContain("回复已丢失");
+      // The task's own waiting reason says the same thing.
+      expect(explainTask(task({ state: "assigned", waitingReason: kind }), []).why).toBe(said);
+    }
+  });
+
   test("a pending decision with a retry says you can retry it here", () => {
     for (const category of ["D1", "D3", "D4"]) {
       const said = explainDecision(decision({ category }));
