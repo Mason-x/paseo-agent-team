@@ -283,7 +283,10 @@ daemon restart.
 **Recover and roll back.**
 
 - After a restart the daemon recovers every live Run from its ledger and works out again which
-  reads and sends are due. One case needs a person: a Run whose launch was interrupted while its
+  reads and sends are due. The plugin gets no Paseo handle when it loads: recovery starts with the
+  first RPC or hook it receives after the daemon is up, so after restarting the daemon **open the
+  Runs page** (any call counts, and the page makes one as soon as it loads) for the Engine to
+  start; until then a live Run does not move. One case needs a person: a Run whose launch was interrupted while its
   members were being created cannot be resumed. It is closed with a critical alert that lists the
   Agents already recorded for it (it may be missing ones that were created but not recorded, the
   coordinator is created first). Look for those Agents in Paseo, archive them if you do not want

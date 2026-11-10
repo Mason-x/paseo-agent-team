@@ -248,4 +248,10 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain("只能取消这个 Run 后重新启动");
     expect(section).not.toContain("请点重新规划");
   });
+
+  test("it says the Engine starts recovering only when something calls the plugin: open the Runs page after a restart (T11a)", () => {
+    expect(section).toContain("gets no Paseo handle when it loads");
+    expect(section).toContain("**open the\n  Runs page**");
+    expect(section).toContain("until then a live Run does not move");
+  });
 });
