@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createRunQueries } from "../../server/run-engine/queries";
-import { createEngineRuntime, seatSourceOf } from "../../server/run-engine/runtime";
+import { createEngineRuntime, roleMcpReader, seatSourceOf } from "../../server/run-engine/runtime";
 import type { EngineStartInput } from "../../server/run-engine/start";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { buildLaunchPlan, type LaunchPlan } from "../../shared/domain/launch-plan";
 import { COORDINATOR_SEAT_ID, REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
 import { readLaunchWorkspace } from "../../shared/domain/run-engine/run-record";
+import { readAgentSpecs } from "../../shared/domain/run-engine/seat-rebuild";
 import { engineLaunchGate, resolveTeamRunEngine } from "../../shared/domain/run-engine/team-config";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PaseoPort, PortTimelinePage } from "../../shared/paseo/port";
@@ -129,6 +130,12 @@ function fakeHost() {
   const sent: { agentId: string; text: string; messageId: string }[] = [];
   /** Agents whose turn is still running, as the host's live snapshot reports it. */
   const busy = new Set<string>();
+  /** Agents the host reads as closed, and the ones whose timeline it cannot load. */
+  const closed = new Set<string>();
+  const unreadable = new Set<string>();
+  /** The Agents created through the Paseo handle itself (a rebuild), by workspace. */
+  const madeBy = new Map<string, string>();
+  const made: { workspaceId: string; options: Record<string, unknown>; id: string }[] = [];
   let seq = 0;
   let reads = 0;
   const entries = (agentId: string) => {
@@ -156,6 +163,7 @@ function fakeHost() {
         timeline: {
           refetch: async () => {
             reads += 1;
+            if (unreadable.has(agentId)) throw new Error("Failed to resume: no rollout found");
             return {
               entries: [...entries(agentId)],
               epoch: "e1",
@@ -170,9 +178,11 @@ function fakeHost() {
         },
         current: () => ({ status: "idle", activeTurn: null }),
         refresh: async () => ({
-          agent: busy.has(agentId)
-            ? { status: "running", activeTurn: { id: "turn" } }
-            : { status: "idle", activeTurn: null },
+          agent: closed.has(agentId)
+            ? { status: "closed", activeTurn: null }
+            : busy.has(agentId)
+              ? { status: "running", activeTurn: { id: "turn" } }
+              : { status: "idle", activeTurn: null },
         }),
       }),
     },
@@ -186,8 +196,28 @@ function fakeHost() {
     },
     archiveAgent: async () => undefined,
   };
+  /** The Paseo handle as an RPC or a hook supplies it: the port, and what creates an Agent in a Workspace. */
+  const paseo = Object.assign({}, port, {
+    workspaces: {
+      ref: (workspaceId: string) => ({
+        agents: {
+          create: async (options: Record<string, unknown>) => {
+            const key = String(options.idempotencyKey ?? "");
+            const id = madeBy.get(key) ?? `agent-made-${madeBy.size + 1}`;
+            madeBy.set(key, id);
+            made.push({ workspaceId, options, id });
+            return { id };
+          },
+        },
+      }),
+    },
+  }) as unknown as PaseoPort;
   return {
     port,
+    paseo,
+    made,
+    closed,
+    unreadable,
     adapter,
     sent,
     busy,
@@ -201,9 +231,20 @@ function fakeHost() {
 
 type Host = ReturnType<typeof fakeHost>;
 
-function runtime(options: { supported?: boolean; identityOk?: boolean } = {}) {
+function runtime(
+  options: { supported?: boolean; identityOk?: boolean; roles?: readonly unknown[] } = {},
+) {
   return createEngineRuntime({
     store,
+    ...(options.roles
+      ? {
+          readRoles: async () => ({
+            status: "ready" as const,
+            values: { roles: options.roles } as never,
+          }),
+          rebuildRetryDelayMs: 0,
+        }
+      : {}),
     ensureReady: async () => undefined,
     // The machine's own git config must not decide these tests.
     commitIdentity: async () =>
@@ -463,6 +504,90 @@ describe("a Run started through the launch host", () => {
     await vi.waitFor(() => expect(recover).toHaveBeenCalledTimes(1));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(recover).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a member the host cannot reopen, through the production wiring", () => {
+  test("is rebuilt from the spec frozen at launch: the Agent is made through the Paseo handle, bound, and given the work once", async () => {
+    const host = fakeHost();
+    const wired = runtime({ roles: [techLead, architect, developer] });
+    const started = await wired.launchHost.start(startInput(), host.paseo, host.adapter);
+    if (!started.ok) throw new Error(`start failed: ${started.message} ${started.detail}`);
+    await wired.recover();
+    const launched = await stored();
+    const seatB = launched.roster.find((seat) => seat.duties.includes("implement"));
+    if (!seatB?.agentId) throw new Error("fixture has no implementing seat");
+    const specs = readAgentSpecs(launched);
+    const frozen = specs.kind === "valid" ? specs.seats.get(seatB.seatId) : undefined;
+    expect(frozen?.systemPrompt).toBeTruthy();
+
+    // A restart left the implementing member closed, and it never ran: its history cannot be read either.
+    host.closed.add(seatB.agentId);
+    host.unreadable.add(seatB.agentId);
+    await coordinatorPlans(host, started.coordinatorId);
+    await wired.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: started.coordinatorId,
+        turnId: host.turnOf(started.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.paseo,
+    );
+
+    const after = await stored();
+    expect(host.made).toHaveLength(1);
+    const made = host.made[0];
+    expect(made?.workspaceId).toBe("ws-start");
+    expect(made?.options).toMatchObject({
+      idempotencyKey: `engine:${RUN_ID}:seat:${seatB.seatId}:rebuild:1`,
+      parent: started.coordinatorId,
+      labels: frozen?.labels,
+      config: { systemPrompt: frozen?.systemPrompt },
+    });
+    expect(made?.options.prompt).toBeUndefined();
+    expect(after.roster.find((seat) => seat.seatId === seatB.seatId)?.agentId).toBe(made?.id);
+    expect(states(after)).toEqual({ t1: "assigned", t2: "pending" });
+    // The plan request, then the task: to the new Agent. The old one was never written to.
+    expect(host.sent.map((entry) => entry.agentId)).toEqual([started.coordinatorId, made?.id]);
+    expect(after.events.filter((event) => event.kind === "seat-rebound")).toHaveLength(1);
+  });
+
+  test("a runtime given no Role reader never rebuilds", async () => {
+    const host = fakeHost();
+    const wired = runtime();
+    const started = await wired.launchHost.start(startInput(), host.paseo, host.adapter);
+    if (!started.ok) throw new Error("start failed");
+    const seatB = (await stored()).roster.find((seat) => seat.duties.includes("implement"));
+    if (!seatB?.agentId) throw new Error("fixture has no implementing seat");
+    host.closed.add(seatB.agentId);
+    host.unreadable.add(seatB.agentId);
+    await wired.recover();
+    await coordinatorPlans(host, started.coordinatorId);
+    await wired.onHook(
+      {
+        name: "agent.turn_ended",
+        agentId: started.coordinatorId,
+        turnId: host.turnOf(started.coordinatorId),
+        outcome: { kind: "completed" },
+      },
+      host.paseo,
+    );
+    expect(host.made).toHaveLength(0);
+    expect(states(await stored())).toEqual({ t1: "ready", t2: "pending" });
+  });
+
+  test("a Role is read for its MCP configuration alone: found, missing, or settings that cannot be read", async () => {
+    const mcpServers = { docs: { command: "node", args: ["a.js"] } };
+    const read = roleMcpReader(async () => ({
+      status: "ready",
+      values: { roles: [{ ...developer, mcpServers }, architect] } as never,
+    }));
+    expect(await read(developer.id)).toEqual({ status: "found", mcpServers });
+    expect(await read(architect.id)).toEqual({ status: "found", mcpServers: architect.mcpServers });
+    expect(await read("role-nobody")).toEqual({ status: "missing" });
+    const broken = roleMcpReader(async () => ({ status: "invalid", error: "bad json" }));
+    expect(await broken(developer.id)).toEqual({ status: "missing" });
   });
 });
 

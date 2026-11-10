@@ -2446,10 +2446,22 @@ describe("kick", () => {
       reason: "x",
       answer: { action: "retry" },
     });
+    // Frozen specs and the attempts to rebuild a member are in the ledger and nowhere else.
+    await store.update(RUN_ID, (record) => {
+      (record.launch as Record<string, unknown>).agentSpecs = {
+        version: 1,
+        seats: { "seat-b1": { systemPrompt: "SECRET-FROZEN-PROMPT" } },
+      };
+      (record as Record<string, unknown>).seatRebuilds = { version: 1, items: [] };
+      return record;
+    });
     const view = projectDetail(await stored());
     if (!view.ok) throw new Error("projection failed");
     const everything = JSON.stringify([replan, kicked, decided, view.view]);
     for (const secret of [
+      "SECRET-FROZEN-PROMPT",
+      "agentSpecs",
+      "seatRebuilds",
       DAG_NONCE,
       newNonce(text),
       "semanticArgs",

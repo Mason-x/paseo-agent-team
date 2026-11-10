@@ -14,6 +14,13 @@ import { identifyModelFamily } from "../model-family";
 import { reserveCoordinatorTurn } from "./coordinator-budget";
 import { COORDINATOR_DUTY, COORDINATOR_SEAT_ID } from "./dag-admission";
 import { emptyReadRetries } from "./read-retry";
+import {
+  readSeatRebuilds,
+  reboundAlerts,
+  SEAT_REBOUND_EVENT,
+  type SeatRebuildItem,
+} from "./seat-rebuild";
+import { isActorSettled } from "./transitions";
 
 /**
  * Building the first record of an Engine Run, and the small controlled changes the start sequence
@@ -315,6 +322,174 @@ export function bindSeatAgent(
   target.agentId = agentId;
   audit(next, "seat-bound", now, { seatId, agentId });
   return { ok: true, changed: true, next };
+}
+
+export type SeatRebind = {
+  seatId: string;
+  fromAgentId: string;
+  toAgentId: string;
+  rebuildId: string;
+  generation: number;
+};
+
+export type SeatRebinding =
+  | { ok: true; changed: boolean; next: RunRecord }
+  | {
+      ok: false;
+      code:
+        | "seat-missing"
+        | "seat-not-member"
+        | "agent-mismatch"
+        | "agent-in-use"
+        | "assignment-open"
+        | "proof-bound"
+        | "outbox-open";
+    };
+
+/** Dispatches and wakes the host has not yet answered for are still in flight to their recipient. */
+const OUTBOX_IN_FLIGHT = new Set(["prepared", "sending", "outcome-unknown"]);
+
+function reboundAlready(record: RunRecord, rebuildId: string, toAgentId: string): boolean {
+  const read = readSeatRebuilds(record);
+  return (
+    read.kind === "valid" &&
+    read.items.some(
+      (item) =>
+        item.rebuildId === rebuildId && item.state === "bound" && item.toAgentId === toAgentId,
+    )
+  );
+}
+
+/**
+ * Gives a member's seat a new Agent, the one way a bound seat changes agents (`bindSeatAgent` still
+ * refuses). The seat must hold `fromAgentId` and be idle in the ledger's eyes: no assignment of the seat
+ * or of that Agent unsettled, nothing still on its way to it. Old assignments keep the Agent they were
+ * made for; new work reads the roster. Asking again after it worked is a no-op, decided by the rebuild
+ * record (the audit event may have been compacted away). Not for the coordinator.
+ */
+export function rebindSeatAgent(record: RunRecord, input: SeatRebind, now: string): SeatRebinding {
+  const index = record.roster.findIndex((seat) => seat.seatId === input.seatId);
+  const seat = record.roster[index];
+  if (index < 0 || seat === undefined) return { ok: false, code: "seat-missing" };
+  if (seat.seatId === COORDINATOR_SEAT_ID || !seat.enabled) {
+    return { ok: false, code: "seat-not-member" };
+  }
+  if (
+    seat.agentId === input.toAgentId &&
+    reboundAlready(record, input.rebuildId, input.toAgentId)
+  ) {
+    return { ok: true, changed: false, next: record };
+  }
+  if (seat.agentId !== input.fromAgentId || input.toAgentId === input.fromAgentId) {
+    return { ok: false, code: "agent-mismatch" };
+  }
+  const used =
+    record.roster.some((other) => other.agentId === input.toAgentId) ||
+    record.assignments.some((entry) => entry.agentId === input.toAgentId) ||
+    record.nonceRegistry.some((entry) => entry.agentId === input.toAgentId);
+  if (used) return { ok: false, code: "agent-in-use" };
+  if (
+    record.assignments.some(
+      (entry) =>
+        (entry.seatId === input.seatId || entry.agentId === input.fromAgentId) &&
+        !isActorSettled(record, entry),
+    )
+  ) {
+    return { ok: false, code: "assignment-open" };
+  }
+  // A proof a seat's Agent was accepted with is only valid while the roster still names that Agent
+  // (`historicalProofValid`): moving the seat would make the ledger refuse the commit. A seat in that
+  // position has finished a turn, so it is never rebuilt; this is the guard if its receipts say otherwise.
+  if (
+    record.assignments.some(
+      (entry) =>
+        (entry.seatId === input.seatId || entry.agentId === input.fromAgentId) &&
+        entry.acceptedProof !== null,
+    )
+  ) {
+    return { ok: false, code: "proof-bound" };
+  }
+  if (
+    record.outbox.some(
+      (intent) => intent.recipient === input.fromAgentId && OUTBOX_IN_FLIGHT.has(intent.state),
+    )
+  ) {
+    return { ok: false, code: "outbox-open" };
+  }
+  const next = structuredClone(record);
+  const target = next.roster[index];
+  if (target === undefined) return { ok: false, code: "seat-missing" };
+  target.agentId = input.toAgentId;
+  audit(next, SEAT_REBOUND_EVENT, now, {
+    seatId: input.seatId,
+    fromAgentId: input.fromAgentId,
+    toAgentId: input.toAgentId,
+    rebuildId: input.rebuildId,
+    generation: input.generation,
+  });
+  return { ok: true, changed: true, next };
+}
+
+/**
+ * Why a seat could not be handed to a new Agent right now, or `null` if it could: the same answer
+ * `rebindSeatAgent` would give, asked before an Agent is created so that none is made for nothing.
+ */
+export function rebindBlocker(
+  record: RunRecord,
+  seatId: string,
+  fromAgentId: string,
+): Extract<SeatRebinding, { ok: false }>["code"] | null {
+  const probe = rebindSeatAgent(
+    record,
+    { seatId, fromAgentId, toAgentId: "\u0000probe", rebuildId: "probe", generation: 1 },
+    "1970-01-01T00:00:00.000Z",
+  );
+  return probe.ok ? null : probe.code;
+}
+
+export type RebuildCompletion =
+  | { ok: true; changed: boolean; next: RunRecord }
+  | {
+      ok: false;
+      code: Extract<SeatRebinding, { ok: false }>["code"] | "rebuild-missing" | "rebuild-settled";
+    };
+
+/**
+ * The Agent a rebuild created is bound to its seat, the attempt is marked bound and the alerts are
+ * written, all in the one record the caller commits. Done twice it changes nothing the second time.
+ */
+export function completeSeatRebuild(
+  record: RunRecord,
+  input: { rebuildId: string; toAgentId: string },
+  now: string,
+): RebuildCompletion {
+  const read = readSeatRebuilds(record);
+  const item: SeatRebuildItem | undefined =
+    read.kind === "valid" ? read.items.find((e) => e.rebuildId === input.rebuildId) : undefined;
+  if (item === undefined) return { ok: false, code: "rebuild-missing" };
+  if (item.state === "bound" && item.toAgentId === input.toAgentId) {
+    return { ok: true, changed: false, next: record };
+  }
+  if (item.state !== "creating") return { ok: false, code: "rebuild-settled" };
+  const rebound = rebindSeatAgent(
+    record,
+    {
+      seatId: item.seatId,
+      fromAgentId: item.fromAgentId,
+      toAgentId: input.toAgentId,
+      rebuildId: item.rebuildId,
+      generation: item.generation,
+    },
+    now,
+  );
+  if (!rebound.ok) return rebound;
+  const next = structuredClone(rebound.next);
+  const stored = (next as Record<string, unknown>).seatRebuilds as { items: SeatRebuildItem[] };
+  const target = stored.items.find((e) => e.rebuildId === item.rebuildId);
+  if (!target) return { ok: false, code: "rebuild-missing" };
+  Object.assign(target, { state: "bound", toAgentId: input.toAgentId, settledAt: now });
+  next.updatedAt = now;
+  return { ok: true, changed: true, next: reboundAlerts(next, item, now) };
 }
 
 export type LaunchState = RunRecord["launch"]["state"];

@@ -51,7 +51,8 @@ export type RetryReport = {
 
 export type DriverOptions = {
   store: Pick<RunStore, "get" | "update" | "list" | "runsForAgent">;
-  observer: Pick<RunObserver, "ingest" | "flush" | "reconcile">;
+  observer: Pick<RunObserver, "ingest" | "flush" | "reconcile"> &
+    Partial<Pick<RunObserver, "buffered">>;
   host: ObserverHost;
   /**
    * The host `recover` reconciles with, when it must be stricter than `host`: reconcile records a
@@ -65,7 +66,8 @@ export type DriverOptions = {
    * `grantReopen` lets a person's "check now" allow one more try at reopening each closed seat of the
    * Run (the automatic passes try each seat only once); without it a check does not.
    */
-  service: Pick<EngineService, "dispatchNext"> & Partial<Pick<EngineService, "grantReopen">>;
+  service: Pick<EngineService, "dispatchNext"> &
+    Partial<Pick<EngineService, "grantReopen" | "settleEndedRebuilds" | "needsAnotherLook">>;
   /**
    * The outbox executor. With it, a recovery or a retry also settles the messages whose delivery was
    * unknown (by the host's echo, never by sending again) and sends the ones that were prepared and
@@ -217,6 +219,12 @@ export function createEngineDriver(options: DriverOptions) {
       if (last.status !== "dispatched") break;
       dispatched += 1;
     }
+    // A hook for an Agent the Run only named a moment ago (a rebuilt member's `agent.created`) may have
+    // been held for want of an owner; now that the pass may have bound it, it is delivered, not left to
+    // age out and make the observer ask for a full reconcile.
+    if ((options.observer.buffered ?? 0) > 0) {
+      await options.observer.flush().catch((error: unknown) => log("could not flush hooks", error));
+    }
     await show(runId, last);
     await openMissingDecisions(runId);
     const finished = await finishIfDone(runId);
@@ -311,6 +319,9 @@ export function createEngineDriver(options: DriverOptions) {
     }
     const lifecycle = read.record.lifecycle;
     if (lifecycle === "finished" || lifecycle === "cancelled") {
+      await options.service.settleEndedRebuilds?.(runId).catch((error: unknown) => {
+        log(`engine could not close the rebuilds of ${runId}`, error);
+      });
       return {
         status: "ok",
         dispatched: 0,
@@ -342,6 +353,8 @@ export function createEngineDriver(options: DriverOptions) {
 
   /** Runs a write was committed for while a retry of them was running (that retry may be past it). */
   const retryAfterWrite = new Set<string>();
+  /** Runs a person pressed "check now" for while a retry was running: the extra pass is theirs. */
+  const retryByPerson = new Set<string>();
 
   /**
    * A person's retry joins the one that is running. A retry asked for by a write (`afterWrite`: a
@@ -361,19 +374,37 @@ export function createEngineDriver(options: DriverOptions) {
     const running = retrying.get(runId);
     if (running) {
       if (ask.afterWrite) retryAfterWrite.add(runId);
+      // The click joined a pass that may be past the step it opens (a second try at a seat). When the pass
+      // is done, one more is run only if the Run has something a person's permission would change.
+      if (ask.byPerson) retryByPerson.add(runId);
       return running;
     }
     const run = (async () => {
       try {
         let report: RetryReport;
+        let again = false;
+        let retryByPersonAgain = false;
         do {
           retryAfterWrite.delete(runId);
+          if (again && retryByPersonAgain) options.service.grantReopen?.(runId);
           report = await retryNow(runId);
-        } while (retryAfterWrite.has(runId));
+          again = retryAfterWrite.has(runId);
+          retryByPersonAgain = false;
+          // A person pressed the button while this pass ran: it may have been past the step that the click
+          // opens. One more pass is spent on it only when there is such a step to take.
+          if (!again && retryByPerson.delete(runId)) {
+            const wanted = await options.service.needsAnotherLook?.(runId).catch(() => false);
+            if (wanted) {
+              again = true;
+              retryByPersonAgain = true;
+            }
+          }
+        } while (again);
         return report;
       } finally {
         retrying.delete(runId);
         retryAfterWrite.delete(runId);
+        retryByPerson.delete(runId);
       }
     })();
     retrying.set(runId, run);
@@ -427,7 +458,13 @@ export function createEngineDriver(options: DriverOptions) {
       const listed = await options.store.list();
       let runs = 0;
       for (const entry of listed.entries) {
-        if (entry.lifecycle === "finished" || entry.lifecycle === "cancelled") continue;
+        if (entry.lifecycle === "finished" || entry.lifecycle === "cancelled") {
+          // Over, but an attempt to rebuild a member that a restart cut off is still written down as being made.
+          await options.service.settleEndedRebuilds?.(entry.runId).catch((error: unknown) => {
+            log(`engine could not close the rebuilds of ${entry.runId}`, error);
+          });
+          continue;
+        }
         const read = await options.store.get(entry.runId);
         if (read.status !== "ok") continue;
         runs += 1;

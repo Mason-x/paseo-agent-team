@@ -2,9 +2,11 @@ import path from "node:path";
 import { compileEngineIntent } from "../../shared/domain/run-engine/engine-prompts";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { readLaunchWorkspace, readSeatProfiles } from "../../shared/domain/run-engine/run-record";
-import type { PaseoAdapter } from "../../shared/paseo/adapter";
+import { createPaseoAdapter, type PaseoAdapter } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PaseoPort } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
+import type { RolesDocument } from "../../shared/settings";
+import type { SettingsState } from "../planning-context";
 import { type FilesPort, nodeFiles } from "../version/process";
 import { readServerId } from "../version/service";
 import { createCancelFinisher } from "./cancel";
@@ -19,6 +21,7 @@ import { createMemberLostSettler } from "./member-lost";
 import { createRunObserver, type ObserverHookEvent } from "./observer";
 import { createReadRetry } from "./read-retry";
 import { type CommitIdentity, commitIdentity } from "./repo";
+import type { RoleMcp } from "./seat-rebuild";
 import { createEngineService, type SeatSource } from "./service";
 import {
   type EngineStartInput,
@@ -68,6 +71,14 @@ export type EngineRuntimeOptions = {
   files?: FilesPort;
   /** Overrides the git committer check; tests use it so they do not depend on the machine's git config. */
   commitIdentity?: (directory: string) => Promise<CommitIdentity>;
+  /**
+   * The Roles as they are now. A rebuild of a member's Agent compares the Role's MCP configuration with
+   * the digest frozen at launch, and uses the Role's configuration (which may hold secrets) to create the
+   * new Agent. Absent, the Engine never rebuilds a member.
+   */
+  readRoles?: () => Promise<SettingsState<RolesDocument>>;
+  /** Lets tests shorten the pause between tries to create a rebuilt Agent. */
+  rebuildRetryDelayMs?: number;
   log?: (message: string, detail?: unknown) => void;
 };
 
@@ -87,6 +98,24 @@ export function seatSourceOf(record: RunRecord, seatId: string): SeatSource | nu
     // snapshot decide the rest, so the host's Profile list is never read again.
     available: true,
     order: record.roster.findIndex((seat) => seat.seatId === seatId),
+  };
+}
+
+/**
+ * What a rebuild needs of a Role: the MCP configuration it has now. A Role that is not there, or settings
+ * that cannot be read, are "missing": the Engine then creates nothing. (A throw is caught by the caller
+ * and counts the same.)
+ */
+export function roleMcpReader(
+  readRoles: () => Promise<SettingsState<RolesDocument>>,
+): (roleId: string) => Promise<RoleMcp> {
+  return async (roleId) => {
+    const state = await readRoles();
+    const role =
+      state.status === "ready"
+        ? state.values.roles.find((entry) => entry.id === roleId)
+        : undefined;
+    return role ? { status: "found", mcpServers: role.mcpServers } : { status: "missing" };
   };
 }
 
@@ -145,10 +174,23 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
     onReadFailure,
     log,
   });
+  const readRoles = options.readRoles;
   const service = createEngineService({
     store,
     port,
     effects,
+    rebuild: readRoles
+      ? {
+          // The same handle the launch used to create the members: the Paseo handle is only here once
+          // an RPC or a hook has supplied it, as for everything the Engine does on the host.
+          createAgent: (input) => {
+            if (!bound) throw new Error("the Run Engine has no Paseo handle yet");
+            return createPaseoAdapter(bound as unknown as PaseoPort).createAgent(input);
+          },
+          readRole: roleMcpReader(readRoles),
+          retryDelayMs: options.rebuildRetryDelayMs,
+        }
+      : undefined,
     resolveSeat: seatSourceOf,
     resolveWorkspace,
     compile: compileDispatch,

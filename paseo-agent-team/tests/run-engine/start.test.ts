@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { sha256Hex } from "../../server/run-engine/digest";
+import { mcpServersSha256, sha256Hex } from "../../server/run-engine/digest";
 import { createEffects, type SendableIntent } from "../../server/run-engine/effects";
 import { inspectRepo } from "../../server/run-engine/repo";
 import {
@@ -24,6 +24,7 @@ import { compileEngineIntent } from "../../shared/domain/run-engine/engine-promp
 import { readReadRetries } from "../../shared/domain/run-engine/read-retry";
 import { reduceRun } from "../../shared/domain/run-engine/reducer";
 import { readSeatProfiles } from "../../shared/domain/run-engine/run-record";
+import { readAgentSpecs } from "../../shared/domain/run-engine/seat-rebuild";
 import type { CreateMemberInput } from "../../shared/paseo/adapter";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunTeamEngineConfig } from "../../shared/schemas/run-engine/config";
@@ -727,5 +728,121 @@ describe("startEngineRun: failures", () => {
     expect(result).toMatchObject({ ok: false, step: "kickoff" });
     expect(host.sent).toHaveLength(0);
     expect((await stored()).launch.state).toBe("failed");
+  });
+});
+
+describe("startEngineRun: the spec frozen for rebuilding a member (T11b)", () => {
+  /** Every seat the launch made, with what it was created with. */
+  async function launched(planEdit?: (plan: LaunchPlan) => void) {
+    if (planEdit) planEdit(plan);
+    const { agents, deps } = setup();
+    const seenAtFirstCreate: { agentSpecs: unknown; revision: number }[] = [];
+    const creating = {
+      ...agents.adapter,
+      createAgent: async (request: CreateMemberInput) => {
+        const read = await store.get(RUN_ID);
+        if (read.status === "ok") {
+          seenAtFirstCreate.push({
+            agentSpecs: (read.record.launch as Record<string, unknown>).agentSpecs,
+            revision: read.record.revision,
+          });
+        }
+        return agents.adapter.createAgent(request);
+      },
+    };
+    const created: RunRecord[] = [];
+    const watching = {
+      ...store,
+      create: async (record: RunRecord) => {
+        created.push(structuredClone(record));
+        return store.create(record);
+      },
+    } as unknown as RunStore;
+    const result = await startEngineRun({ ...deps, adapter: creating, store: watching }, input());
+    return { result, agents, seenAtFirstCreate, created };
+  }
+
+  test("the specs are written with the Run's first record, before any Agent exists", async () => {
+    const { result, seenAtFirstCreate, created } = await launched();
+    expect(result.ok).toBe(true);
+    // The very record that was created already holds them: no commit of their own, no Agent without them.
+    const first = created[0];
+    const block = (first?.launch as Record<string, unknown> | undefined)?.agentSpecs as {
+      version: number;
+      seats: Record<string, unknown>;
+    };
+    expect(first?.revision).toBe(1);
+    expect(block.version).toBe(1);
+    expect(seenAtFirstCreate.length).toBeGreaterThan(0);
+    for (const seen of seenAtFirstCreate) expect(seen.agentSpecs).toEqual(block);
+    expect(readAgentSpecs(await stored()).kind).toBe("valid");
+  });
+
+  test("each enabled seat's spec is what its Agent was created with, the coordinator's included", async () => {
+    const { agents } = await launched();
+    const record = await stored();
+    const specs = readAgentSpecs(record);
+    if (specs.kind !== "valid") throw new Error("expected valid specs");
+    expect([...specs.seats.keys()].sort()).toEqual(
+      [COORDINATOR_SEAT_ID, ...engine.seats.map((seat) => seat.seatId)].sort(),
+    );
+    for (const request of agents.requests) {
+      const seatId = request.idempotencyKey?.split(":seat:")[1] ?? "";
+      const spec = specs.seats.get(seatId);
+      expect(spec?.title).toBe(request.title);
+      expect(spec?.labels).toEqual(request.labels);
+      expect(spec?.systemPrompt).toBe(request.systemPrompt);
+      expect(spec?.systemPromptSha256).toBe(sha256Hex(request.systemPrompt));
+      // The whole Profile, not the subset kept for scheduling.
+      expect(spec?.profile).toEqual(request.profile);
+      expect(spec?.parentSeatId).toBe(seatId === COORDINATOR_SEAT_ID ? null : COORDINATOR_SEAT_ID);
+    }
+    const pinned = (record.launch as Record<string, unknown>).systemPrompts as Record<
+      string,
+      { hash: string }
+    >;
+    for (const [seatId, spec] of specs.seats) {
+      expect(spec.systemPromptSha256).toBe(pinned[seatId]?.hash);
+    }
+  });
+
+  test("a seat whose prompt is over 64 KiB is not frozen, not cut, and the others are", async () => {
+    const { result } = await launched((p) => {
+      const member = p.members[0];
+      if (member) member.role = { ...member.role, mission: "字".repeat(30_000) };
+    });
+    expect(result.ok).toBe(true);
+    const specs = readAgentSpecs(await stored());
+    if (specs.kind !== "valid") throw new Error("expected valid specs");
+    const missing = engine.seats.filter((seat) => !specs.seats.has(seat.seatId));
+    expect(missing).toHaveLength(1);
+    expect(specs.seats.has(COORDINATOR_SEAT_ID)).toBe(true);
+    // The Run itself is unharmed.
+    expect((await stored()).launch.state).toBe("running");
+  });
+
+  test("the Role's MCP configuration is never stored, only its digest", async () => {
+    const secret = "sk-very-secret-token";
+    const mcpServers = {
+      docs: { command: "node", args: ["server.js"], env: { TOKEN: secret } },
+      web: {
+        type: "http" as const,
+        url: "https://example.invalid",
+        headers: { Authorization: secret },
+      },
+    };
+    await launched((p) => {
+      for (const member of p.members) member.role = { ...member.role, mcpServers };
+    });
+    const raw = JSON.stringify(await stored());
+    expect(raw).not.toContain(secret);
+    const specs = readAgentSpecs(await stored());
+    if (specs.kind !== "valid") throw new Error("expected valid specs");
+    const memberSeat = engine.seats[0]?.seatId ?? "";
+    expect(specs.seats.get(memberSeat)?.mcpServersSha256).toBe(mcpServersSha256(mcpServers));
+    // A Role with none has the digest of nothing, and so does one that is empty.
+    expect(specs.seats.get(COORDINATOR_SEAT_ID)?.mcpServersSha256).toBe(
+      mcpServersSha256(undefined),
+    );
   });
 });

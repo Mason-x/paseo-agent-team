@@ -68,6 +68,79 @@ describe("run.get", () => {
     expect(text).not.toContain("outbox");
   });
 
+  test("a Run with frozen specs and rebuilds shows none of them: no prompt, digest, MCP, key or attempt record", async () => {
+    const { store, queries } = await setup();
+    const marker = "SECRET-FROZEN-PROMPT";
+    const digest = "d".repeat(64);
+    const record = ledger("run-qry006-a1", { schemaVersion: 2 });
+    (record.launch as Record<string, unknown>).agentSpecs = {
+      version: 1,
+      seats: {
+        "seat-b1": {
+          parentSeatId: "coordinator",
+          title: "Builder",
+          labels: {},
+          systemPrompt: marker,
+          systemPromptSha256: digest,
+          profile: { id: "p", name: "P", provider: "claude" },
+          roleId: "role-x",
+          mcpServersSha256: "e".repeat(64),
+        },
+      },
+    };
+    (record as Record<string, unknown>).seatRebuilds = {
+      version: 1,
+      items: [
+        {
+          rebuildId: "rebuild-seat-b1-g1",
+          seatId: "seat-b1",
+          generation: 1,
+          fromAgentId: "agent-old",
+          toAgentId: "agent-fresh",
+          idempotencyKey: "engine:run-qry006-a1:seat:seat-b1:rebuild:1",
+          title: "Builder（重建 1）",
+          reason: "turn-cut-off",
+          state: "bound",
+          requestedAt: record.updatedAt,
+          settledAt: record.updatedAt,
+          error: null,
+        },
+      ],
+    };
+    record.events.push({
+      seq: record.counters.eventsThroughSeq + 1,
+      kind: "seat-rebound",
+      at: record.updatedAt,
+      payload: { seatId: "seat-b1", fromAgentId: "agent-old", toAgentId: "agent-fresh" },
+    });
+    record.counters.eventsThroughSeq += 1;
+    await store.create(record);
+
+    const got = await queries.get({ runContractVersion: 1, runId: "run-qry006-a1" });
+    const list = await queries.list({ runContractVersion: 1 });
+    const detail = projectDetail(record);
+    const history = historyPage(record, undefined);
+    const text = JSON.stringify([got, list, detail.ok ? detail.view : null, history.page]);
+    for (const secret of [
+      marker,
+      digest,
+      "e".repeat(64),
+      "agentSpecs",
+      "seatRebuilds",
+      "systemPrompt",
+      "mcpServers",
+      "idempotencyKey",
+      "agent-old",
+      "agent-fresh",
+      "rebuild-seat-b1",
+      "fromAgentId",
+    ]) {
+      expect(text, secret).not.toContain(secret);
+    }
+    // The event itself is there, by its kind, for the history page to explain.
+    expect(history.page.events.some((entry) => entry.kind === "seat-rebound")).toBe(true);
+  });
+
   test("reading never changes the stored record", async () => {
     const { home, store, queries } = await setup();
     await store.create(ledger("run-qry002-a1"));

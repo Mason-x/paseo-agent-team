@@ -196,7 +196,12 @@ export default function contribute(server: PluginServerContext) {
   };
   void ensureRunStore();
   const runQueries = createRunQueries({ store: runStore, ensureReady: ensureRunStore });
-  const engine = createEngineRuntime({ store: runStore, ensureReady: ensureRunStore, log });
+  const engine = createEngineRuntime({
+    store: runStore,
+    ensureReady: ensureRunStore,
+    readRoles: () => settings.roles.read(),
+    log,
+  });
   const launches = createLaunchService({ ...settings, engine: engine.launchHost, log });
   // A hook handler must never throw into the host, whatever the Engine does (also synchronously).
   const guardedObserve = async (event: ObserverHookEvent, paseo: PluginHookContext["paseo"]) => {

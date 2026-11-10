@@ -43,6 +43,19 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain(`${RUN_ENGINE_ENV}=1`);
   });
 
+  test("the Rebuilding paragraph states its limits as the code has them", () => {
+    const rebuilding = section.slice(section.indexOf("**Rebuilding (0.8.0).**"));
+    expect(rebuilding).toContain("launch.agentSpecs");
+    expect(rebuilding).toContain("64 KiB");
+    expect(rebuilding).toContain("256 KiB");
+    expect(rebuilding).toContain("rebuilt at most twice");
+    // A lost answer costs nothing only once: three lost answers and a second generation can leave an Agent behind.
+    expect(rebuilding).not.toContain("so a lost answer\n  costs nothing");
+    expect(rebuilding).toContain("can the host be left with an Agent that no Run lists");
+    expect(rebuilding).toContain("evidence-seat-unavailable");
+    expect(rebuilding).toContain("delivery proof");
+  });
+
   test("the ledger path and the evidence root are the ones the code uses", () => {
     expect(section).toContain("agent-team-runs/v1/runs/<runId>.json");
     expect(section).toContain("agent-team-evidence/<runId>");
