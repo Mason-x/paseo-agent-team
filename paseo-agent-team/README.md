@@ -368,8 +368,9 @@ daemon restart.
   (`incomplete:dispatch-not-found`), the host reported the end of a turn of the coordinator after the
   request, and the coordinator began no turn since, the Run used to stay in 启动中 with nothing said. Now
   the first read after the restart (the recovery, or a hook, or **立即检查并推进**) leaves one warning,
-  「DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失，请点重新规划」, and the Run moves to 等待任务图
-  like one whose plan was refused: press **重新规划**. That sends the coordinator one new request (it
+  「DAG 缺失：宿主可能在协调者规划时重启，计划回复已丢失。请在“控制”里填写原因后点“请求重新规划”；如果协调者打不开（重启打断规划太早时会这样），只能取消这个 Run 后重新启动。」, and the Run moves to 等待任务图
+  like one whose plan was refused: write a reason under 控制 and press **请求重新规划** (the page asks for
+  the reason first). That sends the coordinator one new request (it
   costs one of its turns) and the plan it answers with is read as usual; the warning comes down when it
   is admitted or when you ask again. Nothing is sent by the Engine itself and the plan is not asked for
   again in the same words. Apart from this case, a reply that cannot be read still writes nothing: a failed
@@ -379,7 +380,33 @@ daemon restart.
   not tried again on the spot; the next recovery, hook or **立即检查并推进** reads once more. A Run that
   stays in 启动中 with no warning has not matched this case: cancel it and start it again. One limit: if a
   plan was read and refused and the host then loses the history too, the warning above is added and the
-  real reason of the earlier refusal is no longer the one a re-plan shows the coordinator.
+  real reason of the earlier refusal is no longer the one a re-plan shows the coordinator. Another limit: if
+  the restart cut the coordinator's first planning turn within a few seconds, its session may never have
+  been saved and cannot be opened again; the re-plan request is then answered with an error instead of a plan
+  (a second warning, 「DAG 缺失：协调者的回复里没有 task-dag 块」) and the only way out is to cancel the Run
+  and start it again (DEV, T9 re-check: a restart 2.7 seconds into the first planning turn).
+- **A host restart leaves members closed.** After a daemon restart the members that were not in the middle
+  of a turn read as closed in Paseo, and the Engine never opens an Agent again: it reads seats, it does not
+  start them. A task that needs such a seat used to wait under the reason 席位正忙, as if it would free
+  itself. Now the seat is refused for what it is, 席位的 Agent 已关闭（例如 daemon 重启后还没被重新打开），
+  Engine 不会给它派活, on the producer's seat and on the review and smoke seats alike. It is still a wait:
+  no decision is opened and nothing is sent. When a task is held back only by closed seats (archived
+  ones may be among them) and no other seat is busy, waiting for a permission, short of a channel or
+  otherwise on its way back, the Run gets one warning, written once and found again by its start,
+  「有任务在等一个已关闭的席位：」. It says the Engine will not reopen the seat and will not hand the
+  task to another one; that you press **立即检查并推进** once the member is idle in Paseo again, or
+  cancel the Run and start it again; that a member that never ran a turn, Codex ones above all, may not
+  open again after a restart (DEV: `Failed to resume Codex thread … no rollout found`); and that you
+  should not message the member to wake it while the Run is live, because that message collides with the
+  dispatch that follows (DEV: the member answered the wake-up with an OK, the dispatch came back as a
+  report that could not be used and a stuck-producer decision opened). The warning comes down in the
+  pass in which the task is dispatched, or no longer held by closed seats; asking again while nothing
+  changed writes nothing. A task blocked by the failed-task limit or a full ledger is not looked at in
+  that pass, so the warning is left as it was. The Engine does not try to reopen the seat before
+  refusing it, and it cannot rebuild an Agent for a seat; both are open work (T10). Before 0.7.0 the
+  same restart showed the same 席位正忙. Going back: nothing in the ledger changes shape; a Run that
+  already carries the warning keeps it there (nothing in an older version takes it down) and the task's
+  note `waiting-for-seat:seat-closed` reads as an unknown reason until the next pass rewrites it.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The
