@@ -61,7 +61,11 @@ export type DriverOptions = {
   reconcileHost?: ObserverHost;
   intake: Pick<Intake, "settleAgent">;
   dagIntake: Pick<DagIntake, "settleCoordinator">;
-  service: Pick<EngineService, "dispatchNext">;
+  /**
+   * `grantReopen` lets a person's "check now" allow one more try at reopening each closed seat of the
+   * Run (the automatic passes try each seat only once); without it a check does not.
+   */
+  service: Pick<EngineService, "dispatchNext"> & Partial<Pick<EngineService, "grantReopen">>;
   /**
    * The outbox executor. With it, a recovery or a retry also settles the messages whose delivery was
    * unknown (by the host's echo, never by sending again) and sends the ones that were prepared and
@@ -318,6 +322,8 @@ export function createEngineDriver(options: DriverOptions) {
     // Flush, then settle, then reconcile: the same order as `recover`. A hook the observer held back (its
     // store was not ready) is recorded first, so the settler can use a buffered `agent.closed` and a held
     // `turn_ended` is not dropped as a duplicate of an end the settler wrote without it.
+    // A person's check: every closed seat of the Run may be tried once more (the passes below do it).
+    options.service.grantReopen?.(runId);
     await options.observer.flush();
     // Before the host is read for turns whose hook was lost: that read takes a closed Agent for one with
     // no turn and would record the cut-off turn as ended by the host. The settler writes the receipt the
