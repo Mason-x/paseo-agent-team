@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -410,5 +410,81 @@ describe("capacity limits", () => {
       })),
     ).rejects.toMatchObject({ code: "invalid-record" });
     expect(await readFile(file, "utf8")).toBe(before);
+  });
+});
+
+describe("the last way out of a frozen Run (E2b): stop the daemon, move its ledger file out, start again", () => {
+  const exclusive = (claimId: string, taskId: string) =>
+    claim({
+      claimId,
+      taskId,
+      kind: "hot",
+      path: "repo-exclusive",
+      access: "write",
+    });
+  const wantsRepo = [
+    {
+      repoId: REPO_ID,
+      kind: "hot" as const,
+      path: "repo-exclusive",
+      access: "write" as const,
+      verified: true,
+    },
+  ];
+
+  test("a paused Run's repo-exclusive claim blocks another Run until its file is moved out; then the other Run gets it and every other view stays trusted", async () => {
+    const home = await tempHome();
+    const first = await open(home);
+    await first.create(
+      firstRevision("run-aaa111-w1", {
+        lifecycle: "paused",
+        resources: [exclusive("claim-w1", "t2")],
+      }),
+    );
+    await first.create(firstRevision("run-aaa111-w2"));
+    // While the file is in the ledger the other Run waits for it, whatever the first one's state.
+    await first.update("run-aaa111-w2", (record, ctx) => {
+      expect(ctx.otherResources.trusted).toBe(true);
+      const check = findLockConflicts(
+        { resources: [...record.resources, ...ctx.otherResources.claims] },
+        { taskId: "t9", scopes: wantsRepo },
+      );
+      expect(check.ok && check.conflicts.length).toBe(1);
+      return null;
+    });
+    await first.close();
+
+    // The daemon is stopped; the file goes to a backup directory, not away.
+    const backup = path.join(home, "backup");
+    await mkdir(backup);
+    await rename(recordPath(home, "run-aaa111-w1"), path.join(backup, "run-aaa111-w1.json"));
+
+    const second = await open(home);
+    const listed = await second.list();
+    expect(listed.entries.map((entry) => entry.runId)).toEqual(["run-aaa111-w2"]);
+    // A file that is not there is missing, not damaged: nothing else is made untrusted by it.
+    expect(listed.broken).toEqual([]);
+    expect(await second.resourcesExcluding("run-aaa111-w2")).toEqual({ trusted: true, claims: [] });
+    expect((await second.get("run-aaa111-w1")).status).toBe("missing");
+    await second.update("run-aaa111-w2", (record, ctx) => {
+      expect(ctx.otherResources).toEqual({ trusted: true, claims: [] });
+      const check = findLockConflicts(
+        { resources: [...record.resources, ...ctx.otherResources.claims] },
+        { taskId: "t9", scopes: wantsRepo },
+      );
+      expect(check.ok && check.conflicts.length).toBe(0);
+      return { ...record, resources: [exclusive("claim-w2", "t2")] };
+    });
+    expect((await second.get("run-aaa111-w2")).status).toBe("ok");
+    expect(await readdir(backup)).toEqual(["run-aaa111-w1.json"]);
+    await second.close();
+
+    // Nothing was lost: the file put back is a Run again at the next start.
+    await rename(path.join(backup, "run-aaa111-w1.json"), recordPath(home, "run-aaa111-w1"));
+    const third = await open(home);
+    expect((await third.list()).entries.map((entry) => entry.runId)).toEqual([
+      "run-aaa111-w1",
+      "run-aaa111-w2",
+    ]);
   });
 });

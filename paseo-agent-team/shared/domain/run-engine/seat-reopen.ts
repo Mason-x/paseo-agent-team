@@ -1,6 +1,8 @@
 import type { RunRecord } from "../../schemas/run-engine/ledger";
+import { COORDINATOR_SEAT_ID } from "./dag-admission";
 import { isEngineSettled } from "./lost-turn";
 import { rankCandidates, type SeatChoice, type SeatRuntime } from "./scheduler";
+import { readSeatRebuilds } from "./seat-rebuild";
 
 /**
  * Whether a closed member may be reopened by reading its history (T11a), from the receipts alone.
@@ -43,6 +45,50 @@ export function classifySeatForReopen(
     if (outcome === undefined || outcome === "completed") return "P";
   }
   return turned ? "C" : "N";
+}
+
+/**
+ * When the Agent of a seat was made, as far as the ledger can tell: the first `created` receipt of the
+ * Agent; for an Agent a rebuild made, the time the rebuild was asked for (it is made after that); otherwise
+ * the Run's own creation (the launch made the Agent after it).
+ */
+export function agentBuiltAt(
+  record: Pick<RunRecord, "eventReceipts" | "createdAt" | "schemaVersion" | "launch">,
+  agentId: string,
+): string {
+  let built: string | null = null;
+  const earlier = (at: string) => {
+    if (built === null || Date.parse(at) < Date.parse(built)) built = at;
+  };
+  for (const receipt of record.eventReceipts) {
+    if (receipt.kind === "created" && receipt.agentId === agentId) earlier(receipt.receivedAt);
+  }
+  if (built !== null) return built;
+  const rebuilds = readSeatRebuilds(record as Parameters<typeof readSeatRebuilds>[0]);
+  if (rebuilds.kind === "valid") {
+    for (const item of rebuilds.items) {
+      if (item.toAgentId === agentId) earlier(item.requestedAt);
+    }
+  }
+  return built ?? record.createdAt;
+}
+
+/**
+ * Whether a seat has to have its history read once before this process sends it anything, even though the
+ * host says it is idle (E2b). After a kill the host reads a member that is not in a turn as idle without a
+ * closed receipt, so a member that never ran a turn in this Run and was made before this process began (a
+ * Codex one cannot be opened: its rollout does not exist) looks fine until a send fails and the delivery is
+ * left of unknown outcome for good. All three must hold: it never started a turn in this Run (`N`), its Agent
+ * is older than this process, and it is not the coordinator. A seat made by this process, or one that
+ * has finished a turn, is never asked for.
+ */
+export function needsFirstRead(
+  record: Pick<RunRecord, "eventReceipts" | "createdAt" | "schemaVersion" | "launch">,
+  input: { seatId: string; agentId: string; processStart: string },
+): boolean {
+  if (input.seatId === COORDINATOR_SEAT_ID) return false;
+  if (classifySeatForReopen(record, input.agentId) !== "N") return false;
+  return Date.parse(agentBuiltAt(record, input.agentId)) < Date.parse(input.processStart);
 }
 
 /** `P` and `N` are tried; `C` is left to be rebuilt. */

@@ -69,6 +69,7 @@ import {
 import {
   classifySeatForReopen,
   mayReopen,
+  needsFirstRead,
   REOPEN_READS_PER_PASS,
   REOPEN_TIMEOUT_MS,
   reopenKey,
@@ -329,6 +330,44 @@ export function createEngineService(options: EngineServiceOptions) {
   const rebuildPermit = new Map<string, number>();
   /** The seat facts the last dispatch of each Run was planned with, so reopening ranks the same way. */
   const lastSeatFacts = new Map<string, readonly SeatRuntime[]>();
+  /** When this process began: an Agent made before it has not been read by it (E2b). */
+  const processStart = clock.now();
+  /**
+   * The seats this process has read the history of with success, by the same key as `reopenTried`. A seat
+   * that never ran and is older than this process is not handed any work before it is in here.
+   */
+  const readHere = new Set<string>();
+  /**
+   * The seats the host read as idle and that were held back for want of a first read, by the same key. Only
+   * such a seat may be rebuilt although it is not closed; a closed one a person has opened meanwhile may not.
+   */
+  const heldIdle = new Set<string>();
+  const unreadHere = (record: RunRecord, seatId: string, agentId: string | null): boolean =>
+    agentId !== null &&
+    !readHere.has(reopenKey(record.runId, seatId, agentId)) &&
+    needsFirstRead(record, { seatId, agentId, processStart });
+
+  /** Whether a denial for a closed seat is for one that is only unread: it never ran and is older than this process. */
+  const deniedUnread = (record: RunRecord, denials: readonly SeatDenial[]): boolean =>
+    denials.some(
+      (denial) =>
+        denial.reason === "seat-closed" &&
+        unreadHere(
+          record,
+          denial.seatId,
+          record.roster.find((seat) => seat.seatId === denial.seatId)?.agentId ?? null,
+        ),
+    );
+
+  function heldForFirstRead(
+    record: RunRecord,
+    seat: { seatId: string; agentId: string | null },
+    snapshot: PortAgentSnapshot,
+  ): boolean {
+    if (snapshot.status !== "idle" || !unreadHere(record, seat.seatId, seat.agentId)) return false;
+    heldIdle.add(reopenKey(record.runId, seat.seatId, seat.agentId as string));
+    return true;
+  }
 
   async function liveSnapshot(
     runId: string,
@@ -374,7 +413,10 @@ export function createEngineService(options: EngineServiceOptions) {
         // Archived seats take no work for the rest of this Run: nothing here resumes one.
         archived: isAgentArchived(record, seat.agentId),
         // Read as closed: a restart leaves it so, and nothing here reopens it (see `heldByClosedSeat`).
-        closed: readable && snapshot.status === "closed",
+        // Also a member that never ran and was made before this process, which the host reads as idle after
+        // a kill: it is read once before it gets anything (E2b).
+        closed:
+          readable && (snapshot.status === "closed" || heldForFirstRead(record, seat, snapshot)),
         channelState: channel?.state ?? "unknown",
         available: source.available,
         load: mine.filter((entry) => entry.state === "assigned" || entry.state === "in_progress")
@@ -1047,9 +1089,13 @@ export function createEngineService(options: EngineServiceOptions) {
     work: Work,
     denials: readonly SeatDenial[],
     budget: { reads: number },
+    onlyUnread = false,
   ): Promise<boolean> {
     for (const seat of reopenCandidates(record, work, denials)) {
       if (budget.reads >= REOPEN_READS_PER_PASS) break;
+      // Other seats are only busy for now: a closed one is read when everything else is closed too, but a
+      // seat that is merely unread is read as soon as it is the one that would take the work (E2b).
+      if (onlyUnread && !unreadHere(record, seat.seatId, seat.agentId)) continue;
       if (!mayReopen(record, seat.agentId)) continue;
       const key = reopenKey(runId, seat.seatId, seat.agentId);
       if (reopenTried.has(key)) continue;
@@ -1059,6 +1105,7 @@ export function createEngineService(options: EngineServiceOptions) {
         const reading = await reopenByReadingHistory(seat.agentId);
         if (reading === "idle") {
           reopenFailed.delete(key);
+          readHere.add(key);
           log(`reopened the closed seat ${seat.seatId} of ${runId} by reading its history`);
           return true;
         }
@@ -1067,6 +1114,7 @@ export function createEngineService(options: EngineServiceOptions) {
           log(
             `the closed seat ${seat.seatId} of ${runId} has a turn running after its history was read`,
           );
+          readHere.add(key);
           continue;
         }
         reopenFailed.add(key);
@@ -1093,6 +1141,7 @@ export function createEngineService(options: EngineServiceOptions) {
     runId: string,
     work: Work,
     denials: readonly SeatDenial[],
+    onlyUnread = false,
   ): Promise<boolean> {
     const rebuild = options.rebuild;
     if (!rebuild) return false;
@@ -1107,6 +1156,7 @@ export function createEngineService(options: EngineServiceOptions) {
     const permitted = (rebuildPermit.get(runId) ?? 0) > Date.parse(clock.now());
     for (const seat of reopenCandidates(record, work, denials)) {
       if (isAgentArchived(record, seat.agentId)) continue;
+      if (onlyUnread && !unreadHere(record, seat.seatId, seat.agentId)) continue;
       const kind = classifySeatForReopen(record, seat.agentId);
       // Reading can bring a P seat back, and a seat that never ran has to fail to be read first.
       if (kind === "P") continue;
@@ -1152,7 +1202,10 @@ export function createEngineService(options: EngineServiceOptions) {
       }
       // Everything above was judged on a snapshot. Look at the Agent itself once more: it must still be closed
       // with no turn running, or it is not rebuilt (a person may have written to it meanwhile).
-      if (!(await stillClosed(seat.agentId))) {
+      const idleToo =
+        heldIdle.has(reopenKey(runId, seat.seatId, seat.agentId)) &&
+        unreadHere(record, seat.seatId, seat.agentId);
+      if (!(await stillClosed(seat.agentId, idleToo))) {
         log(`the seat ${seat.seatId} of ${runId} is not closed any more: not rebuilt`);
         continue;
       }
@@ -1174,12 +1227,17 @@ export function createEngineService(options: EngineServiceOptions) {
     return false;
   }
 
-  /** A fresh look at the Agent (no read of its history): closed, nothing running. False if it cannot be told. */
-  async function stillClosed(agentId: string): Promise<boolean> {
+  /**
+   * A fresh look at the Agent (no read of its history): closed, nothing running. False if it cannot be told.
+   * `idleToo` is for the one seat that may be rebuilt although the host reads it idle: it never ran, is older
+   * than this process, and reading its history failed (E2b). Any other idle seat is never rebuilt.
+   */
+  async function stillClosed(agentId: string, idleToo = false): Promise<boolean> {
     try {
       const refreshed = await options.port.agents.ref(agentId).refresh();
       const snapshot = refreshed?.agent;
-      return snapshot !== undefined && snapshot.status === "closed" && !snapshot.activeTurn;
+      if (snapshot === undefined || snapshot.activeTurn) return false;
+      return snapshot.status === "closed" || (idleToo && snapshot.status === "idle");
     } catch (error) {
       log(`could not look at ${agentId} before rebuilding its seat`, error);
       return false;
@@ -1292,9 +1350,16 @@ export function createEngineService(options: EngineServiceOptions) {
     while (
       mayReopenSeats &&
       latest.status === "waiting" &&
-      heldByClosedSeat(latest.denials) &&
+      (heldByClosedSeat(latest.denials) || deniedUnread(read.record, latest.denials)) &&
       !cancelPending(read.record) &&
-      (await reopenClosedSeats(runId, read.record, work, latest.denials, budget))
+      (await reopenClosedSeats(
+        runId,
+        read.record,
+        work,
+        latest.denials,
+        budget,
+        !heldByClosedSeat(latest.denials),
+      ))
     ) {
       // A look that still waits says nothing about the warning yet: the next candidate may take the work.
       latest = await dispatchNextUnlocked(runId, false, true, false);
@@ -1308,8 +1373,8 @@ export function createEngineService(options: EngineServiceOptions) {
       options.rebuild &&
       work.kind !== "evidence" &&
       latest.status === "waiting" &&
-      heldByClosedSeat(latest.denials) &&
-      (await rebuildFirstPossible(runId, work, latest.denials))
+      (heldByClosedSeat(latest.denials) || deniedUnread(read.record, latest.denials)) &&
+      (await rebuildFirstPossible(runId, work, latest.denials, !heldByClosedSeat(latest.denials)))
     ) {
       // The seat has its new Agent. Whether to send anything is decided on the Run as it is now, not on the
       // snapshot this pass began with: a pause or a cancellation may have come while it was being made.

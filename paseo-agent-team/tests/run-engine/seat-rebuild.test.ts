@@ -105,6 +105,7 @@ function fakeHost() {
   const readsAs = new Map<string, ReadsAs>();
   const sent: { agentId: string; text: string }[] = [];
   const timelineReads: string[] = [];
+  const calls = { refreshes: 0 };
   const snapshot = (agentId: string): PortAgentSnapshot =>
     running.has(agentId)
       ? { status: "running", activeTurn: null }
@@ -134,11 +135,14 @@ function fakeHost() {
           },
         },
         current: () => snapshot(agentId),
-        refresh: async () => ({ agent: snapshot(agentId) }),
+        refresh: async () => {
+          calls.refreshes += 1;
+          return { agent: snapshot(agentId) };
+        },
       }),
     },
   };
-  return { port, sent, closed, running, readsAs, timelineReads };
+  return { port, sent, closed, running, readsAs, timelineReads, calls };
 }
 type Host = ReturnType<typeof fakeHost>;
 
@@ -493,6 +497,28 @@ for (const version of [1, 2] as const) {
         expect(rebuildAlerts(record)[0]?.summary).toContain("0.8.0 之前启动");
         expect(rebuildAlerts(record)[0]?.summary).toContain("取消这个 Run 后重新启动");
         expect(eventsOf(record, "seat-rebound")).toHaveLength(0);
+      });
+
+      test("E2b: a v1 Run's member that never ran and cannot be opened (the host reads it idle after a kill) is read once, gets nothing, and the Run says it can only be cancelled", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 })(record);
+          archiveB1(record);
+        });
+        const host = fakeHost();
+        host.readsAs.set(B3, "throws");
+        const rebuild = fakeRebuild();
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "waiting",
+          taskId: "t2",
+        });
+        await service.dispatchNext(RUN_ID);
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent).toHaveLength(0);
+        expect(rebuild.created).toHaveLength(0);
+        const record = await stored();
+        expect(roster(record, "seat-b3")).toBe(B3);
+        expect(rebuildAlerts(record)[0]?.summary).toContain("取消这个 Run 后重新启动");
       });
       return;
     }
@@ -1824,6 +1850,390 @@ for (const version of [1, 2] as const) {
         expect(
           (await stored()).eventReceipts.some((entry) => entry.agentId === "agent-new-1"),
         ).toBe(true);
+      });
+    });
+
+    // E2b: after a kill the host reads a member that was not in a turn as idle, with no closed receipt. One
+    // that never ran a turn in this Run and was made before this process is read once before it gets work.
+    describe("a member that never ran and is older than this process is read once before it gets work (E2b)", () => {
+      /** The host was killed: the member reads idle. `how` is what reading its history does. */
+      async function killed(how: ReadsAs, extra: (record: RunRecord) => void = () => undefined) {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 })(record);
+          archiveB1(record);
+          extra(record);
+        });
+        const host = fakeHost();
+        host.readsAs.set(B3, how);
+        return { host, rebuild: fakeRebuild() };
+      }
+      const later = () => new Date(Date.now() + 3_600_000).toISOString();
+      async function freshStore(): Promise<void> {
+        await store.close();
+        await rm(path.join(home, "paseo"), { recursive: true, force: true });
+        await mkdir(path.join(home, "paseo"));
+        store = createRunStore({ home: path.join(home, "paseo"), lock: { acquireTimeoutMs: 300 } });
+        await store.initialize();
+      }
+
+      test("a Codex reviewer that cannot be opened: one read that fails, nothing sent to it, its seat rebuilt for never-ran-unopenable, one review to the new Agent", async () => {
+        await seedReview((record) => {
+          withJudge("seat-b6", B6)(record);
+          record.eventReceipts.push(
+            receipt(record, "archived", B2, null, { disposition: "accepted" }),
+          );
+        });
+        const host = fakeHost();
+        host.readsAs.set(B6, "throws");
+        const rebuild = fakeRebuild();
+        const service = makeService(host, rebuild);
+        const result = await service.dispatchNext(RUN_ID);
+
+        expect(result).toMatchObject({
+          status: "dispatched",
+          purpose: "reviewer",
+          seatId: "seat-b6",
+        });
+        // Read exactly once, never sent anything; the new Agent was not read either (this process made it).
+        expect(host.timelineReads).toEqual([B6]);
+        const fresh = rebuild.byKey.get(KEY("seat-b6", 1)) ?? "";
+        expect(fresh).not.toBe("");
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([fresh]);
+        expect(host.sent.some((entry) => entry.agentId === B6)).toBe(false);
+        const record = await stored();
+        expect(roster(record, "seat-b6")).toBe(fresh);
+        expect(items(record)).toMatchObject([
+          {
+            seatId: "seat-b6",
+            fromAgentId: B6,
+            toAgentId: fresh,
+            state: "bound",
+            reason: "never-ran-unopenable",
+          },
+        ]);
+        expect(checkLedgerInvariants(record).ok).toBe(true);
+        // Later passes read and send nothing more.
+        await service.dispatchNext(RUN_ID);
+        expect(host.timelineReads).toEqual([B6]);
+        expect(host.sent).toHaveLength(1);
+        expect(rebuild.created).toHaveLength(1);
+      });
+
+      test("a member that reads fine (a Claude one) is read once, gets exactly one dispatch, is not rebuilt, and later passes do not read it again", async () => {
+        const { host, rebuild } = await killed("opens");
+        const service = makeService(host, rebuild);
+        const result = await service.dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b3" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+        await service.dispatchNext(RUN_ID);
+        await service.dispatchNext(RUN_ID);
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent).toHaveLength(1);
+      });
+
+      test("a reading that finds a turn running counts as loaded: the seat is not rebuilt and is not read again", async () => {
+        const { host, rebuild } = await killed("runs");
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([B3]);
+        host.running.delete(B3);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "dispatched",
+          seatId: "seat-b3",
+        });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+      });
+
+      test("not read: a seat this process made, and a seat that already finished a turn or started one", async () => {
+        const cases: [string, (record: RunRecord) => void][] = [
+          [
+            "made by this process",
+            (record) =>
+              record.eventReceipts.push(
+                receipt(record, "created", B3, null, { receivedAt: later() }),
+              ),
+          ],
+          [
+            "finished a turn (P)",
+            (record) => {
+              record.eventReceipts.push(receipt(record, "turn_started", B3, "turn-done"));
+              record.eventReceipts.push(receipt(record, "turn_ended", B3, "turn-done"));
+            },
+          ],
+          ["started a turn and none finished (C)", (record) => cutOff(record, B3)],
+        ];
+        for (const [name, extra] of cases) {
+          await freshStore();
+          const { host, rebuild } = await killed("throws", extra);
+          const result = await makeService(host, rebuild).dispatchNext(RUN_ID);
+          expect([name, result.status]).toEqual([name, "dispatched"]);
+          // Zero reads of the history, zero creates, and the dispatch went to the old Agent as it always did.
+          expect([name, host.timelineReads]).toEqual([name, []]);
+          expect([name, rebuild.created.length]).toEqual([name, 0]);
+          expect([name, host.sent.map((entry) => entry.agentId)]).toEqual([name, [B3]]);
+        }
+      });
+
+      test("the guard of an earlier review still holds: a P or a C seat that reads idle is never rebuilt, whatever a read would say", async () => {
+        for (const extra of [
+          (record: RunRecord) => {
+            record.eventReceipts.push(receipt(record, "turn_started", B3, "turn-done"));
+            record.eventReceipts.push(receipt(record, "turn_ended", B3, "turn-done"));
+          },
+          (record: RunRecord) => cutOff(record, B3),
+        ]) {
+          await freshStore();
+          const { host, rebuild } = await killed("throws", extra);
+          // Busy for now, so the work waits; it still reads nothing and builds nothing.
+          host.running.add(B3);
+          const service = makeService(host, rebuild);
+          await service.dispatchNext(RUN_ID);
+          service.grantReopen(RUN_ID);
+          await service.dispatchNext(RUN_ID);
+          expect(host.timelineReads).toEqual([]);
+          expect(rebuild.created).toHaveLength(0);
+          expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+        }
+      });
+
+      test("it is looked at only when work is waiting for it: a paused Run and a Run with nothing to dispatch make no host call at all", async () => {
+        for (const mutate of [
+          (record: RunRecord) => {
+            record.lifecycle = "paused";
+          },
+          (record: RunRecord) => {
+            const t2 = record.tasks.find((task) => task.spec.id === "t2");
+            if (t2) t2.state = "pending";
+          },
+        ]) {
+          await freshStore();
+          const { host, rebuild } = await killed("throws", mutate);
+          const service = makeService(host, rebuild, {
+            clock: { now: () => new Date(Date.now() + 24 * 3_600_000).toISOString() },
+          });
+          for (let pass = 0; pass < 3; pass += 1) await service.dispatchNext(RUN_ID);
+          expect(host.timelineReads).toEqual([]);
+          expect(host.calls.refreshes).toBe(0);
+          expect(host.sent).toHaveLength(0);
+          expect(rebuild.created).toHaveLength(0);
+        }
+      });
+
+      test("a read that fails with no way to rebuild: nothing is sent to the old Agent, no second read by itself, one more read when a person asks", async () => {
+        const { host } = await killed("throws");
+        const service = makeService(host, null);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "waiting",
+          taskId: "t2",
+        });
+        await service.dispatchNext(RUN_ID);
+        await service.dispatchNext(RUN_ID);
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent).toHaveLength(0);
+        service.grantReopen(RUN_ID);
+        await service.dispatchNext(RUN_ID);
+        await service.dispatchNext(RUN_ID);
+        expect(host.timelineReads).toEqual([B3, B3]);
+        expect(host.sent).toHaveLength(0);
+        // A person's check that finds it readable now lets it have the work, once.
+        host.readsAs.set(B3, "opens");
+        service.grantReopen(RUN_ID);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "dispatched",
+          seatId: "seat-b3",
+        });
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B3]);
+      });
+
+      test("a read that does not finish in time proves nothing: no rebuild, no dispatch to it, and it is tried again when a person asks", async () => {
+        const { host, rebuild } = await killed("hangs");
+        const service = makeService(host, rebuild, { reopenTimeoutMs: 20 });
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent).toHaveLength(0);
+        expect(rebuild.created).toHaveLength(0);
+        host.readsAs.set(B3, "opens");
+        service.grantReopen(RUN_ID);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "dispatched",
+          seatId: "seat-b3",
+        });
+        expect(host.timelineReads).toEqual([B3, B3]);
+      });
+
+      test("a pass reads at most two such seats", async () => {
+        await seed((record) => {
+          withSeats(
+            { seatId: "seat-b3", agentId: B3 },
+            { seatId: "seat-b4", agentId: B4 },
+            { seatId: "seat-b5", agentId: "agent-b5" },
+          )(record);
+          archiveB1(record);
+        });
+        const host = fakeHost();
+        for (const id of [B3, B4, "agent-b5"]) host.readsAs.set(id, "throws");
+        await makeService(host, null).dispatchNext(RUN_ID);
+        expect(host.timelineReads).toHaveLength(2);
+        expect(host.sent).toHaveLength(0);
+      });
+
+      test("another seat that is only busy does not keep it from being read: it takes the work in parallel after one read", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 })(record);
+        });
+        const host = fakeHost();
+        host.running.add(B1);
+        host.readsAs.set(B3, "opens");
+        const result = await makeService(host, fakeRebuild()).dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b3" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B3]);
+      });
+
+      test("the same with a seat that cannot be opened: read once, rebuilt, and the busy seat is left alone", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 })(record);
+        });
+        const host = fakeHost();
+        host.running.add(B1);
+        host.readsAs.set(B3, "throws");
+        const rebuild = fakeRebuild();
+        const result = await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b3" });
+        expect(host.timelineReads).toEqual([B3]);
+        const fresh = rebuild.byKey.get(KEY("seat-b3", 1)) ?? "";
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([fresh]);
+        expect(roster(await stored(), "seat-b1")).toBe(B1);
+      });
+
+      test("a seat that is found running when the attempt is about to be written is not rebuilt", async () => {
+        const { host, rebuild } = await killed("throws");
+        rebuild.state.onReadRole = async () => {
+          host.running.add(B3);
+        };
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(rebuild.created).toHaveLength(0);
+        expect(host.sent).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+      });
+
+      test("a seat with a turn running is busy, not unread: nothing is read and nothing is sent to it", async () => {
+        const { host, rebuild } = await killed("opens");
+        host.running.add(B3);
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([]);
+        expect(host.sent).toHaveLength(0);
+        expect(rebuild.created).toHaveLength(0);
+      });
+
+      test("only the unread seat is read when another is merely busy: a closed seat behind it is left for when everything is closed", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
+          record.eventReceipts.push(receipt(record, "turn_started", B3, "turn-done"));
+          record.eventReceipts.push(receipt(record, "turn_ended", B3, "turn-done"));
+        });
+        const host = fakeHost();
+        host.running.add(B1);
+        host.closed.add(B3);
+        host.readsAs.set(B3, "opens");
+        host.readsAs.set(B4, "opens");
+        const result = await makeService(host, fakeRebuild()).dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b4" });
+        expect(host.timelineReads).toEqual([B4]);
+        expect(host.sent.map((entry) => entry.agentId)).toEqual([B4]);
+      });
+
+      test("a closed seat a person has opened since its read failed is not rebuilt for being unread", async () => {
+        const { host, rebuild } = await neverRanSeat("throws");
+        rebuild.state.onReadRole = async () => {
+          host.closed.delete(B3);
+        };
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(host.timelineReads).toEqual([B3]);
+        expect(rebuild.created).toHaveLength(0);
+        expect(host.sent).toHaveLength(0);
+        expect(readSeatRebuilds(await stored()).kind).toBe("absent");
+      });
+
+      test("a closed seat that was cut off is not rebuilt because an unread seat is: only the unread one is, while another seat is merely busy", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
+          cutOff(record, B3);
+        });
+        const host = fakeHost();
+        host.running.add(B1);
+        host.closed.add(B3);
+        host.readsAs.set(B4, "throws");
+        const rebuild = fakeRebuild();
+        const result = await makeService(host, rebuild).dispatchNext(RUN_ID);
+        expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b4" });
+        const record = await stored();
+        expect(items(record).map((item) => item.seatId)).toEqual(["seat-b4"]);
+        expect(roster(record, "seat-b3")).toBe(B3);
+        expect(host.timelineReads).toEqual([B4]);
+      });
+
+      test("each unread Agent is read once: later passes with or without work read nothing and write nothing", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 })(record);
+          archiveB1(record);
+        });
+        const host = fakeHost();
+        host.readsAs.set(B3, "opens");
+        const service = makeService(host, fakeRebuild());
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "dispatched" });
+        expect(host.timelineReads).toEqual([B3]);
+        const after = await stored();
+        const refreshes = host.calls.refreshes;
+        for (let pass = 0; pass < 5; pass += 1) await service.dispatchNext(RUN_ID);
+        // Nothing is left to send: the passes look at no seat at all, read no history, write nothing.
+        expect(host.timelineReads).toEqual([B3]);
+        expect(host.sent).toHaveLength(1);
+        expect((await stored()).revision).toBe(after.revision);
+        expect(host.calls.refreshes).toBe(refreshes);
+      });
+
+      test("a seat that is read once stays read through passes that wait on something else, and a failed one is not read again by them", async () => {
+        await seed((record) => {
+          withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
+        });
+        const host = fakeHost();
+        host.running.add(B1);
+        host.readsAs.set(B3, "opens");
+        host.readsAs.set(B4, "throws");
+        host.running.add(B3);
+        const service = makeService(host, null);
+        // B1 and B3 are busy, B4 is unread and cannot be read: one failed read, then only waiting.
+        for (let pass = 0; pass < 4; pass += 1) {
+          expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        }
+        expect(host.timelineReads).toEqual([B4]);
+        expect(host.sent).toHaveLength(0);
+      });
+
+      test("a failed rebuild is the person's to repeat, and the first Agent is never sent to", async () => {
+        const { host, rebuild } = await killed("throws");
+        rebuild.state.failures = 3;
+        const service = makeService(host, rebuild);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({ status: "waiting" });
+        expect(items(await stored())).toMatchObject([{ generation: 1, state: "failed" }]);
+        await service.dispatchNext(RUN_ID);
+        expect(rebuild.created).toHaveLength(3);
+        expect(host.timelineReads).toEqual([B3]);
+        service.grantReopen(RUN_ID);
+        expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+          status: "dispatched",
+          seatId: "seat-b3",
+        });
+        expect(host.sent.some((entry) => entry.agentId === B3)).toBe(false);
       });
     });
 
