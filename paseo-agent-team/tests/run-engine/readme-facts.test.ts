@@ -264,11 +264,17 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).toContain(
       "or never started one, is read; one that started a turn and never finished one is not",
     );
-    expect(section).toContain("at most two seats are read per\n  pass");
+    expect(section).toContain("at most two seats are read per pass");
     expect(section).toContain("Archived seats, review seats the family gate would refuse");
-    expect(section).toContain("has already tried to reopen the seat");
-    expect(section).toContain("or whose first turn was cut off within a few\n  seconds");
+    expect(section).toContain("has already tried to reopen the seats it can read");
+    expect(section).toContain("a Codex member that never\n  ran a turn cannot be opened");
+    expect(section).toContain(
+      "a member whose first turn was cut off within a few seconds is not read at all",
+    );
     expect(section).not.toContain("will not reopen the seat");
+    expect(section).toContain("only the button **立即检查并推进** allows one more read");
+    expect(section).toContain("in\n  the scheduler's own order");
+    expect(section).toContain("the next candidate is read in the same pass, within the two");
   });
 
   test("it says the Engine starts recovering only when something calls the plugin: open the Runs page after a restart (T11a)", () => {
