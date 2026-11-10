@@ -77,6 +77,10 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(flat).toContain("move the Run's ledger file");
     expect(flat).toContain("outside `agent-team-runs`");
     expect(flat).toContain("Going back to 0.7.x loses both fixes");
+    expect(flat).toContain("no `outcome-unknown` dispatch intent");
+    expect(flat).toContain("not tried on a live daemon");
+    expect(flat).toContain("the retried turn's end is still dropped as a repeat");
+    expect(flat).toContain("so the retry can be judged ended early");
   });
 
   test("the ledger path and the evidence root are the ones the code uses", () => {

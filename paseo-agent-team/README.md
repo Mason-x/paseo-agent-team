@@ -544,7 +544,11 @@ seen; an end the Engine wrote itself does not. A late real end of a turn the Eng
 start), a repeat of the host's own end and an Engine end written by an earlier plugin process are judged as
 before, and the reconcile read is unchanged. Before 0.8.0 the hook of the retried turn was dropped as a
 repeat of the Engine's own end and only a check recorded it, so the Run waited with neither a warning nor a
-decision.
+decision. Two cases stay. If the same turn id appears a third time in one plugin process and an earlier
+appearance ended by a host hook in that process (the host renumbering twice without a restart, for example
+two session rebuilds), the retried turn's end is still dropped as a repeat until you press **立即检查并推进**,
+and nothing warns meanwhile. And a late real end of a turn the Engine had settled, arriving after the retry
+began, is given to the retry (the hook carries no message id), so the retry can be judged ended early.
 
 **A member that never ran, after a kill.** After a kill the host reads a member that was not in a turn as
 idle, with no `closed` receipt, so it looks usable. A member that has never started a turn in this Run, whose
@@ -570,7 +574,8 @@ outcome of that dispatch stays unknown: the Run is frozen, cancelling it stops a
 repository claim stays, so every later Engine Run in the same repository waits for it. The window is
 milliseconds long with 0.8.0 (only the intent being sent at the moment of the crash); without the fix above it
 was the rest of the Run, because every message to such a member went out after the crash. The product has no
-button for it. The last way out, checked offline with the store code and not tried on a live daemon: stop the
+button for it. The last way out, checked offline with the store code, with a fixture that has no `outcome-unknown`
+dispatch intent (a paused Run and its `repo-exclusive` claim only) and not tried on a live daemon: stop the
 daemon; move the Run's ledger file (`<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json`) to a backup
 directory outside `agent-team-runs`, do not delete it; start the daemon. The Run is gone from the Runs
 page, its claim is gone, the other Runs stay readable and trusted (a missing file is "missing", not
