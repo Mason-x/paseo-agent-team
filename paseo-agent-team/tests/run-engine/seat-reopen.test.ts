@@ -15,6 +15,7 @@ import {
 } from "../../shared/domain/run-engine/cancel-request";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { emptyReadRetries } from "../../shared/domain/run-engine/read-retry";
+import type { SeatRuntime } from "../../shared/domain/run-engine/scheduler";
 import {
   SEAT_CLOSED_ALERT,
   SEAT_CLOSED_ALERT_PREFIX,
@@ -25,6 +26,7 @@ import {
   REOPEN_READS_PER_PASS,
   REOPEN_TIMEOUT_MS,
   reopenKey,
+  reopenOrder,
 } from "../../shared/domain/run-engine/seat-reopen";
 import type { PaseoEnginePort, PortAgentSnapshot, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunEventReceipt, RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -151,9 +153,12 @@ type Host = ReturnType<typeof fakeHost>;
 
 const FAMILY = { producer: "haiku", judge: "luna" };
 
-function makeService(host: Host, extra: { reopenTimeoutMs?: number; judgeFamily?: string } = {}) {
+function makeService(
+  host: Host,
+  extra: { reopenTimeoutMs?: number; judgeFamily?: string; unavailable?: string[] } = {},
+) {
   const effects = createEffects({ store, port: host.port, compile: compileDispatch });
-  const haiku = (order: number) => ({
+  const haiku = (seatId: string, order: number) => ({
     profile: {
       id: PROFILE_HAIKU.id,
       name: PROFILE_HAIKU.name,
@@ -161,7 +166,7 @@ function makeService(host: Host, extra: { reopenTimeoutMs?: number; judgeFamily?
       model: PROFILE_HAIKU.model,
       family: PROFILE_HAIKU.family,
     },
-    available: true,
+    available: !(extra.unavailable ?? []).includes(seatId),
     order,
   });
   const orders: Record<string, number> = { "seat-b1": 0, "seat-b3": 1, "seat-b4": 2, "seat-b5": 3 };
@@ -170,7 +175,7 @@ function makeService(host: Host, extra: { reopenTimeoutMs?: number; judgeFamily?
     port: host.port,
     effects,
     resolveSeat: (_record, seatId) => {
-      if (seatId in orders) return haiku(orders[seatId] as number);
+      if (seatId in orders) return haiku(seatId, orders[seatId] as number);
       if (seatId === JUDGE_SEAT_REVIEW) {
         return {
           profile: {
@@ -385,6 +390,70 @@ describe("what a closed member's receipts say about reopening it (seat-reopen.ts
   });
 });
 
+// --- the order in which closed seats are read ---------------------------------------------------
+
+describe("which closed seats are read, and in what order (reopenOrder)", () => {
+  const seat = (seatId: string, extra: Partial<SeatRuntime> = {}): SeatRuntime => ({
+    seatId,
+    profileId: PROFILE_HAIKU.id,
+    agentId: `agent-${seatId}`,
+    enabled: true,
+    idle: false,
+    permissionPending: false,
+    degraded: true,
+    closed: true,
+    channelState: "available",
+    available: true,
+    load: 0,
+    qualityRework: 0,
+    order: 0,
+    ...extra,
+  });
+  const ids = (seats: SeatRuntime[], options?: Parameters<typeof reopenOrder>[2]) =>
+    reopenOrder(
+      seats,
+      seats.map((entry) => entry.seatId),
+      options,
+    );
+
+  test("load first, then earlier quality rework, then the frozen order, then the seat id", () => {
+    expect(
+      ids([
+        seat("d", { order: 0, qualityRework: 1 }),
+        seat("c", { order: 3 }),
+        seat("b", { order: 1 }),
+        seat("a", { order: 1 }),
+      ]),
+    ).toEqual(["a", "b", "c", "d"]);
+    expect(ids([seat("z", { order: 0, qualityRework: 2 }), seat("y", { order: 5 })])).toEqual([
+      "y",
+      "z",
+    ]);
+  });
+
+  test("a seat that carries other work is not worth reading, except for a supplement", () => {
+    const seats = [seat("a", { order: 0, load: 1 }), seat("b", { order: 1 })];
+    expect(ids(seats)).toEqual(["b"]);
+    expect(ids(seats, { ignoreLoad: true })).toEqual(["b", "a"]);
+  });
+
+  test("a seat the scheduler would refuse once it opens is left out", () => {
+    expect(ids([seat("a", { available: false }), seat("b")])).toEqual(["b"]);
+    expect(ids([seat("a", { channelState: "paused" }), seat("b")])).toEqual(["b"]);
+    expect(ids([seat("a", { permissionPending: true }), seat("b")])).toEqual(["b"]);
+    expect(ids([seat("a", { agentId: null }), seat("b")])).toEqual(["b"]);
+  });
+
+  test("only the closed seats asked for are listed, and the caller's own gate has a say", () => {
+    const seats = [seat("a"), seat("b"), seat("c")];
+    expect(reopenOrder(seats, ["c", "a"])).toEqual(["a", "c"]);
+    expect(
+      reopenOrder(seats, ["a", "b", "c"], { allows: (entry) => entry.seatId !== "b" }),
+    ).toEqual(["a", "c"]);
+    expect(reopenOrder(seats, [])).toEqual([]);
+  });
+});
+
 // --- the Engine reopens a closed seat before it refuses it ------------------------------------
 
 for (const version of [1, 2] as const) {
@@ -495,13 +564,18 @@ for (const version of [1, 2] as const) {
       await driver.kick(RUN_ID);
       expect(host.timelineReads).toEqual([B1]);
 
-      await driver.retryRun(RUN_ID);
+      await driver.retryRun(RUN_ID, { byPerson: true });
       expect(host.timelineReads).toEqual([B1, B1]);
       await driver.kick(RUN_ID);
       expect(host.timelineReads).toEqual([B1, B1]);
 
+      // A retry after a write (an answer, a resume, a recovered read) is an automatic pass: it reads nothing.
+      await driver.retryRun(RUN_ID, { afterWrite: true });
+      await driver.retryRun(RUN_ID);
+      expect(host.timelineReads).toEqual([B1, B1]);
+
       host.readsAs.set(B1, "opens");
-      const report = await driver.retryRun(RUN_ID);
+      const report = await driver.retryRun(RUN_ID, { byPerson: true });
       expect(report.dispatched).toBe(1);
       expect(host.timelineReads).toEqual([B1, B1, B1]);
       expect(host.sent.map((entry) => entry.agentId)).toEqual([B1]);
@@ -599,7 +673,7 @@ for (const version of [1, 2] as const) {
       expect(seatAlerts(await stored())).toHaveLength(1);
     });
 
-    test("after a reopening the dispatch is looked at once more, and that look reads nothing", async () => {
+    test("a reopened seat that does not take the work: the next candidate is read in the same pass", async () => {
       await seed((record) => {
         withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
         archiveB1(record);
@@ -607,15 +681,61 @@ for (const version of [1, 2] as const) {
       const host = fakeHost();
       host.closed.add(B3);
       host.closed.add(B4);
-      // B3 reads idle once and is closed again by the time the dispatch looks; B4 would open.
+      // B3 reads idle once and is closed again by the time the dispatch looks; B4 opens.
       host.readsAs.set(B3, "flaps");
       host.readsAs.set(B4, "opens");
       const result = await makeService(host).dispatchNext(RUN_ID);
 
+      expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b4" });
+      expect(host.timelineReads).toEqual([B3, B4]);
+      expect(host.sent.map((entry) => entry.agentId)).toEqual([B4]);
+      expect(seatAlerts(await stored())).toEqual([]);
+    });
+
+    test("the look after a reopening reads nothing: a pass never reads more than two seats", async () => {
+      await seed((record) => {
+        withSeats(
+          { seatId: "seat-b3", agentId: B3 },
+          { seatId: "seat-b4", agentId: B4 },
+          { seatId: "seat-b5", agentId: B5 },
+        )(record);
+        archiveB1(record);
+      });
+      const host = fakeHost();
+      for (const agent of [B3, B4, B5]) host.closed.add(agent);
+      host.readsAs.set(B3, "flaps");
+      host.readsAs.set(B4, "flaps");
+      host.readsAs.set(B5, "opens");
+      const service = makeService(host);
+      const result = await service.dispatchNext(RUN_ID);
+
       expect(result).toMatchObject({ status: "waiting", taskId: "t2" });
-      expect(host.timelineReads).toEqual([B3]);
+      expect(host.timelineReads).toEqual([B3, B4]);
       expect(host.sent).toHaveLength(0);
       expect(seatAlerts(await stored())).toHaveLength(1);
+      // The next pass reaches the third.
+      expect(await service.dispatchNext(RUN_ID)).toMatchObject({
+        status: "dispatched",
+        seatId: "seat-b5",
+      });
+    });
+
+    test("a closed seat the scheduler would refuse again once it opens is not read: the next one is", async () => {
+      await seed((record) => {
+        withSeats({ seatId: "seat-b3", agentId: B3 }, { seatId: "seat-b4", agentId: B4 })(record);
+        archiveB1(record);
+      });
+      const host = fakeHost();
+      host.closed.add(B3);
+      host.closed.add(B4);
+      host.readsAs.set(B3, "opens");
+      host.readsAs.set(B4, "opens");
+      // seat-b3 comes first in the roster but its Profile is not available.
+      const result = await makeService(host, { unavailable: ["seat-b3"] }).dispatchNext(RUN_ID);
+
+      expect(result).toMatchObject({ status: "dispatched", seatId: "seat-b4" });
+      expect(host.timelineReads).toEqual([B4]);
+      expect(host.sent.map((entry) => entry.agentId)).toEqual([B4]);
     });
 
     test("a person's check on one Run allows one more try only for that Run", async () => {

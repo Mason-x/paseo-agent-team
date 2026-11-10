@@ -1,5 +1,6 @@
 import type { RunRecord } from "../../schemas/run-engine/ledger";
 import { isEngineSettled } from "./lost-turn";
+import { rankCandidates, type SeatChoice, type SeatRuntime } from "./scheduler";
 
 /**
  * Whether a closed member may be reopened by reading its history (T11a), from the receipts alone.
@@ -29,6 +30,9 @@ export function classifySeatForReopen(
   record: Pick<RunRecord, "eventReceipts">,
   agentId: string,
 ): SeatReopenClass {
+  // Any turn receipt of the agent counts as having turned: a member with only an end on record (a turn
+  // the Engine settled, or one that failed) is C, not N, which is the careful side. In practice every end
+  // the Engine writes follows a start, so the difference does not come up.
   let turned = false;
   for (const receipt of record.eventReceipts) {
     if (receipt.agentId !== agentId) continue;
@@ -44,6 +48,37 @@ export function classifySeatForReopen(
 /** `P` and `N` are tried; `C` is left to be rebuilt. */
 export function mayReopen(record: Pick<RunRecord, "eventReceipts">, agentId: string): boolean {
   return classifySeatForReopen(record, agentId) !== "C";
+}
+
+/**
+ * The closed seats worth reading, best first, in the scheduler's own order (`rankCandidates`: load, quality
+ * rework, frozen order, seat id). A seat is worth reading only if, once it reads idle, the scheduler would hand
+ * it the work: it carries no other work, its Profile and channel are usable, nothing waits for a permission,
+ * and `allows` (the caller's own gate, e.g. the family of a reviewer) agrees. `ignoreLoad` is for a
+ * supplement, which goes back to the producer that already holds the task.
+ */
+export function reopenOrder(
+  seats: readonly SeatRuntime[],
+  closedSeatIds: Iterable<string>,
+  options: { ignoreLoad?: boolean; allows?: (seat: SeatRuntime) => boolean } = {},
+): string[] {
+  const wanted = new Set(closedSeatIds);
+  const ranked: SeatChoice[] = [];
+  for (const seat of seats) {
+    if (!wanted.has(seat.seatId) || seat.agentId === null) continue;
+    if (seat.permissionPending || !seat.available || seat.channelState !== "available") continue;
+    if (seat.load > 0 && options.ignoreLoad !== true) continue;
+    if (options.allows?.(seat) === false) continue;
+    ranked.push({
+      seatId: seat.seatId,
+      profileId: seat.profileId,
+      load: seat.load,
+      qualityRework: seat.qualityRework,
+      order: seat.order,
+      qualification: "reopen",
+    });
+  }
+  return rankCandidates(ranked).map((choice) => choice.seatId);
 }
 
 /** What one automatic try is counted against: a Run, a seat and the Agent it holds. */

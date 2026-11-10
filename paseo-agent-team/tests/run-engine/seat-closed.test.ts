@@ -322,12 +322,15 @@ for (const version of [1, 2] as const) {
 
     test("the warning tells what to do, in Chinese, without a raw reason code", () => {
       // T11a: the Engine has already tried to reopen it, by reading its history and sending nothing.
-      expect(SEAT_CLOSED_ALERT).toContain("已经试过重新打开");
+      expect(SEAT_CLOSED_ALERT).toContain("已经对能读的席位试过重新打开");
       expect(SEAT_CLOSED_ALERT).toContain("只读它的历史，不发消息");
       expect(SEAT_CLOSED_ALERT).toContain("也不会改派");
       // What cannot be opened, and the way out.
-      expect(SEAT_CLOSED_ALERT).toContain("从没开过回合的成员");
+      expect(SEAT_CLOSED_ALERT).toContain("从没开过回合的 Codex 成员");
       expect(SEAT_CLOSED_ALERT).toContain("第一个回合开头几秒就被打断的成员");
+      expect(SEAT_CLOSED_ALERT).toContain("Engine 根本不读");
+      // A member that never ran a turn is not said to be unopenable in general: Claude ones open.
+      expect(SEAT_CLOSED_ALERT).not.toContain("从没开过回合的成员");
       expect(SEAT_CLOSED_ALERT).toContain("立即检查并推进");
       expect(SEAT_CLOSED_ALERT).toContain("取消这个 Run 后重新启动");
       expect(SEAT_CLOSED_ALERT).toContain("Codex");

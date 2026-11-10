@@ -1912,7 +1912,7 @@ describe("evidence the gate refused is asked for again, on the same delivery", (
     expect(state.reopenReads).toBe(1);
     expect((await stored()).revision).toBe(held.revision);
 
-    await driver.retryRun(RUN_ID);
+    await driver.retryRun(RUN_ID, { byPerson: true });
     expect(state.reopenReads).toBe(2);
     expect(evidenceRequests(host)).toHaveLength(0);
   });

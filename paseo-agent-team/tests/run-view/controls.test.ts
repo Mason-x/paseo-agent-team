@@ -276,9 +276,14 @@ describe("what a retry will do is said per kind of decision", () => {
 
   test("a retry of a producer's attempt says to look at the task's branch first", () => {
     const BRANCH = "先看这个任务的分支：上一次尝试可能已经提交了改动，重试会在现有分支上接着做。";
-    for (const kind of ["stuck-producer", "limbo-producer", "host-lost"]) {
+    for (const kind of ["stuck-producer", "limbo-producer"]) {
       expect(retryExplanation("D1", kind)).toContain(BRANCH);
     }
+    // A host-lost decision is a producer's or a reviewer's: the sentence says which of them it is for.
+    const lost = retryExplanation("D1", "host-lost");
+    expect(lost).toContain("如果丢失的是生产者的回合，先看这个任务的分支");
+    expect(lost).toContain("评审不改分支，重试只是重新送审");
+    expect(lost).not.toContain(BRANCH);
     // A judge's retry rebuilds nothing on the branch, and a rework is already on it.
     expect(retryExplanation("D1", "stuck-judge")).not.toContain("先看这个任务的分支");
     expect(retryExplanation("D3", "quality-d3")).not.toContain("先看这个任务的分支");

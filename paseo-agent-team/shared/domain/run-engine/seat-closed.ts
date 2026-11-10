@@ -6,4 +6,4 @@
  */
 export const SEAT_CLOSED_ALERT_PREFIX = "有任务在等一个已关闭的席位：";
 
-export const SEAT_CLOSED_ALERT = `${SEAT_CLOSED_ALERT_PREFIX}Engine 已经试过重新打开它（只读它的历史，不发消息，不调用模型），没有成功，也不会改派。打不开的有两种：从没开过回合的成员（尤其是 Codex），和第一个回合开头几秒就被打断的成员。它在 Paseo 里重新变为空闲后，点“立即检查并推进”继续（Engine 会再试一次重新打开）；否则取消这个 Run 后重新启动。Run 进行中不要给它发消息去唤醒它，消息会和随后的派发撞在一起。`;
+export const SEAT_CLOSED_ALERT = `${SEAT_CLOSED_ALERT_PREFIX}Engine 已经对能读的席位试过重新打开（只读它的历史，不发消息，不调用模型），没有成功，也不会改派。读不出来的有：从没开过回合的 Codex 成员，和第一个回合开头几秒就被打断的成员；第一个回合被打断的成员和会被同家族规则拒绝的评审席位，Engine 根本不读。它在 Paseo 里重新变为空闲后，点“立即检查并推进”继续（读得了的席位，Engine 会再读一次）；否则取消这个 Run 后重新启动。Run 进行中不要给它发消息去唤醒它，消息会和随后的派发撞在一起。`;
