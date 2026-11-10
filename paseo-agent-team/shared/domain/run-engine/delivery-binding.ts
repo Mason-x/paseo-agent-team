@@ -75,15 +75,24 @@ export function resolveProducerProof(
   return parsed.success && parsed.data.status === "done" ? parsed.data : undefined;
 }
 
-/**
- * A reviewer or smoker whose accepted proof is a blocked task report: it said it could not do its job
- * (plan 8, point 24) and so judged nothing. It neither passes nor fails the delivery it was bound to,
- * which is what lets a person have the delivery judged again.
- */
-export function judgedNothing(assignment: RunAssignment): boolean {
+/** A blocked judge, or a reviewer abandoned after a lost turn, left the delivery unjudged. */
+export function judgedNothing(record: RunRecord, assignment: RunAssignment): boolean {
   if (assignment.purpose !== "reviewer" && assignment.purpose !== "smoker") return false;
   const parsed = RunStoredTaskReportSchema.safeParse(assignment.acceptedProof);
-  return parsed.success && parsed.data.status === "blocked";
+  if (parsed.success && parsed.data.status === "blocked") return true;
+  return (
+    assignment.purpose === "reviewer" &&
+    assignment.state === "ended" &&
+    assignment.acceptedProof === null &&
+    record.nonceRegistry.some(
+      (nonce) =>
+        nonce.assignmentId === assignment.assignmentId &&
+        nonce.nonce === assignment.nonce &&
+        nonce.acceptedAt === null &&
+        nonce.revokedAt !== null &&
+        nonce.revokeReason === "abandoned-by-retry",
+    )
+  );
 }
 
 /** Identity-only D resolution: evidence gates decide whether this candidate is a valid D. */

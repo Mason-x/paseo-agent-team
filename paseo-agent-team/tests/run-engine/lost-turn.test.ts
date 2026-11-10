@@ -746,8 +746,8 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     expect(summary.startsWith(earlier(LOST_CODE))).toBe(true);
     expect(summary.length).toBeGreaterThan(earlier(LOST_CODE).length);
     expect(summary).toContain("宿主可能丢失了进行中的回合");
-    // A producer's own task turn: wait, press the button, the Engine records the loss and opens a decision.
-    expect(summary).toContain("如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲");
+    expect(summary).toContain("或审查者的评审回合");
+    expect(summary).toContain("冒烟、补证或补报回合不会被引擎结算");
     expect(summary).toContain(`至少等 ${LOST_TURN_SETTLE_DELAY_MS / 1000} 秒后点“立即检查并推进”`);
     expect(summary).toContain("引擎会把这一回合记为宿主丢失并开出决策（重试或取消）");
     // T9b: the host said the turn ended and the reply cannot be read: idle, closed or archived, then a decision.
@@ -756,8 +756,6 @@ describe("the alert for a lost turn says the way out and still matches the wordi
     );
     expect(summary).toContain("成员已关闭或归档时只能取消");
     expect(summary).not.toBe(earlierT4b(LOST_CODE));
-    // The turns it does not settle, and the way out for them: a plain OK, then the button again.
-    expect(summary).toContain("判官、冒烟、补证或补报回合不会被引擎结算");
     expect(summary).toContain(
       "请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”",
     );
@@ -790,11 +788,16 @@ describe("the alert for a lost turn says the way out and still matches the wordi
   const earlierT4b = (code: string) =>
     `${earlier(code)}。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 30 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；判官、冒烟、补证或补报回合不会被引擎结算；引擎没见到回合开始、或该成员之后又有更晚的回合或结束记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
 
+  /** The 0.7.1 hint, whose alert may still be open after the upgrade. */
+  const earlierT9b = (code: string) =>
+    `${earlier(code)}。宿主可能丢失了进行中的回合：如果这是成员（生产者）的实现回合，且该成员在 Paseo 里空闲，并且引擎记录过这一回合的开始，至少等 30 秒后点“立即检查并推进”，引擎会把这一回合记为宿主丢失并开出决策（重试或取消）；如果宿主已经报告这一回合结束、回复却读不到，而成员空闲、已关闭或已归档，同样至少等 30 秒后点“立即检查并推进”，引擎会开出决策（成员已关闭或归档时只能取消）；判官、冒烟、补证或补报回合不会被引擎结算（成员已关闭或归档时除外）；引擎没见到回合开始、或该成员之后又有更晚的回合记录的回合，也不会被结算，请向该成员发一条只要求回复 OK 的消息，等它回复后再点“立即检查并推进”`;
+
   /** The wordings earlier versions wrote for the used-up item of a lost dispatch: the plain one, A21's and T4b's. */
   const earlierWordings = [
     { name: "before A21", text: earlier },
     { name: "A21 (the plain OK hint)", text: earlierWithHint },
     { name: "T4b (0.7.0, before T9b)", text: earlierT4b },
+    { name: "T9b (0.7.1)", text: earlierT9b },
   ];
 
   for (const wording of earlierWordings) {

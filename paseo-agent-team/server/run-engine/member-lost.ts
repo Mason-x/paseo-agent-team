@@ -50,7 +50,7 @@ import type { RunStore } from "./store";
  * A third kind (T9b) is a reply the host lost after it had reported the turn's end (a forced archive, the
  * cascade of archiving the coordinator, a daemon stop): there is no receipt to write, only the decision
  * (`member-lost` when the member reads as closed or was archived; else `host-lost` for a producer's own
- * task turn, a `closed` receipt alone does not change that, T9d) and the alert coming down
+ * task turn or a reviewer, a `closed` receipt alone does not change that) and the alert coming down
  * (`findLostReplies`); the reply of that attempt is never taken in afterwards (the intake's gate).
  *
  * While the whole Run is being cancelled (A5) both kinds are recorded as ended but open no decision: the
