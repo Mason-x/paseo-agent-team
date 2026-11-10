@@ -420,7 +420,7 @@ daemon restart.
   Before 0.7.0 the same restart showed the same 席位正忙. Going back: nothing in the ledger changes
   shape; a Run that
   already carries the warning keeps it there (nothing in an older version takes it down) and the task's
-  note `waiting-for-seat:seat-closed` reads as an unknown reason until the next pass rewrites it.
+  note `waiting-for-seat:seat-closed` shows the raw code `seat-closed` after 没有可用的席位： until the next pass rewrites it.
 - A host restart also restarts the host's turn numbering, so a new turn can carry the id of an old one
   (`foreground-turn-1` again; a codex session counts from `codex-turn-0`). The Engine keeps both: the first
   time a turn id shows up its receipt keeps the old key, a later appearance gets `#2`, `#3`, and so on. The
