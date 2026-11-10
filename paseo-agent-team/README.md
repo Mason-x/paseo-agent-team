@@ -409,9 +409,10 @@ daemon restart.
   hand the task to another one; that you press **立即检查并推进** once the member is idle in Paseo again (the
   seats it can read are read once more), or cancel the Run and start it again; that a Codex member that never
   ran a turn cannot be opened after a restart (DEV: `Failed to resume Codex thread … no rollout found`), and
-  that a member whose first turn was cut off within a few seconds is not read at all, nor is a review seat the
-  family gate would refuse, so those stay closed for good and the only way out is to cancel the Run and start it
-  again; and that you
+  that a member whose first turn was cut off within a few seconds is not read at all; for those two the Engine makes a
+  new Agent when the Run carries what it needs (**Rebuilding**, below) and says so in a second warning; a review seat
+  the family gate would refuse is neither read nor rebuilt, and where nothing can be rebuilt the only way out is to
+  cancel the Run and start it again; and that you
   should not message the member to wake it while the Run is live, because that message collides with the
   dispatch that follows (DEV: the member answered the wake-up with an OK, the dispatch came back as a
   report that could not be used and a stuck-producer decision opened). The warning comes down in the
@@ -439,8 +440,36 @@ daemon restart.
   supplement is the exception), its Profile or channel is not usable, or a permission waits. If a reopened seat
   does not take the work after all, the next candidate is read in the same pass, within the two. Archived seats, review seats the family gate would refuse, and idle, paused, finished and cancelled
   Runs, and Runs being cancelled, are never read. A read that fails or leaves the seat closed is only logged
-  and the warning stays. The Engine cannot rebuild an Agent for a seat that does not open; that is open work
-  (T11b).
+  and the warning stays.
+  **Rebuilding (0.8.0).** A closed member that reading cannot bring back is given a new Agent: one whose first turn was
+  cut off (it started a turn and never finished one, so it is not read), or one that never ran and whose read failed or
+  left it closed in this plugin process (a Codex member after a restart). The new Agent is made from what the Run froze
+  when it was started, `launch.agentSpecs`, written in the same commit as the Run and before any Agent exists: the
+  system prompt, the whole Profile, title, labels, the Role's id and **only a digest** of the Role's MCP configuration
+  (it may hold keys; nothing of it is kept). A seat whose prompt is over 64 KiB, or that would take the specs past
+  256 KiB together (members first, the coordinator last), is left out whole and cannot be rebuilt. It happens in the
+  pass in which the task is held back only by closed seats and the reads have been made, for the first seat in reading
+  order that can be rebuilt, one at a time per Run: the attempt is written first (`seatRebuilds`, state creating),
+  the Agent is created with a key that names the attempt (up to three tries, the same key every time, so a lost answer
+  costs nothing), and one commit gives the seat the new Agent (the history shows 成员的 Agent 已换绑, `seat-rebound`)
+  and marks the attempt bound. The work then goes to the new Agent, which is titled "… （重建 n）". A restart or a crash
+  in the middle leaves the attempt on the ledger and the next look carries it on with the same key: one new Agent, bound
+  once. A Run paused or cancelled while the Agent is being made still gets it bound; nothing is sent. The old Agent stays in Paseo
+  and archiving it does not affect the Run; what it reports afterwards is dropped by the Engine. **Limits.** A seat is
+  rebuilt at most twice. The second time needs a person's **立即检查并推进**; a restart, a hook, a recovered read or an
+  answer does not give it, and there is no third. Never rebuilt: a supplement (it must go to the producer that holds the
+  task), the coordinator, a member that finished a turn (it is reopened by reading), an archived seat, a seat that still
+  has work or a message on its way to it (a lost turn is first settled by its decision), and a Run that is paused, being
+  cancelled or not running. A producer whose seat was rebuilt can no longer be asked for a supplement for its earlier
+  task (`evidence-seat-unavailable`): cancel the Run and start it again. **Warnings.** Being rebuilt, rebuilt (it comes
+  down when the new Agent has taken its first dispatch), and failed (with a code, never the host's text; it stays
+  while the seat is still held). A Run with no usable spec (a v1 Run, one started before 0.8.0, a seat over the size
+  limit, a Role that is gone or whose MCP configuration is no longer the one the Run started with, records of
+  attempts that cannot be read) creates nothing, writes no attempt and says once per seat 「Engine 无法重建席位 …」: cancel
+  the Run and start it again. The members card on the page finds members by label, so it can show the old Agent as well
+  as the new one. Going back: 0.7.x ignores the specs and the records, a seat that was already rebuilt keeps its new Agent,
+  the history shows the new event as 其他事件, and an attempt still being made is dropped and may leave an Agent that no Run
+  lists.
   Before 0.7.0 the same restart showed the same 席位正忙. Going back: nothing in the ledger changes
   shape; a Run that
   already carries the warning keeps it there (nothing in an older version takes it down) and the task's
