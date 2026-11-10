@@ -56,6 +56,10 @@ export function receiptOccurrence(receipt: KeyedReceipt): number {
   return Number.isSafeInteger(n) && n >= 2 ? n : 1;
 }
 
+function isEngineEnd(receipt: RunEventReceipt): boolean {
+  return (receipt as { settledBy?: unknown }).settledBy === ENGINE_SETTLER;
+}
+
 function isTurnReceipt(receipt: RunEventReceipt): receipt is TurnReceipt {
   return (
     (receipt.kind === "turn_started" || receipt.kind === "turn_ended") &&
@@ -152,9 +156,11 @@ export function startedAfterEnded(record: Ledger, ended: RunEventReceipt): boole
  *
  * - `turn_started`: this process wrote that start → the same appearance (a duplicate); this process wrote
  *   an end whose start is missing (out of order) → that appearance; otherwise a new one.
- * - `turn_ended`: this process wrote that end → the same; else the newest appearance that started and
- *   has no end (a turn that began before a plugin reload); else the newest one when its end was written
- *   by the Engine itself (the real end arrives late); else a new one (its start was missed).
+ * - `turn_ended`: the host wrote that end in this process → the same; else the newest appearance that
+ *   started and has no end (a turn that began before a plugin reload, or a retried turn that reused the id
+ *   of one the Engine itself ended); else the newest one when its end was written by the Engine itself
+ *   (the real end arrives late); else a new one (its start was missed). An end the Engine wrote is not
+ *   one the host delivered, so it never makes a later hook "already seen".
  */
 export function resolveHookOccurrence(
   record: Ledger,
@@ -183,7 +189,10 @@ export function resolveHookOccurrence(
     if (orphan > 0) return orphan;
     return latest === 0 ? 1 : latest + 1;
   }
-  const seen = maxOccurrence(of(mine, "turn_ended"));
+  // Only ends the host delivered count as seen. An end the Engine wrote itself (a turn the host never
+  // ended) is not a hook this process received: counting it made the end of a retried turn that reuses the
+  // id look like a repeat of the Engine's end, so it was dropped and only a reconcile read recorded it.
+  const seen = maxOccurrence(of(mine, "turn_ended").filter((item) => !isEngineEnd(item.receipt)));
   if (seen > 0) return seen;
   const open = of(all, "turn_started")
     .map((item) => item.occurrence)
@@ -191,12 +200,7 @@ export function resolveHookOccurrence(
     .reduce((best, occurrence) => Math.max(best, occurrence), 0);
   if (open > 0) return open;
   const newestEnd = of(all, "turn_ended").find((item) => item.occurrence === latest);
-  if (
-    newestEnd !== undefined &&
-    (newestEnd.receipt as { settledBy?: unknown }).settledBy === ENGINE_SETTLER
-  ) {
-    return latest;
-  }
+  if (newestEnd !== undefined && isEngineEnd(newestEnd.receipt)) return latest;
   return latest === 0 ? 1 : latest + 1;
 }
 
