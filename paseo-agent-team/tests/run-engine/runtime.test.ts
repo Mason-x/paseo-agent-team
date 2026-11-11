@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createRunQueries } from "../../server/run-engine/queries";
-import { createEngineRuntime, roleMcpReader, seatSourceOf } from "../../server/run-engine/runtime";
+import {
+  createEngineRuntime,
+  RUN_ENGINE_ENV,
+  roleMcpReader,
+  seatSourceOf,
+} from "../../server/run-engine/runtime";
 import type { EngineStartInput } from "../../server/run-engine/start";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { buildLaunchPlan, type LaunchPlan } from "../../shared/domain/launch-plan";
@@ -251,7 +256,8 @@ function runtime(
       options.identityOk === false ? { ok: false, detail: "no committer" } : { ok: true },
     env: {
       PASEO_HOME: paseoHome.replaceAll("\\", "/"),
-      ...(options.supported === false ? {} : { PASEO_AGENT_TEAM_RUN_ENGINE: "1" }),
+      // The switch is off only for the value that says so: absent means on.
+      ...(options.supported === false ? { [RUN_ENGINE_ENV]: "0" } : {}),
     },
     log: vi.fn(),
   });
@@ -290,15 +296,27 @@ const states = (record: RunRecord) =>
   Object.fromEntries(record.tasks.map((task) => [task.spec.id, task.state]));
 
 describe("the launch host", () => {
-  test("is supported only when the daemon sets PASEO_AGENT_TEAM_RUN_ENGINE=1", () => {
+  test("is on unless the daemon sets PASEO_AGENT_TEAM_RUN_ENGINE=0 or false", () => {
+    const read = (value: string | undefined) =>
+      createEngineRuntime({
+        store,
+        ensureReady: async () => undefined,
+        env: value === undefined ? {} : { [RUN_ENGINE_ENV]: value },
+      }).launchHost.supported;
     expect(runtime().launchHost.supported).toBe(true);
     expect(runtime({ supported: false }).launchHost.supported).toBe(false);
-    const other = createEngineRuntime({
-      store,
-      ensureReady: async () => undefined,
-      env: { PASEO_HOME: paseoHome, PASEO_AGENT_TEAM_RUN_ENGINE: "true" },
-    });
-    expect(other.launchHost.supported).toBe(false);
+    // Nothing set, or set to nothing, or anything that does not say off, is on.
+    expect(read(undefined)).toBe(true);
+    expect(read("")).toBe(true);
+    expect(read("1")).toBe(true);
+    expect(read("true")).toBe(true);
+    expect(read("no")).toBe(true);
+    // Off is `0` or `false`, however it was typed: case and surrounding spaces do not keep it on.
+    expect(read("0")).toBe(false);
+    expect(read("false")).toBe(false);
+    expect(read("FALSE")).toBe(false);
+    expect(read(" 0 ")).toBe(false);
+    expect(read(" False\t")).toBe(false);
   });
 
   test("reads the daemon's server id from PASEO_HOME, and says why when it cannot", async () => {

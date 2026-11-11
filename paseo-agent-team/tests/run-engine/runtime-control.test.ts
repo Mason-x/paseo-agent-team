@@ -212,7 +212,8 @@ function runtime(options: { supported?: boolean; identityOk?: boolean } = {}) {
       options.identityOk === false ? { ok: false, detail: "no committer" } : { ok: true },
     env: {
       PASEO_HOME: paseoHome.replaceAll("\\", "/"),
-      ...(options.supported === false ? {} : { PASEO_AGENT_TEAM_RUN_ENGINE: "1" }),
+      // The switch is off only for the value that says so: absent means on.
+      ...(options.supported === false ? { PASEO_AGENT_TEAM_RUN_ENGINE: "0" } : {}),
     },
     log: vi.fn(),
   });

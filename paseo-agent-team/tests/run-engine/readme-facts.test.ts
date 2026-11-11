@@ -42,9 +42,13 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(readme.indexOf("## Follow progress")).toBeLessThan(readme.indexOf("## Run Engine"));
   });
 
-  test("the daemon switch is the one the runtime reads, and it must be 1", () => {
+  test("the daemon switch is the one the runtime reads, and only 0 or false turns it off", () => {
     expect(RUN_ENGINE_ENV).toBe("PASEO_AGENT_TEAM_RUN_ENGINE");
-    expect(section).toContain(`${RUN_ENGINE_ENV}=1`);
+    expect(section).toContain(`${RUN_ENGINE_ENV}=0`);
+    expect(section).toContain(`${RUN_ENGINE_ENV}=false`);
+    // The Engine is on by default, but a Team still opts in with its own `runEngine` block.
+    expect(section).not.toContain(`${RUN_ENGINE_ENV}=1`);
+    expect(section).toContain("on by default");
   });
 
   test("the Rebuilding paragraph states its limits as the code has them", () => {

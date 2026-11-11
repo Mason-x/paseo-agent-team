@@ -176,7 +176,9 @@ export default function contribute(server: PluginServerContext) {
   // the outbox executor, the dispatch service, report and DAG intake, and the driver; every host
   // hook goes through `driver.onHook`, and the Paseo handle is bound the first time an RPC or hook
   // supplies one (that also runs one recovery of the Runs that were live before a restart).
-  // Engine Runs are started only when `PASEO_AGENT_TEAM_RUN_ENGINE=1` is set on this daemon.
+  // Engine Runs are started by default; only a daemon started with
+  // `PASEO_AGENT_TEAM_RUN_ENGINE=0` (or `false`) refuses them, and a Team whose `runEngine` block is
+  // not switched on is unaffected either way.
   const runStore = createRunStore({ home: process.env.PASEO_HOME, log });
   let runStoreInitializing: Promise<void> | null = null;
   const ensureRunStore = (): Promise<void> => {

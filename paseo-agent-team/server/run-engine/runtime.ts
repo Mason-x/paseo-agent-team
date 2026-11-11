@@ -43,8 +43,25 @@ import type { RunStore } from "./store";
  * that needs the host throws and the callers' own guards turn that into a logged, skipped step.
  */
 
-/** Engine Runs start only on a daemon that sets this to `1` (the DEV daemon), never by default. */
+/**
+ * Whether a daemon may start Engine Runs at all: on unless this is `0` or `false`. A Team still opts in
+ * with its own `runEngine` block, which only the editor writes, so a Team that has not turned the Engine
+ * on behaves exactly as before.
+ */
 export const RUN_ENGINE_ENV = "PASEO_AGENT_TEAM_RUN_ENGINE";
+
+/** The only two values that turn the Engine off. Everything else, including no value, leaves it on. */
+const RUN_ENGINE_OFF: ReadonlySet<string> = new Set(["0", "false"]);
+
+/**
+ * A switch that turns something off must not stay on because of how it was typed, so surrounding spaces
+ * and case are ignored: `0`, ` 0 `, `false` and `FALSE` are off. Anything else, including no value and an
+ * empty value, leaves the Engine on.
+ */
+export function engineEnabled(env: NodeJS.ProcessEnv): boolean {
+  const value = env[RUN_ENGINE_ENV];
+  return value === undefined || !RUN_ENGINE_OFF.has(value.trim().toLowerCase());
+}
 
 export type EngineIdentity =
   | { ok: true; serverId: string; paseoHome: string }
@@ -52,7 +69,10 @@ export type EngineIdentity =
 
 /** What the launch service needs from the Engine; absent means "this build starts no Engine Run". */
 export type EngineLaunchHost = {
-  /** The `PASEO_AGENT_TEAM_RUN_ENGINE=1` switch. Enabled Teams are blocked while it is false. */
+  /**
+   * Whether this daemon may start Engine Runs: on unless `PASEO_AGENT_TEAM_RUN_ENGINE` is `0` or `false`.
+   * Enabled Teams are blocked while it is false.
+   */
   supported: boolean;
   /** Where the ledger lives and which daemon it is bound to; unreadable means no Engine start. */
   identity(): Promise<EngineIdentity>;
@@ -126,7 +146,7 @@ export function createEngineRuntime(options: EngineRuntimeOptions) {
   const files = options.files ?? nodeFiles();
   const log = options.log ?? (() => undefined);
   const { store } = options;
-  const supported = env[RUN_ENGINE_ENV] === "1";
+  const supported = engineEnabled(env);
 
   let bound: PaseoEnginePort | null = null;
   const port: PaseoEnginePort = {

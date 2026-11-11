@@ -155,11 +155,16 @@ dispatches each task to a member seat, takes the member's report, checks the evi
 independent reviewer (and a DEV smoke where the task declares one), sends back what failed, and
 stops at a decision for a person when it will not undo something by itself.
 
-**Turn it on.** Two things, both required:
+**Turn it on.** The daemon runs the Engine by default; a Team still opts in. Two things:
 
-1. Start the daemon with `PASEO_AGENT_TEAM_RUN_ENGINE=1`. Without it a Team that has the Engine
-   enabled is refused at launch with a message; it never falls back to the coordinator chain
-   silently.
+1. Leave the daemon alone unless you want the Engine off. It is on by default; start the daemon
+   with `PASEO_AGENT_TEAM_RUN_ENGINE=0` (or `PASEO_AGENT_TEAM_RUN_ENGINE=false`) to turn it off,
+   and a Team that has the Engine enabled is then refused at launch with a message; it never falls
+   back to the coordinator chain silently. Only `0` and `false` turn it off, ignoring case and
+   surrounding spaces (`FALSE` and ` 0 ` also do); any other value, and no value, leaves it on. Turning the daemon's
+   Engine off, or leaving it on, changes nothing for a Team whose `runEngine` block is not
+   switched on: that block is written only from the editor, and such a Team runs on the
+   coordinator chain as before.
 2. In **Agent Teams → Teams**, edit the Team and open **Run 引擎**: switch it on, give each seat a
    tier (S, A, B), its duties (implement, review, smoke) and its channel (normally its Profile's
    provider, for example `claude`), and check the policy numbers. The launch preview shows what
