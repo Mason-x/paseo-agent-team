@@ -561,29 +561,47 @@ pass, no message and no model call; a failed read is not repeated by the automat
 **立即检查并推进** allows exactly one more; a paused Run, a Run with nothing to send and a pass with no work for
 that seat read nothing. It is read when the work would go to it: a free seat takes the work first, and a seat
 that is only busy does not keep it from being read. If the read works (a Claude member), the seat is marked
-opened in memory and gets the work, once. If it fails, the old Agent is sent nothing and the seat is rebuilt
-(**Rebuilding**, reason `never-ran-unopenable`, at most twice, the second needs the button); this is the only
-case in which a seat the host reads as idle is rebuilt, and a closed seat a person has opened since is not.
-A read that does not finish in time proves nothing: no rebuild, no dispatch, the next press reads again.
+opened in memory and gets the work, once. If it fails, the old Agent is sent nothing and the Engine attempts
+to rebuild the seat (**Rebuilding**, reason `never-ran-unopenable`, at most twice, the second needs the
+button); this is the only case in which a seat the host reads as idle may be rebuilt, and a closed seat a
+person has opened since is not. A failed rebuild leaves a warning and does not send the work to the old Agent.
+In the DEV strong-kill test the read failed (`Failed to resume Codex thread … no rollout found`), the old
+reviewer was sent nothing (its ledger has no dispatch or outbox entry; its timeline could not be read, so this
+is partial evidence), the rebuild was recorded as `create-failed`, and the Run did not reach finished;
+answering cancel took it to `cancelled` and released its claim. The host's error there was
+`Caller agent … not found`: the code counts only an error whose message contains `parent` as
+`parent-unavailable`, so the step that reopens the coordinator and tries once more was skipped. With the
+coordinator not loaded the rebuild cannot succeed, so such a Run can only be cancelled and started again;
+that cancellation does complete (one DEV Run). A rebuild after a graceful restart is likely to fail the same
+way (inferred, not verified). This classification is older than the fix above: it has been on main since the
+rebuild was added. A read that does not finish in time proves nothing: no rebuild, no dispatch, the next
+press reads again.
 Where nothing can be rebuilt (a Run started before specs were frozen, a Role that changed) the seat stays
 refused with the closed-seat warning and the Run can only be cancelled.
 
 **A Run frozen by a dispatch of unknown outcome, and the last way out.** If the host crashes or restarts
 while a dispatch is being sent, and the receiver can no longer be read (a Codex member that never ran), the
 outcome of that dispatch stays unknown: the Run is frozen, cancelling it stops at `paused`, and its
-repository claim stays, so every later Engine Run in the same repository waits for it. The window is
-milliseconds long with 0.8.0 (only the intent being sent at the moment of the crash); without the fix above it
-was the rest of the Run, because every message to such a member went out after the crash. The product has no
-button for it. The last way out, checked offline with the store code, with a fixture that has no `outcome-unknown`
-dispatch intent (a paused Run and its `repo-exclusive` claim only) and not tried on a live daemon: stop the
-daemon; move the Run's ledger file (`<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json`) to a backup
-directory outside `agent-team-runs`, do not delete it; start the daemon. The Run is gone from the Runs
-page, its claim is gone, the other Runs stay readable and trusted (a missing file is "missing", not
-"damaged"), and putting the file back at the next stop brings the Run back. Members of that Run that are
-still alive in Paseo are not touched. Going back to 0.7.x loses both fixes: a retried turn that reused its id
-is recorded only when you press **立即检查并推进**, and after a crash every message to a member that never ran
-goes out and may freeze the Run, so cancel a Run with a Codex reviewer that has not reviewed yet and start it
-again.
+repository claim stays, so every later Engine Run in the same repository waits for it. The window is only a
+dispatch in flight at the moment of the crash (one DEV Run; the size of that window was not measured);
+without the pre-dispatch read, a later message to such a member can also freeze the Run. The product has no
+button for it. The last way out was
+checked offline with the store code using a paused Run that had an
+`outcome-unknown` dispatch intent and a `repo-exclusive` claim; it has not been tried on a live daemon:
+stop the daemon; confirm that all old members and subprocesses that could write to this repository have
+stopped; move the Run's ledger file (`<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json`) to a backup
+directory outside `agent-team-runs`, do not delete it; start the daemon. In the store test the Run
+was gone from the list, its claim was gone, and the other Run stayed readable and trusted (a missing file is
+"missing", not "damaged"). Stopping the daemon and moving the ledger do not establish that the old members
+or their subprocesses have stopped writing. Before allowing another Run to write to the same repository,
+confirm that all old writers have stopped; otherwise keep later Runs from writing there. If another Run
+has acquired the same repository claim, putting the old ledger back also restores its claim, leaving both
+claims present; do not restore it while a conflicting claim remains. Going back to 0.7.x loses both fixes: a
+retried turn that reused its id is recorded only when you press **立即检查并推进**, and after a crash every message
+to a member that never ran
+goes out and may freeze the Run, so cancel a Run with a Codex reviewer that has not reviewed yet before it is
+dispatched to, and start again only after cancellation has completed. If cancellation stops at `paused`, the
+claim can still block a new Run; the last way out above has the same old-writer and conflicting-claim risks.
 
 **Where the data is.** `<PASEO_HOME>/agent-team-runs/v1/runs/<runId>.json` is the ledger;
 damaged or unreadable ledgers are kept as they are and listed on the page, never repaired or

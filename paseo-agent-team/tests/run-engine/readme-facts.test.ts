@@ -77,8 +77,21 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(flat).toContain("move the Run's ledger file");
     expect(flat).toContain("outside `agent-team-runs`");
     expect(flat).toContain("Going back to 0.7.x loses both fixes");
-    expect(flat).toContain("no `outcome-unknown` dispatch intent");
-    expect(flat).toContain("not tried on a live daemon");
+    expect(flat).toContain("`outcome-unknown` dispatch intent and a `repo-exclusive` claim");
+    expect(flat).toContain("not been tried on a live daemon");
+    expect(flat).toContain("confirm that all old writers have stopped");
+    expect(flat).toContain("start again only after cancellation has completed");
+    expect(flat).toContain("do not restore it while a conflicting claim remains");
+    // The rebuild that failed on DEV, why the coordinator was not reopened, and what is left to do.
+    expect(flat).toContain("`Caller agent … not found`");
+    expect(flat).toContain("`parent-unavailable`");
+    expect(flat).toContain("can only be cancelled and started again");
+    expect(flat).toContain("(inferred, not verified)");
+    expect(flat).toContain("has been on main since the rebuild was added");
+    // The frozen window is not claimed to be short: only a dispatch in flight, and it was not measured.
+    const frozen = flat.slice(flat.indexOf("**A Run frozen by a dispatch of unknown outcome"));
+    expect(frozen).toContain("the size of that window was not measured");
+    expect(frozen).not.toMatch(/milliseconds?/u);
     expect(flat).toContain("the retried turn's end is still dropped as a repeat");
     expect(flat).toContain("so the retry can be judged ended early");
   });
