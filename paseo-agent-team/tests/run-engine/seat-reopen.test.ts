@@ -21,8 +21,10 @@ import {
   SEAT_CLOSED_ALERT_PREFIX,
 } from "../../shared/domain/run-engine/seat-closed";
 import {
+  agentBuiltAt,
   classifySeatForReopen,
   mayReopen,
+  needsFirstRead,
   REOPEN_READS_PER_PASS,
   REOPEN_TIMEOUT_MS,
   reopenKey,
@@ -940,3 +942,112 @@ for (const version of [1, 2] as const) {
     });
   });
 }
+
+// --- E2b: which seats are read once before they get work (pure) --------------------------------------
+
+describe("needsFirstRead and agentBuiltAt", () => {
+  const START = "2026-11-10T12:00:00.000Z";
+  const BEFORE = "2026-11-10T09:00:00.000Z";
+  const AFTER = "2026-11-10T12:30:00.000Z";
+  const stamp = (
+    kind: RunEventReceipt["kind"],
+    agentId: string,
+    turnId: string | null,
+    receivedAt: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    ({
+      eventKey: `${kind}:${agentId}:${turnId ?? "-"}`,
+      dedupeKey: `${kind}:${agentId}:${turnId ?? "-"}`,
+      kind,
+      agentId,
+      turnId,
+      seq: 1,
+      receivedAt,
+      disposition: "observed",
+      ...extra,
+    }) as RunEventReceipt;
+  const ledger = (
+    receipts: RunEventReceipt[],
+    over: Record<string, unknown> = {},
+  ): Pick<RunRecord, "eventReceipts" | "createdAt" | "schemaVersion" | "launch"> =>
+    ({
+      eventReceipts: receipts,
+      createdAt: BEFORE,
+      schemaVersion: 2,
+      launch: {},
+      ...over,
+    }) as never;
+  const ask = (record: ReturnType<typeof ledger>, seatId = "seat-b3", agentId = B3) =>
+    needsFirstRead(record, { seatId, agentId, processStart: START });
+
+  test("a member that never ran and was made before this process has to be read once", () => {
+    expect(ask(ledger([stamp("created", B3, null, BEFORE)]))).toBe(true);
+    // No created receipt: the Run's own start dates the Agent.
+    expect(ask(ledger([]))).toBe(true);
+  });
+
+  test("not one made by this process: its created receipt or, with none, the Run itself is newer", () => {
+    expect(ask(ledger([stamp("created", B3, null, AFTER)]))).toBe(false);
+    expect(ask(ledger([], { createdAt: AFTER }))).toBe(false);
+    // The earliest created receipt is the one that counts.
+    expect(
+      ask(ledger([stamp("created", B3, null, AFTER), stamp("created", B3, null, BEFORE)])),
+    ).toBe(true);
+  });
+
+  test("not one that has turned in this Run (a finished turn or a cut-off one), however old", () => {
+    const old = stamp("created", B3, null, BEFORE);
+    expect(ask(ledger([old, stamp("turn_started", B3, "t", BEFORE)]))).toBe(false);
+    expect(
+      ask(
+        ledger([old, stamp("turn_started", B3, "t", BEFORE), stamp("turn_ended", B3, "t", BEFORE)]),
+      ),
+    ).toBe(false);
+  });
+
+  test("not the coordinator", () => {
+    expect(ask(ledger([]), "coordinator", "agent-coord")).toBe(false);
+  });
+
+  test("another agent's receipts say nothing about this one", () => {
+    expect(
+      ask(ledger([stamp("created", B3, null, AFTER), stamp("turn_started", B1, "t", BEFORE)])),
+    ).toBe(false);
+    expect(
+      ask(ledger([stamp("created", B3, null, BEFORE), stamp("turn_started", B1, "t", BEFORE)])),
+    ).toBe(true);
+  });
+
+  test("an Agent a rebuild made is dated by the rebuild: made by this process, it is not read", () => {
+    const item = (requestedAt: string) => ({
+      rebuildId: "rebuild-seat-b3-g1",
+      seatId: "seat-b3",
+      generation: 1,
+      fromAgentId: "agent-old",
+      toAgentId: B3,
+      idempotencyKey: "key",
+      title: "t（重建 1）",
+      reason: "never-ran-unopenable",
+      state: "bound",
+      requestedAt,
+      settledAt: requestedAt,
+      error: null,
+    });
+    const withItem = (requestedAt: string) =>
+      ledger([], { seatRebuilds: { version: 1, items: [item(requestedAt)] } });
+    expect(agentBuiltAt(withItem(AFTER), B3)).toBe(AFTER);
+    expect(ask(withItem(AFTER))).toBe(false);
+    // One rebuilt by an earlier process is older than this one and has never run: read once.
+    expect(ask(withItem(BEFORE))).toBe(true);
+    // A created receipt of the Agent wins over the rebuild's record.
+    expect(
+      agentBuiltAt(
+        ledger([stamp("created", B3, null, AFTER)], {
+          seatRebuilds: { version: 1, items: [item(BEFORE)] },
+        }),
+        B3,
+      ),
+    ).toBe(AFTER);
+  });
+});

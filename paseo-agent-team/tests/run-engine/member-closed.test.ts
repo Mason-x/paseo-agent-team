@@ -110,6 +110,8 @@ function fakeHost(options: { reopensOnRead?: boolean } = {}) {
   const timelineReads = new Map<string, number>();
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
+  // A turn id the host will give the next message of an agent (a restarted host numbers turns again).
+  const nextTurnId = new Map<string, string>();
   const calls = { archives: 0, seatReads: 0 };
   const runningAgents = new Set<string>();
   const closedAgents = new Set<string>();
@@ -147,7 +149,9 @@ function fakeHost(options: { reopensOnRead?: boolean } = {}) {
         send: async (text, options) => {
           const messageId = options?.messageId ?? "";
           sent.push({ agentId, text, messageId });
-          add(agentId, `turn-${agentId}-${sent.length}`, { type: "user_message", messageId });
+          const turnId = nextTurnId.get(agentId) ?? `turn-${agentId}-${sent.length}`;
+          nextTurnId.delete(agentId);
+          add(agentId, turnId, { type: "user_message", messageId });
         },
         archive: async () => {
           calls.archives += 1;
@@ -200,6 +204,10 @@ function fakeHost(options: { reopensOnRead?: boolean } = {}) {
       runningAgents.delete(agentId);
       closedAgents.add(agentId);
     },
+    /** The next message to this agent runs in a turn with this id (the host numbers turns from the start again). */
+    reuseTurnId: (agentId: string, turnId: string) => {
+      nextTurnId.set(agentId, turnId);
+    },
     /** The person opened it again. */
     reopen: (agentId: string) => {
       closedAgents.delete(agentId);
@@ -223,8 +231,11 @@ type Host = ReturnType<typeof fakeHost>;
  * (`lost-turn.ts`); with the real clock that was true only because the machine took a few milliseconds
  * in between, so a fast one could put both in the same millisecond. Here "later" is a fact of the test.
  */
-function steppedClock(stepMs = 1000): { now(): string; jump(ms: number): void } {
-  let at = Date.parse("2026-11-05T12:00:00.000Z");
+function steppedClock(
+  stepMs = 1000,
+  startIso = "2026-11-05T12:00:00.000Z",
+): { now(): string; jump(ms: number): void } {
+  let at = Date.parse(startIso);
   return {
     now: () => {
       at += stepMs;
@@ -237,8 +248,8 @@ function steppedClock(stepMs = 1000): { now(): string; jump(ms: number): void } 
 }
 
 /** The wiring as production makes it: the settler first, the cancellation finisher after it. */
-function build(host: Host, options: { tickMs?: number; reopen?: boolean } = {}) {
-  const clock = steppedClock(options.tickMs);
+function build(host: Host, options: { tickMs?: number; reopen?: boolean; start?: string } = {}) {
+  const clock = steppedClock(options.tickMs, options.start);
   // The agents the settler holds back from the host reads, as the runtime wires it.
   const watch = createClosingWatch();
   const isHeld = (agentId: string) => watch.holds(agentId);
@@ -1702,6 +1713,106 @@ for (const schema of [1, 2] as const) {
       expect(openDecisions(after)).toHaveLength(0);
       expect(closingAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
     });
+  });
+}
+
+// --- E2a: a retried turn that reuses the id of one the Engine ended takes its own end from its hook ---
+
+for (const schema of [1, 2] as const) {
+  describe(`a retried turn whose id the host reused after a restart ends by its own hook [v${schema}]`, () => {
+    beforeEach(async () => {
+      version = schema;
+      await setup();
+    });
+
+    for (const withReceipt of [true, false]) {
+      const how = withReceipt
+        ? "a graceful stop (a closed receipt)"
+        : "a kill (no receipt, the host read it closed)";
+      test(`${how}: host-lost, retry, the retry's turn_ended hook alone takes the report in and sends the review; a repeat of the hook and a late real end are dropped`, async () => {
+        const host = fakeHost({ reopensOnRead: true });
+        const first = build(host, { tickMs: 1, reopen: true });
+        await reachWorking(host, first);
+        const reusedId = host.turnOf(MEMBER);
+        host.close(MEMBER);
+        if (withReceipt) await first.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+
+        // The plugin restarts: a process that began after everything now in the ledger.
+        const second = build(host, {
+          tickMs: 1,
+          reopen: true,
+          start: "2026-11-05T13:00:00.000Z",
+        });
+        if (withReceipt) {
+          second.clock.jump(60_000);
+          await second.driver.recover();
+          await second.control.idle();
+        } else {
+          await recoverWithoutHook(second, "kick");
+          second.clock.jump(31_000);
+          await second.driver.kick(RUN_ID);
+        }
+        const lost = await stored();
+        expect(lost.schemaVersion).toBe(schema);
+        const engineEnds = engineReceipts(lost);
+        expect(engineEnds).toHaveLength(1);
+        expect(engineEnds[0]).toMatchObject({
+          outcome: "host-lost",
+          turnId: reusedId,
+          eventKey: `turn_ended:${MEMBER}:${reusedId}`,
+        });
+        const open = openDecisions(lost);
+        expect(open).toHaveLength(1);
+
+        // The retry reaches the member, and the restarted host gives its turn the id the old one had.
+        host.reuseTurnId(MEMBER, reusedId);
+        const out = await answer(second, open[0]?.decisionId ?? "", "retry");
+        expect(out).toMatchObject({ status: "applied", taskId: "t1" });
+        expect(host.turnOf(MEMBER)).toBe(reusedId);
+        await turnStarts(host, second, MEMBER);
+        const started = await stored();
+        expect(
+          started.eventReceipts.some(
+            (r) =>
+              r.kind === "turn_started" && r.eventKey === `turn_started:${MEMBER}:${reusedId}#2`,
+          ),
+        ).toBe(true);
+
+        // The retry's turn ends. Its hook alone does it: no kick, no recovery.
+        produce(host, MEMBER);
+        host.runningAgents.delete(MEMBER);
+        const revisionBefore = started.revision;
+        const sentBefore = host.sent.length;
+        await turnEnded(host, second, MEMBER);
+        const after = await stored();
+        const ends = after.eventReceipts.filter(
+          (r) => r.kind === "turn_ended" && r.turnId === reusedId,
+        );
+        expect(ends.map((r) => r.eventKey)).toEqual([
+          `turn_ended:${MEMBER}:${reusedId}`,
+          `turn_ended:${MEMBER}:${reusedId}#2`,
+        ]);
+        expect(ends[1] as unknown as { settledBy?: string }).not.toHaveProperty("settledBy");
+        expect(after.revision).toBeGreaterThan(revisionBefore);
+        // The report is taken in and the review goes out in the same pass.
+        expect(states(after).t1).toBe("review");
+        expect(host.sent.length).toBe(sentBefore + 1);
+        expect(host.sent.at(-1)?.agentId).toBe(JUDGE);
+        expect(checkLedgerInvariants(after).ok).toBe(true);
+
+        // The same hook again, and the first appearance's real end arriving late: both are duplicates.
+        const settled = after.revision;
+        await turnEnded(host, second, MEMBER);
+        await second.driver.onHook({
+          name: "agent.turn_ended",
+          agentId: MEMBER,
+          turnId: reusedId,
+        });
+        const dup = await stored();
+        expect(dup.revision).toBe(settled);
+        expect(host.sent).toHaveLength(sentBefore + 1);
+      });
+    }
   });
 }
 

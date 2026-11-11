@@ -376,6 +376,81 @@ describe("which appearance a hook is", () => {
     ).toBe(2);
   });
 
+  // E2a. After a restart the host numbers turns from the start again, so a retried turn can carry the id
+  // of the one the Engine already ended in this process. Its hook is the second appearance, not a repeat.
+  const OLD_START = "2026-11-09T10:00:00.000Z";
+  const AFTER_START = "2026-11-09T12:05:00.000Z";
+  const RETRY_START = "2026-11-09T12:06:00.000Z";
+  const engineEnd = (basis: Record<string, unknown>) =>
+    receipt("turn_ended", 1, AFTER_START, {
+      settledBy: ENGINE_SETTLER,
+      outcome: "host-lost",
+      basis,
+    });
+
+  test("E2a (a) a graceful restart: the Engine ended the first appearance in this process, the retry started: the retry's end is the second appearance", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      engineEnd({ closedBy: "receipt", seatStatus: "idle" }),
+      receipt("turn_started", 2, RETRY_START),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(2);
+  });
+
+  test("E2a (b) a kill, no closed receipt, the host read it closed: same answer", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      engineEnd({ closedBy: "host-read", closedReceiptKey: null, seatStatus: "idle" }),
+      receipt("turn_started", 2, RETRY_START),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(2);
+  });
+
+  test("E2a (c) the Engine's end, a real end arriving late and no newer start: still the first appearance, a duplicate", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      engineEnd({ closedBy: "receipt", seatStatus: "idle" }),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(1);
+  });
+
+  test("E2a (d) the host delivers the same end twice: the second is the same appearance", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      engineEnd({ closedBy: "receipt", seatStatus: "idle" }),
+      receipt("turn_started", 2, RETRY_START),
+      receipt("turn_ended", 2, "2026-11-09T12:07:00.000Z"),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(2);
+  });
+
+  test("E2a (e) an end the Engine wrote in an earlier process is not seen by this one: unchanged", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      receipt("turn_ended", 1, "2026-11-09T10:05:00.000Z", { settledBy: ENGINE_SETTLER }),
+      receipt("turn_started", 2, RETRY_START),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(2);
+    // And without a newer start, the late real end is still the first appearance's.
+    expect(resolve("turn_ended", ledger.slice(0, 2))).toBe(1);
+  });
+
+  test("E2a: a retried turn can end more than once over several restarts: each end takes the open appearance", () => {
+    const ledger = [
+      receipt("turn_started", 1, OLD_START),
+      receipt("turn_ended", 1, "2026-11-09T10:05:00.000Z"),
+      receipt("turn_started", 2, "2026-11-09T12:01:00.000Z"),
+      receipt("turn_ended", 2, "2026-11-09T12:02:00.000Z", { settledBy: ENGINE_SETTLER }),
+      receipt("turn_started", 3, RETRY_START),
+    ];
+    expect(resolve("turn_ended", ledger)).toBe(3);
+  });
+
+  test("E2a: when two appearances started and neither ended, the end belongs to the newest", () => {
+    const ledger = [receipt("turn_started", 1, OLD_START), receipt("turn_started", 2, RETRY_START)];
+    expect(resolve("turn_ended", ledger)).toBe(2);
+  });
+
   test("a start with an older appearance on record is a new one; with none, the first", () => {
     expect(resolve("turn_started", [])).toBe(1);
     expect(resolve("turn_started", [receipt("turn_started", 1, "2026-11-09T10:00:00.000Z")])).toBe(
