@@ -29,7 +29,7 @@
 | AC12 | 不自行答权限；决定只作用一次；恢复后只继续剩余阶段 | 部分 | 假宿主已覆盖权限等待重启、解除回执去重与报告一次入账；真实宿主权限对话观察到两次（引擎不代答）；人的重复批准已由 T8-P 观察（批准一次入账一条 `permission_resolved`，同一请求再批准无效果），"等待期间重启 daemon 再批准"仍未做（T9v/R″ 没有权限样本） | — | Run 2（N=1）：审查者回 blocked `PERMISSION_REQUIRED`，引擎只开 `stuck-judge` 的重试/取消，未代答、未归档；重试是决策重试，不是权限回应；T8-P（N=1）：default 模式下生产者发真实权限请求，人批准一次入账一条 `permission_resolved`，同一请求再批准 CLI 报没有待处理、台账无新增，引擎全程无代答；随后的拒绝使生产者 `blocked/PERMISSION_REQUIRED` 并开 `stuck-producer`；"等待期间重启再批准"未做 |
 | AC13 | 截止前不重派；到期按预算执行；耗尽不继续消耗模型 | 部分 | 退避只存在于宿主读取失败的重查（现含不完整窗口、对账读取、补证前的席位刷新，恢复后自动继续前 3 次）；派发之后的临时失败没有自动重试；预算耗尽有告警和追加预算的 RPC（不开决策）；失败的任务多于策略上限后不再开始尚未开始的任务，已在进行的评审、冒烟、补证请求与返工照常（A13，评审后修正，有端到端用例）；没有分组预算的入口；协调者的回合预算已有（计划请求与重新规划各扣一回合，计划格式重发不计，不退还，耗尽时重新规划被拒并告警，追加预算后继续，A14） | A7 | 无 |
 | AC14 | 暂停停新派发；续办重新核对；取消证实静止后才释放 | 部分 | 暂停、续办、单任务取消和整个 Run 的延迟取消都有入口；"从未发出的派发被本地撤回"已有引擎级用例（A16）；启动中断已安全关闭但不能续办；真实宿主上取消能完成，但重启丢失在途回复后会一直等；A21 起有出路（成员空闲后发只要求回复 OK 的消息，等回复，再点“立即检查并推进”，离线用例覆盖；T8-R 因回合 id 重复未走通，T9a 已修，T9v 在 DEV 上看到 `#2` 回执并据以取消完成），引擎不自行结算（B14）；三轮 T11b：重建进行中 Run 被暂停或取消，这一次照样建完并绑定，之后不派发，取消能完成（离线用例） | B13 | Run 1（N=1）阻塞取消完成、占用释放、告警 resolved；Run 4（N=1）重启丢失 reviewer 回合后取消停在 paused、`waiting.turns=1`，不释放；T8-L（N=1）：L1/L2 在成员被归档/级联归档后取消整个 Run 都完成并释放占用；T8-R 优雅停 daemon 后没有可答复的决策，未做取消；T9v（N=1）：L1′ 与 R′ 答复取消后占用释放、Run finished；R″（N=1）：Run 3 的 member-lost 答复取消后 Run finished，Run 2 的取消返回 applied 时看到 paused（那是取消 RPC 的第一个答复），台账随后是 rev 68、cancelled，只比请求晚 60 毫秒，已经完成（T11 裁决事实 9：不是缺陷） |
-| AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；没有 DEV | — | 未做（A12、T9v、R″ 都没有构造损坏台账、未知版本或容量上限） |
+| AC15 | 保留原始数据；诊断可见；不覆盖、不截断、不越限派发 | 部分 | 存储层与容量门（接近上限不再派发新工作）、事件压缩已覆盖；回执与 nonce 没有压缩办法，真到上限的 Run 只能收尾后重启；DEV 只补了台账本身的样本，没有完整 Run | — | T11d V4（N=1，不调用模型）：离线构造的三份台账放进 DEV，损坏与未知版本的字节不变并被报告为健康问题，接近上限（≥7680）只写 1 条告警、零派发 |
 | AC16 | 旧 Run 可看；不支持时清晰阻断，不静默采用另一条执行链 | 已覆盖 | —（A16：Runs 页同时显示 Engine Run 与协调者链路的 Run；Run 启动后 Team 的 `runEngine` 块被改坏或删除，既有 Run 仍可读、可 kick、可控制。页面与 `run.list` 都不以开关为输入，开关关闭时列表与控制仍可用见 runtime.test.ts） | — | 无 |
 | AC17 | 模型调用数为零；不为无变化输入重复记账或唤醒战略协调者 | 部分 | 假宿主已覆盖 5 次重复事件与 kick 无新发送、修订号不变且无重查计时器，假时钟 24 小时空闲 Run 零宿主读写零计时器（A16）；T8-I 在真实宿主上静置 62 分钟，台账修订号、mtime、size、sha256 与 14 个检查点全程不变、无新回合（N=1，对象是未答复的 `stuck-producer` 决策）；更长的空闲与多 Run 并发未验证；决策唤醒协调者的逻辑只在纯分类器里 | — | Run 6（T8-I，N=1）：静置 62 分钟（不重启 daemon、不对 Run 做 RPC、只做文件 stat），台账修订号 30、mtime、size、sha256 与 14 个检查点不变，无新回合；对象是 `stuck-producer` 决策，不是 `member-lost`；T9v/R″（N=1）：决策开出后与 awaiting-dag 时的 kick 都不写台账（修订号 36→36、21→21、31→31，mtime 不变），没有发送 |
 | AC18 | 没有新增决策时不逐事件唤醒；相同决定去重 | 部分 | 只有"协调者没收到消息"的间接观察；去重只在纯分类器 | B3、B6 | 无 |
@@ -38,7 +38,7 @@
 | AC21 | 截止条件最终被处理；重复到期不重复副作用；不出现忙循环 | 已覆盖（范围声明：现有唯一的截止条件是宿主读取重查，B7 的派发后退避已推迟，所以没有别的可测对象） | —（范围声明见左） | B7（已推迟） | 第 35 点（没有 DEV） |
 | AC22 | 不闪成空进度；原因与台账一致；旧历史游标失效可恢复 | 部分，需 DEV | 决策子类已由服务端投影并兼容旧客户端；真实浏览器、窄屏与重连已由 A12 看过一次，T8-B 又看过一次（Playwright Chromium，宽 1440、窄 390）；列表状态与台账不符的缺陷已在客户端修复并有离线测试（v1/v2 记录各一遍，计划第 73 点），尚未在真实 DEV 重验；其余原因码仍靠源码扫描；重查用尽告警在丢失回合时带出路提示（A21、T4b；T8-B 在 DEV 页面上看过，末尾被截断，T9c 已修，T9v 在 1440/390 看到全文；R″ 看到 T9e 告警全文与 host-lost 卡片） | B8、B10（剩余字段） | Run 1–3（N=1）：1280x900 与 390x844 无横向溢出、按钮可点；停 daemon 显示不可用而非空进度，同端口重启自动重连；列表把 active 阻塞与 cancelled 的 Run 显示为已完成并计入已结束（缺陷，已修：`tests/run-view/runs-tab.test.ts`「a Run in both lists is described by the ledger…」、`tests/run-list.test.ts`「Engine lifecycle over agent state」）；T8-B（N=1，Playwright Chromium，1440×900 与 390×844）：首屏约 1.2 秒一次到位、没有把已完成/已取消显示成进行中；决策与告警文案可读、390px 无横向溢出；原因草稿与预算数字/确认框不跨 daemon 重启（宿主卸载整个面板，整页重载同样丢），草稿只在面板不卸载的轮询中保留（仅单测证据）；`maxLength=600` 只做到 CDP 合成 IME；"立即检查并推进" idle 无反馈、告警文本被截断，已由 T9c 修；T9v（N=1，Playwright Chromium，1440×900 与 390×844）：已解决告警全文可见（T9c 修好）、idle 时 kick 的“已检查：没有需要推进的事”在按钮下恰好一次、member-lost 决策卡只有“取消任务”、无横向溢出；R″（N=1）：T9e 告警全文与“请求重新规划”按钮在 1440/390 可见（窄屏折两行、无溢出）、host-lost 决策卡（重试+取消）在 1440/390 可见 |
 
-没有 DEV 记录的项目仍需要在专用 DEV daemon 上再看一遍；A12、T8、T9v、R″ 覆盖了 AC10、AC12、AC14、AC17、AC22 的部分真实场景（模型 claude-haiku-5-5 / gpt-6-luna，浏览器 Playwright Chromium，每项 N=1），AC15 仍是零样本（见各自的 DEV 记录）。
+没有 DEV 记录的项目仍需要在专用 DEV daemon 上再看一遍；A12、T8、T9v、R″、T11d、T11e、T11e2 覆盖了 AC10、AC12、AC14、AC15、AC17、AC22 的部分真实场景（模型 claude-haiku-5-5 / gpt-6-luna，浏览器 Playwright Chromium，每项 N=1），AC15 的 DEV 记录来自 T11d V4（离线构造的台账放进 DEV，不是完整 Run）。
 
 ## 各项证据
 
@@ -373,7 +373,7 @@
 - tests/ledger-primitives.test.ts :: a %s being written is re-read without stealing it or reporting corruption — 模板；覆盖主锁与回收 guard
 - tests/ledger-primitives.test.ts :: a permanently malformed lock is still refused after bounded re-reads
 
-缺口：回执（`eventReceipts`）与 nonce（`nonceRegistry`）是状态而不是历史，不能压缩，达到 6144 只告警、达到 7680 停止新的派发；A12 没有在 DEV 验证（压缩要上千条事件；本轮也没有构造损坏台账、未知版本或容量上限）。
+缺口：回执（`eventReceipts`）与 nonce（`nonceRegistry`）是状态而不是历史，不能压缩，达到 6144 只告警、达到 7680 停止新的派发；A12 没有在 DEV 验证（压缩要上千条事件；本轮也没有构造损坏台账、未知版本或容量上限）。三轮 T11d 的 V4 在 DEV 上补了台账本身的样本（离线构造的损坏、未知版本、接近上限三份台账；不调用模型），仍没有跑到容量上限的完整 Run。
 
 ### AC16 旧 Run、新配置旧客户端、引擎关闭或配置损坏
 - tests/run-engine/ledger-versions.test.ts :: v1 initialize, queries, recovery and reopen do not migrate or reserialize bytes
