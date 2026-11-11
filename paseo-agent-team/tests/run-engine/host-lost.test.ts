@@ -669,6 +669,8 @@ for (const schema of [1, 2] as const) {
         limbo: { turnId: LOST_TURN, reason: HOST_LOST_CODE },
       });
       expect(decisionKindOf(settled, decision)).toBe("host-lost");
+      // The text still names the lost dispatch (the older cause) and the new one.
+      expect(decision.summary).toContain("派发消息已不在历史里");
       expect(answerableActions(settled, decision)).toEqual(["retry", "cancel"]);
       expect(settled.alerts.map((alert) => alert.state)).toEqual(["resolved"]);
       expect(settled.tasks.find((task) => task.spec.id === "t1")?.waitingReason).toBe(
@@ -947,6 +949,11 @@ for (const schema of [1, 2] as const) {
       const sentBefore = host.sent.length;
       host.closedAgents.add(MEMBER);
       built.clock.at = heldAt + 31_000;
+      await kick(built);
+      // Only closed: the first look that sees it waits (T11e) and settles nothing; the turn is the closed
+      // member's, not the host's loss, so no look at the dispatch settles it as host-lost either.
+      expect(engineReceipts(await stored())).toEqual([]);
+      built.clock.at = heldAt + 62_000;
       await kick(built);
       const settled = await stored();
       expect(host.sent).toHaveLength(sentBefore);

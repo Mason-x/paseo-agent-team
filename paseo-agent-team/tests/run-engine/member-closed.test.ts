@@ -11,10 +11,11 @@ import { createEngineDriver } from "../../server/run-engine/driver";
 import { createEffects } from "../../server/run-engine/effects";
 import { createObserverHost } from "../../server/run-engine/host";
 import { createIntake } from "../../server/run-engine/intake";
-import { createMemberLostSettler } from "../../server/run-engine/member-lost";
+import { createClosingWatch, createMemberLostSettler } from "../../server/run-engine/member-lost";
 import { createRunObserver } from "../../server/run-engine/observer";
 import { projectDetail, projectSummary } from "../../server/run-engine/projection";
 import type { ReadFailure } from "../../server/run-engine/read-retry";
+import { reopenByReading } from "../../server/run-engine/reopen-read";
 import { createEngineService } from "../../server/run-engine/service";
 import { createRunStore, type RunStore } from "../../server/run-engine/store";
 import { REPO_ALIAS } from "../../shared/domain/run-engine/dag-admission";
@@ -28,6 +29,7 @@ import { checkLedgerInvariants } from "../../shared/domain/run-engine/invariants
 import { isEngineSettled } from "../../shared/domain/run-engine/lost-turn";
 import { compileDispatch } from "../../shared/domain/run-engine/prompt-template";
 import { emptyReadRetries } from "../../shared/domain/run-engine/read-retry";
+import { CLOSING_TURN_ALERT_PREFIX } from "../../shared/domain/run-engine/seat-closed";
 import { explainDecision, explainWaiting } from "../../shared/domain/run-engine/waiting";
 import type { PaseoEnginePort, PortTimelinePage } from "../../shared/paseo/port";
 import type { RunRecord } from "../../shared/schemas/run-engine/ledger";
@@ -102,8 +104,10 @@ afterEach(async () => {
 type Sent = { agentId: string; text: string; messageId: string };
 type PortTimelineEntry = PortTimelinePage["entries"][number];
 
-function fakeHost() {
+function fakeHost(options: { reopensOnRead?: boolean } = {}) {
   const timelines = new Map<string, PortTimelineEntry[]>();
+  const unopenable = new Set<string>();
+  const timelineReads = new Map<string, number>();
   const turns = new Map<string, string>();
   const sent: Sent[] = [];
   const calls = { archives: 0, seatReads: 0 };
@@ -149,16 +153,27 @@ function fakeHost() {
           calls.archives += 1;
         },
         timeline: {
-          refetch: async () => ({
-            entries: [...entries(agentId)],
-            epoch: "e1",
-            startCursor: null,
-            hasOlder: false,
-            hasNewer: false,
-            gap: false,
-            staleCursor: false,
-            reset: false,
-          }),
+          refetch: async () => {
+            timelineReads.set(agentId, (timelineReads.get(agentId) ?? 0) + 1);
+            // The real host loads a closed Agent again when its timeline is read (T11 fact 1); a Codex
+            // member that never ran a turn cannot be (fact 3).
+            if (options.reopensOnRead && closedAgents.has(agentId)) {
+              if (unopenable.has(agentId)) {
+                throw new Error(`Failed to resume Codex thread for ${agentId}: no rollout found`);
+              }
+              closedAgents.delete(agentId);
+            }
+            return {
+              entries: [...entries(agentId)],
+              epoch: "e1",
+              startCursor: null,
+              hasOlder: false,
+              hasNewer: false,
+              gap: false,
+              staleCursor: false,
+              reset: false,
+            };
+          },
         },
         current: () => state(agentId),
         refresh: async () => {
@@ -177,6 +192,9 @@ function fakeHost() {
     runningAgents,
     absentAgents,
     unreadableAgents,
+    unopenable,
+    /** How often the timeline of an agent was read (any reader). */
+    reads: (agentId: string) => timelineReads.get(agentId) ?? 0,
     /** The person closed the Agent: no live turn, and the host reads it back as closed. */
     close: (agentId: string) => {
       runningAgents.delete(agentId);
@@ -205,19 +223,26 @@ type Host = ReturnType<typeof fakeHost>;
  * (`lost-turn.ts`); with the real clock that was true only because the machine took a few milliseconds
  * in between, so a fast one could put both in the same millisecond. Here "later" is a fact of the test.
  */
-function steppedClock(): { now(): string } {
+function steppedClock(stepMs = 1000): { now(): string; jump(ms: number): void } {
   let at = Date.parse("2026-11-05T12:00:00.000Z");
   return {
     now: () => {
-      at += 1000;
+      at += stepMs;
       return new Date(at).toISOString();
+    },
+    jump: (ms) => {
+      at += ms;
     },
   };
 }
 
 /** The wiring as production makes it: the settler first, the cancellation finisher after it. */
-function build(host: Host) {
-  const clock = steppedClock();
+function build(host: Host, options: { tickMs?: number; reopen?: boolean } = {}) {
+  const clock = steppedClock(options.tickMs);
+  // The agents the settler holds back from the host reads, as the runtime wires it.
+  const watch = createClosingWatch();
+  const isHeld = (agentId: string) => watch.holds(agentId);
+  const reopens = { count: 0 };
   const failures: ReadFailure[] = [];
   const onReadFailure = (_runId: string, failure: ReadFailure) => {
     failures.push(failure);
@@ -231,7 +256,7 @@ function build(host: Host) {
       ? { status: refreshed.agent.status, activeTurn: refreshed.agent.activeTurn != null }
       : null;
   };
-  const observerHost = createObserverHost(host.port);
+  const observerHost = createObserverHost(host.port, { isHeld });
   // The observer holds hooks back while its store is not ready (a restart before the ledger is open).
   const gate = { ready: true };
   const observerStore: RunStore = new Proxy(store, {
@@ -304,12 +329,26 @@ function build(host: Host) {
     dagIntake,
     service,
     clock,
-    memberLost: createMemberLostSettler({ store, readSeat, onReadFailure, clock }),
+    memberLost: createMemberLostSettler({
+      store,
+      readSeat,
+      onReadFailure,
+      clock,
+      watch,
+      ...(options.reopen
+        ? {
+            reopenSeat: (agentId: string) => {
+              reopens.count += 1;
+              return reopenByReading(host.port, agentId, 30_000);
+            },
+          }
+        : {}),
+    }),
     cancelFinisher: createCancelFinisher({ store, readSeat, onReadFailure, clock }),
-    reconcileHost: createObserverHost(host.port, { requireIdle: true }),
+    reconcileHost: createObserverHost(host.port, { requireIdle: true, isHeld }),
   });
   const control = createRunControl({ store, ensureReady: async () => undefined, driver, clock });
-  return { driver, control, failures, seatReads, gate };
+  return { driver, control, failures, seatReads, gate, clock, reopens, watch };
 }
 
 type Built = ReturnType<typeof build>;
@@ -586,6 +625,8 @@ for (const schema of [1, 2] as const) {
       const host = fakeHost();
       const built = build(host);
       await reachWorking(host, built);
+      // Archived while it still reads as running: nothing is settled yet, and no closed receipt is on record.
+      await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
       host.close(MEMBER);
       // The button a person presses, as production wires it (`run.kick` reads the host before it settles).
       await recoverWithoutHook(built, "kick");
@@ -624,6 +665,7 @@ for (const schema of [1, 2] as const) {
             next.policy.perTask.protocolResends = repairBudget;
             return next;
           });
+          await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
           host.close(MEMBER);
           const sentBefore = host.sent.length;
 
@@ -687,6 +729,9 @@ for (const schema of [1, 2] as const) {
         built.gate.ready = false;
         const held = await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
         expect(held.status).toBe("buffered");
+        expect(
+          (await built.driver.onHook({ name: "agent.archived", agentId: MEMBER })).status,
+        ).toBe("buffered");
         built.gate.ready = true;
         expect(engineReceipts(await stored())).toHaveLength(0);
         // The host reads the member as having no turn, but not as closed: only the held hook shows the close.
@@ -837,6 +882,7 @@ for (const schema of [1, 2] as const) {
       await reachWorking(host, built);
       const turnId = host.turnOf(MEMBER);
       produce(host, MEMBER);
+      await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
       host.close(MEMBER);
       await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
       const settled = await stored();
@@ -861,6 +907,7 @@ for (const schema of [1, 2] as const) {
       const host = fakeHost();
       const built = build(host);
       await reachWorking(host, built);
+      await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
       host.close(MEMBER);
       await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
       const settled = await stored();
@@ -962,6 +1009,7 @@ for (const schema of [1, 2] as const) {
       const host = fakeHost();
       const built = build(host);
       await reachWorking(host, built);
+      await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
       host.close(MEMBER);
       await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
       // The turn is settled; the member is then unreadable: the cancellation has no proof of a quiet seat.
@@ -1061,6 +1109,10 @@ for (const schema of [1, 2] as const) {
       await reachWorking(host, built, independentPlan());
       host.close(MEMBER);
       await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      // Only closed: the Engine waits (T11e) and, with no way to reopen it here, calls it lost after 30 seconds.
+      expect(openDecisions(await stored())).toHaveLength(0);
+      built.clock.jump(31_000);
+      await built.driver.kick(RUN_ID);
       const decision = openDecisions(await stored())[0];
       await decideCancel(built, decision?.decisionId ?? "");
       host.reopen(MEMBER);
@@ -1144,6 +1196,511 @@ for (const schema of [1, 2] as const) {
       expect(states(done).t1).toBe("cancelled");
       expect(done.resources).toEqual([]);
       expect(checkLedgerInvariants(done).ok).toBe(true);
+    });
+  });
+}
+
+// --- T11e: a member that is only closed gets a look at reopening before its turn is called lost -----
+
+const closingAlerts = (record: RunRecord) =>
+  record.alerts.filter((alert) => alert.summary.startsWith(CLOSING_TURN_ALERT_PREFIX));
+
+async function answer(built: Built, decisionId: string, action: "retry" | "cancel") {
+  const before = await stored();
+  const out = await built.control.decide({
+    runContractVersion: 1 as const,
+    runId: RUN_ID,
+    decisionId,
+    requestId: `answer-${action}`,
+    expectedRevision: before.revision,
+    reason: "the member was closed by a restart",
+    answer: { action },
+  });
+  await built.control.idle();
+  return out;
+}
+
+const person = (built: Built) =>
+  built.control.kick({ runContractVersion: 1 as const, runId: RUN_ID });
+
+for (const schema of [1, 2] as const) {
+  describe(`a member that is only closed is reopened before its turn is called lost [v${schema}]`, () => {
+    beforeEach(async () => {
+      version = schema;
+      await setup();
+    });
+
+    /** The cut-off turn of a graceful stop (a closed receipt) or of a kill (none): the member is closed. */
+    async function restartedClosed(withReceipt: boolean) {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      const reads = host.reads(MEMBER);
+      const sent = host.sent.length;
+      if (withReceipt) await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      else await recoverWithoutHook(built, "kick");
+      return { host, built, reads, sent };
+    }
+
+    for (const withReceipt of [true, false]) {
+      const how = withReceipt ? "a graceful stop wrote a closed receipt" : "a kill left no receipt";
+      test(`${how}: the first look reads the history once and warns; nothing is written before 30 seconds; then host-lost, retry sends exactly one new task`, async () => {
+        const { host, built, reads, sent } = await restartedClosed(withReceipt);
+        const first = await stored();
+        expect(first.schemaVersion).toBe(schema);
+        // The history was read once (that is what reopened it), by the settler and nobody else.
+        expect(host.reads(MEMBER)).toBe(reads + 1);
+        expect(built.reopens.count).toBe(1);
+        expect(engineReceipts(first)).toHaveLength(0);
+        expect(openDecisions(first)).toHaveLength(0);
+        expect(closingAlerts(first).map((alert) => alert.state)).toEqual(["open"]);
+        expect(closingAlerts(first)[0]?.severity).toBe("warning");
+        expect(closingAlerts(first)[0]?.summary).toContain("30 秒");
+        expect(closingAlerts(first)[0]?.summary).toContain("立即检查并推进");
+
+        // Within 30 seconds every way of looking writes nothing, sends nothing and reads no history.
+        built.clock.jump(10_000);
+        const looks: [string, () => Promise<unknown>][] = [
+          ["kick", () => built.driver.kick(RUN_ID)],
+          ["recover", () => recoverWithoutHook(built, "recover")],
+          ["button", () => recoverWithoutHook(built, "kick")],
+        ];
+        for (const [name, look] of looks) {
+          await look();
+          expect([name, (await stored()).revision]).toEqual([name, first.revision]);
+        }
+        const quietly = await stored();
+        expect(host.reads(MEMBER)).toBe(reads + 1);
+        expect(host.sent).toHaveLength(sent);
+        expect(quietly.eventReceipts.filter((r) => r.kind === "turn_ended")).toHaveLength(
+          first.eventReceipts.filter((r) => r.kind === "turn_ended").length,
+        );
+
+        // 30 seconds on: one receipt, one decision, the warning down, in one commit.
+        built.clock.jump(21_000);
+        await built.driver.kick(RUN_ID);
+        const settled = await stored();
+        const receipts = engineReceipts(settled);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]).toMatchObject({
+          kind: "turn_ended",
+          agentId: MEMBER,
+          outcome: "host-lost",
+          settledBy: "engine",
+          basis: { closedBy: withReceipt ? "receipt" : "host-read", seatStatus: "idle" },
+        });
+        const open = openDecisions(settled);
+        expect(open).toHaveLength(1);
+        expect(decisionKindOf(settled, open[0] as never)).toBe("host-lost");
+        // The text names this cause (closed, then reopened idle) as well as the lost dispatch.
+        expect(open[0]?.summary).toContain("重新打开后空闲");
+        expect(answerableActions(settled, open[0] as never)).toEqual(["retry", "cancel"]);
+        expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+        expect(settled.tasks.find((task) => task.spec.id === "t1")?.waitingReason).toBe(
+          "host-lost",
+        );
+        expect(checkLedgerInvariants(settled).ok).toBe(true);
+        expect(host.sent).toHaveLength(sent);
+        expect(host.calls.archives).toBe(0);
+        expect(host.reads(MEMBER)).toBe(reads + 1);
+
+        // The answer retry sends exactly one new task to the reopened member.
+        const out = await answer(built, open[0]?.decisionId ?? "", "retry");
+        expect(out).toMatchObject({ status: "applied", taskId: "t1" });
+        expect(host.sent).toHaveLength(sent + 1);
+        expect(host.sent.at(-1)?.agentId).toBe(MEMBER);
+        await built.driver.kick(RUN_ID);
+        expect(host.sent).toHaveLength(sent + 1);
+        // And the new attempt is taken in like any other.
+        await turnStarts(host, built, MEMBER);
+        produce(host, MEMBER);
+        host.runningAgents.delete(MEMBER);
+        await turnEnded(host, built, MEMBER);
+        expect(states(await stored()).t1).toBe("review");
+      });
+    }
+
+    test("a restart of the plugin forgets what was seen: the closed receipt still dates the wait, and one look reads and settles", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const first = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, first);
+      host.close(MEMBER);
+      await first.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(engineReceipts(await stored())).toHaveLength(0);
+      const reads = host.reads(MEMBER);
+      // A new process: nothing in memory. The receipt is older than 30 seconds by then.
+      first.clock.jump(45_000);
+      const second = build(host, { tickMs: 1, reopen: true });
+      second.clock.jump(60_000);
+      await second.driver.recover();
+      await second.control.idle();
+      const settled = await stored();
+      expect(host.reads(MEMBER)).toBe(reads + 1);
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "host-lost" });
+      expect(openDecisions(settled)).toHaveLength(1);
+      expect(closingAlerts(settled).every((alert) => alert.state === "resolved")).toBe(true);
+    });
+
+    test("a kill with no receipt restarts the clock with the process: the first look after a restart only starts waiting", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const first = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, first);
+      host.close(MEMBER);
+      await recoverWithoutHook(first, "kick");
+      const second = build(host, { tickMs: 1, reopen: true });
+      second.clock.jump(120_000);
+      const before = await stored();
+      await recoverWithoutHook(second, "recover");
+      // The new process has no memory of when the member was first seen closed: the seat now reads idle
+      // (it was reopened), nothing shows the turn was cut, and nothing is settled (T4b's own rules apply).
+      expect(engineReceipts(await stored())).toHaveLength(0);
+      expect((await stored()).revision).toBeGreaterThanOrEqual(before.revision);
+    });
+
+    test("the history cannot be read (a Codex member that never ran): one read, then member-lost with the host's words; a person's check reads once more; nothing loops", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      host.unopenable.add(MEMBER);
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      const reads = host.reads(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const first = await stored();
+      expect(host.reads(MEMBER)).toBe(reads + 1);
+      expect(closingAlerts(first).map((alert) => alert.state)).toEqual(["open"]);
+      expect(engineReceipts(first)).toHaveLength(0);
+
+      // Automatic looks never read again.
+      built.clock.jump(5_000);
+      await built.driver.kick(RUN_ID);
+      await recoverWithoutHook(built, "recover");
+      expect(host.reads(MEMBER)).toBe(reads + 1);
+      expect((await stored()).revision).toBe(first.revision);
+
+      // A person's "check now" reads exactly once more, and still writes nothing inside 30 seconds.
+      await person(built);
+      expect(host.reads(MEMBER)).toBe(reads + 2);
+      await built.driver.kick(RUN_ID);
+      expect(host.reads(MEMBER)).toBe(reads + 2);
+      expect(openDecisions(await stored())).toHaveLength(0);
+
+      built.clock.jump(31_000);
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+      const open = openDecisions(settled);
+      expect(open).toHaveLength(1);
+      expect(decisionKindOf(settled, open[0] as never)).toBe("member-lost");
+      expect(answerableActions(settled, open[0] as never)).toEqual(["cancel"]);
+      expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+      const note = settled.events.filter((event) => event.kind === "task-note").at(-1);
+      expect(JSON.stringify(note?.payload)).toContain("Failed to resume Codex thread");
+      expect(JSON.stringify(note?.payload)).toContain("no rollout found");
+
+      // Done: nothing is read and nothing is written however long it sits or how often it is looked at.
+      const revision = settled.revision;
+      const seatReads = built.seatReads.count;
+      const settlerReads = built.reopens.count;
+      built.clock.jump(24 * 3600 * 1000);
+      await built.driver.kick(RUN_ID);
+      await recoverWithoutHook(built, "recover");
+      await recoverWithoutHook(built, "kick");
+      expect((await stored()).revision).toBe(revision);
+      expect(built.seatReads.count).toBe(seatReads);
+      expect(built.reopens.count).toBe(settlerReads);
+    });
+
+    test("the read leaves the member closed (no error): member-lost after 30 seconds, without a host message in the note", async () => {
+      const host = fakeHost();
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(built.reopens.count).toBe(1);
+      expect(openDecisions(await stored())).toHaveLength(0);
+      built.clock.jump(31_000);
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(openDecisions(settled)).toHaveLength(1);
+      expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+      const note = settled.events.filter((event) => event.kind === "task-note").at(-1);
+      expect(JSON.stringify(note?.payload)).not.toContain("hostError");
+    });
+
+    test("the host has no such Agent any more, or it was archived: member-lost at once, no history is read", async () => {
+      for (const how of ["absent", "archived"] as const) {
+        await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+        await store.close().catch(() => undefined);
+        await setup();
+        const host = fakeHost({ reopensOnRead: true });
+        const built = build(host, { tickMs: 1, reopen: true });
+        await reachWorking(host, built);
+        host.runningAgents.delete(MEMBER);
+        const reads = host.reads(MEMBER);
+        if (how === "absent") {
+          host.absentAgents.add(MEMBER);
+        } else {
+          await built.driver.onHook({ name: "agent.archived", agentId: MEMBER });
+          host.close(MEMBER);
+        }
+        await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+        const settled = await stored();
+        expect(engineReceipts(settled)).toHaveLength(1);
+        expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+        expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+        expect(closingAlerts(settled)).toEqual([]);
+        expect(built.reopens.count).toBe(0);
+        expect(host.reads(MEMBER)).toBe(reads);
+      }
+    });
+
+    test("a reviewer's turn is treated the same: host-lost after the wait, and retry sends exactly one new review", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachReview(host, built);
+      host.close(JUDGE);
+      const sent = host.sent.length;
+      await built.driver.onHook({ name: "agent.closed", agentId: JUDGE });
+      expect(openDecisions(await stored())).toHaveLength(0);
+      expect(closingAlerts(await stored()).map((alert) => alert.state)).toEqual(["open"]);
+      built.clock.jump(31_000);
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled).map((receipt) => receipt.agentId)).toEqual([JUDGE]);
+      const open = openDecisions(settled);
+      expect(open).toHaveLength(1);
+      expect(decisionKindOf(settled, open[0] as never)).toBe("host-lost");
+      expect(answerableActions(settled, open[0] as never)).toEqual(["retry", "cancel"]);
+      expect(host.sent).toHaveLength(sent);
+      const out = await answer(built, open[0]?.decisionId ?? "", "retry");
+      expect(out).toMatchObject({ status: "applied", taskId: "t1" });
+      expect(host.sent).toHaveLength(sent + 1);
+      expect(host.sent.at(-1)?.agentId).toBe(JUDGE);
+    });
+
+    test("cancelling the whole Run: the turn is recorded as ended at once, no history is read, no decision is opened", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(closingAlerts(await stored()).map((alert) => alert.state)).toEqual(["open"]);
+      const reads = built.reopens.count;
+      await askForCancel(built);
+      await built.driver.kick(RUN_ID);
+      const done = await stored();
+      expect(done.lifecycle).toBe("cancelled");
+      expect(engineReceipts(done)).toHaveLength(1);
+      expect(engineReceipts(done)[0]).toMatchObject({ outcome: "agent-closed" });
+      expect(openDecisions(done)).toEqual([]);
+      expect(built.reopens.count).toBe(reads);
+    });
+
+    test("a turn is running at the 30 seconds (a person wrote to the member): nothing is settled and the warning stays; it comes down once the person's turn is on the ledger", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      // The reopened member is now working on something a person asked.
+      host.runningAgents.add(MEMBER);
+      built.clock.jump(31_000);
+      await built.driver.kick(RUN_ID);
+      const busy = await stored();
+      expect(engineReceipts(busy)).toHaveLength(0);
+      expect(openDecisions(busy)).toHaveLength(0);
+      expect(closingAlerts(busy).map((alert) => alert.state)).toEqual(["open"]);
+      // Looking again writes nothing.
+      await built.driver.kick(RUN_ID);
+      expect((await stored()).revision).toBe(busy.revision);
+
+      // The person's turn begins on the ledger: the member works again, nothing was cut off for good.
+      host.addUserMessage(MEMBER, "turn-person", "typed-by-the-person");
+      await built.driver.onHook({
+        name: "agent.turn_started",
+        agentId: MEMBER,
+        turnId: "turn-person",
+      });
+      await built.driver.kick(RUN_ID);
+      const after = await stored();
+      expect(engineReceipts(after)).toHaveLength(0);
+      expect(closingAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
+    });
+
+    test("cancelling the whole Run before any look has seen the closed member: the history is never read (no read to reopen it for a Run that is going away)", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await askForCancel(built);
+      await built.driver.kick(RUN_ID);
+      const done = await stored();
+      expect(done.lifecycle).toBe("cancelled");
+      // The settler's own reopening read is what is counted (other readers do read timelines).
+      expect(built.reopens.count).toBe(0);
+      expect(engineReceipts(done)).toHaveLength(1);
+      expect(openDecisions(done)).toEqual([]);
+    });
+
+    test("the hold on the host reads of a member comes off as soon as the host says it started a turn (before any pass looks again)", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      // Waiting: the Engine holds the member, so no reader opens its history behind its back.
+      expect(built.watch.holds(MEMBER)).toBe(true);
+      host.addUserMessage(MEMBER, "turn-person-hold", "typed-hold");
+      host.runningAgents.add(MEMBER);
+      await built.driver.onHook({
+        name: "agent.turn_started",
+        agentId: MEMBER,
+        turnId: "turn-person-hold",
+      });
+      // A turn start does not kick a pass: the hook alone released it.
+      expect(built.watch.holds(MEMBER)).toBe(false);
+    });
+
+    test("the coordinator is not waited on: only closed means member-lost at once, no history is read, no warning", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      await store.update(RUN_ID, (current) => {
+        const next = structuredClone(current);
+        const assignment = next.assignments.find((entry) => entry.state === "assigned");
+        if (assignment) assignment.purpose = "coordinator";
+        return next;
+      });
+      host.close(MEMBER);
+      const reads = built.reopens.count;
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+      expect(closingAlerts(settled)).toEqual([]);
+      expect(built.reopens.count).toBe(reads);
+      expect(openDecisions(settled)).toHaveLength(1);
+      expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+    });
+
+    /** What a person pause leaves in the record: the Run is paused, the assignments are untouched. */
+    async function pause() {
+      await store.update(RUN_ID, (current) => {
+        const next = structuredClone(current);
+        next.lifecycle = "paused";
+        return next;
+      });
+    }
+
+    for (const withReceipt of [true, false]) {
+      test(`a paused Run (${withReceipt ? "closed receipt" : "no receipt, the host reads it closed"}) is settled by the earlier rule at once: member-lost, no history read, no warning`, async () => {
+        const host = fakeHost({ reopensOnRead: true });
+        const built = build(host, { tickMs: 1, reopen: true });
+        await reachWorking(host, built);
+        await pause();
+        host.close(MEMBER);
+        const reads = built.reopens.count;
+        if (withReceipt) await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+        else await built.driver.kick(RUN_ID);
+        const settled = await stored();
+        expect(settled.lifecycle).toBe("paused");
+        expect(engineReceipts(settled)).toHaveLength(1);
+        expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+        expect(openDecisions(settled)).toHaveLength(1);
+        expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+        expect(closingAlerts(settled)).toEqual([]);
+        expect(built.reopens.count).toBe(reads);
+        // Settled once: looking again writes nothing.
+        await built.driver.kick(RUN_ID);
+        expect((await stored()).revision).toBe(settled.revision);
+      });
+    }
+
+    test("a Run paused while a closed member turn waits: the next look settles it by the earlier rule and takes the warning down; no further read", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(closingAlerts(await stored()).map((alert) => alert.state)).toEqual(["open"]);
+      const reads = built.reopens.count;
+      await pause();
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "agent-closed" });
+      expect(decisionKindOf(settled, openDecisions(settled)[0] as never)).toBe("member-lost");
+      expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+      expect(built.reopens.count).toBe(reads);
+    });
+
+    test("a look that cannot read the member while its turn waits keeps the warning, writes nothing and settles nothing; once it can be read the wait goes on from the first sight", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      const waiting = await stored();
+      expect(closingAlerts(waiting).map((alert) => alert.state)).toEqual(["open"]);
+      expect(built.watch.holds(MEMBER)).toBe(true);
+
+      host.unreadableAgents.add(MEMBER);
+      built.clock.jump(40_000);
+      await built.driver.kick(RUN_ID);
+      await recoverWithoutHook(built, "recover");
+      const failed = await stored();
+      expect(failed.revision).toBe(waiting.revision);
+      expect(closingAlerts(failed).map((alert) => alert.state)).toEqual(["open"]);
+      expect(engineReceipts(failed)).toHaveLength(0);
+      expect(openDecisions(failed)).toHaveLength(0);
+      // Still held: nothing reads the member behind the Engine back.
+      expect(built.watch.holds(MEMBER)).toBe(true);
+
+      // It can be read again, and more than 30 seconds have gone by since the first sight: settled.
+      host.unreadableAgents.delete(MEMBER);
+      await built.driver.kick(RUN_ID);
+      const settled = await stored();
+      expect(engineReceipts(settled)).toHaveLength(1);
+      expect(engineReceipts(settled)[0]).toMatchObject({ outcome: "host-lost" });
+      expect(closingAlerts(settled).map((alert) => alert.state)).toEqual(["resolved"]);
+    });
+
+    test("the host own turn end after the hold was set takes the hold off before the report is read, so the report is taken in", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      produce(host, MEMBER);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      expect(built.watch.holds(MEMBER)).toBe(true);
+      expect(states(await stored()).t1).toBe("assigned");
+      // The turn really did end (the host says so): its report must be readable by the hook that says it.
+      await turnEnded(host, built, MEMBER, "completed");
+      expect(states(await stored()).t1).toBe("review");
+    });
+
+    test("a person opens the member again and it works before the 30 seconds: nothing is settled and the warning comes down", async () => {
+      const host = fakeHost({ reopensOnRead: true });
+      const built = build(host, { tickMs: 1, reopen: true });
+      await reachWorking(host, built);
+      host.close(MEMBER);
+      await built.driver.onHook({ name: "agent.closed", agentId: MEMBER });
+      host.runningAgents.add(MEMBER);
+      host.addUserMessage(MEMBER, "turn-person", "typed-by-the-person");
+      await built.driver.onHook({
+        name: "agent.turn_started",
+        agentId: MEMBER,
+        turnId: "turn-person",
+      });
+      built.clock.jump(60_000);
+      await built.driver.kick(RUN_ID);
+      const after = await stored();
+      expect(engineReceipts(after)).toHaveLength(0);
+      expect(openDecisions(after)).toHaveLength(0);
+      expect(closingAlerts(after).map((alert) => alert.state)).toEqual(["resolved"]);
     });
   });
 }

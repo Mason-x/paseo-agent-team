@@ -280,11 +280,15 @@ describe.each([
 
   test("the Engine's end for it takes the new appearance's key and opens the decision on it", async () => {
     await oldThenNew();
+    let now = "2026-11-05T13:05:00.000Z";
     const settler = createMemberLostSettler({
       store,
       readSeat: async () => ({ status: "closed", activeTurn: false }),
-      clock: { now: () => "2026-11-05T13:05:00.000Z" },
+      clock: { now: () => now },
     });
+    // Closed and nothing more known: the first look waits, the one 30 seconds later settles (T11e).
+    expect(await settler.settle(RUN_ID)).toEqual({ settled: 0 });
+    now = "2026-11-05T13:05:31.000Z";
     expect(await settler.settle(RUN_ID)).toEqual({ settled: 1 });
     const after = await stored();
     const end = after.eventReceipts.find(

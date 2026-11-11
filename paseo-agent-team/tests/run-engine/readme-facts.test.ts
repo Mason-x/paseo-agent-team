@@ -271,6 +271,67 @@ describe("the Run Engine section of the README agrees with the code", () => {
     expect(section).not.toContain("请点重新规划");
   });
 
+  test("it describes a member that is only closed: the read, the wait, the outcomes, what stays and the rollback (T11e)", () => {
+    const text = section.replace(/\s+/gu, " ");
+    const facts: [string, string][] = [
+      ["title", "**A member that is only closed.**"],
+      ["scope", "producer's task turn or of a reviewer's turn is only closed"],
+      ["no archived, no turn end", "with no `turn_ended` and no `archived` receipt"],
+      [
+        "one read",
+        "reads the member's history once to try to reopen it (read only: no message, no model call, 30 seconds at most)",
+      ],
+      ["warning", "raises a warning that says what it waits for and when to press"],
+      ["one more per press", "each press of the button allows exactly one more"],
+      [
+        "30 seconds from the first sight",
+        "at least 30 seconds after the member was first seen closed",
+      ],
+      [
+        "memory only",
+        "kept in memory only: after a plugin restart the 30 seconds start again, so it is later, never earlier; nothing runs by timer",
+      ],
+      [
+        "host-lost",
+        "writes its own turn end (`outcome` `host-lost`), opens a `host-lost` decision (retry or cancel) and takes the warning down in the same commit",
+      ],
+      [
+        "member-lost with the host's words",
+        "`member-lost` (cancel only) as before and the task note keeps the host's own error text",
+      ],
+      [
+        "running is left alone",
+        "with a turn running at that moment (someone wrote to it) is left alone and the warning stays",
+      ],
+      [
+        "unchanged cases",
+        "`archived` receipt, a member the host no longer has, a smoke tester, a supplement, the coordinator, a Run that is being cancelled and a Run that is paused keep the earlier rule: lost at once",
+      ],
+      [
+        "clean the branch",
+        "look at the member's branch and clean up what the cut-off turn left behind",
+      ],
+      [
+        "what is offered",
+        "gets a `host-lost` decision (retry or cancel) when the member reopens; a member that cannot be reopened or was archived, a smoke tester, a supplement, the coordinator and a paused Run get a `member-lost` decision",
+      ],
+      [
+        "unreadable look",
+        "a look that cannot read the member (the warning stays, nothing is timed or settled",
+      ],
+      ["decision text", "The text of the `host-lost` decision names both causes"],
+      ["false idle", "a reopened member can read idle without being usable"],
+      ["Codex", "a Codex member that never ran a turn cannot be opened and can only be cancelled"],
+      [
+        "hold is memory only",
+        "a mark kept in memory, not in the ledger, so a plugin restart loses the mark",
+      ],
+      ["rollback", "Going back to 0.7.x: a `host-lost` decision of this kind"],
+    ];
+    for (const [fact, needle] of facts) expect(text, fact).toContain(needle);
+    expect(text).not.toContain("DRILL-PLACEHOLDER");
+  });
+
   test("it describes reopening a closed seat by reading its history, and what is never read (T11a)", () => {
     expect(section).toContain("**Reopening.**");
     expect(section).toContain("(no message, no model call, 30 seconds at most)");

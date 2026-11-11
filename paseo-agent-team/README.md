@@ -201,8 +201,12 @@ Agent in the middle of its turn, the host may never report that the turn ended. 
 itself. When the host reported the turn's end first, the lost-reply rules under *Recover and roll back*
 apply instead: an `archived` receipt gives a cancel-only decision, while a producer or reviewer that is
 idle after a graceful daemon stop with only a `closed` receipt gets a `host-lost` decision with retry
-or cancel. When the Engine recorded a closed turn itself, the task waits for a
-decision that can only be answered with cancel: the member is not asked again. Whatever the cut-off
+or cancel. When the Engine recorded a closed turn itself, what the person is offered depends on whether the member
+can be reopened: a producer's or reviewer's turn whose member is only closed is first given a look at
+reopening (see *A member that is only closed* below) and gets a `host-lost` decision (retry or cancel) when
+the member reopens; a member that cannot be reopened or was archived, a smoke tester, a supplement, the
+coordinator and a paused Run get a `member-lost` decision, a
+decision that can only be answered with cancel: that member is not asked again. Whatever the cut-off
 turn replied is not taken in (even a valid report), and the
 Engine sends nothing to the member and archives nothing. Answering cancel releases the task's claims
 and cancels the tasks that depend on it; cancelling the whole Run finishes as well. An archived
@@ -213,6 +217,32 @@ Going back to 0.6.x: a member-lost decision that
 nobody answered shows a retry there; do not pick it. While the Agent stays closed the seat refuses
 the new attempt and nothing is sent (for a reviewer's decision the retry is refused outright), but
 it is misleading; cancel instead.
+
+**A member that is only closed.** A daemon restart or a kill leaves every member closed, and reading its
+history opens it again. So when the member of a producer's task turn or of a reviewer's turn is only
+closed (a `closed` receipt, or the host reads it as closed, with no `turn_ended` and no `archived`
+receipt), the Engine does not call the turn lost at once. The first look that sees it reads the member's
+history once to try to reopen it (read only: no message, no model call, 30 seconds at most) and raises a
+warning that says what it waits for and when to press **立即检查并推进**. A read that failed is not
+repeated by the automatic looks; each press of the button allows exactly one more. The first look at
+least 30 seconds after the member was first seen closed settles the turn (the time of the `closed`
+receipt, else the first look, which is kept in memory only: after a plugin restart the 30 seconds start
+again, so it is later, never earlier; nothing runs by timer). If the member then reads idle with no turn
+running, the Engine writes its own turn end (`outcome` `host-lost`), opens a `host-lost` decision (retry
+or cancel) and takes the warning down in the same commit. If it is still closed, cannot be read or does
+not open, the turn is `member-lost` (cancel only) as before and the task note keeps the host's own error
+text. A member with a turn running at that moment (someone wrote to it) is left alone and the warning
+stays; so is a look that cannot read the member (the warning stays, nothing is timed or settled, the wait
+goes on when it can be read). An `archived` receipt, a member the host no longer has, a smoke tester, a
+supplement, the coordinator, a Run that is being cancelled and a Run that is paused keep the earlier rule:
+lost at once (a paused Run reads no history and waits for nothing). Before you answer retry, look at the member's
+branch and clean up what the cut-off turn left behind; the Engine sends the new task only after your
+answer. The text of the `host-lost` decision names both causes: the dispatch is gone from the member's history, or the member was closed and reads idle after being reopened. Two cases stay: a reopened member can read idle without being usable (a Claude member cut off in
+the first seconds of its first turn), and then the retried turn fails through the ordinary failure path
+and you can cancel; a Codex member that never ran a turn cannot be opened and can only be cancelled.
+While the turn waits, the host reads of that member are held back by a mark kept in memory, not in the
+ledger, so a plugin restart loses the mark and the wait starts again from the first look.
+Going back to 0.7.x: a `host-lost` decision of this kind (a producer's or reviewer's turn whose member was only closed) answered with retry is accepted and the task goes back to ready, but 0.7.x does not reopen a closed seat, so the new attempt stops at the closed seat and nothing is sent; answer cancel instead. A 0.7.1 drill read the v1 and v2 ledgers this writes (parse, invariants and the decision's `retry` and `cancel` all work; the settled turn end is an ordinary receipt with extra fields that 0.7.1 ignores); the stop at the closed seat is 0.7.x's own seat-closed refusal and was not rehearsed on a live 0.7.1 host. Answer these decisions before rolling back.
 
 **Advanced fields.** Two policy fields have no control in the Team editor. They live in the Team's
 `runEngine` block under `policy` (Teams are stored in the host setting `agent-team-teams`), and the
@@ -313,7 +343,7 @@ daemon restart.
   Run finishes as well. Nothing runs by timer: the look happens when you press the button, when a hook
   arrives or when the daemon recovers, and the Engine sends the member nothing by itself. After a host
   restart the member's provider process may still be running (on Windows too): make sure it has
-  stopped before you answer. A member the host reads as closed is the closed-or-archived case above.
+  stopped before you answer. A member the host reads as closed is the closed-or-archived case above (a producer or reviewer that is only closed: *A member that is only closed*).
   Where the host never reported the turn's end, the Engine settles only a producer's or reviewer's turn.
   It does not settle a smoke tester, a supplement or a re-report, or a turn it never saw begin (no
   turn start on record): for those the warning is still shown, the Run does not move on, a kick

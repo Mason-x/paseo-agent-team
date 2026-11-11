@@ -100,8 +100,10 @@ T11 是这条线的最后一批：三项代码、一轮 DEV、发 0.8.0、留一
 ### T11e｜DEV 发现问题的修复
 不改合同的直接修（fix）；要改合同的回问 Opus。最多两轮。修完只重验受影响的项，不超过 2 个 Run、1.5 小时。
 
+执行记录（第一轮，裁决 ruling-t11d 第 1 条）：生产者的任务回合和评审回合，成员只有 closed 回执或宿主读到 closed 时，先读一次时间线试着重开并告警，首次看到 closed 满 30 秒后再结算：重开后 idle 且无在跑回合开 `host-lost`，否则 `member-lost`（task-note 写宿主原话）；archived 回执或宿主没有该 Agent 照旧立即结算。合同不变。细节见计划 P04 第 93 点。DEV 复验（Run A、Run B）待做。
+
 ### T11f｜发 0.8.0
-照 T7 的步骤；Grok 在发布提交上独立重跑一次门禁；照 0.7.1 的做法构建并上传 zip。Release 正文追加回滚注意：回滚到 0.7.x 后，冻结规格和重建记录被忽略，已换绑的席位照常用新 Agent；还在 creating 的重建会被丢下，可能留下一个没登记的 Agent；T11c 回滚演练的结论。本批原则上只发 0.8.0；万一需要另发（例如 T11b 撤回后发 0.7.2），不受一天一版的限制。
+照 T7 的步骤；Grok 在发布提交上独立重跑一次门禁；照 0.7.1 的做法构建并上传 zip。Release 正文追加回滚注意：回滚到 0.7.x 后，这类 host-lost 决策（成员只是被关闭，重启打断了它的回合，重新打开后给出的）答“重试”会停在已关闭的席位上（0.7.x 不会重开），应改答取消；冻结规格和重建记录被忽略，已换绑的席位照常用新 Agent；还在 creating 的重建会被丢下，可能留下一个没登记的 Agent；T11c 回滚演练的结论。本批原则上只发 0.8.0；万一需要另发（例如 T11b 撤回后发 0.7.2），不受一天一版的限制。
 
 ### T11g｜交付
 1. 草稿 PR：在 0.8.0 之后的 main 上开分支 `todo/r2-default-on`。改动：runtime.ts 改为没设置就开启，设为 `0` 或 `false` 才关闭；同步修改注释、runtime.test.ts、index.server.ts 的注释、README 第一步和 readme-facts.test.ts。提交：`feat(run-engine): run the Engine by default; PASEO_AGENT_TEAM_RUN_ENGINE=0 turns it off`。以 draft 打开，等 CI 绿。正文写清：R2 准入表；观察期的起算日；合并步骤（更新分支、等 CI 绿、独立重跑门禁、合并、发 0.9.0）；回滚办法。

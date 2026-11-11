@@ -85,6 +85,7 @@ import type {
 import { alertIdFor } from "./digest";
 import { type DispatchIntent, type Effects, type OutboxReport, payloadHash } from "./effects";
 import type { ReadFailure } from "./read-retry";
+import { ReopenTimeout, reopenByReading } from "./reopen-read";
 import {
   deliveredFiles,
   dispatchWorkspace,
@@ -302,13 +303,6 @@ function sameFiles(claimed: readonly string[], actual: readonly string[]): boole
   const left = normalize(claimed);
   const right = normalize(actual);
   return left.length === right.length && left.every((file, index) => file === right[index]);
-}
-
-/** Reading a closed member's history took longer than allowed. It says nothing about whether the Agent can be opened. */
-class ReopenTimeout extends Error {
-  constructor() {
-    super("reading the history timed out");
-  }
 }
 
 export function createEngineService(options: EngineServiceOptions) {
@@ -1035,39 +1029,9 @@ export function createEngineService(options: EngineServiceOptions) {
     });
   }
 
-  /**
-   * Reads the tail of the member's timeline, which is what makes the host load a closed Agent again
-   * (reading a snapshot does not), then looks at it once more. It sends nothing and calls no model.
-   *  - "idle": reopened, it reads idle and has no turn running;
-   *  - "busy": it is loaded and has a turn running (a person wrote to it, say): nothing to reopen or to rebuild;
-   *  - "closed": the read worked and the Agent is still closed;
-   * a read that throws is thrown on, and one that takes too long throws `ReopenTimeout`: neither says that the
-   * Agent cannot be opened (a slow read may still succeed).
-   */
-  async function reopenByReading(agentId: string): Promise<"idle" | "busy" | "closed"> {
-    const handle = options.port.agents.ref(agentId);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () => reject(new ReopenTimeout()),
-        options.reopenTimeoutMs ?? REOPEN_TIMEOUT_MS,
-      );
-    });
-    const reading = (async () => {
-      await handle.timeline.refetch({ direction: "tail", limit: 1, projection: "canonical" });
-      return handle.refresh();
-    })();
-    // If the timeout wins, the read may still fail later: nobody waits for it, so say nothing.
-    reading.catch(() => undefined);
-    try {
-      const refreshed = await Promise.race([reading, timeout]);
-      const snapshot = refreshed?.agent;
-      if (snapshot === undefined) return "closed";
-      if (snapshot.status === "idle" && !snapshot.activeTurn) return "idle";
-      return snapshot.status === "running" || snapshot.activeTurn ? "busy" : "closed";
-    } finally {
-      clearTimeout(timer);
-    }
+  /** Reads a closed member's history to bring it back (see `reopenByReading` in reopen-read.ts). */
+  function reopenByReadingHistory(agentId: string): Promise<"idle" | "busy" | "closed"> {
+    return reopenByReading(options.port, agentId, options.reopenTimeoutMs ?? REOPEN_TIMEOUT_MS);
   }
 
   /**
@@ -1092,7 +1056,7 @@ export function createEngineService(options: EngineServiceOptions) {
       reopenTried.add(key);
       budget.reads += 1;
       try {
-        const reading = await reopenByReading(seat.agentId);
+        const reading = await reopenByReadingHistory(seat.agentId);
         if (reading === "idle") {
           reopenFailed.delete(key);
           log(`reopened the closed seat ${seat.seatId} of ${runId} by reading its history`);
@@ -1226,7 +1190,7 @@ export function createEngineService(options: EngineServiceOptions) {
   function hostFor(rebuild: NonNullable<EngineServiceOptions["rebuild"]>): RebuildHost {
     return {
       ...rebuild,
-      reopenAgent: async (agentId) => (await reopenByReading(agentId)) === "idle",
+      reopenAgent: async (agentId) => (await reopenByReadingHistory(agentId)) === "idle",
     };
   }
 

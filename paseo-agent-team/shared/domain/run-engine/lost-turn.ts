@@ -26,6 +26,12 @@ import { latestEndedTurn, provenEndedTurn } from "./turn-proof";
  * up. `findLostTurns` says which ones a further look, at least `LOST_TURN_SETTLE_DELAY_MS` later, shows
  * to be lost. It is only for a member the host reads as idle: a closed one is a closed turn.
  *
+ * A restart leaves every member closed, and reading its history is what opens it again (T11e): so a
+ * producer's task turn or a reviewer's turn whose member is only closed (not archived, not gone) is not
+ * lost at once. `planClosedTurns` leaves it for `CLOSED_TURN_WAIT_MS`, during which the caller tries to
+ * reopen the member, and then says `host-lost` (retry or cancel) if the member reads idle again, else
+ * `member-lost` as before.
+ *
  * What proves a closed turn (all of these, for one assignment):
  *  a. it waits for a report: open, no accepted proof, and its dispatch was confirmed delivered;
  *  b. its turn is known: the agent's newest `turn_started` after the assignment was made (the
@@ -177,10 +183,88 @@ export function agentsToCheck(record: RunRecord): string[] {
   ].sort();
 }
 
-function noTurnRunning(seat: SeatRead | undefined): boolean {
+export function noTurnRunning(seat: SeatRead | undefined): boolean {
   if (seat === undefined || seat === "unreadable") return false;
   if (seat === "absent") return true;
   return !seat.activeTurn && seat.status !== "running" && seat.status !== "initializing";
+}
+
+/**
+ * How long a producer's or reviewer's turn that was cut off under a closed member is left alone before it
+ * is called lost (T11e): the Engine reads the member's history once to try to reopen it, then settles at
+ * the first look this long after it first saw the member closed.
+ */
+export const CLOSED_TURN_WAIT_MS = LOST_TURN_SETTLE_DELAY_MS;
+
+/**
+ * Whether a cut-off turn gets a look at reopening the member before it is called lost (T11e): the turn of
+ * a producer's own task or of a reviewer. Smoke tests, supplements (evidence requests) and the coordinator
+ * keep T4a as it was: closed means lost, at once.
+ */
+const REOPEN_PURPOSES: readonly RunAssignment["purpose"][] = ["member", "reopen", "reviewer"];
+
+export function reopensBeforeLost(record: RunRecord, assignment: RunAssignment): boolean {
+  return (
+    REOPEN_PURPOSES.includes(assignment.purpose) && evidenceRepairOf(record, assignment) === null
+  );
+}
+
+/** Identifies one cut-off turn to the memory of the caller (when it was first seen closed). */
+export type ClosedTurnRef = Pick<ClosedTurn, "assignmentId" | "agentId" | "turnId" | "occurrence">;
+/** When the caller first saw this turn's member closed, or null when it has not. */
+export type SeenClosedAt = (turn: ClosedTurnRef) => string | null;
+
+type ClosedTurnFacts = {
+  turn: ClosedTurn;
+  seat: SeatRead | undefined;
+  /** When the host's `closed` receipt came in, if the ledger has one. */
+  closedAt: string | null;
+  reopens: boolean;
+  /** The host archived the member after the turn began: it is not coming back in this Run. */
+  archived: boolean;
+  /** The host reads a turn running (only when asked for): someone wrote to the member meanwhile. */
+  running: boolean;
+};
+
+function closedTurnFacts(
+  record: RunRecord,
+  seats: ReadonlyMap<string, SeatRead>,
+  seenAt?: SeenClosedAt,
+  withRunning = false,
+): ClosedTurnFacts[] {
+  const found: ClosedTurnFacts[] = [];
+  for (const { assignment, started, closed } of closedTurnCandidates(record)) {
+    const seat = seats.get(assignment.agentId);
+    const quiet = noTurnRunning(seat);
+    // A seat that cannot be read, or that has a turn running, is not settled. With `withRunning` a running
+    // one that was seen closed is still reported (as `running`), so a caller can keep waiting on it.
+    if (!quiet && !(withRunning && typeof seat === "object")) continue;
+    if (started.turnId === null) continue;
+    const ref: ClosedTurnRef = {
+      assignmentId: assignment.assignmentId,
+      agentId: assignment.agentId,
+      turnId: started.turnId,
+      occurrence: receiptOccurrence(started),
+    };
+    let basis: ClosedTurnBasis | null = null;
+    if (closed !== null) basis = { closedBy: "receipt", closedReceiptKey: closed.eventKey };
+    else if (quiet && seat !== undefined && typeof seat === "object" && seat.status === "closed") {
+      basis = { closedBy: "host-read", closedReceiptKey: null };
+    } else if (seenAt?.(ref) != null) {
+      // Read as closed on an earlier look and reopened since: still the turn that was cut off.
+      basis = { closedBy: "host-read", closedReceiptKey: null };
+    }
+    if (basis === null) continue;
+    found.push({
+      turn: { ...ref, taskId: assignment.taskId, basis },
+      seat,
+      closedAt: closed?.receivedAt ?? null,
+      reopens: reopensBeforeLost(record, assignment),
+      archived: closedSince(record, ref.agentId, ref.turnId, ref.occurrence, ["archived"]),
+      running: !quiet,
+    });
+  }
+  return found;
 }
 
 /** The turns that were closed under their member, and what showed it. Writes nothing. */
@@ -188,26 +272,68 @@ export function findClosedTurns(
   record: RunRecord,
   seats: ReadonlyMap<string, SeatRead>,
 ): ClosedTurn[] {
-  const turns: ClosedTurn[] = [];
-  for (const { assignment, started, closed } of closedTurnCandidates(record)) {
-    const seat = seats.get(assignment.agentId);
-    if (!noTurnRunning(seat)) continue;
-    let basis: ClosedTurnBasis | null = null;
-    if (closed !== null) basis = { closedBy: "receipt", closedReceiptKey: closed.eventKey };
-    else if (seat !== undefined && typeof seat === "object" && seat.status === "closed") {
-      basis = { closedBy: "host-read", closedReceiptKey: null };
+  return closedTurnFacts(record, seats).map((facts) => facts.turn);
+}
+
+export type ClosedTurnPlan = {
+  /** Lost for good: only `cancel` is offered (`member-lost`). */
+  lost: ClosedTurn[];
+  /** The member reads idle again with no turn running after the wait: `retry` or `cancel` (`host-lost`). */
+  hostLost: ClosedTurn[];
+  /** Closed, but not for long enough yet: nothing is written except the warning that says so. */
+  waiting: ClosedTurn[];
+};
+
+/**
+ * What to do with each turn that was cut off under a closed member (T11e). Writes nothing.
+ *
+ * A producer's task turn or a reviewer's turn (`reopensBeforeLost`) gets a wait first, unless the host
+ * archived the member after the turn began or no longer has it (`lost` at once, as T4a always did), or the
+ * whole Run is being cancelled (the receipt is all the cancellation needs), or the Run is not active (a
+ * paused Run is settled by the earlier rule, with no wait and no read of the member's history). The wait runs from the host's
+ * `closed` receipt when the ledger has one, else from the first look that saw the member closed
+ * (`seenAt`; with no memory of one, from `now`). After it:
+ *  - the member reads idle with no turn running (the caller tried to reopen it by reading its history):
+ *    `hostLost`;
+ *  - any other reading (still closed, an error): `lost`.
+ * A member that cannot be read is not in the plan. One with a turn running is left alone (nothing is
+ * settled), and the turns that were seen closed before stay in `waiting`, so the warning stays.
+ * Every other turn is `lost` as soon as it is closed.
+ */
+export function planClosedTurns(
+  record: RunRecord,
+  seats: ReadonlyMap<string, SeatRead>,
+  options: { now: string; cancelling: boolean; inactive?: boolean; seenAt: SeenClosedAt },
+): ClosedTurnPlan {
+  const plan: ClosedTurnPlan = { lost: [], hostLost: [], waiting: [] };
+  for (const facts of closedTurnFacts(record, seats, options.seenAt, true)) {
+    const { turn, seat } = facts;
+    if (facts.running) {
+      if (facts.reopens && !options.cancelling && options.inactive !== true && !facts.archived) {
+        plan.waiting.push(turn);
+      }
+      continue;
     }
-    if (basis === null || started.turnId === null) continue;
-    turns.push({
-      assignmentId: assignment.assignmentId,
-      taskId: assignment.taskId,
-      agentId: assignment.agentId,
-      turnId: started.turnId,
-      occurrence: receiptOccurrence(started),
-      basis,
-    });
+    if (
+      !facts.reopens ||
+      options.cancelling ||
+      options.inactive === true ||
+      facts.archived ||
+      seat === "absent"
+    ) {
+      plan.lost.push(turn);
+      continue;
+    }
+    const since = facts.closedAt ?? options.seenAt(turn) ?? options.now;
+    if (Date.parse(options.now) - Date.parse(since) < CLOSED_TURN_WAIT_MS) {
+      plan.waiting.push(turn);
+    } else if (seat !== undefined && typeof seat === "object" && seat.status === "idle") {
+      plan.hostLost.push(turn);
+    } else {
+      plan.lost.push(turn);
+    }
   }
-  return turns;
+  return plan;
 }
 
 /**
