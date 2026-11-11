@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## [0.8.0](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.7.1...paseo-agent-team-v0.8.0) (2026-11-11)
+
+
+### Features
+
+* **run-engine:** rebuild a member's Agent from the frozen launch spec when a restart leaves it unopenable ([3dbbca8](https://github.com/Mason-x/paseo-agent-team/commit/3dbbca87e7a5620ef5e8a6dcdf5c7c0f40bed9eb))
+
+
+### Bug Fixes
+
+* **run-engine:** correct and verify lost-review recovery guidance ([eaaa14b](https://github.com/Mason-x/paseo-agent-team/commit/eaaa14b57eb4e7a2937a534472b298884738e27c))
+* **run-engine:** keep a rebuilt Agent from being lost or made for a seat that is not closed ([6c6b5c6](https://github.com/Mason-x/paseo-agent-team/commit/6c6b5c67d9ed22fb0410faaaa759ba0dd3b32587))
+* **run-engine:** keep the coordinator and a paused Run out of the reopen wait and keep the warning when a look fails ([ce389ee](https://github.com/Mason-x/paseo-agent-team/commit/ce389eec1b7cf23e086059baeeff9fd45b753c71))
+* **run-engine:** let a review cut off by a restart be tried again ([b9e5486](https://github.com/Mason-x/paseo-agent-team/commit/b9e54869e2bb979a42e733c258aba30f3dcb2a67))
+* **run-engine:** read a member that never ran a turn before its first dispatch after a restart, and rebuild it if it cannot be opened ([e58e723](https://github.com/Mason-x/paseo-agent-team/commit/e58e72396bd01c63c728832cf949c73cc0360af6))
+* **run-engine:** read closed seats in the scheduler's order, and let only the button grant another read ([9943d85](https://github.com/Mason-x/paseo-agent-team/commit/9943d850b115479606decf68500f61b8028a4a66))
+* **run-engine:** record a retried turn's end from its own hook after a restart reused the turn id ([c2c879e](https://github.com/Mason-x/paseo-agent-team/commit/c2c879eb2efcf6d8712212962d46df03b17d762c))
+* **run-engine:** reopen a closed seat by reading its history before refusing it ([ef5555b](https://github.com/Mason-x/paseo-agent-team/commit/ef5555b4bee76dd0de7100f80328ecf252561a32))
+* **run-engine:** say the same thing about a lost reply in the reason and in the summary ([57c3bdc](https://github.com/Mason-x/paseo-agent-team/commit/57c3bdc2e2c6e9f7a316a39e9603a2795e383b68))
+* **run-engine:** take the closed-seat warning down once a Run is finished or cancelled ([8f2f6d4](https://github.com/Mason-x/paseo-agent-team/commit/8f2f6d420dc132bed0e6da30ac1c435108c66d46))
+* **run-engine:** tell a person to look at the task's branch before retrying a producer ([c4ae86b](https://github.com/Mason-x/paseo-agent-team/commit/c4ae86b7988a9826acdc68f067b30ac285db2a76))
+* **run-engine:** try to reopen a member that only has a closed receipt before calling it lost ([37b41bd](https://github.com/Mason-x/paseo-agent-team/commit/37b41bd91acb9a7b8d24cf05082a8848cbbe2841))
+* **run-engine:** try to reopen a member that only has a closed receipt before calling it lost ([fad391c](https://github.com/Mason-x/paseo-agent-team/commit/fad391cf401ba9ba22c95c354c21f3cfc9bc4100))
+
 ## [0.7.1](https://github.com/Mason-x/paseo-agent-team/compare/paseo-agent-team-v0.7.0...paseo-agent-team-v0.7.1) (2026-11-10)
 
 
