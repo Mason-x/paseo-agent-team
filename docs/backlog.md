@@ -96,6 +96,16 @@
 - **R04b 转入 backlog**：把设计师账本切换到通用原子底座。P1 账本 v2 刚上线，改造对用户没有价值、只增加回归风险；保留为后续清理项。
 - 已知 B 批前置/未决：大台账的压缩与只读导出行为、旧 Run 数据的兼容观察、hooks 早到队列与去重；均按 `docs/orchestration-roadmap.md` 的阶段 1 验收。
 
+### 2026-11-12：M1 之后（Engine 冻结）
+
+M1 同任务对照判「Engine 不如」（[M1 结果](m1-results.md)），Engine 冻结。以下按普通产品项记录，不改上面各条的状态。
+
+1. **缺 DAG 时 Engine 不自动重试规划。** 协调者回复没有 `task-dag` 时，Run 停在 `awaiting-dag`，「立即检查并推进」返回 `not-active`、dispatched 0，Engine 不会自己再请求规划；取消后「DAG 缺失」告警仍开着。（Run 6）
+2. **工作区脏时 Engine 静默拒绝派发。** `dispatch-blocked:workspace-dirty` 不开任何告警，只能靠 15 分钟无进展规则发现，出路只有取消。（Run 6b）
+3. **宿主空闲约 60 分钟关闭会话（推断）。** Run 6 的 5 条 `closed` 回执集中在最后一次活动约 60 分钟后；长等待会走到重开路径。未验证。
+4. **T11b 的 Caller 分类窄修复（原 0.8.1 计划，现不做）。** `errorCode` 只把消息含 `parent` 的错误归入 `parent-unavailable`，宿主报 `Caller agent … not found` 时不会先重开协调者，重建记 `create-failed`，只能取消重开。合同零变化，若要恢复按 0.8.1 的原计划做。
+5. **链路治理疏漏（普通产品项）。** 链路 Run 1/4/5 的最终候选未经两家复审：Run 1 的 DeepSeek 结论只针对 `fa31362a`，最终 `4c8ceae8` 只经 Grok 增量复审；Run 4 的审查针对 `7cb3dc4`，其后仅注释改动；Run 5 的 `95b67b3` 只改一条测试断言、未再送审。Run 4、Run 5 的协调者自述用过 python。隐藏测试与盲审未显示质量影响，仅记录。
+
 ## 未完成项
 
 - **第 5 项 5B（T6–T11）**：
