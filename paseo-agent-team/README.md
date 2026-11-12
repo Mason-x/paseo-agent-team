@@ -155,6 +155,24 @@ dispatches each task to a member seat, takes the member's report, checks the evi
 independent reviewer (and a DEV smoke where the task declares one), sends back what failed, and
 stops at a decision for a person when it will not undo something by itself.
 
+**Status: experimental, and no longer developed (M1, 2026-11-12).** In the M1 same-task comparison
+against the coordinator chain the Engine was not better (`docs/m1-results.md` in the repository), so it
+is frozen: no further development, and it stays off by default. What is written below is what 0.8.0
+ships; the switch still works if you want to try it.
+
+**Known problems.** These are the ways a Run can stop with nothing left to do but cancel it:
+
+1. A coordinator reply that carries no `task-dag` leaves the Run in `awaiting-dag`.
+   **立即检查并推进** returns `not-active` and nothing asks for a new plan on its own. Cancel the
+   Run; asking for a new plan by hand may also work (not verified).
+2. A workspace with uncommitted changes makes the Engine refuse to dispatch
+   (`dispatch-blocked:workspace-dirty`) without raising any warning or decision. The Run just stops
+   moving; the only way out is to cancel it.
+3. Rebuilding members while the coordinator is not loaded fails with `Caller agent … not found`,
+   which the Engine records as `create-failed`; the Run can only be cancelled and started again.
+4. The host appears to close a session after about 60 minutes idle (inferred, not verified), so a
+   long wait can end in a session that has to be reopened.
+
 **Turn it on.** Two things, both required:
 
 1. Start the daemon with `PASEO_AGENT_TEAM_RUN_ENGINE=1`. Without it a Team that has the Engine
