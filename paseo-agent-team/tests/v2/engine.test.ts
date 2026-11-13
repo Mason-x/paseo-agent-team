@@ -658,4 +658,49 @@ describe("reconcile after restarts and idle agents (6.4, AC8)", () => {
     await h.engine.idle();
     expect((await h.get(run.id)).attempts).toHaveLength(1);
   });
+
+  it("waits for writer idle before gating and ignores late writer-turn-ended before notify", async () => {
+    const h = setup({ gate: "true" });
+    const run = await h.start();
+    const writer = h.host.writerAgent();
+    if (!writer) throw new Error("writer missing");
+    writer.status = "running";
+
+    const origSend = h.host.send.bind(h.host);
+    let dispatchedInFlight = false;
+    h.host.send = async (agentId: string, text: string) => {
+      if (!dispatchedInFlight) {
+        dispatchedInFlight = true;
+        // Late turn.after from the submitting turn arrives while notifyWriter is sending.
+        await h.engine.dispatch(run.id, { kind: "writer-turn-ended" });
+      }
+      await origSend(agentId, text);
+    };
+
+    const submitRes = await h.call(
+      h.writerTools(run).team_submit as never,
+      { summary: "empty" },
+      run.writer.agentId,
+    );
+    expect(submitRes.isError).toBeUndefined();
+
+    // While the writer is still running, gate waits and isGateRunning remains true.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.engine.isGateRunning(run.id)).toBe(true);
+    expect((await h.get(run.id)).state).toBe("gating");
+    expect((await h.get(run.id)).attempts[0]?.finishedAt).toBeUndefined();
+
+    // Writer turn ends; gate runs, fails on AC17 empty commit, and sends exactly one message.
+    writer.status = "idle";
+    await h.engine.idle();
+
+    const after = await h.get(run.id);
+    expect(after.state).toBe("writing");
+    expect(after.nudges).toBe(0);
+    expect(after.attempts[0]?.result).toBe("fail");
+    expect(after.attempts[0]?.policyViolations).toEqual(["no files changed relative to base"]);
+    expect(dispatchedInFlight).toBe(true);
+    expect(writer.sent).toHaveLength(1);
+    expect(writer.sent[0]).toContain("no files changed relative to base");
+  });
 });

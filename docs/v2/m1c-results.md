@@ -81,3 +81,17 @@ PR 开出后 CI 失败：`@getpaseo/plugin/server` 没有导出 `defineAgentTool
 
 - **空提交可以通过门禁。** "求助测试"里写手拿到回答后没有改任何文件就调用了 `team_submit`，门禁命令是 `true`，通过了，进入审查。门禁只看命令的退出码。这是服务端行为，不是界面问题；是否要求"相对基线必须有改动"见 Spec 第 18 节。
 - DEV 宿主的 Agent Profile 要写在 `config.json` 的 `daemon.agentProfiles` 下。写在根上会让 daemon 拒绝启动（`Unrecognized key`），已写进 `AGENTS.md`。
+
+## 8 后续修正（AC17、门禁竞态与 env 透传）
+
+在 #42、#43 合并后按用户决定补齐 3 项修正，子上限调整为服务端与共享代码 2580 行、客户端 920 行（总上限 3500 行不变），v2 测试共 10 个文件 150 条全通过（含新增 `budget.test.ts` 行数预算守护用例）：
+
+| 文件 | 改动前 | 改动后 | 净增 | 理由 |
+| --- | --- | --- | --- | --- |
+| `v2/server/gate.ts` | 235 | 243 | +8 | `policyViolations` 拦截空提交（+1，AC17）；`GateOptions` 新增 `beforeRun` 钩子并在 `createGateRunner().run` 登记 `active` 后调用（+7，修复门禁开跑与写手送审回合未结束的竞态） |
+| `v2/server/engine.ts` | 437 | 458 | +21 | `run-gate` 传入 `beforeRun` 等待写手 idle（+6）；`waitWriterIdle` 支持取消信号（+0）；`notifying` 计数 Map 在 `gate-failed`/`reports` 通知发出前忽略迟到的 `writer-turn-ended`（+15，避免误扣 `nudges` 与重复发消息） |
+| 服务端与共享合计 | **2549** | **2578** | **+29** | 上限 2580，余量 2 行 |
+| `v2/client/start-input.ts` | 145 | 147 | +2 | `Draft` 增加 `env` 字段并在 `buildStartInput` 透传 |
+| `v2/client/NewRunDialog.tsx` | 201 | 213 | +12 | 读取 `projectConfig` 时同步写入 `env`（+1）；`open` 打开或 `repoPath` prop 变化且用户未手改时同步路径并重置标记（+11） |
+| 客户端合计 | **899** | **913** | **+14** | 上限 920，余量 7 行 |
+| **总计** | **3448** | **3491** | **+43** | 上限 3500，余量 9 行 |

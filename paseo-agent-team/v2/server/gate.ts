@@ -28,6 +28,7 @@ export const matchesAny = (file: string, globs: string[]) =>
   globs.some((g) => globToRegExp(g).test(file));
 
 export function policyViolations(files: string[], protectedPaths: string[], allowed?: string[]) {
+  if (!files.length) return ["no files changed relative to base"];
   const out: string[] = [];
   for (const f of files) {
     if (matchesAny(f, protectedPaths)) out.push(`protected path changed: ${f}`);
@@ -115,7 +116,12 @@ function runCommand(opts: {
   });
 }
 
-export type GateOptions = { now?: () => string; maxLogBytes?: number; signal?: AbortSignal };
+export type GateOptions = {
+  now?: () => string;
+  maxLogBytes?: number;
+  signal?: AbortSignal;
+  beforeRun?: (signal?: AbortSignal) => Promise<void>;
+};
 
 /** Runs the frozen gate commands for one candidate commit in the writer's worktree (Spec 9). */
 export async function runGate(
@@ -206,6 +212,8 @@ export function createGateRunner() {
       active.add(run.id);
       // A stopped gate must not report: after a restart reconcile runs it again (AC8).
       const job = tail.then(async () => {
+        if (stop.signal.aborted) throw new Error("gate stopped");
+        await opts.beforeRun?.(stop.signal);
         if (stop.signal.aborted) throw new Error("gate stopped");
         const attempt = await runGate(run, n, sha, { ...opts, signal: stop.signal });
         if (stop.signal.aborted) throw new Error("gate stopped");

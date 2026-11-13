@@ -94,6 +94,7 @@ export interface Draft {
   gate: string;
   protectedPaths: string;
   timeouts: Record<string, number>;
+  env?: Record<string, string>;
   limits?: StartInput["limits"];
   writer?: Profile;
   reviewers: (Profile | undefined)[];
@@ -138,6 +139,7 @@ export function buildStartInput(d: Draft): StartInput {
     taskMarkdown: withVerification(d.task, commands),
     gateCommands: gateFromLines(d.gate, d.timeouts),
     protectedPaths: splitLines(d.protectedPaths),
+    env: d.env,
     limits: d.limits,
     writer: profileSpec(d.writer),
     reviewers: d.reviewers.flatMap((r) => (r ? [profileSpec(r)] : [])),
