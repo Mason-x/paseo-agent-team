@@ -1,0 +1,57 @@
+{"t": "2026-11-12T16:16:41.612Z", "ev": "plugin.loaded", "pid": 2063548}
+{"t": "2026-11-12T16:17:39.020Z", "ev": "probe.start", "cfg": {"repo": "/tmp/claude-1000/-srv-dev-projects-paseo-agent-team/167fe776-b425-44f3-b061-2ac2291334a2/scratchpad/probe-repo", "sha": "b9391a027870322b9a0dc944756b9453bee174a7", "tag": "t1"}}
+{"t": "2026-11-12T16:17:40.000Z", "ev": "ws.created", "name": "by-sha", "base": "b9391a027870322b9a0dc944756b9453bee174a7", "ms": 968, "id": "wks_594071c2ffa7cd54", "dir": "/srv/dev/projects/paseo-agent-team/paseo-agent-team/.paseo-dev/worktrees/2jmv2f36/probe-t1-by-sha", "head": "b9391a027870322b9a0dc944756b9453bee174a7", "branch": "probe/t1-by-sha", "setMetadata": "workspace handle has no setMetadata", "setupMarker": false}
+{"t": "2026-11-12T16:17:40.925Z", "ev": "ws.created", "name": "by-sha-bg", "base": "b9391a027870322b9a0dc944756b9453bee174a7", "ms": 914, "id": "wks_1cdc7f2dff784c6e", "dir": "/srv/dev/projects/paseo-agent-team/paseo-agent-team/.paseo-dev/worktrees/2jmv2f36/probe-t1-by-sha-bg", "head": "b9391a027870322b9a0dc944756b9453bee174a7", "branch": "probe/t1-by-sha-bg", "setMetadata": "workspace handle has no setMetadata", "setupMarker": false}
+{"t": "2026-11-12T16:17:41.848Z", "ev": "ws.created", "name": "by-branch", "base": "main", "ms": 906, "id": "wks_0b95be979576738a", "dir": "/srv/dev/projects/paseo-agent-team/paseo-agent-team/.paseo-dev/worktrees/2jmv2f36/probe-t1-by-branch", "head": "b9391a027870322b9a0dc944756b9453bee174a7", "branch": "probe/t1-by-branch", "setMetadata": "workspace handle has no setMetadata", "setupMarker": false}
+{"t": "2026-11-12T16:17:41.867Z", "ev": "ws.list", "includeBackground": false, "visible": ["wks_0b95be979576738a", "wks_594071c2ffa7cd54"], "made": ["wks_594071c2ffa7cd54", "wks_1cdc7f2dff784c6e", "wks_0b95be979576738a"]}
+{"t": "2026-11-12T16:17:41.869Z", "ev": "ws.list", "includeBackground": true, "visible": ["wks_0b95be979576738a", "wks_1cdc7f2dff784c6e", "wks_594071c2ffa7cd54"], "made": ["wks_594071c2ffa7cd54", "wks_1cdc7f2dff784c6e", "wks_0b95be979576738a"]}
+{"t": "2026-11-12T16:17:42.363Z", "ev": "ws.archived", "id": "wks_594071c2ffa7cd54"}
+{"t": "2026-11-12T16:17:42.726Z", "ev": "ws.archived", "id": "wks_1cdc7f2dff784c6e"}
+{"t": "2026-11-12T16:17:43.091Z", "ev": "ws.archived", "id": "wks_0b95be979576738a"}
+{"t": "2026-11-12T16:17:43.092Z", "ev": "probe.done"}
+{"t": "2026-11-12T16:20:01.571Z", "ev": "plugin.loaded", "pid": 2069995}
+{"t": "2026-11-12T16:20:02.700Z", "ev": "probe.start", "cfg": {"repo": "/tmp/claude-1000/-srv-dev-projects-paseo-agent-team/167fe776-b425-44f3-b061-2ac2291334a2/scratchpad/probe-repo", "sha": "b9391a027870322b9a0dc944756b9453bee174a7", "failSha": "67dadfbdeb9ee23e7ada4fbba43173cd31a79469", "tag": "t2", "mode": "setup"}}
+{"t": "2026-11-12T16:20:03.624Z", "ev": "setup.created", "name": "ok", "ms": 923, "id": "wks_1e4bc1505be5b058"}
+{"t": "2026-11-12T16:20:03.639Z", "ev": "setup.state", "name": "ok", "ms": 938, "state": "running|marker=false"}
+{"t": "2026-11-12T16:20:06.670Z", "ev": "setup.state", "name": "ok", "ms": 3969, "state": "completed|marker=true"}
+{"t": "2026-11-12T16:20:07.152Z", "ev": "setup.created", "name": "fail", "ms": 307, "id": "wks_beaf73f8457cf3c7"}
+{"t": "2026-11-12T16:20:07.160Z", "ev": "setup.state", "name": "fail", "ms": 315, "state": "none|marker=false"}
+{"t": "2026-11-12T16:20:07.664Z", "ev": "setup.state", "name": "fail", "ms": 819, "state": "running|marker=false"}
+{"t": "2026-11-12T16:20:10.184Z", "ev": "setup.state", "name": "fail", "ms": 3339, "state": "failed|marker=true"}
+{"t": "2026-11-12T16:20:10.356Z", "ev": "probe.done"}
+{"t": "2026-11-12T16:21:12.147Z", "ev": "open.before", "agentId": "19937b0f-e541-4bb1-8be2-aa675f0e137d", "provider": "claude", "reason": "create", "purpose": "interactive", "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:22:38.285Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "19937b0f-e541-4bb1-8be2-aa675f0e137d", "provider": "claude"}
+{"t": "2026-11-12T16:22:41.186Z", "ev": "turn.after", "agentId": "19937b0f-e541-4bb1-8be2-aa675f0e137d", "turnId": "foreground-turn-1", "outcome": "completed"}
+{"t": "2026-11-12T16:23:29.196Z", "ev": "open.before", "agentId": "c06e1656-53b2-4ea4-b0d5-4320d2b4e0da", "provider": "claude", "reason": "create", "purpose": "interactive", "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:23:47.560Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "c06e1656-53b2-4ea4-b0d5-4320d2b4e0da", "provider": "claude"}
+{"t": "2026-11-12T16:23:50.488Z", "ev": "turn.after", "agentId": "c06e1656-53b2-4ea4-b0d5-4320d2b4e0da", "turnId": "foreground-turn-1", "outcome": "completed"}
+{"t": "2026-11-12T16:23:52.035Z", "ev": "open.before", "agentId": "ed496e0a-1f7c-4f66-9a17-389e2063572e", "provider": "codex", "reason": "create", "purpose": "interactive", "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:24:33.582Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "ed496e0a-1f7c-4f66-9a17-389e2063572e", "provider": "codex"}
+{"t": "2026-11-12T16:24:38.793Z", "ev": "turn.after", "agentId": "ed496e0a-1f7c-4f66-9a17-389e2063572e", "turnId": "codex-turn-0", "outcome": "completed"}
+{"t": "2026-11-12T16:25:48.506Z", "ev": "plugin.loaded", "pid": 2080685}
+{"t": "2026-11-12T16:26:02.976Z", "ev": "open.before", "agentId": "2cadae04-4a6a-4427-b108-e85f9d3014ed", "provider": "claude", "reason": "create", "purpose": "interactive", "labels": {"agent-team.role": "writer"}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:26:22.093Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "2cadae04-4a6a-4427-b108-e85f9d3014ed", "provider": "claude"}
+{"t": "2026-11-12T16:26:24.992Z", "ev": "turn.after", "agentId": "2cadae04-4a6a-4427-b108-e85f9d3014ed", "turnId": "foreground-turn-1", "outcome": "completed"}
+{"t": "2026-11-12T16:26:26.032Z", "ev": "open.before", "agentId": "252ddcd3-a821-4639-8bf5-fa84ca3baa64", "provider": "claude", "reason": "create", "purpose": "interactive", "labels": {}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:26:35.682Z", "ev": "turn.after", "agentId": "252ddcd3-a821-4639-8bf5-fa84ca3baa64", "turnId": "foreground-turn-1", "outcome": "completed"}
+{"t": "2026-11-12T16:28:17.107Z", "ev": "plugin.loaded", "pid": 2084895}
+{"t": "2026-11-12T16:28:18.122Z", "ev": "open.before", "agentId": "cc18a2b3-95b3-442c-96b5-b077a0853880", "provider": "claude", "reason": "create", "purpose": "interactive", "labels": {"agent-team.role": "writer"}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:28:31.872Z", "ev": "permission.before", "agentId": "cc18a2b3-95b3-442c-96b5-b077a0853880", "name": "mcp__paseo__team_probe_ping", "kind": "tool", "mine": true}
+{"t": "2026-11-12T16:28:31.875Z", "ev": "permission.allowed", "agentId": "cc18a2b3-95b3-442c-96b5-b077a0853880", "id": "permission-24408dc0-931f-4b80-b059-5079239c165d"}
+{"t": "2026-11-12T16:28:31.907Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "cc18a2b3-95b3-442c-96b5-b077a0853880", "provider": "claude"}
+{"t": "2026-11-12T16:28:33.351Z", "ev": "open.before", "agentId": "63489fb5-4903-4669-b4f2-d90c4454586e", "provider": "codex", "reason": "create", "purpose": "interactive", "labels": {"agent-team.role": "writer"}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:28:33.432Z", "ev": "turn.after", "agentId": "cc18a2b3-95b3-442c-96b5-b077a0853880", "turnId": "foreground-turn-1", "outcome": "completed"}
+{"t": "2026-11-12T16:29:09.750Z", "ev": "permission.before", "agentId": "63489fb5-4903-4669-b4f2-d90c4454586e", "name": "CodexMcpElicitation", "kind": "tool", "mine": false}
+{"t": "2026-11-12T16:29:31.177Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "63489fb5-4903-4669-b4f2-d90c4454586e", "provider": "codex"}
+{"t": "2026-11-12T16:29:33.884Z", "ev": "plugin.loaded", "pid": 2087158}
+{"t": "2026-11-12T16:29:35.302Z", "ev": "open.before", "agentId": "203327cb-a550-43fc-9b78-04db5764c867", "provider": "codex", "reason": "create", "purpose": "interactive", "labels": {"agent-team.role": "writer"}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:29:36.346Z", "ev": "turn.after", "agentId": "63489fb5-4903-4669-b4f2-d90c4454586e", "turnId": "codex-turn-0", "outcome": "completed"}
+{"t": "2026-11-12T16:30:01.108Z", "ev": "permission.before", "agentId": "203327cb-a550-43fc-9b78-04db5764c867", "name": "CodexMcpElicitation", "kind": "tool", "mine": false}
+{"t": "2026-11-12T16:30:23.916Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "203327cb-a550-43fc-9b78-04db5764c867", "provider": "codex"}
+{"t": "2026-11-12T16:30:29.679Z", "ev": "turn.after", "agentId": "203327cb-a550-43fc-9b78-04db5764c867", "turnId": "codex-turn-0", "outcome": "completed"}
+{"t": "2026-11-12T16:30:33.272Z", "ev": "plugin.loaded", "pid": 2089029}
+{"t": "2026-11-12T16:30:34.690Z", "ev": "open.before", "agentId": "25e0e742-d37a-4337-8387-cc82b0b59730", "provider": "codex", "reason": "create", "purpose": "interactive", "labels": {"agent-team.role": "writer"}, "toolsBefore": 0, "mcpServers": []}
+{"t": "2026-11-12T16:31:03.273Z", "ev": "permission.before", "agentId": "25e0e742-d37a-4337-8387-cc82b0b59730", "name": "CodexMcpElicitation", "kind": "tool", "mine": true}
+{"t": "2026-11-12T16:31:03.276Z", "ev": "permission.allowed", "agentId": "25e0e742-d37a-4337-8387-cc82b0b59730", "id": "permission-040b1304-2aa1-4d6a-a11f-00096fd8cdb7"}
+{"t": "2026-11-12T16:31:03.292Z", "ev": "tool.called", "input": {"note": "hi"}, "agentId": "25e0e742-d37a-4337-8387-cc82b0b59730", "provider": "codex"}
+{"t": "2026-11-12T16:31:10.845Z", "ev": "turn.after", "agentId": "25e0e742-d37a-4337-8387-cc82b0b59730", "turnId": "codex-turn-0", "outcome": "completed"}
