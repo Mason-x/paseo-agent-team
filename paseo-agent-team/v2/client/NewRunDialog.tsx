@@ -1,72 +1,125 @@
-import { usePaseo, useRpc } from "@getpaseo/plugin/client";
-import { Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { Pressable, Text, View } from "react-native";
-import { projectConfigRpc, runStartRpc } from "../shared/rpc";
-import { SEATS } from "../shared/run";
+import { usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
+import { Modal, useToast } from "@getpaseo/plugin/client/ui";
+import { useEffect, useRef, useState } from "react";
+import { projectConfigRpc, runStartRpc, teamSettings } from "../shared/rpc";
 import {
   buildStartInput,
   type Draft,
   draftProblems,
   emptyDraft,
-  type Profile,
-  profilesFromConfig,
+  type HostProject,
+  matchProfile,
+  matchReviewers,
+  profileSpec,
+  projectsFromHost,
+  seedFromPrompt,
 } from "./start-input";
-import { Btn, errorText, inputStyle, ROW, ThemeProvider, Txt, useTheme } from "./ui";
+import {
+  Btn,
+  Chip,
+  errorText,
+  Field,
+  Input,
+  ProfileChips,
+  ReviewerSeats,
+  Row,
+  ThemeProvider,
+  Txt,
+  useProfiles,
+  useTheme,
+} from "./ui";
 
-interface Props {
+type Props = {
   open: boolean;
   repoPath?: string;
+  prompt?: string;
+  openNonce?: string;
   onClose: () => void;
   onStarted: (runId: string) => void;
-}
+};
 
-export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
+export function NewRunDialog({ open, repoPath, prompt, openNonce, onClose, onStarted }: Props) {
   const paseo = usePaseo();
   const start = useRpc(runStartRpc);
   const projectConfig = useRpc(projectConfigRpc);
+  const settings = useSettings(teamSettings);
   const toast = useToast();
+  const profiles = useProfiles(open);
   const [d, setD] = useState<Draft>(() => emptyDraft(repoPath));
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [hostProjects, setHostProjects] = useState<HostProject[]>([]);
+  const [cfgMsg, setCfgMsg] = useState<{ color?: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const touchedRepo = useRef(false);
+  const touched = useRef({ repo: false, profiles: false });
+  const lastNonce = useRef<string | undefined>(undefined);
   const set = (patch: Partial<Draft>) => setD((s) => ({ ...s, ...patch }));
   const theme = useTheme();
   const c = theme.colors;
+  const readyValues = settings.status === "ready" ? settings.values : null;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reload the profiles each time the dialog opens
   useEffect(() => {
     if (!open) return;
-    paseo.config
-      .get()
-      .then((r) => setProfiles(profilesFromConfig(r.config)))
-      .catch((e) => toast.error(`读取 Agent Profile 失败：${errorText(e)}`));
-  }, [open]);
+    Promise.all([
+      paseo.projects.list().catch(() => null),
+      paseo.workspaces.list().catch(() => null),
+    ]).then(([p, w]) => setHostProjects(projectsFromHost(p, w)));
+  }, [open, paseo]);
 
   useEffect(() => {
-    if (open && repoPath && !touchedRepo.current) setD((s) => ({ ...s, repoPath }));
-  }, [open, repoPath]);
+    if (!open) return;
+    if (openNonce !== lastNonce.current) {
+      lastNonce.current = openNonce;
+      touched.current.repo = false;
+      setD((s) => ({
+        ...s,
+        ...(prompt?.trim() ? seedFromPrompt(prompt) : {}),
+        ...(repoPath ? { repoPath } : {}),
+      }));
+    } else if (repoPath && !touched.current.repo) setD((s) => ({ ...s, repoPath }));
+  }, [open, repoPath, prompt, openNonce]);
 
-  // Defaults from the repository's paseo-team.json, once the path has settled.
+  useEffect(() => {
+    if (!open || !profiles.length || !readyValues || touched.current.profiles) return;
+    const defWriter = matchProfile(profiles, readyValues.writer);
+    const defReviewers = matchReviewers(profiles, readyValues.reviewers);
+    setD((s) => ({
+      ...s,
+      ...(defWriter && !s.writer ? { writer: defWriter } : {}),
+      ...(s.reviewers.every((r) => !r) && defReviewers.some(Boolean)
+        ? { reviewers: defReviewers }
+        : {}),
+    }));
+  }, [open, profiles, readyValues]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: only the path matters here
   useEffect(() => {
-    if (!open || !d.repoPath.trim()) return;
-    const timer = setTimeout(() => {
-      projectConfig({ path: d.repoPath.trim() })
-        .then(({ config }) => {
-          if (!config) return;
-          const timeouts = Object.fromEntries(
-            (config.gate ?? []).map((g) => [g.command, g.timeoutSec]),
+    if (!open || !d.repoPath.trim()) return setCfgMsg(null);
+    const timer = setTimeout(async () => {
+      setCfgMsg({ text: "正在检查 paseo-team.json…" });
+      try {
+        const { config, error } = await projectConfig({ path: d.repoPath.trim() });
+        if (error || !config) {
+          set({ env: undefined, limits: undefined, timeouts: {} });
+          return setCfgMsg(
+            error ? { color: c.statusDanger, text: `paseo-team.json 解析失败：${error}` } : null,
           );
-          set({
-            ...(config.gate && { gate: config.gate.map((g) => g.command).join("\n"), timeouts }),
-            ...(config.protectedPaths && { protectedPaths: config.protectedPaths.join("\n") }),
-            env: config.env,
-            limits: config.limits,
-          });
-        })
-        .catch(() => undefined);
-    }, 600);
+        }
+        const timeouts = Object.fromEntries(
+          (config.gate ?? []).map((g) => [g.command, g.timeoutSec]),
+        );
+        set({
+          ...(config.gate && { gate: config.gate.map((g) => g.command).join("\n"), timeouts }),
+          ...(config.protectedPaths && { protectedPaths: config.protectedPaths.join("\n") }),
+          env: config.env,
+          limits: config.limits,
+        });
+        setCfgMsg({
+          color: c.statusSuccess,
+          text: `已载入 paseo-team.json（${config.gate?.length ?? 0} 条门禁命令）`,
+        });
+      } catch {
+        setCfgMsg(null);
+      }
+    }, 450);
     return () => clearTimeout(timer);
   }, [open, d.repoPath]);
 
@@ -76,7 +129,15 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
     try {
       const { run, warnings } = await start(buildStartInput(d));
       if (warnings.length) toast.show(warnings.join("\n"), { variant: "warning" });
-      touchedRepo.current = false;
+      if (settings.status === "ready" && d.writer && d.reviewers.every(Boolean)) {
+        const next = {
+          maxActiveRuns: settings.values.maxActiveRuns,
+          writer: profileSpec(d.writer),
+          reviewers: d.reviewers.flatMap((r) => (r ? [profileSpec(r)] : [])),
+        };
+        void settings.save(next, settings.revision);
+      }
+      touched.current = { repo: false, profiles: false };
       setD(emptyDraft(repoPath));
       onStarted(run.id);
     } catch (e) {
@@ -86,128 +147,82 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
     }
   }
 
-  const input = (value: string, onChange: (v: string) => void, lines?: number) => (
-    <TextInput
-      value={value}
-      onChangeText={onChange}
-      multiline={lines !== undefined}
-      autoCapitalize="none"
-      autoCorrect={false}
-      placeholderTextColor={c.foregroundMuted}
-      style={{ ...inputStyle(theme), minHeight: lines ? lines * 20 : undefined }}
-    />
+  const textField = (
+    label: string,
+    key: "title" | "baseRef" | "task" | "gate" | "protectedPaths",
+    lines?: number,
+  ) => (
+    <Field label={label}>
+      <Input value={d[key]} onChange={(v) => set({ [key]: v })} lines={lines} />
+    </Field>
   );
+  const pickRepo = (repoPath: string) => {
+    touched.current.repo = true;
+    set({ repoPath });
+  };
+  const pickPref =
+    <K extends "writer" | "reviewers">(k: K) =>
+    (v: Draft[K]) => {
+      touched.current.profiles = true;
+      set({ [k]: v });
+    };
 
   return (
     <Modal title="新建 Team Run" open={open} onOpenChange={(o) => !o && onClose()}>
       <Modal.Content>
         <ThemeProvider value={theme}>
-          <Field label="标题">{input(d.title, (title) => set({ title }))}</Field>
+          {textField("标题", "title")}
           <Field label="仓库路径">
-            {input(d.repoPath, (v) => {
-              touchedRepo.current = true;
-              set({ repoPath: v });
-            })}
+            {hostProjects.length > 0 && (
+              <Row>
+                {hostProjects.map((p) => (
+                  <Chip
+                    key={p.path}
+                    icon="FolderGit2"
+                    label={p.name}
+                    a11y={`选择仓库 ${p.name}`}
+                    on={d.repoPath.trim() === p.path}
+                    onPress={() => pickRepo(p.path)}
+                  />
+                ))}
+              </Row>
+            )}
+            <Input value={d.repoPath} onChange={pickRepo} />
+            {cfgMsg && (
+              <Txt size={12} color={cfgMsg.color} muted={!cfgMsg.color}>
+                {cfgMsg.text}
+              </Txt>
+            )}
           </Field>
-          <Field label="基线分支">{input(d.baseRef, (baseRef) => set({ baseRef }))}</Field>
-          <Field label="任务说明（“怎么验证”一节由验收命令生成）">
-            {input(d.task, (task) => set({ task }), 10)}
-          </Field>
-          <Field label="验收命令（每行一条，启动后冻结）">
-            {input(d.gate, (gate) => set({ gate }), 3)}
-          </Field>
-          <Field label="受保护路径（每行一个 glob，写手不能改）">
-            {input(d.protectedPaths, (protectedPaths) => set({ protectedPaths }), 3)}
-          </Field>
+          {textField("基线分支", "baseRef")}
+          {textField("任务说明（“怎么验证”一节由验收命令生成）", "task", 10)}
+          {textField("验收命令（每行一条，启动后冻结）", "gate", 3)}
+          {textField("受保护路径（每行一个 glob，写手不能改）", "protectedPaths", 3)}
           <Field label="写手">
-            <Chips profiles={profiles} value={d.writer} onPick={(writer) => set({ writer })} />
+            <ProfileChips profiles={profiles} value={d.writer} onPick={pickPref("writer")} />
           </Field>
-          {SEATS.slice(0, d.reviewers.length).map((seat, i) => (
-            <Field key={seat} label={`审查者 ${seat}（须是不逐次等人批准的模式）`}>
-              <Chips
-                profiles={profiles}
-                value={d.reviewers[i]}
-                onPick={(p) => set({ reviewers: d.reviewers.map((x, j) => (j === i ? p : x)) })}
-              />
-              {d.reviewers.length > 1 && (
-                <Btn
-                  label="移除"
-                  onPress={() => set({ reviewers: d.reviewers.filter((_, j) => j !== i) })}
-                />
-              )}
-            </Field>
-          ))}
-          {d.reviewers.length < 3 && (
-            <Btn
-              label="＋ 添加审查者"
-              onPress={() => set({ reviewers: [...d.reviewers, undefined] })}
-            />
+          <ReviewerSeats
+            profiles={profiles}
+            reviewers={d.reviewers}
+            onChange={pickPref("reviewers")}
+          />
+          {problems.length > 0 && (
+            <Txt size={13} color={c.statusWarning}>
+              {problems.join("；")}
+            </Txt>
           )}
-          <Txt size={13} color={c.statusWarning}>
-            {problems.join("；")}
-          </Txt>
-          <View style={{ flexDirection: "row", gap: 8 }}>
+          <Row>
             <Btn
               kind="primary"
+              icon="Play"
               label={busy ? "启动中…" : "启动"}
               disabled={busy || problems.length > 0}
               onPress={() => void submit()}
             />
             <Btn label="取消" onPress={onClose} />
-          </View>
+          </Row>
         </ThemeProvider>
       </Modal.Content>
     </Modal>
-  );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <View style={{ gap: 6 }}>
-      <Txt muted size={12}>
-        {label}
-      </Txt>
-      {children}
-    </View>
-  );
-}
-
-function Chips(p: { profiles: Profile[]; value?: Profile; onPick: (p: Profile) => void }) {
-  const { profiles, value, onPick } = p;
-  const c = useTheme().colors;
-  if (!profiles.length)
-    return (
-      <Txt muted size={13}>
-        没有可选的 Agent Profile：请先在 Paseo 设置里创建
-      </Txt>
-    );
-  return (
-    <View style={ROW}>
-      {profiles.map((p) => {
-        const on = value?.id === p.id;
-        return (
-          <Pressable
-            key={p.id}
-            accessibilityRole="button"
-            accessibilityLabel={`选择 ${p.name}`}
-            accessibilityState={{ selected: on }}
-            onPress={() => onPick(p)}
-            style={{
-              borderColor: on ? c.accent : c.border,
-              borderWidth: 1,
-              borderRadius: 8,
-              paddingHorizontal: 10,
-              paddingVertical: 6,
-              backgroundColor: on ? c.surface2 : "transparent",
-            }}
-          >
-            <Text style={{ color: c.foreground, fontSize: 13 }}>{p.name}</Text>
-            <Text
-              style={{ color: c.foregroundMuted, fontSize: 11 }}
-            >{`${p.provider}${p.model ? `/${p.model}` : ""}${p.modeId ? ` · ${p.modeId}` : ""}`}</Text>
-          </Pressable>
-        );
-      })}
-    </View>
   );
 }

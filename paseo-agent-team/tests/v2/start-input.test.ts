@@ -3,12 +3,18 @@ import {
   buildStartInput,
   type Draft,
   draftProblems,
+  durationLabel,
   emptyDraft,
   gateFromLines,
+  matchProfile,
+  matchReviewers,
   type Profile,
   profileSpec,
   profilesFromConfig,
+  projectsFromHost,
+  seedFromPrompt,
   splitLines,
+  TASK_TEMPLATE,
   withVerification,
 } from "../../v2/client/start-input";
 import { StartInputSchema } from "../../v2/shared/rpc";
@@ -129,5 +135,56 @@ describe("buildStartInput", () => {
 
   it("refuses to build while a profile is unchosen", () => {
     expect(() => buildStartInput(ready({ reviewers: [undefined] }))).toThrow();
+  });
+});
+
+describe("host picker, prompt seeding & defaults", () => {
+  it("extracts unique host projects and filters temp team workspaces", () => {
+    const out = projectsFromHost(
+      { projects: [{ rootPath: "/repos/alpha", displayName: "Alpha" }] },
+      {
+        emptyProjects: [{ projectRootPath: "/repos/beta" }, { path: "/repos/alpha" }],
+        entries: [
+          {
+            name: "main",
+            projectRootPath: "/repos/gamma",
+            projectDisplayName: "Gamma",
+          },
+          {
+            name: "team-r-20261113-abcd-writer",
+            workspaceDirectory: "/tmp/team-r-20261113-abcd/writer",
+            projectRootPath: "/repos/temp",
+          },
+        ],
+      },
+    );
+    expect(out).toEqual([
+      { path: "/repos/alpha", name: "Alpha" },
+      { path: "/repos/beta", name: "beta" },
+      { path: "/repos/gamma", name: "Gamma" },
+    ]);
+  });
+
+  it("seeds title and body appropriately from short vs detailed slash prompts", () => {
+    expect(seedFromPrompt("")).toEqual({ title: "", task: TASK_TEMPLATE });
+    const shortSeed = seedFromPrompt("Fix flaky gate timer");
+    expect(shortSeed.title).toBe("Fix flaky gate timer");
+    expect(shortSeed.task).toContain("# Fix flaky gate timer");
+
+    const multi = seedFromPrompt("Add artifact RPC\nAlso support archived runs");
+    expect(multi.title).toBe("Add artifact RPC");
+    expect(multi.task).toContain("## 要什么结果\n\nAdd artifact RPC\nAlso support archived runs");
+  });
+
+  it("matches saved profiles and formats run duration labels", () => {
+    const claudeAuto2: Profile = { ...claude, id: "p1b", modeId: "plan" };
+    expect(matchProfile([claudeAuto2, claude], profileSpec(claude))?.id).toBe("p1");
+    expect(matchReviewers([claude, codex], [])).toEqual([undefined]);
+    expect(matchReviewers([claude, codex], [profileSpec(codex)]).map((p) => p?.id)).toEqual(["p2"]);
+
+    const t0 = "2026-11-13T00:00:00.000Z";
+    expect(durationLabel(t0, "2026-11-13T00:00:42.000Z")).toBe("耗时 42 秒");
+    expect(durationLabel(t0, "2026-11-13T00:06:00.000Z")).toBe("耗时 6 分钟");
+    expect(durationLabel(t0, "2026-11-13T01:30:00.000Z")).toBe("耗时 1 小时 30 分钟");
   });
 });

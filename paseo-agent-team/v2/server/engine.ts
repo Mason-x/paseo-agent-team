@@ -322,17 +322,18 @@ export function createEngine(deps: EngineDeps) {
     return null;
   }
 
-  /** True when an agent of this Run is stopped on a permission request nobody answered. */
-  async function pendingPermission(run: Run): Promise<boolean> {
+  /** First agent of this Run stopped on an unanswered permission request, or null. */
+  async function pendingPermissionAgent(run: Run): Promise<string | null> {
     const host = deps.host();
-    if (!host || finished(run)) return false;
+    if (!host || finished(run)) return null;
     const ids = [
       run.writer.agentId,
       ...run.reviews.filter((r) => !r.verdict && !r.void).map((r) => r.reviewer.agentId),
     ];
-    for (const id of ids) if ((await host.agent(id)).pendingPermissions > 0) return true;
-    return false;
+    for (const id of ids) if ((await host.agent(id)).pendingPermissions > 0) return id;
+    return null;
   }
+  const pendingPermission = async (run: Run) => (await pendingPermissionAgent(run)) !== null;
 
   // ---- start (Spec 6.1 first row) ----
 
@@ -437,6 +438,7 @@ export function createEngine(deps: EngineDeps) {
     reconcileAll,
     findByAgent,
     pendingPermission,
+    pendingPermissionAgent,
     get: (id: string) => store.get(id),
     list: () => store.list(),
     store,
