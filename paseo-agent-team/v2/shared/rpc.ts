@@ -35,6 +35,10 @@ export const RunSummarySchema = z.object({
   createdAt: z.string(),
   lastProgressAt: z.string(),
   closedAt: z.string().optional(),
+  branch: z.string(),
+  workspaceId: z.string(),
+  writerAgentId: z.string(),
+  writerProfile: z.string(),
   waiting: WaitingSchema,
 });
 export type RunSummary = z.infer<typeof RunSummarySchema>;
@@ -81,7 +85,13 @@ export const runGetRpc = defineRpc({
     waiting: WaitingSchema,
     behindBase: z.number().nullable(),
     pendingPermission: z.boolean(),
+    pendingPermissionAgentId: z.string().nullable(),
   }),
+});
+export const runArtifactRpc = defineRpc({
+  name: "run.artifact",
+  input: z.object({ id: z.string(), file: z.string().min(1) }),
+  output: z.object({ content: z.string().nullable(), path: z.string(), archived: z.boolean() }),
 });
 export const runStartRpc = defineRpc({
   name: "run.start",

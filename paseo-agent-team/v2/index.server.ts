@@ -7,6 +7,7 @@ import { createRpc } from "./server/rpc";
 import { createRunStore } from "./server/store";
 import {
   projectConfigRpc,
+  runArtifactRpc,
   runCloseRpc,
   runGetRpc,
   runListRpc,
@@ -58,6 +59,7 @@ export default function contribute(server: PluginServerContext) {
   };
   server.handle(runListRpc, (_input, ctx) => seen(ctx, () => rpc.list()));
   server.handle(runGetRpc, ({ id }, ctx) => seen(ctx, () => rpc.get(id)));
+  server.handle(runArtifactRpc, ({ id, file }, ctx) => seen(ctx, () => rpc.artifact(id, file)));
   server.handle(runStartRpc, (input, ctx) => seen(ctx, () => rpc.start(input)));
   server.handle(runResolveRpc, ({ id, choice }, ctx) => seen(ctx, () => rpc.resolve(id, choice)));
   server.handle(runCloseRpc, ({ id, outcome }, ctx) => seen(ctx, () => rpc.close(id, outcome)));

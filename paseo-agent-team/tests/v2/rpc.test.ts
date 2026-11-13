@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRpc, summarize } from "../../v2/server/rpc";
@@ -26,7 +26,15 @@ describe("run.list / run.get", () => {
     const run = await h.start();
     const { runs } = await rpc.list();
     expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({ id: run.id, state: "writing", waiting: { who: "writer" } });
+    expect(runs[0]).toMatchObject({
+      id: run.id,
+      state: "writing",
+      waiting: { who: "writer" },
+      branch: run.workspace.branch,
+      workspaceId: run.workspace.id,
+      writerAgentId: run.writer.agentId,
+      writerProfile: run.writer.profile,
+    });
     expect(summarize(run).waiting.options).toContain("abandon");
   });
 
@@ -39,7 +47,12 @@ describe("run.list / run.get", () => {
     const view = await rpc.get(run.id);
     expect(view.behindBase).toBe(1);
     expect(view.pendingPermission).toBe(true);
+    expect(view.pendingPermissionAgentId).toBe(run.writer.agentId);
     expect(view.waiting.why).toContain("权限");
+    if (writer) writer.pending = 0;
+    const cleared = await rpc.get(run.id);
+    expect(cleared.pendingPermission).toBe(false);
+    expect(cleared.pendingPermissionAgentId).toBeNull();
     if (writer) writer.archived = true; // reconcile inside get notices this
     expect((await rpc.get(run.id)).run.state).toBe("blocked");
   });
@@ -47,6 +60,44 @@ describe("run.list / run.get", () => {
   it("get on an unknown Run fails clearly", async () => {
     const { rpc } = setup();
     await expect(rpc.get("r-20261112-ffff")).rejects.toThrow("不存在");
+  });
+});
+
+describe("run.artifact", () => {
+  it("reads live artifacts, tails logs to 200 lines, rejects traversal, and falls back to archive", async () => {
+    const { h, rpc } = setup();
+    const run = await h.start();
+
+    const task = await rpc.artifact(run.id, run.task.file);
+    expect(task.archived).toBe(false);
+    expect(task.content).toContain("# demo");
+
+    const missing = await rpc.artifact(run.id, ".team/progress.md");
+    expect(missing).toMatchObject({ content: null, archived: false });
+
+    const gateDir = path.join(run.workspace.path, ".team/gate");
+    mkdirSync(gateDir, { recursive: true });
+    const lines = Array.from({ length: 250 }, (_, i) => `line-${i + 1}`).join("\n");
+    writeFileSync(path.join(gateDir, "a1-1.log"), lines);
+    const log = await rpc.artifact(run.id, ".team/gate/a1-1.log");
+    expect(log.content).not.toContain("line-1\n");
+    expect(log.content).toContain("line-250");
+
+    await expect(rpc.artifact(run.id, "../secret")).rejects.toThrow();
+    await expect(rpc.artifact(run.id, ".team/../secret")).rejects.toThrow();
+    await expect(rpc.artifact(run.id, ".team/other.md")).rejects.toThrow();
+
+    mkdirSync(path.join(run.workspace.path, ".team/reviews"), { recursive: true });
+    const escapeLink = path.join(run.workspace.path, ".team/reviews/1-r1.md");
+    symlinkSync("/etc/hosts", escapeLink);
+    await expect(rpc.artifact(run.id, ".team/reviews/1-r1.md")).rejects.toThrow();
+    unlinkSync(escapeLink);
+
+    await rpc.resolve(run.id, { kind: "abandon" });
+    await h.engine.idle();
+    const archivedTask = await rpc.artifact(run.id, run.task.file);
+    expect(archivedTask.archived).toBe(true);
+    expect(archivedTask.content).toContain("# demo");
   });
 });
 
