@@ -95,3 +95,27 @@ PR 开出后 CI 失败：`@getpaseo/plugin/server` 没有导出 `defineAgentTool
 | `v2/client/NewRunDialog.tsx` | 201 | 213 | +12 | 读取 `projectConfig` 时同步写入 `env`（+1）；`open` 打开或 `repoPath` prop 变化且用户未手改时同步路径并重置标记（+11） |
 | 客户端合计 | **899** | **913** | **+14** | 上限 920，余量 7 行 |
 | **总计** | **3448** | **3491** | **+43** | 上限 3500，余量 9 行 |
+
+## 9 UI 与交互完整升级（budget 调至 2650 / 1800 / 4450）
+
+在不改写核心状态机与 Run 存储格式的前提下，补齐服务端只读查询与客户端完整交互闭环，子预算同步调整为服务端与共享代码 ≤ 2650、客户端 ≤ 1800、总计 ≤ 4450：
+
+- **服务端与共享只读补强**（合计 **2649** 行 ≤ 2650，余量 1 行）：
+  - `v2/shared/rpc.ts`（115）：`RunSummarySchema` 增加 `branch`、`workspaceId`、`writerAgentId`、`writerProfile`；`runGetRpc` 增加 `pendingPermissionAgentId`；新增只读 `runArtifactRpc`（`run.artifact`）。
+  - `v2/server/engine.ts`（460）：新增并导出 `pendingPermissionAgent(run)`，`pendingPermission(run)` 复用该函数。
+  - `v2/server/rpc.ts`（155）与 `v2/index.server.ts`（74）：`summarize` / `get` 填入新字段；实现并注册 `run.artifact`（严格白名单、`realpath` 符号链接越界校验与路径越界校验，worktree 删除后回退 `archiveDir`，`.log` 取末尾 200 行、非日志上限 64 KiB）。
+  - 其余未改动行数的服务端与共享文件：`shared/machine.ts` 379、`shared/run.ts` 202、`server/gate.ts` 243、`server/git.ts` 102、`server/hooks.ts` 156、`server/host.ts` 209、`server/roles.ts` 328、`server/store.ts` 101、`server/tools.ts` 125。
+- **客户端完整升级**（合计 **1798** 行 ≤ 1800，余量 2 行）：
+  - `v2/index.client.tsx`（93）：注册 `addSettingsScreen`（`TeamSettingsScreen`）、workspace 级 `/team` 斜杠命令、4 项命令中心入口，以及侧栏/工作区面板。
+  - `v2/client/ui.tsx`（396）：封装 `Box`、`Input`、`Field`、`StatusPill`、`Chip`、`Btn`、`CopyBtn`、`ProfileChips`、`ReviewerSeats`、`useProfiles`、`usePoll`。
+  - `v2/client/RunsView.tsx`（275）：顶栏 `活跃 X / Y` 与默认设置弹窗入口、分段状态筛选（全部 / 待处理 / 进行中 / 已结束，已结束默认展示最近 15 条并支持展开全部）、空状态引导卡、列表卡片耗时与直达工作区/写手按钮、`/team` 的 `nonce` 参数响应，以及按 `runId`/`selected` 为 `RunDetail` 加 `key` 隔离跨 Run 状态。
+  - `v2/client/RunDetail.tsx`（419）：4 阶段流水线进度条、顶部快捷操作栏（返回/工作区/写手/复制分支名/刷新）、权限请求直达批准按钮（`pendingPermissionAgentId`）、基线落后 `git rebase` 一键复制、可折叠 Markdown 任务说明、门禁日志与审查报告按需展开（支持 `run.artifact` 与归档查看，自动展开最新已结束审查）。
+  - `v2/client/NewRunDialog.tsx`（228）：宿主项目与工作区仓库快选（过滤临时 team worktree）、`paseo-team.json` 载入/清空旧覆盖与解析错误内联提示、`/team` `prompt` 自动填充标题/正文、自动预填及启动保存默认 Profile（`teamSettings`）。
+  - `v2/client/TeamSettings.tsx`（169）：`maxActiveRuns`（1–10 含预设快选）、默认写手与审查者 Profile 的设置屏及弹窗。
+  - `v2/client/start-input.ts`（218）：`projectsFromHost`、`seedFromPrompt`、`matchProfile`、`matchReviewers`、`durationLabel`。
+- **总计**：**4447** 行 ≤ **4450**（余量 3 行）。
+- **验证结果（2026-11-13）**：
+  - `./node_modules/.bin/biome check --write v2/ tests/v2/`、`npm run check`（574 文件 0 error）、`npm run typecheck`（exit 0）。
+  - `vitest run tests/v2/`：**10/10** 测试文件、**154/154** 用例全部通过（含 `rpc.test.ts`、`start-input.test.ts`、`budget.test.ts` 新增/更新断言）。
+  - 全量 `npm test`：**230/230** 测试文件、**4448 passed | 3 skipped | 3 todo**；`npm run verify:package` 通过。
+  - 隔离 DEV daemon（Paseo CLI `0.15.4`，`PASEO_HOME=.paseo-dev`）：`plugin install .../v2` 编译加载成功，`plugin ls paseo-agent-team --json` 显示 `enabled: true`、`status: "running"`、无错误，测完已停止 daemon 并清理 `.paseo-dev`。
