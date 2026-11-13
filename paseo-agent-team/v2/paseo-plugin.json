@@ -1,0 +1,8 @@
+{
+  "id": "paseo-agent-team",
+  "name": "Agent Team",
+  "description": "One writer, one worktree, independent review: runs a task through program-executed acceptance gates and commit-bound review.",
+  "requirements": {
+    "paseo": ">=0.15.4"
+  }
+}
