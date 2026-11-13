@@ -1,6 +1,6 @@
 import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { projectConfigRpc, runStartRpc } from "../shared/rpc";
 import { SEATS } from "../shared/run";
@@ -29,6 +29,7 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
   const [d, setD] = useState<Draft>(() => emptyDraft(repoPath));
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [busy, setBusy] = useState(false);
+  const touchedRepo = useRef(false);
   const set = (patch: Partial<Draft>) => setD((s) => ({ ...s, ...patch }));
   const theme = useTheme();
   const c = theme.colors;
@@ -41,6 +42,10 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
       .then((r) => setProfiles(profilesFromConfig(r.config)))
       .catch((e) => toast.error(`读取 Agent Profile 失败：${errorText(e)}`));
   }, [open]);
+
+  useEffect(() => {
+    if (open && repoPath && !touchedRepo.current) setD((s) => ({ ...s, repoPath }));
+  }, [open, repoPath]);
 
   // Defaults from the repository's paseo-team.json, once the path has settled.
   // biome-ignore lint/correctness/useExhaustiveDependencies: only the path matters here
@@ -56,6 +61,7 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
           set({
             ...(config.gate && { gate: config.gate.map((g) => g.command).join("\n"), timeouts }),
             ...(config.protectedPaths && { protectedPaths: config.protectedPaths.join("\n") }),
+            env: config.env,
             limits: config.limits,
           });
         })
@@ -70,6 +76,7 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
     try {
       const { run, warnings } = await start(buildStartInput(d));
       if (warnings.length) toast.show(warnings.join("\n"), { variant: "warning" });
+      touchedRepo.current = false;
       setD(emptyDraft(repoPath));
       onStarted(run.id);
     } catch (e) {
@@ -96,7 +103,12 @@ export function NewRunDialog({ open, repoPath, onClose, onStarted }: Props) {
       <Modal.Content>
         <ThemeProvider value={theme}>
           <Field label="标题">{input(d.title, (title) => set({ title }))}</Field>
-          <Field label="仓库路径">{input(d.repoPath, (v) => set({ repoPath: v }))}</Field>
+          <Field label="仓库路径">
+            {input(d.repoPath, (v) => {
+              touchedRepo.current = true;
+              set({ repoPath: v });
+            })}
+          </Field>
           <Field label="基线分支">{input(d.baseRef, (baseRef) => set({ baseRef }))}</Field>
           <Field label="任务说明（“怎么验证”一节由验收命令生成）">
             {input(d.task, (task) => set({ task }), 10)}

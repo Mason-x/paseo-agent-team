@@ -121,6 +121,12 @@ describe("buildStartInput", () => {
     expect(input.taskMarkdown).toContain("## 怎么验证");
   });
 
+  it("passes env through and validates with StartInputSchema", () => {
+    const input = buildStartInput(ready({ env: { DB: "app_{runId}_{seat}" } }));
+    expect(input.env).toEqual({ DB: "app_{runId}_{seat}" });
+    expect(StartInputSchema.safeParse(input).success).toBe(true);
+  });
+
   it("refuses to build while a profile is unchosen", () => {
     expect(() => buildStartInput(ready({ reviewers: [undefined] }))).toThrow();
   });

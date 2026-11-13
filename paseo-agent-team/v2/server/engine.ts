@@ -99,6 +99,7 @@ export function createEngine(deps: EngineDeps) {
     while (pending.size) await Promise.all([...pending]);
   };
   const creating = new Set<string>();
+  const notifying = new Map<string, number>();
 
   // ---- effects ----
 
@@ -111,7 +112,13 @@ export function createEngine(deps: EngineDeps) {
         if (!a || gate.isRunning(run.id)) return;
         background(
           gate
-            .run(run, a.n, a.sha, { now })
+            .run(run, a.n, a.sha, {
+              now,
+              beforeRun: async (signal) => {
+                const h = deps.host();
+                if (h) await waitWriterIdle(h, run.writer.agentId, signal);
+              },
+            })
             .then((attempt) => dispatch(run.id, { kind: "gate-finished", attempt })),
           "gate",
         );
@@ -121,8 +128,19 @@ export function createEngine(deps: EngineDeps) {
         return startReviewers(run, eff.round, eff.sha);
       case "cleanup-reviewers":
         return background(cleanup(run.id), "reviewer cleanup");
-      case "notify-writer":
-        return background(notifyWriter(run.id, eff), "notify writer");
+      case "notify-writer": {
+        const track = eff.kind === "gate-failed" || eff.kind === "reports";
+        if (track) notifying.set(run.id, (notifying.get(run.id) ?? 0) + 1);
+        return background(
+          notifyWriter(run.id, eff).finally(() => {
+            if (!track) return;
+            const left = (notifying.get(run.id) ?? 1) - 1;
+            if (left > 0) notifying.set(run.id, left);
+            else notifying.delete(run.id);
+          }),
+          "notify writer",
+        );
+      }
       case "remind-reviewer": {
         const r = run.reviews.find((x) => x.id === eff.reviewId);
         if (!r) return;
@@ -156,9 +174,9 @@ export function createEngine(deps: EngineDeps) {
     );
   }
 
-  async function waitWriterIdle(host: Host, agentId: string) {
+  async function waitWriterIdle(host: Host, agentId: string, signal?: AbortSignal) {
     const until = Date.now() + 30_000;
-    while (Date.now() < until) {
+    while (Date.now() < until && !signal?.aborted) {
       if ((await host.agent(agentId)).status !== "running") return;
       await new Promise((r) => setTimeout(r, timing.pollMs));
     }
@@ -212,6 +230,9 @@ export function createEngine(deps: EngineDeps) {
   async function applyLocked(id: string, ev: Event): Promise<Result | null> {
     const run = await store.get(id);
     if (!run) return null;
+    if (ev.kind === "writer-turn-ended" && !ev.failed && notifying.has(id)) {
+      return { run, effects: [] };
+    }
     const res = transition(run, ev, now());
     const saved = res.run === run ? run : await store.update(id, () => res.run);
     for (const eff of res.effects) execute(saved, eff);

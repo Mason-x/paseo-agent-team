@@ -9,9 +9,10 @@ import {
   runGate,
   tailLines,
 } from "../../v2/server/gate";
+import { excludeTeamDir } from "../../v2/server/git";
 import type { GateCommand, Run } from "../../v2/shared/run";
 import { makeRun } from "./fixtures";
-import { commit, tempRepo, write } from "./repo";
+import { commit, sh, tempRepo, write } from "./repo";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -53,7 +54,9 @@ describe("glob matching", () => {
     expect(globToRegExp(".github/").test(".github/workflows/ci.yml")).toBe(true);
   });
 
-  it("policyViolations flags protected paths and paths outside the allow-list", () => {
+  it("policyViolations flags empty diffs, protected paths, and paths outside the allow-list", () => {
+    expect(policyViolations([], ["tests/**"])).toEqual(["no files changed relative to base"]);
+    expect(policyViolations([], [], ["src/**"])).toEqual(["no files changed relative to base"]);
     expect(policyViolations(["src/a.ts", "tests/a.ts"], ["tests/**"])).toEqual([
       "protected path changed: tests/a.ts",
     ]);
@@ -111,6 +114,40 @@ describe("runGate", () => {
     expect(a.policyViolations).toEqual(["protected path changed: tests/a.test.ts"]);
     expect(a.checks).toHaveLength(1); // commands still ran
     expect(await failureReport(run, a)).toContain("tests/a.test.ts");
+  });
+
+  it("fails on empty commits with no file changes relative to base (AC17)", async () => {
+    const r = tempRepo();
+    cleanups.push(r.cleanup);
+    const wt = r.worktree("writer", "team/r-20261112-0002/writer");
+    await excludeTeamDir(wt);
+    const run = makeRun({
+      id: "r-20261112-0002",
+      workspace: { id: "ws2", path: wt, branch: "team/r-20261112-0002/writer" },
+      repo: { sourceCheckout: r.dir, baseRef: "main", baseSha: r.base },
+      task: {
+        file: ".team/task.md",
+        gateCommands: [cmd("test", "echo ran")],
+        protectedPaths: [],
+        env: {},
+      },
+    });
+    sh(wt, "commit", "--allow-empty", "-q", "-m", "empty");
+    const emptySha = sh(wt, "rev-parse", "HEAD");
+    const empty = await runGate(run, 1, emptySha);
+    expect(empty.result).toBe("fail");
+    expect(empty.policyViolations).toEqual(["no files changed relative to base"]);
+    expect(empty.checks).toHaveLength(1);
+    expect(await failureReport(run, empty)).toContain(
+      "策略违规：no files changed relative to base",
+    );
+
+    commit(wt, "README.md", "changed\n");
+    const revertedSha = commit(wt, "README.md", "base\n");
+    const reverted = await runGate(run, 2, revertedSha);
+    expect(reverted.result).toBe("fail");
+    expect(reverted.policyViolations).toEqual(["no files changed relative to base"]);
+    expect(reverted.checks).toHaveLength(1);
   });
 
   it("enforces allowedPaths when set", async () => {
