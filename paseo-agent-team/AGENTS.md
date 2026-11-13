@@ -21,6 +21,8 @@ the explicit `--home` / `--host` rule below mandatory on every single command.
    - present with source `directory` and path == `$PWD` → `"$PASEO" plugin reload paseo-agent-team --host "$DEV_HOST"`
    - anything else → remove it on DEV_HOST, install `$PWD`, inspect again. Require `status: "running"` and no error.
 4. Configure at least two Agent Profiles (different providers) on DEV_HOST before exercising Launch. Never copy profiles or credentials from `~/.paseo`.
+   In `.paseo-dev/config.json` they go under `daemon.agentProfiles`; a root-level `agentProfiles` key makes the daemon refuse to start.
+   Typecheck against the SDK that CI installs: after touching dependencies, re-run `npm run typecheck` from a clean `npm ci`.
 5. Set `daemon.mcp.injectIntoAgents` to true in `.paseo-dev/config.json`: plugin tools (`team_*`) only reach
    agents when Paseo tools are enabled. After UI or RPC changes, reload the plugin on DEV_HOST.
    Scratch repositories and workspaces go outside this repo.
